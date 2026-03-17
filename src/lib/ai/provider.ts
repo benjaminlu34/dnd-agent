@@ -15,8 +15,10 @@ import {
   createStarterClues,
   createStarterNpcs,
   createStarterQuests,
+  createSeededDummyCharacter,
   createStarterState,
 } from "@/lib/game/starter-data";
+import { generatedCampaignSetupSchema } from "@/lib/game/session-zero";
 import type {
   CampaignBlueprint,
   CharacterSheet,
@@ -29,6 +31,11 @@ import type {
   Stat,
   TriageDecision,
 } from "@/lib/game/types";
+
+type CampaignSetupGenerationInput = {
+  prompt?: string;
+  previousDraft?: GeneratedCampaignSetup;
+};
 
 type StreamCallbacks = {
   onNarration?: (chunk: string) => void;
@@ -52,157 +59,166 @@ const campaignSetupTool = {
     type: "object",
     additionalProperties: false,
     properties: {
-      title: { type: "string" },
-      premise: { type: "string" },
-      tone: { type: "string" },
-      setting: { type: "string" },
-      villain: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          name: { type: "string" },
-          motive: { type: "string" },
-          progressClock: { type: "number" },
-        },
-        required: ["name", "motive", "progressClock"],
-      },
-      openingScene: {
+      publicSynopsis: {
         type: "object",
         additionalProperties: false,
         properties: {
           title: { type: "string" },
-          summary: { type: "string" },
-          location: { type: "string" },
-          atmosphere: { type: "string" },
-          activeThreat: { type: "string" },
-          suggestedActions: {
+          premise: { type: "string" },
+          tone: { type: "string" },
+          setting: { type: "string" },
+          openingScene: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              title: { type: "string" },
+              summary: { type: "string" },
+              location: { type: "string" },
+              atmosphere: { type: "string" },
+              activeThreat: { type: "string" },
+              suggestedActions: {
+                type: "array",
+                items: { type: "string" },
+              },
+            },
+            required: [
+              "title",
+              "summary",
+              "location",
+              "atmosphere",
+              "activeThreat",
+              "suggestedActions",
+            ],
+          },
+        },
+        required: ["title", "premise", "tone", "setting", "openingScene"],
+      },
+      secretEngine: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          villain: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              name: { type: "string" },
+              motive: { type: "string" },
+              progressClock: { type: "number" },
+            },
+            required: ["name", "motive", "progressClock"],
+          },
+          hooks: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: { text: { type: "string" } },
+              required: ["text"],
+            },
+          },
+          arcs: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                title: { type: "string" },
+                summary: { type: "string" },
+                expectedTurns: { type: "number" },
+              },
+              required: ["title", "summary", "expectedTurns"],
+            },
+          },
+          reveals: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                title: { type: "string" },
+                truth: { type: "string" },
+                requiredClueTitles: { type: "array", items: { type: "string" } },
+                requiredArcTitles: { type: "array", items: { type: "string" } },
+              },
+              required: ["title", "truth", "requiredClueTitles", "requiredArcTitles"],
+            },
+          },
+          subplotSeeds: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                title: { type: "string" },
+                hook: { type: "string" },
+              },
+              required: ["title", "hook"],
+            },
+          },
+          quests: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                title: { type: "string" },
+                summary: { type: "string" },
+                maxStage: { type: "number" },
+                rewardGold: { type: "number" },
+                rewardItem: { type: "string" },
+              },
+              required: ["title", "summary", "maxStage", "rewardGold"],
+            },
+          },
+          npcs: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                name: { type: "string" },
+                role: { type: "string" },
+                notes: { type: "string" },
+                isCompanion: { type: "boolean" },
+                approval: { type: "number" },
+                personalHook: { type: "string" },
+                status: { type: "string" },
+              },
+              required: ["name", "role", "notes"],
+            },
+          },
+          clues: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                text: { type: "string" },
+                source: { type: "string" },
+                linkedRevealTitle: { type: "string" },
+              },
+              required: ["text", "source", "linkedRevealTitle"],
+            },
+          },
+          locations: {
             type: "array",
             items: { type: "string" },
           },
         },
         required: [
-          "title",
-          "summary",
-          "location",
-          "atmosphere",
-          "activeThreat",
-          "suggestedActions",
+          "villain",
+          "hooks",
+          "arcs",
+          "reveals",
+          "subplotSeeds",
+          "quests",
+          "npcs",
+          "clues",
+          "locations",
         ],
       },
-      hooks: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          properties: { text: { type: "string" } },
-          required: ["text"],
-        },
-      },
-      arcs: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            title: { type: "string" },
-            summary: { type: "string" },
-            expectedTurns: { type: "number" },
-          },
-          required: ["title", "summary", "expectedTurns"],
-        },
-      },
-      reveals: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            title: { type: "string" },
-            truth: { type: "string" },
-            requiredClueTitles: { type: "array", items: { type: "string" } },
-            requiredArcTitles: { type: "array", items: { type: "string" } },
-          },
-          required: ["title", "truth", "requiredClueTitles", "requiredArcTitles"],
-        },
-      },
-      subplotSeeds: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            title: { type: "string" },
-            hook: { type: "string" },
-          },
-          required: ["title", "hook"],
-        },
-      },
-      quests: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            title: { type: "string" },
-            summary: { type: "string" },
-            maxStage: { type: "number" },
-            rewardGold: { type: "number" },
-            rewardItem: { type: "string" },
-          },
-          required: ["title", "summary", "maxStage", "rewardGold"],
-        },
-      },
-      npcs: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            name: { type: "string" },
-            role: { type: "string" },
-            notes: { type: "string" },
-            isCompanion: { type: "boolean" },
-            approval: { type: "number" },
-            personalHook: { type: "string" },
-            status: { type: "string" },
-          },
-          required: ["name", "role", "notes"],
-        },
-      },
-      clues: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            text: { type: "string" },
-            source: { type: "string" },
-            linkedRevealTitle: { type: "string" },
-          },
-          required: ["text", "source", "linkedRevealTitle"],
-        },
-      },
-      locations: {
-        type: "array",
-        items: { type: "string" },
-      },
     },
-    required: [
-      "title",
-      "premise",
-      "tone",
-      "setting",
-      "villain",
-      "openingScene",
-      "hooks",
-      "arcs",
-      "reveals",
-      "subplotSeeds",
-      "quests",
-      "npcs",
-      "clues",
-      "locations",
-    ],
+    required: ["publicSynopsis", "secretEngine"],
   },
 };
 
@@ -220,23 +236,7 @@ function toFunctionTool(
 }
 
 function isGeneratedCampaignSetup(value: unknown): value is GeneratedCampaignSetup {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-
-  const candidate = value as Partial<GeneratedCampaignSetup>;
-  return Boolean(
-    candidate.title &&
-      candidate.premise &&
-      candidate.setting &&
-      candidate.tone &&
-      candidate.villain &&
-      candidate.openingScene &&
-      Array.isArray(candidate.arcs) &&
-      Array.isArray(candidate.quests) &&
-      Array.isArray(candidate.npcs) &&
-      Array.isArray(candidate.clues),
-  );
+  return generatedCampaignSetupSchema.safeParse(value).success;
 }
 
 function createMockCampaignSetup(): GeneratedCampaignSetup {
@@ -248,60 +248,64 @@ function createMockCampaignSetup(): GeneratedCampaignSetup {
   const arcs = createStarterArcs();
 
   return {
-    title: "Eclipse Over Briar Glen",
-    premise: blueprint.premise,
-    tone: blueprint.tone,
-    setting: blueprint.setting,
-    villain: blueprint.villain,
-    openingScene: {
-      title: state.sceneState.title,
-      summary: state.sceneState.summary,
-      location: state.sceneState.location,
-      atmosphere: state.sceneState.atmosphere,
-      activeThreat: state.worldState.activeThreat,
-      suggestedActions: state.sceneState.suggestedActions,
+    publicSynopsis: {
+      title: "Eclipse Over Briar Glen",
+      premise: blueprint.premise,
+      tone: blueprint.tone,
+      setting: blueprint.setting,
+      openingScene: {
+        title: state.sceneState.title,
+        summary: state.sceneState.summary,
+        location: state.sceneState.location,
+        atmosphere: state.sceneState.atmosphere,
+        activeThreat: state.worldState.activeThreat,
+        suggestedActions: state.sceneState.suggestedActions,
+      },
     },
-    hooks: blueprint.initialHooks.map((hook) => ({ text: hook.text })),
-    arcs: arcs.map((arc) => ({
-      title: arc.title,
-      summary: arc.summary,
-      expectedTurns: arc.expectedTurns,
-    })),
-    reveals: blueprint.hiddenReveals.map((reveal) => ({
-      title: reveal.title,
-      truth: reveal.truth,
-      requiredClueTitles: reveal.requiredClues
-        .map((id) => clues.find((clue) => clue.id === id)?.text)
-        .filter((value): value is string => Boolean(value)),
-      requiredArcTitles: reveal.requiredArcIds
-        .map((id) => arcs.find((arc) => arc.id === id)?.title)
-        .filter((value): value is string => Boolean(value)),
-    })),
-    subplotSeeds: blueprint.subplotSeeds,
-    quests: quests.map((quest) => ({
-      title: quest.title,
-      summary: quest.summary,
-      maxStage: quest.maxStage,
-      rewardGold: quest.rewardGold,
-      rewardItem: quest.rewardItem,
-    })),
-    npcs: npcs.map((npc) => ({
-      name: npc.name,
-      role: npc.role,
-      notes: npc.notes,
-      isCompanion: npc.isCompanion,
-      approval: npc.approval,
-      personalHook: npc.personalHook,
-      status: npc.status,
-    })),
-    clues: clues.map((clue) => ({
-      text: clue.text,
-      source: clue.source,
-      linkedRevealTitle:
-        blueprint.hiddenReveals.find((reveal) => reveal.id === clue.linkedRevealId)?.title ??
-        "Hidden Truth",
-    })),
-    locations: state.locations,
+    secretEngine: {
+      villain: blueprint.villain,
+      hooks: blueprint.initialHooks.map((hook) => ({ text: hook.text })),
+      arcs: arcs.map((arc) => ({
+        title: arc.title,
+        summary: arc.summary,
+        expectedTurns: arc.expectedTurns,
+      })),
+      reveals: blueprint.hiddenReveals.map((reveal) => ({
+        title: reveal.title,
+        truth: reveal.truth,
+        requiredClueTitles: reveal.requiredClues
+          .map((id) => clues.find((clue) => clue.id === id)?.text)
+          .filter((value): value is string => Boolean(value)),
+        requiredArcTitles: reveal.requiredArcIds
+          .map((id) => arcs.find((arc) => arc.id === id)?.title)
+          .filter((value): value is string => Boolean(value)),
+      })),
+      subplotSeeds: blueprint.subplotSeeds,
+      quests: quests.map((quest) => ({
+        title: quest.title,
+        summary: quest.summary,
+        maxStage: quest.maxStage,
+        rewardGold: quest.rewardGold,
+        rewardItem: quest.rewardItem,
+      })),
+      npcs: npcs.map((npc) => ({
+        name: npc.name,
+        role: npc.role,
+        notes: npc.notes,
+        isCompanion: npc.isCompanion,
+        approval: npc.approval,
+        personalHook: npc.personalHook,
+        status: npc.status,
+      })),
+      clues: clues.map((clue) => ({
+        text: clue.text,
+        source: clue.source,
+        linkedRevealTitle:
+          blueprint.hiddenReveals.find((reveal) => reveal.id === clue.linkedRevealId)?.title ??
+          "Hidden Truth",
+      })),
+      locations: state.locations,
+    },
   };
 }
 
@@ -545,8 +549,24 @@ function normalizeResolveDecision(raw: unknown, text: string): ResolveDecision {
 }
 
 class MockDungeonMaster {
-  async generateCampaignSetup() {
-    return createMockCampaignSetup();
+  async generateCampaignSetup(_: CharacterSheet, input?: CampaignSetupGenerationInput) {
+    if (!input?.prompt && !input?.previousDraft) {
+      return createMockCampaignSetup();
+    }
+
+    const baseline = input.previousDraft ?? createMockCampaignSetup();
+    const nextTitle = input.prompt?.trim()
+      ? `${baseline.publicSynopsis.title} Reforged`
+      : baseline.publicSynopsis.title;
+
+    return {
+      ...baseline,
+      publicSynopsis: {
+        ...baseline.publicSynopsis,
+        title: nextTitle,
+        premise: input.prompt?.trim() || baseline.publicSynopsis.premise,
+      },
+    };
   }
 
   async triageTurn(input: TurnAIPayload, callbacks?: StreamCallbacks): Promise<TriageDecision> {
@@ -729,7 +749,12 @@ class OpenRouterDungeonMaster {
     };
   }
 
-  async generateCampaignSetup(character: CharacterSheet) {
+  async generateCampaignSetup(
+    character: CharacterSheet,
+    input: CampaignSetupGenerationInput = {},
+  ) {
+    const seedCharacter = character ?? createSeededDummyCharacter();
+    const hasPreviousDraft = Boolean(input.previousDraft);
     const baseMessages = [
       {
         role: "system" as const,
@@ -738,16 +763,30 @@ class OpenRouterDungeonMaster {
           "Create a cohesive opening campaign with 2 arcs, 1-2 quests, 2-4 NPCs, 3-5 clues, 1-2 reveals, and 3 opening suggested actions.",
           "Make it immediately playable.",
           "Keep titles and summaries clear, concrete, and gameable.",
-          "Ensure clue-to-reveal and reveal-to-arc references line up exactly by title.",
+          "Keep all output inside publicSynopsis and secretEngine.",
+          "publicSynopsis is spoiler-safe and must not reveal secretEngine truths, motives, or hidden reveals.",
+          "When revising an existing draft, preserve the overall structure and arrays unless the request requires editing existing values.",
+          "Ensure clue-to-reveal and reveal-to-arc references line up as closely as possible by title.",
           "Do not reuse Briar Glen, Abbess Veyra, the Silver Bell, or other starter campaign names.",
         ].join("\n"),
       },
       {
         role: "user" as const,
         content: [
-          `Generate a campaign for this character: ${character.name}, ${character.archetype}.`,
-          `Stats: strength ${character.stats.strength}, agility ${character.stats.agility}, intellect ${character.stats.intellect}, charisma ${character.stats.charisma}, vitality ${character.stats.vitality}.`,
+          `Generate a campaign for this character: ${seedCharacter.name}, ${seedCharacter.archetype}.`,
+          `Stats: strength ${seedCharacter.stats.strength}, agility ${seedCharacter.stats.agility}, intellect ${seedCharacter.stats.intellect}, charisma ${seedCharacter.stats.charisma}, vitality ${seedCharacter.stats.vitality}.`,
           "Lean toward mystery, momentum, and memorable places over lore dumps.",
+          input.prompt?.trim()
+            ? hasPreviousDraft
+              ? [
+                  "Here is the current draft JSON.",
+                  "You must keep all arrays and structures exactly the same, except where needed to implement the specific request below.",
+                  "Return the full updated JSON, not a partial patch.",
+                  JSON.stringify(input.previousDraft),
+                  `Specific revision request: ${input.prompt.trim()}`,
+                ].join("\n")
+              : `Player prompt: ${input.prompt.trim()}`
+            : "Create a fresh campaign draft.",
         ].join("\n"),
       },
     ];

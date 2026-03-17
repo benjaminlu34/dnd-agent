@@ -75,63 +75,67 @@ export type CampaignBlueprint = {
 };
 
 export type GeneratedCampaignSetup = {
-  title: string;
-  premise: string;
-  tone: string;
-  setting: string;
-  villain: {
-    name: string;
-    motive: string;
-    progressClock: number;
+  publicSynopsis: {
+    title: string;
+    premise: string;
+    tone: string;
+    setting: string;
+    openingScene: {
+      title: string;
+      summary: string;
+      location: string;
+      atmosphere: string;
+      activeThreat: string;
+      suggestedActions: string[];
+    };
   };
-  openingScene: {
-    title: string;
-    summary: string;
-    location: string;
-    atmosphere: string;
-    activeThreat: string;
-    suggestedActions: string[];
+  secretEngine: {
+    villain: {
+      name: string;
+      motive: string;
+      progressClock: number;
+    };
+    hooks: {
+      text: string;
+    }[];
+    arcs: {
+      title: string;
+      summary: string;
+      expectedTurns: number;
+    }[];
+    reveals: {
+      title: string;
+      truth: string;
+      requiredClueTitles: string[];
+      requiredArcTitles: string[];
+    }[];
+    subplotSeeds: {
+      title: string;
+      hook: string;
+    }[];
+    quests: {
+      title: string;
+      summary: string;
+      maxStage: number;
+      rewardGold: number;
+      rewardItem?: string | null;
+    }[];
+    npcs: {
+      name: string;
+      role: string;
+      notes: string;
+      isCompanion?: boolean;
+      approval?: number;
+      personalHook?: string | null;
+      status?: string;
+    }[];
+    clues: {
+      text: string;
+      source: string;
+      linkedRevealTitle: string;
+    }[];
+    locations: string[];
   };
-  hooks: {
-    text: string;
-  }[];
-  arcs: {
-    title: string;
-    summary: string;
-    expectedTurns: number;
-  }[];
-  reveals: {
-    title: string;
-    truth: string;
-    requiredClueTitles: string[];
-    requiredArcTitles: string[];
-  }[];
-  subplotSeeds: {
-    title: string;
-    hook: string;
-  }[];
-  quests: {
-    title: string;
-    summary: string;
-    maxStage: number;
-    rewardGold: number;
-    rewardItem?: string | null;
-  }[];
-  npcs: {
-    name: string;
-    role: string;
-    notes: string;
-    isCompanion?: boolean;
-    approval?: number;
-    personalHook?: string | null;
-    status?: string;
-  }[];
-  clues: {
-    text: string;
-    source: string;
-    linkedRevealTitle: string;
-  }[];
-  locations: string[];
 };
 
 export type SceneState = {

@@ -7,6 +7,7 @@ import type {
   Hook,
   NpcRecord,
   QuestRecord,
+  SceneState,
 } from "@/lib/game/types";
 import { randomItem, slugify } from "@/lib/utils";
 
@@ -45,6 +46,34 @@ const archetypes = [
     },
   },
 ] as const;
+
+const seededCharacterStats = {
+  strength: 1,
+  agility: 1,
+  intellect: 1,
+  charisma: 1,
+  vitality: 1,
+} as const;
+
+type StarterStateOverrides = {
+  openingScene?: Omit<SceneState, "id"> & { id?: string };
+  activeThreat?: string;
+  locations?: string[];
+  villainClock?: number;
+  tensionScore?: number;
+  dangerLevel?: CampaignState["worldState"]["dangerLevel"];
+};
+
+export function createSeededDummyCharacter(): CharacterSheet {
+  return {
+    id: "char_session_zero_wayfarer",
+    name: "Rowan Vale",
+    archetype: "Waymarked Wanderer",
+    stats: seededCharacterStats,
+    maxHealth: 12,
+    health: 12,
+  };
+}
 
 export function createStarterCharacter(): CharacterSheet {
   const choice = randomItem([...archetypes]);
@@ -122,31 +151,45 @@ export function createStarterBlueprint(): CampaignBlueprint {
   };
 }
 
-export function createStarterState(blueprint: CampaignBlueprint): CampaignState {
+export function createStarterState(
+  blueprint: CampaignBlueprint,
+  overrides: StarterStateOverrides = {},
+): CampaignState {
+  const defaultScene: SceneState = {
+    id: "scene_ash_market",
+    title: "Ash Market at Dusk",
+    summary:
+      "Wind rattles brass prayer bells while the market square clears around a blood-red eclipse notice nailed to the fountain.",
+    location: "Briar Glen",
+    atmosphere: "Uneasy, crowded, and one spark away from panic",
+    suggestedActions: [
+      "Inspect the eclipse notice",
+      "Question the bell-warden",
+      "Follow the fresh soot trail toward the smithy",
+    ],
+  };
+  const sceneState = overrides.openingScene
+    ? {
+        ...defaultScene,
+        ...overrides.openingScene,
+        id:
+          overrides.openingScene.id ??
+          `scene_${slugify(overrides.openingScene.title || defaultScene.title) || "opening"}`,
+      }
+    : defaultScene;
+
   return {
     turnCount: 0,
     activeArcId: blueprint.arcs[0]?.id ?? "arc_bell",
     worldState: {
-      dangerLevel: "rising",
-      activeThreat: "Cult lantern-bearers are searching the old quarter.",
+      dangerLevel: overrides.dangerLevel ?? "rising",
+      activeThreat: overrides.activeThreat ?? "Cult lantern-bearers are searching the old quarter.",
     },
-    sceneState: {
-      id: "scene_ash_market",
-      title: "Ash Market at Dusk",
-      summary:
-        "Wind rattles brass prayer bells while the market square clears around a blood-red eclipse notice nailed to the fountain.",
-      location: "Briar Glen",
-      atmosphere: "Uneasy, crowded, and one spark away from panic",
-      suggestedActions: [
-        "Inspect the eclipse notice",
-        "Question the bell-warden",
-        "Follow the fresh soot trail toward the smithy",
-      ],
-    },
-    locations: ["Ash Market", "Old Smithy", "Lantern Catacombs"],
+    sceneState,
+    locations: overrides.locations ?? ["Ash Market", "Old Smithy", "Lantern Catacombs"],
     hooks: blueprint.initialHooks,
-    villainClock: 2,
-    tensionScore: 28,
+    villainClock: overrides.villainClock ?? 2,
+    tensionScore: overrides.tensionScore ?? 28,
     inventory: [],
     gold: 0,
     activeRevealIds: [],

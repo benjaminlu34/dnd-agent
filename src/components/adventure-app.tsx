@@ -1,7 +1,8 @@
 "use client";
 
 import clsx from "clsx";
-import { startTransition, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { startTransition, useEffect, useEffectEvent, useRef, useState } from "react";
 import type {
   CampaignListItem,
   CampaignSnapshot,
@@ -303,7 +304,8 @@ function EmptyJournalCopy({ children }: { children: React.ReactNode }) {
   );
 }
 
-export function AdventureApp() {
+export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string }) {
+  const router = useRouter();
   const [view, setView] = useState<"home" | "campaign">("home");
   const [snapshot, setSnapshot] = useState<CampaignSnapshot | null>(null);
   const [campaigns, setCampaigns] = useState<CampaignListItem[]>([]);
@@ -324,6 +326,12 @@ export function AdventureApp() {
   const [activeNarrationId, setActiveNarrationId] = useState<string | null>(null);
   const [lastCampaignId, setLastCampaignId] = useState<string | null>(null);
   const [pendingActionDraft, setPendingActionDraft] = useState("");
+  const refreshCampaignsEvent = useEffectEvent(() => {
+    void refreshCampaigns();
+  });
+  const loadCampaignEvent = useEffectEvent((campaignId: string) => {
+    void loadCampaign(campaignId);
+  });
 
   function removeStreamingNarration() {
     const currentStreamId = streamingMessageIdRef.current;
@@ -353,10 +361,13 @@ export function AdventureApp() {
   }
 
   useEffect(() => {
-    const campaignId = window.localStorage.getItem(STORAGE_KEY);
+    const campaignId = initialCampaignId ?? window.localStorage.getItem(STORAGE_KEY);
     setLastCampaignId(campaignId);
-    void refreshCampaigns();
-  }, []);
+    refreshCampaignsEvent();
+    if (initialCampaignId) {
+      loadCampaignEvent(initialCampaignId);
+    }
+  }, [initialCampaignId]);
 
   useEffect(() => {
     feedRef.current?.scrollTo({
@@ -440,35 +451,6 @@ export function AdventureApp() {
       streamingMessageIdRef.current = null;
       setActiveNarrationId(null);
     });
-  }
-
-  async function startAdventure() {
-    if (status !== "idle") {
-      return;
-    }
-
-    setStatus("loading");
-    setError(null);
-    setLoadingCampaignId("new");
-
-    try {
-      const response = await fetch("/api/adventure/start", {
-        method: "POST",
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to create the adventure.");
-      }
-
-      const data = (await response.json()) as { snapshot: CampaignSnapshot };
-      applySnapshot(data.snapshot);
-      await refreshCampaigns();
-    } catch (startError) {
-      setError(startError instanceof Error ? startError.message : "Failed to create adventure.");
-    } finally {
-      setStatus("idle");
-      setLoadingCampaignId(null);
-    }
   }
 
   function appendStreamingNarration(chunk: string) {
@@ -736,10 +718,10 @@ export function AdventureApp() {
               <div className="flex flex-col items-center justify-center gap-4 sm:flex-row">
                 <button
                   className="button-press rounded-full bg-white px-6 py-3 text-sm font-semibold tracking-wide text-black hover:bg-zinc-200"
-                  onClick={startAdventure}
+                  onClick={() => router.push("/campaigns/new")}
                   disabled={status !== "idle"}
                 >
-                  {loadingCampaignId === "new" ? "Starting new campaign..." : "Start Adventure"}
+                  Start Session Zero
                 </button>
                 <button
                   className="button-press rounded-full border border-zinc-800 px-6 py-3 text-sm font-semibold text-zinc-100 hover:bg-zinc-900"
@@ -755,9 +737,7 @@ export function AdventureApp() {
               </div>
               {status === "loading" ? (
                 <p className="mt-4 text-sm text-zinc-400">
-                  {loadingCampaignId === "new"
-                    ? "Creating your new chronicle..."
-                    : "Opening campaign..."}
+                  Opening campaign...
                 </p>
               ) : null}
               {error ? <p className="mt-4 text-sm text-red-400">{error}</p> : null}

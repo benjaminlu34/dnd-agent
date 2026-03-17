@@ -1,9 +1,10 @@
 import { PrismaClient } from "@prisma/client";
+import { createSeededDummyCharacter } from "../src/lib/game/starter-data";
 
 const prisma = new PrismaClient();
 
 async function main() {
-  await prisma.user.upsert({
+  const user = await prisma.user.upsert({
     where: { email: "solo@adventure.local" },
     update: {},
     create: {
@@ -11,6 +12,32 @@ async function main() {
       name: "Solo Adventurer",
     },
   });
+
+  const seeded = createSeededDummyCharacter();
+  const existingCharacter = await prisma.character.findFirst({
+    where: {
+      userId: user.id,
+      name: seeded.name,
+      archetype: seeded.archetype,
+    },
+  });
+
+  if (!existingCharacter) {
+    await prisma.character.create({
+      data: {
+        userId: user.id,
+        name: seeded.name,
+        archetype: seeded.archetype,
+        strength: seeded.stats.strength,
+        agility: seeded.stats.agility,
+        intellect: seeded.stats.intellect,
+        charisma: seeded.stats.charisma,
+        vitality: seeded.stats.vitality,
+        maxHealth: seeded.maxHealth,
+        health: seeded.health,
+      },
+    });
+  }
 }
 
 main()

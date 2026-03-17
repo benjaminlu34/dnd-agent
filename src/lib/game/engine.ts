@@ -212,7 +212,7 @@ export async function createAdventure() {
     data: {
       userId: user.id,
       characterId: createdCharacter.id,
-      title: setup.title,
+      title: setup.publicSynopsis.title,
       premise: blueprint.premise,
       tone: blueprint.tone,
       setting: blueprint.setting,

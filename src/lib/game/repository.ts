@@ -21,6 +21,7 @@ import type {
 } from "@/lib/game/types";
 import { parseBlueprint, parseCampaignState } from "@/lib/game/serialization";
 import { getStaleClues } from "@/lib/game/reveals";
+import { createSeededDummyCharacter } from "@/lib/game/starter-data";
 import { prisma } from "@/lib/prisma";
 
 export async function ensureLocalUser() {
@@ -30,6 +31,38 @@ export async function ensureLocalUser() {
     create: {
       email: "solo@adventure.local",
       name: "Solo Adventurer",
+    },
+  });
+}
+
+export async function ensureSeedCharacter() {
+  const user = await ensureLocalUser();
+  const seeded = createSeededDummyCharacter();
+  const existing = await prisma.character.findFirst({
+    where: {
+      userId: user.id,
+      name: seeded.name,
+      archetype: seeded.archetype,
+    },
+    orderBy: { createdAt: "asc" },
+  });
+
+  if (existing) {
+    return existing;
+  }
+
+  return prisma.character.create({
+    data: {
+      userId: user.id,
+      name: seeded.name,
+      archetype: seeded.archetype,
+      strength: seeded.stats.strength,
+      agility: seeded.stats.agility,
+      intellect: seeded.stats.intellect,
+      charisma: seeded.stats.charisma,
+      vitality: seeded.stats.vitality,
+      maxHealth: seeded.maxHealth,
+      health: seeded.health,
     },
   });
 }
