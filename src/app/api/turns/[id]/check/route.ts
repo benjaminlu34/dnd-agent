@@ -9,6 +9,15 @@ type Context = {
   params: Promise<{ id: string }>;
 };
 
+export async function GET(_: Request, context: Context) {
+  const { id } = await context.params;
+
+  return Response.json({
+    ok: true,
+    message: `Check resolution for turn ${id} is a POST endpoint. Open / to use the app UI.`,
+  });
+}
+
 export async function POST(_: Request, context: Context) {
   const { id } = await context.params;
 

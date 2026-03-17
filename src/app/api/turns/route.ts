@@ -5,6 +5,13 @@ import { createNdjsonStream } from "@/lib/http/ndjson";
 
 export const runtime = "nodejs";
 
+export async function GET() {
+  return NextResponse.json({
+    ok: true,
+    message: "Turn submission is a POST endpoint. Open / to use the app UI.",
+  });
+}
+
 export async function POST(request: Request) {
   const body = (await request.json()) as {
     campaignId?: string;

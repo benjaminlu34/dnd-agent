@@ -521,9 +521,7 @@ export async function summarizeSession(sessionId: string) {
   return summary;
 }
 
-export async function maybeGeneratePreviouslyOn(campaignId: string) {
-  const snapshot = await getCampaignSnapshot(campaignId);
-
+export async function maybeGeneratePreviouslyOn(snapshot: CampaignSnapshot | null) {
   if (!snapshot || !snapshot.sessionId) {
     return null;
   }
@@ -542,9 +540,14 @@ export async function maybeGeneratePreviouslyOn(campaignId: string) {
     return null;
   }
 
-  return dmClient.generatePreviouslyOn(
-    lastSummary.summary,
-    snapshot.state.sceneState.title,
-    snapshot.clues.filter((clue) => clue.status !== "resolved").map((clue) => clue.text),
-  );
+  return Promise.race([
+    dmClient.generatePreviouslyOn(
+      lastSummary.summary,
+      snapshot.state.sceneState.title,
+      snapshot.clues.filter((clue) => clue.status !== "resolved").map((clue) => clue.text),
+    ),
+    new Promise<null>((resolve) => {
+      setTimeout(() => resolve(null), 1200);
+    }),
+  ]);
 }

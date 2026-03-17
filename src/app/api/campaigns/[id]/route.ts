@@ -10,12 +10,15 @@ type Context = {
 
 export async function GET(_: Request, context: Context) {
   const { id } = await context.params;
-  const previouslyOn = await maybeGeneratePreviouslyOn(id);
-  const snapshot = await getCampaignSnapshot(id, previouslyOn);
+  const snapshot = await getCampaignSnapshot(id);
 
   if (!snapshot) {
     return NextResponse.json({ error: "Campaign not found." }, { status: 404 });
   }
 
-  return NextResponse.json({ snapshot });
+  const previouslyOn = await maybeGeneratePreviouslyOn(snapshot);
+
+  return NextResponse.json({
+    snapshot: previouslyOn ? { ...snapshot, previouslyOn } : snapshot,
+  });
 }

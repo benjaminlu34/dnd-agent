@@ -183,6 +183,7 @@ function TypewriterText({
   const effectiveRevealedLength =
     active && !prefersReducedMotion && !skipped ? revealedLength : text.length;
   const visible = text.slice(0, effectiveRevealedLength);
+  const paragraphs = visible.split(/\n{2,}/).filter(Boolean);
 
   return (
     <div
@@ -203,12 +204,30 @@ function TypewriterText({
         }
       }}
     >
-      <span className="whitespace-pre-wrap">{visible}</span>
-      {active && !prefersReducedMotion && effectiveRevealedLength < text.length ? (
-        <span className="type-cursor" aria-hidden="true">
-          |
-        </span>
-      ) : null}
+      {paragraphs.length ? (
+        paragraphs.map((paragraph, index) => {
+          const isLast = index === paragraphs.length - 1;
+          return (
+            <p key={`${index}-${paragraph.slice(0, 16)}`} className="mb-4 whitespace-pre-wrap last:mb-0">
+              {paragraph}
+              {isLast && active && !prefersReducedMotion && effectiveRevealedLength < text.length ? (
+                <span className="type-cursor" aria-hidden="true">
+                  |
+                </span>
+              ) : null}
+            </p>
+          );
+        })
+      ) : (
+        <>
+          <span className="whitespace-pre-wrap">{visible}</span>
+          {active && !prefersReducedMotion && effectiveRevealedLength < text.length ? (
+            <span className="type-cursor" aria-hidden="true">
+              |
+            </span>
+          ) : null}
+        </>
+      )}
     </div>
   );
 }
@@ -233,7 +252,7 @@ function MessageBlock({
 
   if (message.role === "user") {
     return (
-      <article className="ml-auto max-w-2xl rounded-[1.4rem] border border-[var(--panel-border)]/70 bg-[rgba(44,31,18,0.62)] px-4 py-3 text-[0.97rem] leading-7 text-[#f5e7c4] shadow-lg">
+      <article className="ml-auto max-w-2xl rounded-2xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-[0.96rem] leading-7 text-zinc-100">
         <p className="story-kicker">{formatRelativeLabel(message)}</p>
         <p className="whitespace-pre-wrap">{message.content}</p>
       </article>
@@ -243,10 +262,10 @@ function MessageBlock({
   return (
     <article
       className={clsx(
-        "max-w-2xl rounded-[1.3rem] border px-4 py-3 text-[0.95rem] leading-7",
+        "max-w-2xl rounded-2xl border px-4 py-3 text-[0.94rem] leading-7",
         message.kind === "warning"
-          ? "border-[var(--danger)]/40 bg-[var(--danger)]/10 text-[#ffd8c8]"
-          : "border-white/8 bg-white/4 text-[var(--muted)]",
+          ? "border-red-500/30 bg-red-500/10 text-red-100"
+          : "border-zinc-800 bg-transparent text-zinc-300",
       )}
     >
       <p className="story-kicker">{formatRelativeLabel(message)}</p>
@@ -257,7 +276,7 @@ function MessageBlock({
 
 function EmptyJournalCopy({ children }: { children: React.ReactNode }) {
   return (
-    <div className="rounded-[1.25rem] border border-dashed border-white/10 bg-black/10 px-4 py-5 text-sm leading-7 text-[var(--muted)]">
+    <div className="rounded-2xl border border-dashed border-zinc-800 bg-black px-4 py-5 text-sm leading-7 text-zinc-500">
       {children}
     </div>
   );
@@ -275,6 +294,7 @@ export function AdventureApp() {
   const [status, setStatus] = useState<"idle" | "loading" | "streaming">("idle");
   const [campaignsLoading, setCampaignsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [loadingCampaignId, setLoadingCampaignId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [journalTab, setJournalTab] = useState<JournalTab>("quests");
   const feedRef = useRef<HTMLDivElement | null>(null);
@@ -329,8 +349,13 @@ export function AdventureApp() {
   }
 
   async function loadCampaign(campaignId: string) {
+    if (status !== "idle" || loadingCampaignId === campaignId) {
+      return;
+    }
+
     setStatus("loading");
     setError(null);
+    setLoadingCampaignId(campaignId);
 
     try {
       const response = await fetch(`/api/campaigns/${campaignId}`, {
@@ -348,6 +373,7 @@ export function AdventureApp() {
       setError(loadError instanceof Error ? loadError.message : "Failed to load campaign.");
     } finally {
       setStatus("idle");
+      setLoadingCampaignId(null);
     }
   }
 
@@ -367,8 +393,13 @@ export function AdventureApp() {
   }
 
   async function startAdventure() {
+    if (status !== "idle") {
+      return;
+    }
+
     setStatus("loading");
     setError(null);
+    setLoadingCampaignId("new");
 
     try {
       const response = await fetch("/api/adventure/start", {
@@ -386,6 +417,7 @@ export function AdventureApp() {
       setError(startError instanceof Error ? startError.message : "Failed to create adventure.");
     } finally {
       setStatus("idle");
+      setLoadingCampaignId(null);
     }
   }
 
@@ -578,48 +610,33 @@ export function AdventureApp() {
       (lastCampaignId && campaigns.find((campaign) => campaign.id === lastCampaignId)) ?? campaigns[0] ?? null;
 
     return (
-      <main className="relative flex min-h-screen items-center justify-center px-6 py-12">
-        <section className="panel gold-glow w-full max-w-5xl overflow-hidden rounded-[2rem]">
-          <div className="grid gap-10 px-8 py-10 lg:grid-cols-[1.08fr_0.92fr] lg:px-12 lg:py-14">
-            <div className="space-y-8">
+      <main className="h-screen w-screen overflow-y-auto bg-black text-zinc-50">
+        <div className="mx-auto flex min-h-full w-full max-w-6xl flex-col px-4">
+          <section className="flex min-h-[70vh] flex-col items-center justify-center px-4 text-center">
+            <div className="w-full max-w-3xl">
               <div className="space-y-4">
-                <p className="text-sm uppercase tracking-[0.35em] text-[var(--accent-soft)]">
+                <p className="text-sm uppercase tracking-[0.35em] text-zinc-400">
                   Campaign Library
                 </p>
-                <h1 className="font-display text-6xl leading-none text-[var(--foreground)] sm:text-7xl">
+                <h1 className="mb-4 text-5xl font-semibold tracking-tight text-zinc-50 md:text-6xl">
                   AI Solo RPG Engine
                 </h1>
-                <p className="max-w-2xl text-lg leading-8 text-[var(--muted)]">
-                  A solo storybook adventure where the fiction stays center stage and the rules move
-                  quietly beneath the page.
+                <p className="mx-auto mb-8 max-w-xl text-lg text-zinc-400">
+                  A full-screen solo story engine where the rules stay beneath the surface and the
+                  page belongs to the fiction.
                 </p>
               </div>
 
-              <div className="grid gap-4 sm:grid-cols-3">
-                {[
-                  "Streaming narration and in-world prompts",
-                  "Hidden structure for clues, reveals, and campaign arcs",
-                  "Explicit rolls only when risk and consequence matter",
-                ].map((point) => (
-                  <div
-                    key={point}
-                    className="rounded-3xl border border-white/10 bg-white/5 px-4 py-5 text-sm leading-6 text-[var(--muted)]"
-                  >
-                    {point}
-                  </div>
-                ))}
-              </div>
-
-              <div className="flex flex-col gap-4 sm:flex-row">
+              <div className="flex flex-col items-center justify-center gap-4 sm:flex-row">
                 <button
-                  className="button-press rounded-full bg-[var(--accent)] px-6 py-3 text-sm font-semibold tracking-wide text-[#26190d] hover:-translate-y-0.5 hover:bg-[#e7b65c]"
+                  className="button-press rounded-full bg-white px-6 py-3 text-sm font-semibold tracking-wide text-black hover:bg-zinc-200"
                   onClick={startAdventure}
                   disabled={status !== "idle"}
                 >
-                  {status === "loading" ? "Preparing the valley..." : "Start Adventure"}
+                  {loadingCampaignId === "new" ? "Starting new campaign..." : "Start Adventure"}
                 </button>
                 <button
-                  className="button-press rounded-full border border-[var(--panel-border)] px-6 py-3 text-sm font-semibold text-[var(--foreground)] hover:bg-white/5"
+                  className="button-press rounded-full border border-zinc-800 px-6 py-3 text-sm font-semibold text-zinc-100 hover:bg-zinc-900"
                   onClick={() => {
                     if (featuredCampaign) {
                       void loadCampaign(featuredCampaign.id);
@@ -630,73 +647,74 @@ export function AdventureApp() {
                   {featuredCampaign ? "Resume Latest Chronicle" : "No Campaign Yet"}
                 </button>
               </div>
-              {error ? <p className="text-sm text-[var(--danger)]">{error}</p> : null}
+              {status === "loading" ? (
+                <p className="mt-4 text-sm text-zinc-400">
+                  {loadingCampaignId === "new"
+                    ? "Creating your new chronicle..."
+                    : "Opening campaign..."}
+                </p>
+              ) : null}
+              {error ? <p className="mt-4 text-sm text-red-400">{error}</p> : null}
+            </div>
+          </section>
+
+          <section className="mx-auto w-full max-w-4xl px-6 pb-24">
+            <div className="mb-6 flex items-start justify-between gap-3">
+              <p className="text-sm uppercase tracking-widest text-zinc-400">Your Chronicles</p>
+              <button
+                className="button-press rounded-full border border-zinc-800 px-3 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-zinc-300 hover:bg-zinc-900"
+                onClick={() => void refreshCampaigns()}
+                disabled={campaignsLoading}
+              >
+                Refresh
+              </button>
             </div>
 
-            <div className="rounded-[1.75rem] border border-[var(--panel-border)] bg-black/20 p-6">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <p className="text-xs uppercase tracking-[0.28em] text-[var(--accent-soft)]">
-                    Your Campaigns
-                  </p>
-                  <p className="mt-2 text-sm leading-7 text-[var(--muted)]">
-                    Return to an old chronicle or begin a fresh one.
-                  </p>
-                </div>
-                <button
-                  className="button-press rounded-full border border-[var(--panel-border)] px-3 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)] hover:bg-white/5"
-                  onClick={() => void refreshCampaigns()}
-                  disabled={campaignsLoading}
-                >
-                  Refresh
-                </button>
-              </div>
-
-              <div className="mt-5 space-y-3">
-                {campaignsLoading ? (
-                  <p className="text-sm leading-7 text-[var(--muted)]">Loading the library...</p>
-                ) : campaigns.length ? (
-                  campaigns.map((campaign) => (
-                    <button
-                      key={campaign.id}
-                      className={clsx(
-                        "button-press block w-full rounded-[1.45rem] border px-4 py-4 text-left transition",
-                        campaign.id === lastCampaignId
-                          ? "border-[var(--accent)]/45 bg-[rgba(214,164,73,0.08)]"
-                          : "border-white/10 bg-white/4 hover:bg-white/6",
-                      )}
-                      onClick={() => void loadCampaign(campaign.id)}
-                      disabled={status !== "idle"}
-                    >
-                      <div className="flex items-start justify-between gap-4">
-                        <div>
-                          <p className="story-kicker">{campaign.setting}</p>
-                          <h2 className="font-display text-2xl text-[var(--foreground)]">
-                            {campaign.title}
-                          </h2>
-                        </div>
-                        <span className="text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
-                          {campaign.id === lastCampaignId ? "Latest" : formatCampaignDate(campaign.updatedAt)}
-                        </span>
+            {campaignsLoading ? (
+              <p className="text-sm leading-7 text-zinc-400">Loading the library...</p>
+            ) : campaigns.length ? (
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                {campaigns.map((campaign) => (
+                  <button
+                    key={campaign.id}
+                    className={clsx(
+                      "group button-press cursor-pointer rounded-lg border bg-zinc-950/50 p-6 text-left transition-colors",
+                      campaign.id === lastCampaignId
+                        ? "border-zinc-700"
+                        : "border-zinc-800 hover:border-zinc-700",
+                      loadingCampaignId === campaign.id && "border-zinc-600 bg-zinc-900/70",
+                    )}
+                    onClick={() => void loadCampaign(campaign.id)}
+                    disabled={status !== "idle"}
+                    aria-busy={loadingCampaignId === campaign.id}
+                  >
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <h2 className="text-lg text-zinc-100 group-hover:text-white">{campaign.title}</h2>
+                        {loadingCampaignId === campaign.id ? (
+                          <p className="mt-1 text-xs uppercase tracking-[0.18em] text-zinc-500">
+                            Opening...
+                          </p>
+                        ) : null}
                       </div>
-                      <p className="mt-2 text-sm leading-7 text-[var(--muted)]">{campaign.premise}</p>
-                      <p className="mt-3 text-xs uppercase tracking-[0.18em] text-[var(--muted)]">
-                        {campaign.characterName} • {campaign.characterArchetype} • {campaign.turnCount} turns
-                      </p>
-                    </button>
-                  ))
-                ) : (
-                  <ol className="space-y-4 text-sm leading-7 text-[var(--muted)]">
-                    <li>One click creates a character, campaign, journal, clues, and opening scene.</li>
-                    <li>Most turns read like prose and stream immediately.</li>
-                    <li>Risky moments pause cleanly for a visible roll before the story resumes.</li>
-                    <li>Hidden truths stay hidden until the engine says they are earned.</li>
-                  </ol>
-                )}
+                      <span className="text-xs text-zinc-400">
+                        {campaign.id === lastCampaignId ? "Latest" : formatCampaignDate(campaign.updatedAt)}
+                      </span>
+                    </div>
+                    <p className="mt-2 text-xs uppercase tracking-[0.18em] text-zinc-400">
+                      {campaign.characterName} • {campaign.characterArchetype}
+                    </p>
+                    <p className="mt-2 line-clamp-2 text-sm text-zinc-400">{campaign.premise}</p>
+                  </button>
+                ))}
               </div>
-            </div>
-          </div>
-        </section>
+            ) : (
+              <div className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-6 text-sm leading-7 text-zinc-400">
+                No campaigns yet. Start a new adventure and your first chronicle will appear here.
+              </div>
+            )}
+          </section>
+        </div>
       </main>
     );
   }
@@ -722,257 +740,290 @@ export function AdventureApp() {
   ];
   const activeArc = snapshot.arcs.find((arc) => arc.status === "active");
   const sceneMoments = inferSceneMoments(snapshot);
+  const companion = snapshot.npcs.find((npc) => npc.isCompanion) ?? null;
 
   return (
-    <main className="min-h-screen px-4 py-4 sm:px-6 sm:py-6">
-      <div className="mx-auto max-w-[1480px]">
-        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_300px]">
-          <section className="panel story-shell rounded-[2.2rem] px-4 py-5 sm:px-8 sm:py-8">
-            <header className="mb-8 flex flex-col gap-5 border-b border-white/8 pb-6">
-              <div className="flex flex-wrap items-start justify-between gap-4">
-                <div className="space-y-3">
-                  <p className="text-xs uppercase tracking-[0.34em] text-[var(--accent-soft)]">
-                    {snapshot.setting}
-                  </p>
-                  <div>
-                    <h1 className="font-display text-4xl text-[var(--foreground)] sm:text-5xl">
-                      {snapshot.title}
-                    </h1>
-                    <p className="mt-2 max-w-3xl text-sm leading-7 text-[var(--muted)]">
-                      {snapshot.premise}
-                    </p>
+    <main className="h-screen w-screen overflow-hidden bg-black text-zinc-50">
+      <div className="flex h-full w-full">
+        <aside className="hidden h-full w-72 shrink-0 flex-col overflow-y-auto border-r border-zinc-800 bg-zinc-950 lg:flex">
+          <div className="border-b border-zinc-800 p-6">
+            <p className="text-[0.68rem] uppercase tracking-[0.24em] text-zinc-400">
+              Campaign
+            </p>
+            <h1 className="mt-3 text-2xl font-semibold tracking-tight text-zinc-50">
+              {snapshot.title}
+            </h1>
+            <p className="mt-2 text-sm leading-6 text-zinc-400">{snapshot.setting}</p>
+            <div className="mt-5 flex flex-col gap-2">
+              <button
+                className="button-press rounded-full border border-zinc-800 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-zinc-300 hover:bg-zinc-900"
+                onClick={returnHome}
+                disabled={status !== "idle"}
+              >
+                Campaign Library
+              </button>
+              <button
+                className="button-press rounded-full border border-zinc-800 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-zinc-300 hover:bg-zinc-900"
+                onClick={summarizeCurrentSession}
+              >
+                Write Journal Entry
+              </button>
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-6 p-6">
+            <section className="rounded-2xl border border-zinc-800 bg-black p-4">
+              <p className="story-kicker">Character</p>
+              <h2 className="text-xl font-semibold text-zinc-50">{snapshot.character.name}</h2>
+              <p className="mt-1 text-sm text-zinc-400">{snapshot.character.archetype}</p>
+              <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+                {Object.entries(snapshot.character.stats).map(([stat, value]) => (
+                  <div key={stat} className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-3">
+                    <p className="text-[0.65rem] uppercase tracking-[0.18em] text-zinc-400">{stat}</p>
+                    <p className="mt-1 text-lg font-medium text-zinc-100">{value >= 0 ? `+${value}` : value}</p>
                   </div>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    className="button-press rounded-full border border-[var(--panel-border)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.22em] text-[var(--muted)] hover:bg-white/5"
-                    onClick={returnHome}
-                    disabled={status !== "idle"}
-                  >
-                    Campaign Library
-                  </button>
-                  <button
-                    className="button-press rounded-full border border-[var(--panel-border)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.22em] text-[var(--muted)] hover:bg-white/5 xl:hidden"
-                    onClick={() => setSidebarOpen((open) => !open)}
-                  >
-                    {sidebarOpen ? "Close Journal" : "Open Journal"}
-                  </button>
-                  <button
-                    className="button-press rounded-full border border-[var(--panel-border)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.22em] text-[var(--muted)] hover:bg-white/5"
-                    onClick={summarizeCurrentSession}
-                  >
-                    Write Journal Entry
-                  </button>
-                </div>
-              </div>
-
-              <section className="scene-card rounded-[1.8rem] px-5 py-5 sm:px-6">
-                <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                  <div className="max-w-3xl">
-                    <p className="text-xs uppercase tracking-[0.28em] text-[var(--accent-soft)]">
-                      Current Scene
-                    </p>
-                    <h2 className="mt-2 font-display text-3xl text-[var(--foreground)] sm:text-4xl">
-                      {snapshot.state.sceneState.title}
-                    </h2>
-                    <p className="mt-3 text-base leading-8 text-[var(--foreground)]/92">
-                      {snapshot.state.sceneState.summary}
-                    </p>
-                  </div>
-
-                  <dl className="grid gap-3 text-sm leading-6 text-[var(--muted)] sm:grid-cols-2 lg:w-[320px] lg:grid-cols-1">
-                    <div>
-                      <dt className="scene-meta-label">Location</dt>
-                      <dd>{snapshot.state.sceneState.location}</dd>
-                    </div>
-                    {sceneMoments.time ? (
-                      <div>
-                        <dt className="scene-meta-label">Time</dt>
-                        <dd>{sceneMoments.time}</dd>
-                      </div>
-                    ) : null}
-                    <div>
-                      <dt className="scene-meta-label">Mood</dt>
-                      <dd>{snapshot.state.sceneState.atmosphere}</dd>
-                    </div>
-                    {sceneMoments.weather ? (
-                      <div>
-                        <dt className="scene-meta-label">In the air</dt>
-                        <dd>{sceneMoments.weather}</dd>
-                      </div>
-                    ) : null}
-                    <div>
-                      <dt className="scene-meta-label">Rumor</dt>
-                      <dd>{snapshot.state.worldState.activeThreat}</dd>
-                    </div>
-                  </dl>
-                </div>
-              </section>
-            </header>
-
-            {error ? (
-              <div className="mb-5 rounded-2xl border border-[var(--danger)]/40 bg-[var(--danger)]/10 px-4 py-3 text-sm text-[#ffd8c8]">
-                {error}
-              </div>
-            ) : null}
-
-            <div
-              ref={feedRef}
-              className="story-feed pr-1"
-              style={{ maxHeight: "56vh", overflowY: "auto" }}
-            >
-              <div className="mx-auto flex w-full max-w-3xl flex-col gap-8">
-                {messages.map((message) => (
-                  <MessageBlock
-                    key={message.id}
-                    message={message}
-                    active={message.id === activeNarrationId}
-                  />
                 ))}
               </div>
-            </div>
+              <div className="mt-4 rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-3">
+                <p className="text-[0.65rem] uppercase tracking-[0.18em] text-zinc-400">Health</p>
+                <p className="mt-1 text-lg font-medium text-zinc-100">
+                  {snapshot.character.health}/{snapshot.character.maxHealth}
+                </p>
+              </div>
+            </section>
 
-            {pendingCheck ? (
-              <section className="mt-8 rounded-[1.75rem] border border-[var(--accent)]/25 bg-[rgba(214,164,73,0.08)] p-5">
-                <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                  <div className="max-w-2xl">
-                    <p className="text-xs uppercase tracking-[0.25em] text-[var(--accent-soft)]">
-                      A roll decides what happens next
-                    </p>
-                    <h2 className="mt-2 font-display text-3xl capitalize">{pendingCheck.stat}</h2>
-                    <p className="mt-2 text-sm leading-7 text-[var(--muted)]">{pendingCheck.reason}</p>
-                    <p className="mt-2 text-xs uppercase tracking-[0.24em] text-[var(--muted)]">
-                      {pendingCheck.mode} check
-                    </p>
-                  </div>
-                  <button
-                    className="button-press rounded-full bg-[var(--accent)] px-5 py-3 text-sm font-semibold text-[#26190d] hover:-translate-y-0.5 hover:bg-[#e7b65c]"
-                    onClick={resolveCheck}
-                    disabled={status !== "idle"}
-                  >
-                    Roll the Dice
-                  </button>
-                </div>
+            {companion ? (
+              <section className="rounded-2xl border border-zinc-800 bg-black p-4">
+                <p className="story-kicker">Companion</p>
+                <h2 className="text-lg font-semibold text-zinc-50">{companion.name}</h2>
+                <p className="mt-1 text-sm text-zinc-400">{companion.role}</p>
+                <p className="mt-3 text-sm leading-7 text-zinc-300">{companion.notes}</p>
               </section>
             ) : null}
 
             {lastCheckResult ? (
-              <section className="mt-5 rounded-[1.6rem] border border-white/8 bg-[#132029] px-5 py-4">
-                <div className="flex flex-wrap items-center gap-4 text-sm">
-                  <span className="font-display text-4xl">{lastCheckResult.total}</span>
-                  <span className="rounded-full bg-white/6 px-3 py-1 uppercase tracking-[0.2em] text-[var(--accent-soft)]">
+              <section className="rounded-2xl border border-zinc-800 bg-black p-4">
+                <p className="story-kicker">Last Check</p>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-3xl font-semibold text-zinc-50">{lastCheckResult.total}</span>
+                  <span className="rounded-full border border-zinc-800 px-3 py-1 text-[0.68rem] uppercase tracking-[0.18em] text-zinc-300">
                     {lastCheckResult.outcome}
                   </span>
-                  <span className="text-[var(--muted)]">
-                    {lastCheckResult.stat} {lastCheckResult.mode} | rolls {lastCheckResult.rolls.join(" / ")} | mod{" "}
-                    {lastCheckResult.modifier >= 0 ? `+${lastCheckResult.modifier}` : lastCheckResult.modifier}
-                  </span>
                 </div>
-                {lastCheckResult.consequences?.length ? (
-                  <p className="mt-3 text-sm leading-7 text-[var(--muted)]">
-                    {lastCheckResult.consequences.join(" ")}
-                  </p>
-                ) : null}
+                <p className="mt-3 text-sm leading-7 text-zinc-400">
+                  {lastCheckResult.stat} {lastCheckResult.mode} | {lastCheckResult.rolls.join(" / ")}
+                </p>
               </section>
             ) : null}
+          </div>
+        </aside>
 
-            <section className="mt-8 rounded-[1.85rem] border border-white/8 bg-[var(--surface-strong)] p-4 sm:p-5">
-              <div className="mb-4">
-                <p className="text-xs uppercase tracking-[0.28em] text-[var(--accent-soft)]">
-                  Possible next moves
-                </p>
-                <p className="mt-2 text-sm leading-7 text-[var(--muted)]">
-                  The story is pressing in around you. Pick a path or write your own.
-                </p>
-              </div>
+        <section className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
+          <header className="flex items-center justify-between gap-4 border-b border-zinc-800 px-6 py-4 sm:px-8">
+            <div className="min-w-0">
+              <p className="text-[0.68rem] uppercase tracking-[0.24em] text-zinc-400">{snapshot.setting}</p>
+              <h1 className="mt-1 truncate text-xl font-semibold tracking-tight text-zinc-50 sm:text-2xl">
+                {snapshot.title}
+              </h1>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                className="button-press rounded-full border border-zinc-800 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-zinc-300 hover:bg-zinc-900 lg:hidden"
+                onClick={returnHome}
+                disabled={status !== "idle"}
+              >
+                Library
+              </button>
+              <button
+                className="button-press rounded-full border border-zinc-800 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-zinc-300 hover:bg-zinc-900 xl:hidden"
+                onClick={() => setSidebarOpen((open) => !open)}
+              >
+                {sidebarOpen ? "Close Context" : "Open Context"}
+              </button>
+            </div>
+          </header>
 
-              <div className="grid gap-3 md:grid-cols-2">
-                {suggestedActions.map((action) => (
-                  <button
-                    key={action}
-                    className="story-choice button-press rounded-[1.35rem] border border-[var(--panel-border)] px-4 py-4 text-left text-sm leading-7 text-[var(--foreground)] hover:border-[var(--accent)]/35 hover:bg-white/6 disabled:opacity-60"
-                    onClick={() => void submitAction(action)}
-                    disabled={status !== "idle" || Boolean(pendingCheck)}
-                  >
-                    <span className="story-choice-label">You could</span>
-                    <span className="mt-1 block">{toNarrativeAction(action)}</span>
-                  </button>
-                ))}
-              </div>
+          <div ref={feedRef} className="story-feed flex-1 overflow-y-auto p-8">
+            <div className="mx-auto flex w-full max-w-2xl flex-col gap-8 pb-12">
+              {messages.map((message) => (
+                <MessageBlock
+                  key={message.id}
+                  message={message}
+                  active={message.id === activeNarrationId}
+                />
+              ))}
+            </div>
+          </div>
+
+          <div className="px-4 pb-4 sm:px-8 sm:pb-8">
+            <div className="mx-auto flex w-full max-w-2xl flex-col gap-4">
+              {error ? (
+                <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">
+                  {error}
+                </div>
+              ) : null}
+
+              {pendingCheck ? (
+                <section className="rounded-lg border border-zinc-800 bg-transparent px-5 py-5">
+                  <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="max-w-2xl">
+                      <p className="text-[0.68rem] uppercase tracking-[0.24em] text-zinc-400">
+                        A roll decides what happens next
+                      </p>
+                      <h2 className="mt-2 text-2xl font-semibold capitalize text-zinc-50">{pendingCheck.stat}</h2>
+                      <p className="mt-2 text-sm leading-7 text-zinc-300">{pendingCheck.reason}</p>
+                      <p className="mt-2 text-[0.68rem] uppercase tracking-[0.18em] text-zinc-400">
+                        {pendingCheck.mode} check
+                      </p>
+                    </div>
+                    <button
+                      className="button-press rounded-full bg-white px-5 py-3 text-sm font-semibold text-black hover:bg-zinc-200"
+                      onClick={resolveCheck}
+                      disabled={status !== "idle"}
+                    >
+                      Roll Dice
+                    </button>
+                  </div>
+                </section>
+              ) : null}
+
+              {lastCheckResult ? (
+                <section className="rounded-lg border border-zinc-800 bg-transparent px-5 py-4 text-sm">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="text-3xl font-semibold text-zinc-50">{lastCheckResult.total}</span>
+                    <span className="rounded-full border border-zinc-800 px-3 py-1 text-[0.68rem] uppercase tracking-[0.18em] text-zinc-300">
+                      {lastCheckResult.outcome}
+                    </span>
+                    <span className="text-zinc-300">
+                      {lastCheckResult.stat} {lastCheckResult.mode} | rolls {lastCheckResult.rolls.join(" / ")} | mod{" "}
+                      {lastCheckResult.modifier >= 0 ? `+${lastCheckResult.modifier}` : lastCheckResult.modifier}
+                    </span>
+                  </div>
+                  {lastCheckResult.consequences?.length ? (
+                    <p className="mt-3 leading-7 text-zinc-300">{lastCheckResult.consequences.join(" ")}</p>
+                  ) : null}
+                </section>
+              ) : null}
+
+              {suggestedActions.length ? (
+                <div className="flex flex-wrap gap-2">
+                  {suggestedActions.map((action) => (
+                    <button
+                      key={action}
+                      className="button-press rounded-full border border-zinc-700 px-4 py-1.5 text-sm text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-white disabled:opacity-50"
+                      onClick={() => void submitAction(action)}
+                      disabled={status !== "idle" || Boolean(pendingCheck)}
+                    >
+                      {toNarrativeAction(action)}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
 
               <form
-                className="mt-4 flex flex-col gap-3 sm:flex-row"
+                className="rounded-[1.75rem] border border-zinc-800 bg-zinc-950 p-3 shadow-2xl shadow-black/50 backdrop-blur"
                 onSubmit={(event) => {
                   event.preventDefault();
                   void submitAction(inputValue);
                 }}
               >
-                <input
-                  value={inputValue}
-                  onChange={(event) => setInputValue(event.target.value)}
-                  placeholder="What do you do next?"
-                  className="min-h-14 flex-1 rounded-[1.25rem] border border-white/8 bg-black/20 px-4 py-3 text-sm text-[var(--foreground)] outline-none transition focus:border-[var(--accent)]/40"
-                  disabled={status !== "idle" || Boolean(pendingCheck)}
-                />
-                <button
-                  className="button-press rounded-[1.25rem] bg-[var(--accent)] px-5 py-3 text-sm font-semibold text-[#26190d] hover:-translate-y-0.5 hover:bg-[#e7b65c] disabled:cursor-not-allowed disabled:opacity-60"
-                  disabled={status !== "idle" || Boolean(pendingCheck) || !inputValue.trim()}
-                >
-                  {status === "streaming" ? "The world responds..." : "Take Action"}
-                </button>
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                  <input
+                    value={inputValue}
+                    onChange={(event) => setInputValue(event.target.value)}
+                    placeholder="What do you do next?"
+                    className="min-h-14 flex-1 rounded-2xl border border-zinc-800 bg-black px-4 py-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-zinc-600"
+                    disabled={status !== "idle" || Boolean(pendingCheck)}
+                  />
+                  <button
+                    className="button-press min-h-14 rounded-2xl bg-white px-5 py-3 text-sm font-medium text-black hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
+                    disabled={status !== "idle" || Boolean(pendingCheck) || !inputValue.trim()}
+                  >
+                    {status === "streaming" ? "The world responds..." : "Take Action"}
+                  </button>
+                </div>
               </form>
-            </section>
-          </section>
+            </div>
+          </div>
+        </section>
 
-          <aside
-            className={clsx(
-              "panel fixed inset-y-4 right-4 z-20 w-[min(88vw,360px)] rounded-[1.9rem] p-4 shadow-2xl transition-transform xl:sticky xl:top-6 xl:block xl:h-fit xl:w-auto xl:translate-x-0",
-              sidebarOpen ? "translate-x-0" : "translate-x-[120%] xl:translate-x-0",
-            )}
-          >
-            <div className="mb-4 flex items-center justify-between gap-3 border-b border-white/8 pb-4">
+        <aside
+          className={clsx(
+            "fixed inset-y-0 right-0 z-20 flex w-[min(90vw,20rem)] flex-col overflow-y-auto border-l border-zinc-800 bg-zinc-950 p-6 transition-transform xl:static xl:w-80 xl:translate-x-0",
+            sidebarOpen ? "translate-x-0" : "translate-x-full xl:translate-x-0",
+          )}
+        >
+          <div className="mb-6 border-b border-zinc-800 pb-6">
+            <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="text-xs uppercase tracking-[0.28em] text-[var(--accent-soft)]">
-                  Journal
-                </p>
-                <h2 className="mt-1 font-display text-3xl">{snapshot.character.name}</h2>
-                <p className="text-sm text-[var(--muted)]">{snapshot.character.archetype}</p>
+                <p className="text-[0.68rem] uppercase tracking-[0.24em] text-zinc-400">Scene</p>
+                <h2 className="mt-2 text-2xl font-semibold tracking-tight text-zinc-50">
+                  {snapshot.state.sceneState.title}
+                </h2>
               </div>
               <button
-                className="button-press rounded-full border border-[var(--panel-border)] px-3 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)] hover:bg-white/5 xl:hidden"
+                className="button-press rounded-full border border-zinc-800 px-3 py-2 text-xs font-medium uppercase tracking-[0.18em] text-zinc-300 hover:bg-zinc-900 xl:hidden"
                 onClick={() => setSidebarOpen(false)}
               >
                 Close
               </button>
             </div>
+            <p className="mt-3 text-sm leading-7 text-zinc-400">{snapshot.state.sceneState.summary}</p>
 
-            <div className="mb-4 flex flex-wrap gap-2">
-              {(["quests", "people", "journal", "clues"] as JournalTab[]).map((tab) => (
-                <button
-                  key={tab}
-                  className={clsx(
-                    "button-press rounded-full px-3 py-2 text-xs font-semibold uppercase tracking-[0.22em]",
-                    journalTab === tab
-                      ? "bg-[var(--accent)] text-[#26190d]"
-                      : "border border-[var(--panel-border)] text-[var(--muted)] hover:bg-white/5",
-                  )}
-                  onClick={() => setJournalTab(tab)}
-                >
-                  {tab}
-                </button>
-              ))}
-            </div>
+            <dl className="mt-5 grid gap-4 text-sm leading-6 text-zinc-400">
+              <div>
+                <dt className="scene-meta-label">Location</dt>
+                <dd>{snapshot.state.sceneState.location}</dd>
+              </div>
+              {sceneMoments.time ? (
+                <div>
+                  <dt className="scene-meta-label">Time</dt>
+                  <dd>{sceneMoments.time}</dd>
+                </div>
+              ) : null}
+              <div>
+                <dt className="scene-meta-label">Mood</dt>
+                <dd>{snapshot.state.sceneState.atmosphere}</dd>
+              </div>
+              {sceneMoments.weather ? (
+                <div>
+                  <dt className="scene-meta-label">In the air</dt>
+                  <dd>{sceneMoments.weather}</dd>
+                </div>
+              ) : null}
+              <div>
+                <dt className="scene-meta-label">Rumor</dt>
+                <dd>{snapshot.state.worldState.activeThreat}</dd>
+              </div>
+            </dl>
+          </div>
 
-            <div className="space-y-4">
+          <div className="mb-4 flex flex-wrap gap-2">
+            {(["quests", "people", "journal", "clues"] as JournalTab[]).map((tab) => (
+              <button
+                key={tab}
+                className={clsx(
+                  "button-press rounded-full px-3 py-2 text-xs font-medium uppercase tracking-[0.18em]",
+                  journalTab === tab
+                    ? "bg-white text-black"
+                    : "border border-zinc-800 text-zinc-300 hover:bg-zinc-900",
+                )}
+                onClick={() => setJournalTab(tab)}
+              >
+                {tab}
+              </button>
+            ))}
+          </div>
+
+          <div className="space-y-4 pb-8">
               {journalTab === "quests" ? (
                 visibleQuests.length ? (
                   visibleQuests.map((quest) => (
-                    <div key={quest.id} className="rounded-[1.4rem] border border-white/8 bg-white/4 px-4 py-4">
+                    <div key={quest.id} className="rounded-2xl border border-zinc-800 bg-black px-4 py-4">
                       <p className="story-kicker">{quest.status === "completed" ? "Completed quest" : "Active quest"}</p>
-                      <h3 className="font-display text-2xl">{quest.title}</h3>
-                      <p className="mt-2 text-sm leading-7 text-[var(--muted)]">{quest.summary}</p>
-                      <p className="mt-3 text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
+                      <h3 className="text-lg font-semibold text-zinc-50">{quest.title}</h3>
+                      <p className="mt-2 text-sm leading-7 text-zinc-400">{quest.summary}</p>
+                      <p className="mt-3 text-xs uppercase tracking-[0.2em] text-zinc-500">
                         {quest.status === "completed"
                           ? "Finished"
                           : `Progress: stage ${quest.stage + 1} of ${quest.maxStage + 1}`}
@@ -987,12 +1038,12 @@ export function AdventureApp() {
               {journalTab === "people" ? (
                 knownPeople.length ? (
                   knownPeople.map((npc) => (
-                    <div key={npc.id} className="rounded-[1.4rem] border border-white/8 bg-white/4 px-4 py-4">
+                    <div key={npc.id} className="rounded-2xl border border-zinc-800 bg-black px-4 py-4">
                       <p className="story-kicker">{npc.role}</p>
-                      <h3 className="font-display text-2xl">{npc.name}</h3>
-                      <p className="mt-2 text-sm leading-7 text-[var(--muted)]">{npc.notes}</p>
+                      <h3 className="text-lg font-semibold text-zinc-50">{npc.name}</h3>
+                      <p className="mt-2 text-sm leading-7 text-zinc-400">{npc.notes}</p>
                       {npc.personalHook ? (
-                        <p className="mt-3 text-sm leading-7 text-[var(--foreground)]/85">
+                        <p className="mt-3 text-sm leading-7 text-zinc-300">
                           Personal thread: {npc.personalHook}
                         </p>
                       ) : null}
@@ -1005,21 +1056,21 @@ export function AdventureApp() {
 
               {journalTab === "journal" ? (
                 <div className="space-y-4">
-                  <div className="rounded-[1.4rem] border border-white/8 bg-white/4 px-4 py-4">
+                  <div className="rounded-2xl border border-zinc-800 bg-black px-4 py-4">
                     <p className="story-kicker">Current chapter</p>
-                    <h3 className="font-display text-2xl">
+                    <h3 className="text-lg font-semibold text-zinc-50">
                       {activeArc?.title ?? snapshot.state.sceneState.title}
                     </h3>
-                    <p className="mt-2 text-sm leading-7 text-[var(--muted)]">
+                    <p className="mt-2 text-sm leading-7 text-zinc-400">
                       {activeArc?.summary ?? snapshot.state.sceneState.summary}
                     </p>
                   </div>
 
                   {journalEntries.length ? (
                     journalEntries.map((entry) => (
-                      <div key={entry.id} className="rounded-[1.4rem] border border-white/8 bg-black/18 px-4 py-4">
+                      <div key={entry.id} className="rounded-2xl border border-zinc-800 bg-black px-4 py-4">
                         <p className="story-kicker">{entry.title}</p>
-                        <p className="mt-2 text-sm leading-7 text-[var(--muted)]">{entry.content}</p>
+                        <p className="mt-2 text-sm leading-7 text-zinc-400">{entry.content}</p>
                       </div>
                     ))
                   ) : (
@@ -1033,10 +1084,10 @@ export function AdventureApp() {
               {journalTab === "clues" ? (
                 discoveredClues.length ? (
                   discoveredClues.map((clue) => (
-                    <div key={clue.id} className="rounded-[1.4rem] border border-white/8 bg-black/18 px-4 py-4">
+                    <div key={clue.id} className="rounded-2xl border border-zinc-800 bg-black px-4 py-4">
                       <p className="story-kicker">Discovered clue</p>
-                      <p className="text-sm leading-7 text-[var(--foreground)]">{clue.text}</p>
-                      <p className="mt-2 text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
+                      <p className="text-sm leading-7 text-zinc-200">{clue.text}</p>
+                      <p className="mt-2 text-xs uppercase tracking-[0.2em] text-zinc-500">
                         Source: {clue.source}
                       </p>
                     </div>
@@ -1045,9 +1096,8 @@ export function AdventureApp() {
                   <EmptyJournalCopy>No hard clues have been uncovered yet.</EmptyJournalCopy>
                 )
               ) : null}
-            </div>
-          </aside>
-        </div>
+          </div>
+        </aside>
       </div>
     </main>
   );
