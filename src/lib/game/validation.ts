@@ -1,5 +1,6 @@
 import type {
   ArcRecord,
+  CampaignCharacter,
   CampaignBlueprint,
   CampaignState,
   Clue,
@@ -13,6 +14,7 @@ import { clamp } from "@/lib/utils";
 type ValidationInput = {
   blueprint: CampaignBlueprint;
   state: CampaignState;
+  character: CampaignCharacter;
   quests: QuestRecord[];
   arcs: ArcRecord[];
   clues: Clue[];
@@ -23,6 +25,7 @@ type ValidationInput = {
 export function validateDelta({
   blueprint,
   state,
+  character,
   quests,
   arcs,
   clues,
@@ -158,14 +161,17 @@ export function validateDelta({
     acceptedNpcChanges.push(npcChange);
   }
 
-  nextState.gold += awardedGold;
-  nextState.inventory = [...state.inventory, ...acceptedInventoryChanges.add];
   nextState.activeRevealIds = Array.from(
     new Set([...state.activeRevealIds, ...acceptedRevealTriggers]),
   );
 
   return {
     nextState,
+    nextCharacter: {
+      health: character.health,
+      gold: character.gold + awardedGold,
+      inventory: [...character.inventory, ...acceptedInventoryChanges.add],
+    },
     warnings,
     acceptedQuestAdvancements,
     acceptedClueDiscoveries,

@@ -13,13 +13,44 @@ export type QuestStatus = "active" | "completed" | "failed";
 export type ArcStatus = "active" | "complete" | "locked";
 export type ClueStatus = "hidden" | "discovered" | "resolved";
 
-export type CharacterSheet = {
-  id: string;
+export type CharacterTemplateDraft = {
   name: string;
   archetype: string;
+  strength: number;
+  agility: number;
+  intellect: number;
+  charisma: number;
+  vitality: number;
+  maxHealth: number;
+  backstory: string | null;
+};
+
+export type CharacterTemplate = CharacterTemplateDraft & {
+  id: string;
+};
+
+export type CharacterInstance = {
+  id: string;
+  templateId: string;
+  health: number;
+  gold: number;
+  inventory: string[];
+};
+
+export type CampaignCharacter = CharacterTemplate & {
+  instanceId: string;
+  templateId: string;
   stats: Record<Stat, number>;
   health: number;
-  maxHealth: number;
+  gold: number;
+  inventory: string[];
+};
+
+export type CharacterSheet = CampaignCharacter;
+
+export type CharacterTemplateSummary = CharacterTemplate & {
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type Hook = {
@@ -159,8 +190,6 @@ export type CampaignState = {
   hooks: Hook[];
   villainClock: number;
   tensionScore: number;
-  inventory: string[];
-  gold: number;
   activeRevealIds: string[];
   pendingTurnId: string | null;
 };
@@ -293,6 +322,7 @@ export type ProposedStateDelta = {
 
 export type ValidatedDelta = {
   nextState: CampaignState;
+  nextCharacter: Pick<CampaignCharacter, "health" | "gold" | "inventory">;
   warnings: string[];
   acceptedQuestAdvancements: ProposedStateDelta["questAdvancements"];
   acceptedClueDiscoveries: string[];

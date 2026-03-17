@@ -1,8 +1,9 @@
 import type {
   ArcRecord,
   CampaignBlueprint,
+  CampaignCharacter,
   CampaignState,
-  CharacterSheet,
+  CharacterTemplate,
   Clue,
   Hook,
   NpcRecord,
@@ -64,26 +65,41 @@ type StarterStateOverrides = {
   dangerLevel?: CampaignState["worldState"]["dangerLevel"];
 };
 
-export function createDefaultCharacterTemplate(): CharacterSheet {
+export function createDefaultCharacterTemplate(): CharacterTemplate {
   return {
-    id: "char_session_zero_wayfarer",
+    id: "template_session_zero_wayfarer",
     name: "Rowan Vale",
     archetype: "Waymarked Wanderer",
-    stats: seededCharacterStats,
+    strength: seededCharacterStats.strength,
+    agility: seededCharacterStats.agility,
+    intellect: seededCharacterStats.intellect,
+    charisma: seededCharacterStats.charisma,
+    vitality: seededCharacterStats.vitality,
     maxHealth: 12,
-    health: 12,
+    backstory:
+      "A road-worn wanderer who carries old maps, half-finished vows, and the habit of showing up where the dark is thickest.",
   };
 }
 
-export function createStarterCharacter(): CharacterSheet {
+export function createStarterCharacter(): CampaignCharacter {
   const choice = randomItem([...archetypes]);
   return {
-    id: `char_${slugify(choice.name)}`,
+    id: `template_${slugify(choice.name)}`,
+    instanceId: `instance_${slugify(choice.name)}`,
+    templateId: `template_${slugify(choice.name)}`,
     name: choice.name,
     archetype: choice.archetype,
+    strength: choice.stats.strength,
+    agility: choice.stats.agility,
+    intellect: choice.stats.intellect,
+    charisma: choice.stats.charisma,
+    vitality: choice.stats.vitality,
     stats: choice.stats,
     maxHealth: 12,
     health: 12,
+    gold: 0,
+    inventory: [],
+    backstory: `${choice.name} has spent too long following rumors that should have stayed buried.`,
   };
 }
 
@@ -190,8 +206,6 @@ export function createStarterState(
     hooks: blueprint.initialHooks,
     villainClock: overrides.villainClock ?? 2,
     tensionScore: overrides.tensionScore ?? 28,
-    inventory: [],
-    gold: 0,
     activeRevealIds: [],
     pendingTurnId: null,
   };

@@ -710,8 +710,7 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
                   AI Solo RPG Engine
                 </h1>
                 <p className="mx-auto mb-8 max-w-xl text-lg text-zinc-400">
-                  A full-screen solo story engine where the rules stay beneath the surface and the
-                  page belongs to the fiction.
+                  A simple AI-powered story engine.
                 </p>
               </div>
 

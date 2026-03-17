@@ -1,22 +1,32 @@
 import type {
   Arc,
+  CharacterInstance as PrismaCharacterInstance,
+  CharacterTemplate as PrismaCharacterTemplate,
   Clue as PrismaClue,
   MemoryEntry,
   Message,
   NPC,
   Quest,
 } from "@prisma/client";
+import {
+  normalizeInventory,
+  toCampaignCharacter,
+  toCharacterStats,
+} from "@/lib/game/characters";
 import type {
-  ArcRecord,
+  CampaignCharacter,
   CampaignListItem,
   CampaignSnapshot,
-  CharacterSheet,
-  ClueStatus,
+  CharacterInstance,
+  CharacterTemplate,
+  CharacterTemplateDraft,
+  CharacterTemplateSummary,
   Clue,
+  ClueStatus,
   MemoryRecord,
   NpcRecord,
-  QuestStatus,
   QuestRecord,
+  QuestStatus,
   StoryMessage,
 } from "@/lib/game/types";
 import { parseBlueprint, parseCampaignState } from "@/lib/game/serialization";
@@ -35,14 +45,54 @@ export async function ensureLocalUser() {
   });
 }
 
-export async function ensureDefaultCharacter() {
+function toTemplateRecord(template: PrismaCharacterTemplate): CharacterTemplate {
+  return {
+    id: template.id,
+    name: template.name,
+    archetype: template.archetype,
+    strength: template.strength,
+    agility: template.agility,
+    intellect: template.intellect,
+    charisma: template.charisma,
+    vitality: template.vitality,
+    maxHealth: template.maxHealth,
+    backstory: template.backstory,
+  };
+}
+
+function toTemplateSummary(template: PrismaCharacterTemplate): CharacterTemplateSummary {
+  return {
+    ...toTemplateRecord(template),
+    createdAt: template.createdAt.toISOString(),
+    updatedAt: template.updatedAt.toISOString(),
+  };
+}
+
+function toInstanceRecord(instance: PrismaCharacterInstance): CharacterInstance {
+  return {
+    id: instance.id,
+    templateId: instance.templateId,
+    health: instance.health,
+    gold: instance.gold,
+    inventory: normalizeInventory(instance.inventory),
+  };
+}
+
+function toCharacter(
+  template: PrismaCharacterTemplate,
+  instance: PrismaCharacterInstance,
+): CampaignCharacter {
+  return toCampaignCharacter(toTemplateRecord(template), toInstanceRecord(instance));
+}
+
+export async function ensureDefaultCharacterTemplate() {
   const user = await ensureLocalUser();
-  const defaultCharacter = createDefaultCharacterTemplate();
-  const existing = await prisma.character.findFirst({
+  const defaultTemplate = createDefaultCharacterTemplate();
+  const existing = await prisma.characterTemplate.findFirst({
     where: {
       userId: user.id,
-      name: defaultCharacter.name,
-      archetype: defaultCharacter.archetype,
+      name: defaultTemplate.name,
+      archetype: defaultTemplate.archetype,
     },
     orderBy: { createdAt: "asc" },
   });
@@ -51,18 +101,57 @@ export async function ensureDefaultCharacter() {
     return existing;
   }
 
-  return prisma.character.create({
+  return prisma.characterTemplate.create({
     data: {
       userId: user.id,
-      name: defaultCharacter.name,
-      archetype: defaultCharacter.archetype,
-      strength: defaultCharacter.stats.strength,
-      agility: defaultCharacter.stats.agility,
-      intellect: defaultCharacter.stats.intellect,
-      charisma: defaultCharacter.stats.charisma,
-      vitality: defaultCharacter.stats.vitality,
-      maxHealth: defaultCharacter.maxHealth,
-      health: defaultCharacter.health,
+      name: defaultTemplate.name,
+      archetype: defaultTemplate.archetype,
+      strength: defaultTemplate.strength,
+      agility: defaultTemplate.agility,
+      intellect: defaultTemplate.intellect,
+      charisma: defaultTemplate.charisma,
+      vitality: defaultTemplate.vitality,
+      maxHealth: defaultTemplate.maxHealth,
+      backstory: defaultTemplate.backstory,
+    },
+  });
+}
+
+export async function listCharacterTemplates(): Promise<CharacterTemplateSummary[]> {
+  const user = await ensureLocalUser();
+  const templates = await prisma.characterTemplate.findMany({
+    where: { userId: user.id },
+    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+  });
+
+  return templates.map(toTemplateSummary);
+}
+
+export async function getCharacterTemplateForUser(templateId: string) {
+  const user = await ensureLocalUser();
+  return prisma.characterTemplate.findFirst({
+    where: {
+      id: templateId,
+      userId: user.id,
+    },
+  });
+}
+
+export async function createCharacterTemplate(input: CharacterTemplateDraft) {
+  const user = await ensureLocalUser();
+
+  return prisma.characterTemplate.create({
+    data: {
+      userId: user.id,
+      name: input.name,
+      archetype: input.archetype,
+      strength: input.strength,
+      agility: input.agility,
+      intellect: input.intellect,
+      charisma: input.charisma,
+      vitality: input.vitality,
+      maxHealth: input.maxHealth,
+      backstory: input.backstory,
     },
   });
 }
@@ -71,7 +160,8 @@ export async function getCampaignAggregate(campaignId: string) {
   return prisma.campaign.findUnique({
     where: { id: campaignId },
     include: {
-      character: true,
+      template: true,
+      characterInstance: true,
       sessions: {
         orderBy: { createdAt: "desc" },
         take: 1,
@@ -100,7 +190,7 @@ export async function listCampaigns(): Promise<CampaignListItem[]> {
   const campaigns = await prisma.campaign.findMany({
     orderBy: { updatedAt: "desc" },
     include: {
-      character: true,
+      template: true,
       sessions: {
         orderBy: { createdAt: "desc" },
         take: 1,
@@ -114,34 +204,13 @@ export async function listCampaigns(): Promise<CampaignListItem[]> {
     premise: campaign.premise,
     setting: campaign.setting,
     tone: campaign.tone,
-    characterName: campaign.character.name,
-    characterArchetype: campaign.character.archetype,
+    characterName: campaign.template.name,
+    characterArchetype: campaign.template.archetype,
     sessionTitle: campaign.sessions[0]?.title ?? null,
     turnCount: campaign.sessions[0]?.turnCount ?? 0,
     updatedAt: campaign.updatedAt.toISOString(),
     createdAt: campaign.createdAt.toISOString(),
   }));
-}
-
-function toCharacter(character: Awaited<ReturnType<typeof getCampaignAggregate>> extends infer T
-  ? T extends { character: infer C }
-    ? C
-    : never
-  : never): CharacterSheet {
-  return {
-    id: character.id,
-    name: character.name,
-    archetype: character.archetype,
-    health: character.health,
-    maxHealth: character.maxHealth,
-    stats: {
-      strength: character.strength,
-      agility: character.agility,
-      intellect: character.intellect,
-      charisma: character.charisma,
-      vitality: character.vitality,
-    },
-  };
 }
 
 function toQuest(quest: Quest): QuestRecord {
@@ -157,12 +226,12 @@ function toQuest(quest: Quest): QuestRecord {
   };
 }
 
-function toArc(arc: Arc): ArcRecord {
+function toArc(arc: Arc) {
   return {
     id: arc.id,
     title: arc.title,
     summary: arc.summary,
-    status: arc.status as ArcRecord["status"],
+    status: arc.status as "active" | "complete" | "locked",
     expectedTurns: arc.expectedTurns,
     currentTurn: arc.currentTurn,
     orderIndex: arc.orderIndex,
@@ -233,6 +302,10 @@ export async function getCampaignSnapshot(
     return null;
   }
 
+  if (!campaign.characterInstance) {
+    throw new Error("Campaign is missing its character instance.");
+  }
+
   const session = campaign.sessions[0];
   const recentMessages = session ? await getRecentMessages(session.id) : [];
   const latestResolvedTurn = session
@@ -255,7 +328,7 @@ export async function getCampaignSnapshot(
     setting: campaign.setting,
     blueprint: parseBlueprint(campaign.blueprint),
     state: parseCampaignState(campaign.stateJson),
-    character: toCharacter(campaign.character),
+    character: toCharacter(campaign.template, campaign.characterInstance),
     quests: campaign.quests.map(toQuest),
     arcs: campaign.arcs.map(toArc),
     npcs: campaign.npcs.map(toNpc),
@@ -334,6 +407,13 @@ export function getPromptContext(snapshot: CampaignSnapshot) {
     villainClock: snapshot.state.villainClock,
     tensionScore: snapshot.state.tensionScore,
     arcPacingHint,
+  };
+}
+
+export function toStoredTemplateSeed(template: CharacterTemplate) {
+  return {
+    ...template,
+    stats: toCharacterStats(template),
   };
 }
 

@@ -13,8 +13,15 @@ import type { CharacterSheet, PromptContext } from "../src/lib/game/types";
 
 const character: CharacterSheet = {
   id: "harness_char",
+  templateId: "harness_char",
+  instanceId: "harness_instance",
   name: "Harness Hero",
   archetype: "Test Pilgrim",
+  strength: 1,
+  agility: 1,
+  intellect: 1,
+  charisma: 0,
+  vitality: 1,
   stats: {
     strength: 1,
     agility: 1,
@@ -24,6 +31,9 @@ const character: CharacterSheet = {
   },
   health: 12,
   maxHealth: 12,
+  gold: 0,
+  inventory: [],
+  backstory: "A contract harness protagonist built to sanity-check the DM outputs.",
 };
 
 const actions = [

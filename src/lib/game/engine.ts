@@ -28,6 +28,7 @@ type TurnStream = {
 
 type TurnRollbackData = {
   previousState: CampaignSnapshot["state"];
+  previousCharacter: Pick<CampaignSnapshot["character"], "health" | "gold" | "inventory">;
   previousSessionTurnCount: number;
   quests: {
     id: string;
@@ -193,31 +194,39 @@ export async function createAdventure() {
   const arcs = buildArcRecordsFromBlueprint(blueprint);
   const npcs = buildNpcRecordsFromSetup(setup);
   const clues = buildClueRecordsFromSetup(setup, blueprint);
-  const createdCharacter = await prisma.character.create({
+  const createdTemplate = await prisma.characterTemplate.create({
     data: {
       userId: user.id,
       name: character.name,
       archetype: character.archetype,
-      strength: character.stats.strength,
-      agility: character.stats.agility,
-      intellect: character.stats.intellect,
-      charisma: character.stats.charisma,
-      vitality: character.stats.vitality,
+      strength: character.strength,
+      agility: character.agility,
+      intellect: character.intellect,
+      charisma: character.charisma,
+      vitality: character.vitality,
       maxHealth: character.maxHealth,
-      health: character.health,
+      backstory: character.backstory,
     },
   });
 
   const campaign = await prisma.campaign.create({
     data: {
       userId: user.id,
-      characterId: createdCharacter.id,
+      templateId: createdTemplate.id,
       title: setup.publicSynopsis.title,
       premise: blueprint.premise,
       tone: blueprint.tone,
       setting: blueprint.setting,
       blueprint,
       stateJson: state,
+      characterInstance: {
+        create: {
+          templateId: createdTemplate.id,
+          health: character.health,
+          gold: character.gold,
+          inventory: character.inventory,
+        },
+      },
       sessions: {
         create: {
           title: "Session 1",
@@ -334,6 +343,11 @@ async function commitValidatedTurn(input: {
   await prisma.$transaction(async (tx) => {
     const rollback: TurnRollbackData = {
       previousState: snapshot.state,
+      previousCharacter: {
+        health: snapshot.character.health,
+        gold: snapshot.character.gold,
+        inventory: snapshot.character.inventory,
+      },
       previousSessionTurnCount: snapshot.state.turnCount,
       quests: snapshot.quests.map((quest) => ({
         id: quest.id,
@@ -362,6 +376,15 @@ async function commitValidatedTurn(input: {
       where: { id: snapshot.campaignId },
       data: {
         stateJson: validated.nextState,
+      },
+    });
+
+    await tx.characterInstance.update({
+      where: { campaignId: snapshot.campaignId },
+      data: {
+        health: validated.nextCharacter.health,
+        gold: validated.nextCharacter.gold,
+        inventory: validated.nextCharacter.inventory,
       },
     });
 
@@ -578,6 +601,15 @@ export async function retryLastTurn(turnId: string) {
       },
     });
 
+    await tx.characterInstance.update({
+      where: { campaignId: turn.campaignId },
+      data: {
+        health: rollback.previousCharacter.health,
+        gold: rollback.previousCharacter.gold,
+        inventory: rollback.previousCharacter.inventory,
+      },
+    });
+
     await tx.session.update({
       where: { id: turn.sessionId },
       data: {
@@ -733,6 +765,7 @@ export async function triageTurn(input: {
   const validated = validateDelta({
     blueprint: snapshot.blueprint,
     state: snapshot.state,
+    character: snapshot.character,
     quests: snapshot.quests,
     arcs: snapshot.arcs,
     clues: snapshot.clues,
@@ -822,6 +855,7 @@ export async function resolvePendingCheck(input: {
   const validated = validateDelta({
     blueprint: snapshot.blueprint,
     state: snapshot.state,
+    character: snapshot.character,
     quests: snapshot.quests,
     arcs: snapshot.arcs,
     clues: snapshot.clues,

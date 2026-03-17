@@ -1,8 +1,8 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
-import type { GeneratedCampaignSetup } from "@/lib/game/types";
+import { useEffect, useState } from "react";
+import type { CharacterTemplateSummary, GeneratedCampaignSetup } from "@/lib/game/types";
 
 function FieldShell({
   label,
@@ -27,15 +27,102 @@ function inputClassName(multiline = false) {
   ].join(" ");
 }
 
+function CharacterCard({
+  character,
+  selected,
+  onSelect,
+}: {
+  character: CharacterTemplateSummary;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={[
+        "rounded-3xl border p-5 text-left transition-colors",
+        selected
+          ? "border-zinc-600 bg-black"
+          : "border-zinc-800 bg-black hover:border-zinc-700",
+      ].join(" ")}
+    >
+      <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Character Template</p>
+      <h2 className="mt-3 text-xl font-semibold text-white">{character.name}</h2>
+      <p className="mt-1 text-sm text-zinc-400">{character.archetype}</p>
+      <div className="mt-4 grid grid-cols-3 gap-2 text-xs text-zinc-300">
+        <span>STR {character.strength}</span>
+        <span>AGI {character.agility}</span>
+        <span>INT {character.intellect}</span>
+        <span>CHA {character.charisma}</span>
+        <span>VIT {character.vitality}</span>
+        <span>HP {character.maxHealth}</span>
+      </div>
+      {character.backstory ? (
+        <p className="mt-4 line-clamp-3 text-sm leading-6 text-zinc-400">{character.backstory}</p>
+      ) : null}
+    </button>
+  );
+}
+
 export function SessionZeroApp() {
   const router = useRouter();
   const [prompt, setPrompt] = useState("");
   const [followUpPrompt, setFollowUpPrompt] = useState("");
+  const [characters, setCharacters] = useState<CharacterTemplateSummary[]>([]);
+  const [charactersLoading, setCharactersLoading] = useState(true);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
   const [draft, setDraft] = useState<GeneratedCampaignSetup | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const selectedCharacter =
+    characters.find((character) => character.id === selectedTemplateId) ?? null;
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadCharacters() {
+      setCharactersLoading(true);
+
+      try {
+        const response = await fetch("/api/characters");
+        const data = (await response.json()) as {
+          characters?: CharacterTemplateSummary[];
+          error?: string;
+        };
+
+        if (!response.ok) {
+          throw new Error(data.error ?? "Failed to load characters.");
+        }
+
+        if (!active) {
+          return;
+        }
+
+        const nextCharacters = data.characters ?? [];
+        setCharacters(nextCharacters);
+        setSelectedTemplateId((current) => current ?? nextCharacters[0]?.id ?? null);
+      } catch (loadError) {
+        if (!active) {
+          return;
+        }
+
+        setError(loadError instanceof Error ? loadError.message : "Failed to load characters.");
+      } finally {
+        if (active) {
+          setCharactersLoading(false);
+        }
+      }
+    }
+
+    void loadCharacters();
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   function updateDraft(updater: (current: GeneratedCampaignSetup) => GeneratedCampaignSetup) {
     setDraft((current) => (current ? updater(current) : current));
@@ -138,6 +225,11 @@ export function SessionZeroApp() {
   }
 
   async function generateDraft(nextPrompt: string, previousDraft?: GeneratedCampaignSetup) {
+    if (!selectedCharacter) {
+      setError("Choose a character before drafting a campaign.");
+      return;
+    }
+
     setLoading(true);
     setError(null);
 
@@ -149,6 +241,7 @@ export function SessionZeroApp() {
         },
         body: JSON.stringify({
           prompt: nextPrompt,
+          character: selectedCharacter,
           previousDraft,
         }),
       });
@@ -173,7 +266,7 @@ export function SessionZeroApp() {
   }
 
   async function confirmDraft() {
-    if (!draft || saving) {
+    if (!draft || !selectedCharacter || saving) {
       return;
     }
 
@@ -186,7 +279,10 @@ export function SessionZeroApp() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ draft }),
+        body: JSON.stringify({
+          templateId: selectedCharacter.id,
+          draft,
+        }),
       });
 
       const data = (await response.json()) as { campaignId?: string; error?: string };
@@ -207,13 +303,64 @@ export function SessionZeroApp() {
     return (
       <main className="min-h-screen bg-black text-zinc-50">
         <div className="mx-auto flex min-h-screen max-w-5xl items-center px-6 py-16">
-          <section className="mx-auto w-full max-w-xl rounded-[2rem] border border-zinc-800 bg-zinc-950 p-8 shadow-[0_0_0_1px_rgba(24,24,27,0.4)]">
+          <section className="mx-auto w-full max-w-4xl rounded-[2rem] border border-zinc-800 bg-zinc-950 p-8 shadow-[0_0_0_1px_rgba(24,24,27,0.4)]">
             <p className="text-[0.68rem] uppercase tracking-[0.28em] text-zinc-500">Session Zero</p>
             <h1 className="mt-4 text-4xl font-semibold tracking-tight text-white">Shape the next adventure.</h1>
             <p className="mt-4 text-sm leading-7 text-zinc-400">
-              Describe the world, tone, or rule constraints you want. The first pass stays spoiler-safe. You can
-              reveal the deeper machinery only if you want to tune it.
+              Choose the character entering this campaign, then describe the world, tone, or rule constraints you want.
+              The first pass stays spoiler-safe. You can reveal the deeper machinery only if you want to tune it.
             </p>
+
+            <div className="mt-8">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-[0.68rem] uppercase tracking-[0.24em] text-zinc-500">Step 1: Choose Character</p>
+                <button
+                  type="button"
+                  className="button-press rounded-full border border-zinc-800 px-4 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-200 hover:bg-black"
+                  onClick={() => router.push("/characters/new")}
+                >
+                  Create Character
+                </button>
+              </div>
+
+              {charactersLoading ? (
+                <div className="mt-4 rounded-3xl border border-zinc-800 bg-black p-6 text-sm text-zinc-400">
+                  Loading saved characters...
+                </div>
+              ) : characters.length ? (
+                <div className="mt-4 grid gap-4 md:grid-cols-2">
+                  {characters.map((character) => (
+                    <CharacterCard
+                      key={character.id}
+                      character={character}
+                      selected={character.id === selectedTemplateId}
+                      onSelect={() => setSelectedTemplateId(character.id)}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-4 rounded-3xl border border-zinc-800 bg-black p-6">
+                  <p className="text-sm leading-7 text-zinc-400">
+                    You need at least one saved character before Session Zero can generate a campaign.
+                  </p>
+                  <button
+                    type="button"
+                    className="button-press mt-4 rounded-full bg-white px-5 py-3 text-sm font-semibold text-black hover:bg-zinc-200"
+                    onClick={() => router.push("/characters/new")}
+                  >
+                    Build Your First Character
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {selectedCharacter ? (
+              <div className="mt-8 rounded-3xl border border-zinc-800 bg-black p-5">
+                <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Selected Hero</p>
+                <h2 className="mt-3 text-2xl font-semibold text-white">{selectedCharacter.name}</h2>
+                <p className="mt-1 text-sm text-zinc-400">{selectedCharacter.archetype}</p>
+              </div>
+            ) : null}
 
             <FieldShell label="Campaign Premise">
               <textarea
@@ -227,7 +374,7 @@ export function SessionZeroApp() {
             <button
               className="button-press mt-6 rounded-full bg-white px-6 py-3 text-sm font-semibold tracking-wide text-black hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
               onClick={() => void generateDraft(prompt)}
-              disabled={loading || !prompt.trim()}
+              disabled={loading || !prompt.trim() || !selectedCharacter || charactersLoading}
             >
               {loading ? "Drafting Campaign..." : "Draft Campaign"}
             </button>

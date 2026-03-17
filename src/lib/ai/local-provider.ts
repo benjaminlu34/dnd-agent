@@ -1,6 +1,8 @@
+import { toCampaignSeedCharacter } from "@/lib/game/characters";
 import { createDefaultCharacterTemplate } from "@/lib/game/starter-data";
 import type {
   CampaignBlueprint,
+  CharacterTemplateDraft,
   CharacterSheet,
   CheckOutcome,
   CheckResult,
@@ -1072,7 +1074,38 @@ export class LocalDungeonMaster {
     character: CharacterSheet,
     input: CampaignSetupGenerationInput = {},
   ) {
-    return buildCampaignSetup(character ?? createDefaultCharacterTemplate(), input);
+    return buildCampaignSetup(
+      character ?? toCampaignSeedCharacter(createDefaultCharacterTemplate()),
+      input,
+    );
+  }
+
+  async generateCharacter(prompt: string): Promise<CharacterTemplateDraft> {
+    const base = createDefaultCharacterTemplate();
+    const cleaned = cleanPrompt(prompt);
+    const seed = cleaned || `${base.name}|${base.archetype}`;
+    const theme = selectTheme(seed);
+    const archetypeFocus = cleaned.split(/\s+/).slice(0, 6).join(" ").trim();
+    const titlePrefix = pickOne(theme.titlePrefixes, createRng(seed));
+    const archetype = archetypeFocus
+      ? `${titlePrefix} ${archetypeFocus.replace(/^[a-z]/, (char) => char.toUpperCase())}`
+      : base.archetype;
+    const nameSeed = stableHash(`${seed}|name`);
+    const statShift = (offset: number) => ((nameSeed >> offset) % 3) - 1;
+
+    return {
+      name: base.name,
+      archetype,
+      strength: clamp(base.strength + statShift(0), -2, 4),
+      agility: clamp(base.agility + statShift(2), -2, 4),
+      intellect: clamp(base.intellect + statShift(4), -2, 4),
+      charisma: clamp(base.charisma + statShift(6), -2, 4),
+      vitality: clamp(base.vitality + statShift(8), -2, 4),
+      maxHealth: clamp(base.maxHealth + statShift(10), 8, 18),
+      backstory: cleaned
+        ? `${base.name} is known as a ${lowerFirst(archetype)}. ${base.name} carries a reputation shaped by ${cleaned.toLowerCase()}. They are looking for the next road that will finally make sense of it.`
+        : base.backstory,
+    };
   }
 
   async triageTurn(input: TurnAIPayload, callbacks?: StreamCallbacks): Promise<TriageDecision> {

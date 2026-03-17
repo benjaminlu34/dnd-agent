@@ -14,7 +14,7 @@ async function main() {
   });
 
   const defaultCharacter = createDefaultCharacterTemplate();
-  const existingCharacter = await prisma.character.findFirst({
+  const existingCharacter = await prisma.characterTemplate.findFirst({
     where: {
       userId: user.id,
       name: defaultCharacter.name,
@@ -23,18 +23,18 @@ async function main() {
   });
 
   if (!existingCharacter) {
-    await prisma.character.create({
+    await prisma.characterTemplate.create({
       data: {
         userId: user.id,
         name: defaultCharacter.name,
         archetype: defaultCharacter.archetype,
-        strength: defaultCharacter.stats.strength,
-        agility: defaultCharacter.stats.agility,
-        intellect: defaultCharacter.stats.intellect,
-        charisma: defaultCharacter.stats.charisma,
-        vitality: defaultCharacter.stats.vitality,
+        strength: defaultCharacter.strength,
+        agility: defaultCharacter.agility,
+        intellect: defaultCharacter.intellect,
+        charisma: defaultCharacter.charisma,
+        vitality: defaultCharacter.vitality,
         maxHealth: defaultCharacter.maxHealth,
-        health: defaultCharacter.health,
+        backstory: defaultCharacter.backstory ?? null,
       },
     });
   }

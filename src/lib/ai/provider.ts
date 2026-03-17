@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { LocalDungeonMaster } from "@/lib/ai/local-provider";
 import { env } from "@/lib/env";
+import { characterTemplateDraftSchema, toCampaignSeedCharacter } from "@/lib/game/characters";
 import {
   buildDungeonMasterSystemPrompt,
   buildOutcomeUserPrompt,
@@ -14,6 +15,7 @@ import { createDefaultCharacterTemplate } from "@/lib/game/starter-data";
 import { generatedCampaignSetupSchema } from "@/lib/game/session-zero";
 import type {
   CampaignBlueprint,
+  CharacterTemplateDraft,
   CharacterSheet,
   CheckResult,
   GeneratedCampaignSetup,
@@ -214,8 +216,43 @@ const campaignSetupTool = {
   },
 };
 
+const generateCharacterTool = {
+  name: "generate_character_template",
+  description: "Create a playable fantasy RPG character template from a loose prompt.",
+  input_schema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      name: { type: "string" },
+      archetype: { type: "string" },
+      strength: { type: "number" },
+      agility: { type: "number" },
+      intellect: { type: "number" },
+      charisma: { type: "number" },
+      vitality: { type: "number" },
+      maxHealth: { type: "number" },
+      backstory: { type: "string" },
+    },
+    required: [
+      "name",
+      "archetype",
+      "strength",
+      "agility",
+      "intellect",
+      "charisma",
+      "vitality",
+      "maxHealth",
+      "backstory",
+    ],
+  },
+};
+
 function toFunctionTool(
-  tool: typeof triageTool | typeof resolutionTool | typeof campaignSetupTool,
+  tool:
+    | typeof triageTool
+    | typeof resolutionTool
+    | typeof campaignSetupTool
+    | typeof generateCharacterTool,
 ) {
   return {
     type: "function" as const,
@@ -229,6 +266,10 @@ function toFunctionTool(
 
 function isGeneratedCampaignSetup(value: unknown): value is GeneratedCampaignSetup {
   return generatedCampaignSetupSchema.safeParse(value).success;
+}
+
+function isCharacterTemplateDraft(value: unknown): value is CharacterTemplateDraft {
+  return characterTemplateDraftSchema.safeParse(value).success;
 }
 
 function stripCodeFences(value: string) {
@@ -534,7 +575,7 @@ class OpenRouterDungeonMaster {
     character: CharacterSheet,
     input: CampaignSetupGenerationInput = {},
   ) {
-    const seedCharacter = character ?? createDefaultCharacterTemplate();
+    const seedCharacter = character ?? toCampaignSeedCharacter(createDefaultCharacterTemplate());
     const hasPreviousDraft = Boolean(input.previousDraft);
     const baseMessages = [
       {
@@ -624,6 +665,80 @@ class OpenRouterDungeonMaster {
     }
 
     return this.fallback.generateCampaignSetup(seedCharacter, input);
+  }
+
+  async generateCharacter(prompt: string) {
+    const trimmedPrompt = prompt.trim();
+
+    try {
+      const response = await this.client.chat.completions.create({
+        model: env.openRouterModel,
+        messages: [
+          {
+            role: "system",
+            content: [
+              "You create grounded but vivid solo fantasy RPG protagonists.",
+              "Return one playable character template.",
+              "Keep stats plausible, varied, and coherent with the concept.",
+              "Backstory should be concise, specific, and campaign-friendly.",
+            ].join("\n"),
+          },
+          {
+            role: "user",
+            content: `Create a character from this prompt: ${trimmedPrompt}`,
+          },
+        ],
+        tools: [toFunctionTool(generateCharacterTool)],
+        tool_choice: "auto",
+        temperature: 0.8,
+      });
+
+      const toolCall = response.choices[0]?.message?.tool_calls?.[0];
+      const args =
+        toolCall && toolCall.type === "function" ? toolCall.function.arguments ?? "" : "";
+      const parsed = args
+        ? safeParseJson(args)
+        : safeParseJson(extractMessageText(response.choices[0]?.message?.content));
+
+      if (isCharacterTemplateDraft(parsed)) {
+        return parsed;
+      }
+    } catch {
+      // Fall through to raw-JSON generation for providers that reject tool routing.
+    }
+
+    try {
+      const fallbackResponse = await this.client.chat.completions.create({
+        model: env.openRouterModel,
+        messages: [
+          {
+            role: "system",
+            content: [
+              "Return only a valid JSON object.",
+              "Do not include markdown, explanations, or code fences.",
+              `JSON schema: ${JSON.stringify(generateCharacterTool.input_schema)}`,
+            ].join("\n"),
+          },
+          {
+            role: "user",
+            content: `Create a character from this prompt: ${trimmedPrompt}`,
+          },
+        ],
+        temperature: 0.8,
+      });
+
+      const parsed = safeParseJson(
+        extractMessageText(fallbackResponse.choices[0]?.message?.content),
+      );
+
+      if (isCharacterTemplateDraft(parsed)) {
+        return parsed;
+      }
+    } catch {
+      // Fall back to the local deterministic provider below.
+    }
+
+    return this.fallback.generateCharacter(trimmedPrompt);
   }
 
   async triageTurn(input: TurnAIPayload, callbacks?: StreamCallbacks): Promise<TriageDecision> {

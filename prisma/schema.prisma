@@ -9,17 +9,17 @@ datasource db {
 }
 
 model User {
-  id         String      @id @default(cuid())
-  email      String      @unique
-  name       String
-  createdAt  DateTime    @default(now())
-  updatedAt  DateTime    @updatedAt
-  campaigns  Campaign[]
-  characters Character[]
+  id                 String              @id @default(cuid())
+  email              String              @unique
+  name               String
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  campaigns          Campaign[]
+  characterTemplates CharacterTemplate[]
 }
 
-model Character {
-  id         String     @id @default(cuid())
+model CharacterTemplate {
+  id         String              @id @default(cuid())
   userId     String
   name       String
   archetype  String
@@ -29,34 +29,49 @@ model Character {
   charisma   Int
   vitality   Int
   maxHealth  Int
-  health     Int
-  createdAt  DateTime   @default(now())
-  updatedAt  DateTime   @updatedAt
-  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  backstory  String?
+  createdAt  DateTime            @default(now())
+  updatedAt  DateTime            @updatedAt
+  user       User                @relation(fields: [userId], references: [id], onDelete: Cascade)
   campaigns  Campaign[]
+  instances  CharacterInstance[]
+}
+
+model CharacterInstance {
+  id          String            @id @default(cuid())
+  campaignId  String            @unique
+  templateId  String
+  health      Int
+  gold        Int               @default(0)
+  inventory   Json              @default("[]")
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  campaign    Campaign          @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  template    CharacterTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
 }
 
 model Campaign {
-  id          String        @id @default(cuid())
-  userId      String
-  characterId String
-  title       String
-  premise     String
-  tone        String
-  setting     String
-  blueprint   Json
-  stateJson   Json
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
-  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  character   Character     @relation(fields: [characterId], references: [id], onDelete: Cascade)
-  sessions    Session[]
-  turns       Turn[]
-  quests      Quest[]
-  arcs        Arc[]
-  npcs        NPC[]
-  clues       Clue[]
-  memories    MemoryEntry[]
+  id                String             @id @default(cuid())
+  userId            String
+  templateId        String
+  title             String
+  premise           String
+  tone              String
+  setting           String
+  blueprint         Json
+  stateJson         Json
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  template          CharacterTemplate  @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  characterInstance CharacterInstance?
+  sessions          Session[]
+  turns             Turn[]
+  quests            Quest[]
+  arcs              Arc[]
+  npcs              NPC[]
+  clues             Clue[]
+  memories          MemoryEntry[]
 }
 
 model Session {
