@@ -7,7 +7,7 @@ A personal-use solo fantasy RPG built with Next.js, Prisma, PostgreSQL, and a de
 - Next.js App Router + TypeScript
 - Tailwind CSS v4
 - Prisma + PostgreSQL
-- Anthropic SDK with a built-in mock fallback
+- OpenRouter with a built-in mock fallback
 - NDJSON streaming for turn events
 
 ## Setup
@@ -16,7 +16,7 @@ A personal-use solo fantasy RPG built with Next.js, Prisma, PostgreSQL, and a de
 2. Copy `.env.example` to `.env`.
 3. Point `DATABASE_URL` at your pooled/runtime PostgreSQL connection.
 4. Point `DIRECT_URL` at your direct PostgreSQL connection for Prisma schema operations.
-5. Optionally set `ANTHROPIC_API_KEY` to use Claude instead of the mock DM.
+5. Optionally set `OPENROUTER_API_KEY` to use a real model instead of the mock DM.
 6. Generate the Prisma client and push the schema.
 
 ```bash
@@ -60,7 +60,7 @@ npm run build
 npm run contract-harness
 ```
 
-The contract harness runs 30 turns against the configured DM provider and reports malformed payloads plus check frequency. Without `ANTHROPIC_API_KEY`, it uses the mock provider so the repo still works locally.
+The contract harness runs 30 turns against the configured DM provider and reports malformed payloads plus check frequency. Without `OPENROUTER_API_KEY`, it uses the mock provider so the repo still works locally.
 
 ## Notes
 

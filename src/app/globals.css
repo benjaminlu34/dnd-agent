@@ -100,7 +100,7 @@ textarea {
 }
 
 .story-entry {
-  max-width: 48rem;
+  max-width: 100%;
 }
 
 .story-kicker {
@@ -113,8 +113,8 @@ textarea {
 
 .story-prose {
   font-family: var(--font-display), serif;
-  font-size: clamp(1.28rem, 1.05rem + 0.65vw, 1.7rem);
-  line-height: 1.9;
+  font-size: clamp(1.08rem, 0.98rem + 0.36vw, 1.34rem);
+  line-height: 1.82;
   letter-spacing: 0.01em;
   color: rgba(245, 240, 225, 0.98);
   text-wrap: pretty;
@@ -139,6 +139,10 @@ textarea {
   background:
     radial-gradient(circle at top left, rgba(214, 164, 73, 0.08), transparent 28%),
     linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.01));
+}
+
+.story-feed {
+  padding-inline: 0.15rem;
 }
 
 .scene-meta-label {

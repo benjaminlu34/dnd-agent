@@ -14,7 +14,7 @@ const bodyFont = Manrope({
 });
 
 export const metadata: Metadata = {
-  title: "Eclipse Over Briar Glen",
+  title: "AI Solo RPG Engine",
   description: "A deterministic solo RPG engine with a streaming AI dungeon master.",
 };
 

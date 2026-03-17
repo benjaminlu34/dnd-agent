@@ -74,6 +74,66 @@ export type CampaignBlueprint = {
   initialHooks: Hook[];
 };
 
+export type GeneratedCampaignSetup = {
+  title: string;
+  premise: string;
+  tone: string;
+  setting: string;
+  villain: {
+    name: string;
+    motive: string;
+    progressClock: number;
+  };
+  openingScene: {
+    title: string;
+    summary: string;
+    location: string;
+    atmosphere: string;
+    activeThreat: string;
+    suggestedActions: string[];
+  };
+  hooks: {
+    text: string;
+  }[];
+  arcs: {
+    title: string;
+    summary: string;
+    expectedTurns: number;
+  }[];
+  reveals: {
+    title: string;
+    truth: string;
+    requiredClueTitles: string[];
+    requiredArcTitles: string[];
+  }[];
+  subplotSeeds: {
+    title: string;
+    hook: string;
+  }[];
+  quests: {
+    title: string;
+    summary: string;
+    maxStage: number;
+    rewardGold: number;
+    rewardItem?: string | null;
+  }[];
+  npcs: {
+    name: string;
+    role: string;
+    notes: string;
+    isCompanion?: boolean;
+    approval?: number;
+    personalHook?: string | null;
+    status?: string;
+  }[];
+  clues: {
+    text: string;
+    source: string;
+    linkedRevealTitle: string;
+  }[];
+  locations: string[];
+};
+
 export type SceneState = {
   id: string;
   title: string;
@@ -157,6 +217,20 @@ export type CampaignSnapshot = {
   memories: MemoryRecord[];
   recentMessages: StoryMessage[];
   previouslyOn: string | null;
+};
+
+export type CampaignListItem = {
+  id: string;
+  title: string;
+  premise: string;
+  setting: string;
+  tone: string;
+  characterName: string;
+  characterArchetype: string;
+  sessionTitle: string | null;
+  turnCount: number;
+  updatedAt: string;
+  createdAt: string;
 };
 
 export type StoryMessage = {
@@ -255,6 +329,7 @@ export type PromptContext = {
   activeArc: ArcRecord | undefined;
   activeQuests: QuestRecord[];
   unresolvedHooks: Hook[];
+  recentCanon: string[];
   relevantClues: Clue[];
   staleClues: Clue[];
   eligibleRevealIds: string[];

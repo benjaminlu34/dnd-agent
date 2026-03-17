@@ -2,12 +2,15 @@ import { prisma } from "@/lib/prisma";
 import { dmClient } from "@/lib/ai/provider";
 import { rollCheck } from "@/lib/game/checks";
 import {
-  createStarterArcs,
+  buildArcRecordsFromBlueprint,
+  buildCampaignBlueprintFromSetup,
+  buildCampaignStateFromSetup,
+  buildClueRecordsFromSetup,
+  buildNpcRecordsFromSetup,
+  buildQuestRecordsFromSetup,
+} from "@/lib/game/campaign-setup";
+import {
   createStarterCharacter,
-  createStarterClues,
-  createStarterNpcs,
-  createStarterQuests,
-  createStarterState,
 } from "@/lib/game/starter-data";
 import { getCampaignSnapshot, getPromptContext } from "@/lib/game/repository";
 import { validateDelta } from "@/lib/game/validation";
@@ -33,13 +36,14 @@ export async function createAdventure() {
     },
   });
 
-  const blueprint = await dmClient.generateCampaignBlueprint();
   const character = createStarterCharacter();
-  const state = createStarterState(blueprint);
-  const quests = createStarterQuests();
-  const arcs = createStarterArcs();
-  const npcs = createStarterNpcs();
-  const clues = createStarterClues();
+  const setup = await dmClient.generateCampaignSetup(character);
+  const blueprint = buildCampaignBlueprintFromSetup(setup);
+  const state = buildCampaignStateFromSetup(setup, blueprint);
+  const quests = buildQuestRecordsFromSetup(setup);
+  const arcs = buildArcRecordsFromBlueprint(blueprint);
+  const npcs = buildNpcRecordsFromSetup(setup);
+  const clues = buildClueRecordsFromSetup(setup, blueprint);
   const createdCharacter = await prisma.character.create({
     data: {
       userId: user.id,
@@ -59,7 +63,7 @@ export async function createAdventure() {
     data: {
       userId: user.id,
       characterId: createdCharacter.id,
-      title: "Eclipse Over Briar Glen",
+      title: setup.title,
       premise: blueprint.premise,
       tone: blueprint.tone,
       setting: blueprint.setting,

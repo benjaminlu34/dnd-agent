@@ -8,6 +8,7 @@ import type {
 } from "@prisma/client";
 import type {
   ArcRecord,
+  CampaignListItem,
   CampaignSnapshot,
   CharacterSheet,
   ClueStatus,
@@ -60,6 +61,33 @@ export async function getCampaignAggregate(campaignId: string) {
       },
     },
   });
+}
+
+export async function listCampaigns(): Promise<CampaignListItem[]> {
+  const campaigns = await prisma.campaign.findMany({
+    orderBy: { updatedAt: "desc" },
+    include: {
+      character: true,
+      sessions: {
+        orderBy: { createdAt: "desc" },
+        take: 1,
+      },
+    },
+  });
+
+  return campaigns.map((campaign) => ({
+    id: campaign.id,
+    title: campaign.title,
+    premise: campaign.premise,
+    setting: campaign.setting,
+    tone: campaign.tone,
+    characterName: campaign.character.name,
+    characterArchetype: campaign.character.archetype,
+    sessionTitle: campaign.sessions[0]?.title ?? null,
+    turnCount: campaign.sessions[0]?.turnCount ?? 0,
+    updatedAt: campaign.updatedAt.toISOString(),
+    createdAt: campaign.createdAt.toISOString(),
+  }));
 }
 
 function toCharacter(character: Awaited<ReturnType<typeof getCampaignAggregate>> extends infer T
@@ -198,6 +226,21 @@ export async function getCampaignSnapshot(
 export function getPromptContext(snapshot: CampaignSnapshot) {
   const activeArc = snapshot.arcs.find((arc) => arc.id === snapshot.state.activeArcId);
   const unresolvedHooks = snapshot.state.hooks.filter((hook) => hook.status === "open");
+  const recentCanon = snapshot.recentMessages
+    .filter((message) => message.kind !== "warning")
+    .slice(-6)
+    .map((message) => {
+      const speaker =
+        message.role === "assistant"
+          ? "DM"
+          : message.role === "user"
+            ? "Player"
+            : message.kind === "check"
+              ? "Check"
+              : "System";
+
+      return `${speaker}: ${message.content}`;
+    });
   const clueWindow = snapshot.clues.filter(
     (clue) => clue.status === "hidden" || clue.status === "discovered",
   );
@@ -231,6 +274,7 @@ export function getPromptContext(snapshot: CampaignSnapshot) {
     activeArc,
     activeQuests: snapshot.quests.filter((quest) => quest.status === "active"),
     unresolvedHooks,
+    recentCanon,
     relevantClues: clueWindow,
     staleClues,
     eligibleRevealIds,

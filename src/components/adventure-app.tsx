@@ -3,6 +3,7 @@
 import clsx from "clsx";
 import { startTransition, useEffect, useRef, useState } from "react";
 import type {
+  CampaignListItem,
   CampaignSnapshot,
   CheckResult,
   PendingCheck,
@@ -105,6 +106,15 @@ function toNarrativeAction(action: string) {
   }
 
   return `Try to ${trimmed.charAt(0).toLowerCase()}${trimmed.slice(1)}`;
+}
+
+function formatCampaignDate(value: string) {
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(new Date(value));
 }
 
 function formatRelativeLabel(message: StoryMessage) {
@@ -223,7 +233,7 @@ function MessageBlock({
 
   if (message.role === "user") {
     return (
-      <article className="ml-auto max-w-2xl rounded-[1.4rem] border border-[var(--panel-border)]/70 bg-[rgba(44,31,18,0.62)] px-4 py-3 text-sm leading-7 text-[#f5e7c4] shadow-lg">
+      <article className="ml-auto max-w-2xl rounded-[1.4rem] border border-[var(--panel-border)]/70 bg-[rgba(44,31,18,0.62)] px-4 py-3 text-[0.97rem] leading-7 text-[#f5e7c4] shadow-lg">
         <p className="story-kicker">{formatRelativeLabel(message)}</p>
         <p className="whitespace-pre-wrap">{message.content}</p>
       </article>
@@ -233,7 +243,7 @@ function MessageBlock({
   return (
     <article
       className={clsx(
-        "max-w-2xl rounded-[1.3rem] border px-4 py-3 text-sm leading-7",
+        "max-w-2xl rounded-[1.3rem] border px-4 py-3 text-[0.95rem] leading-7",
         message.kind === "warning"
           ? "border-[var(--danger)]/40 bg-[var(--danger)]/10 text-[#ffd8c8]"
           : "border-white/8 bg-white/4 text-[var(--muted)]",
@@ -254,49 +264,40 @@ function EmptyJournalCopy({ children }: { children: React.ReactNode }) {
 }
 
 export function AdventureApp() {
+  const [view, setView] = useState<"home" | "campaign">("home");
   const [snapshot, setSnapshot] = useState<CampaignSnapshot | null>(null);
+  const [campaigns, setCampaigns] = useState<CampaignListItem[]>([]);
   const [messages, setMessages] = useState<StoryMessage[]>([]);
   const [suggestedActions, setSuggestedActions] = useState<string[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [pendingCheck, setPendingCheck] = useState<(PendingCheck & { turnId: string }) | null>(null);
   const [lastCheckResult, setLastCheckResult] = useState<CheckResult | null>(null);
   const [status, setStatus] = useState<"idle" | "loading" | "streaming">("idle");
+  const [campaignsLoading, setCampaignsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [journalTab, setJournalTab] = useState<JournalTab>("quests");
   const feedRef = useRef<HTMLDivElement | null>(null);
   const streamingMessageIdRef = useRef<string | null>(null);
   const [activeNarrationId, setActiveNarrationId] = useState<string | null>(null);
+  const [lastCampaignId, setLastCampaignId] = useState<string | null>(null);
 
-  useEffect(() => {
-    const campaignId = window.localStorage.getItem(STORAGE_KEY);
+  function removeStreamingNarration() {
+    const currentStreamId = streamingMessageIdRef.current;
 
-    if (!campaignId) {
+    if (!currentStreamId) {
       return;
     }
 
-    void (async () => {
-      setStatus("loading");
-      setError(null);
+    setMessages((current) => current.filter((message) => message.id !== currentStreamId));
+    streamingMessageIdRef.current = null;
+    setActiveNarrationId(null);
+  }
 
-      try {
-        const response = await fetch(`/api/campaigns/${campaignId}`, {
-          cache: "no-store",
-        });
-
-        if (!response.ok) {
-          window.localStorage.removeItem(STORAGE_KEY);
-          throw new Error("Unable to load that campaign.");
-        }
-
-        const data = (await response.json()) as { snapshot: CampaignSnapshot };
-        applySnapshot(data.snapshot);
-      } catch (loadError) {
-        setError(loadError instanceof Error ? loadError.message : "Failed to load campaign.");
-      } finally {
-        setStatus("idle");
-      }
-    })();
+  useEffect(() => {
+    const campaignId = window.localStorage.getItem(STORAGE_KEY);
+    setLastCampaignId(campaignId);
+    void refreshCampaigns();
   }, []);
 
   useEffect(() => {
@@ -305,6 +306,27 @@ export function AdventureApp() {
       behavior: "smooth",
     });
   }, [messages, pendingCheck, activeNarrationId]);
+
+  async function refreshCampaigns() {
+    setCampaignsLoading(true);
+
+    try {
+      const response = await fetch("/api/campaigns", {
+        cache: "no-store",
+      });
+
+      if (!response.ok) {
+        throw new Error("Unable to load your campaigns.");
+      }
+
+      const data = (await response.json()) as { campaigns: CampaignListItem[] };
+      setCampaigns(data.campaigns);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Failed to load campaigns.");
+    } finally {
+      setCampaignsLoading(false);
+    }
+  }
 
   async function loadCampaign(campaignId: string) {
     setStatus("loading");
@@ -331,8 +353,10 @@ export function AdventureApp() {
 
   function applySnapshot(nextSnapshot: CampaignSnapshot) {
     window.localStorage.setItem(STORAGE_KEY, nextSnapshot.campaignId);
+    setLastCampaignId(nextSnapshot.campaignId);
 
     startTransition(() => {
+      setView("campaign");
       setSnapshot(nextSnapshot);
       setMessages(nextSnapshot.recentMessages);
       setSuggestedActions(nextSnapshot.state.sceneState.suggestedActions);
@@ -357,6 +381,7 @@ export function AdventureApp() {
 
       const data = (await response.json()) as { snapshot: CampaignSnapshot };
       applySnapshot(data.snapshot);
+      await refreshCampaigns();
     } catch (startError) {
       setError(startError instanceof Error ? startError.message : "Failed to create adventure.");
     } finally {
@@ -402,12 +427,11 @@ export function AdventureApp() {
       }
 
       if (event.type === "check_required") {
+        removeStreamingNarration();
         setPendingCheck({
           ...event.check,
           turnId: event.turnId,
         });
-        streamingMessageIdRef.current = null;
-        setActiveNarrationId(null);
       }
 
       if (event.type === "check_result") {
@@ -536,18 +560,34 @@ export function AdventureApp() {
     }
   }
 
-  if (!snapshot) {
+  function returnHome() {
+    if (status !== "idle") {
+      return;
+    }
+
+    removeStreamingNarration();
+    setPendingCheck(null);
+    setSidebarOpen(false);
+    setActiveNarrationId(null);
+    setView("home");
+    void refreshCampaigns();
+  }
+
+  if (view === "home" || !snapshot) {
+    const featuredCampaign =
+      (lastCampaignId && campaigns.find((campaign) => campaign.id === lastCampaignId)) ?? campaigns[0] ?? null;
+
     return (
       <main className="relative flex min-h-screen items-center justify-center px-6 py-12">
         <section className="panel gold-glow w-full max-w-5xl overflow-hidden rounded-[2rem]">
-          <div className="grid gap-10 px-8 py-10 lg:grid-cols-[1.2fr_0.8fr] lg:px-12 lg:py-14">
+          <div className="grid gap-10 px-8 py-10 lg:grid-cols-[1.08fr_0.92fr] lg:px-12 lg:py-14">
             <div className="space-y-8">
               <div className="space-y-4">
                 <p className="text-sm uppercase tracking-[0.35em] text-[var(--accent-soft)]">
-                  Solo Campaign Engine
+                  Campaign Library
                 </p>
                 <h1 className="font-display text-6xl leading-none text-[var(--foreground)] sm:text-7xl">
-                  Eclipse Over Briar Glen
+                  AI Solo RPG Engine
                 </h1>
                 <p className="max-w-2xl text-lg leading-8 text-[var(--muted)]">
                   A solo storybook adventure where the fiction stays center stage and the rules move
@@ -581,29 +621,79 @@ export function AdventureApp() {
                 <button
                   className="button-press rounded-full border border-[var(--panel-border)] px-6 py-3 text-sm font-semibold text-[var(--foreground)] hover:bg-white/5"
                   onClick={() => {
-                    const campaignId = window.localStorage.getItem(STORAGE_KEY);
-                    if (campaignId) {
-                      void loadCampaign(campaignId);
+                    if (featuredCampaign) {
+                      void loadCampaign(featuredCampaign.id);
                     }
                   }}
-                  disabled={status !== "idle"}
+                  disabled={status !== "idle" || !featuredCampaign}
                 >
-                  Resume Last Campaign
+                  {featuredCampaign ? "Resume Latest Chronicle" : "No Campaign Yet"}
                 </button>
               </div>
               {error ? <p className="text-sm text-[var(--danger)]">{error}</p> : null}
             </div>
 
             <div className="rounded-[1.75rem] border border-[var(--panel-border)] bg-black/20 p-6">
-              <p className="text-xs uppercase tracking-[0.28em] text-[var(--accent-soft)]">
-                Quick Start
-              </p>
-              <ol className="mt-5 space-y-4 text-sm leading-7 text-[var(--muted)]">
-                <li>One click creates a character, campaign, journal, clues, and opening scene.</li>
-                <li>Most turns read like prose and stream immediately.</li>
-                <li>Risky moments pause cleanly for a visible roll before the story resumes.</li>
-                <li>Hidden truths stay hidden until the engine says they are earned.</li>
-              </ol>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.28em] text-[var(--accent-soft)]">
+                    Your Campaigns
+                  </p>
+                  <p className="mt-2 text-sm leading-7 text-[var(--muted)]">
+                    Return to an old chronicle or begin a fresh one.
+                  </p>
+                </div>
+                <button
+                  className="button-press rounded-full border border-[var(--panel-border)] px-3 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted)] hover:bg-white/5"
+                  onClick={() => void refreshCampaigns()}
+                  disabled={campaignsLoading}
+                >
+                  Refresh
+                </button>
+              </div>
+
+              <div className="mt-5 space-y-3">
+                {campaignsLoading ? (
+                  <p className="text-sm leading-7 text-[var(--muted)]">Loading the library...</p>
+                ) : campaigns.length ? (
+                  campaigns.map((campaign) => (
+                    <button
+                      key={campaign.id}
+                      className={clsx(
+                        "button-press block w-full rounded-[1.45rem] border px-4 py-4 text-left transition",
+                        campaign.id === lastCampaignId
+                          ? "border-[var(--accent)]/45 bg-[rgba(214,164,73,0.08)]"
+                          : "border-white/10 bg-white/4 hover:bg-white/6",
+                      )}
+                      onClick={() => void loadCampaign(campaign.id)}
+                      disabled={status !== "idle"}
+                    >
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <p className="story-kicker">{campaign.setting}</p>
+                          <h2 className="font-display text-2xl text-[var(--foreground)]">
+                            {campaign.title}
+                          </h2>
+                        </div>
+                        <span className="text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
+                          {campaign.id === lastCampaignId ? "Latest" : formatCampaignDate(campaign.updatedAt)}
+                        </span>
+                      </div>
+                      <p className="mt-2 text-sm leading-7 text-[var(--muted)]">{campaign.premise}</p>
+                      <p className="mt-3 text-xs uppercase tracking-[0.18em] text-[var(--muted)]">
+                        {campaign.characterName} • {campaign.characterArchetype} • {campaign.turnCount} turns
+                      </p>
+                    </button>
+                  ))
+                ) : (
+                  <ol className="space-y-4 text-sm leading-7 text-[var(--muted)]">
+                    <li>One click creates a character, campaign, journal, clues, and opening scene.</li>
+                    <li>Most turns read like prose and stream immediately.</li>
+                    <li>Risky moments pause cleanly for a visible roll before the story resumes.</li>
+                    <li>Hidden truths stay hidden until the engine says they are earned.</li>
+                  </ol>
+                )}
+              </div>
             </div>
           </div>
         </section>
@@ -635,8 +725,8 @@ export function AdventureApp() {
 
   return (
     <main className="min-h-screen px-4 py-4 sm:px-6 sm:py-6">
-      <div className="mx-auto max-w-[1500px]">
-        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
+      <div className="mx-auto max-w-[1480px]">
+        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_300px]">
           <section className="panel story-shell rounded-[2.2rem] px-4 py-5 sm:px-8 sm:py-8">
             <header className="mb-8 flex flex-col gap-5 border-b border-white/8 pb-6">
               <div className="flex flex-wrap items-start justify-between gap-4">
@@ -655,6 +745,13 @@ export function AdventureApp() {
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    className="button-press rounded-full border border-[var(--panel-border)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.22em] text-[var(--muted)] hover:bg-white/5"
+                    onClick={returnHome}
+                    disabled={status !== "idle"}
+                  >
+                    Campaign Library
+                  </button>
                   <button
                     className="button-press rounded-full border border-[var(--panel-border)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.22em] text-[var(--muted)] hover:bg-white/5 xl:hidden"
                     onClick={() => setSidebarOpen((open) => !open)}
@@ -722,16 +819,18 @@ export function AdventureApp() {
 
             <div
               ref={feedRef}
-              className="story-feed space-y-8 pr-1"
+              className="story-feed pr-1"
               style={{ maxHeight: "56vh", overflowY: "auto" }}
             >
-              {messages.map((message) => (
-                <MessageBlock
-                  key={message.id}
-                  message={message}
-                  active={message.id === activeNarrationId}
-                />
-              ))}
+              <div className="mx-auto flex w-full max-w-3xl flex-col gap-8">
+                {messages.map((message) => (
+                  <MessageBlock
+                    key={message.id}
+                    message={message}
+                    active={message.id === activeNarrationId}
+                  />
+                ))}
+              </div>
             </div>
 
             {pendingCheck ? (

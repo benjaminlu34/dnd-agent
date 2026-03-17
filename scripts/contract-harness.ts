@@ -45,6 +45,10 @@ function buildPromptContext(): PromptContext {
     activeArc: arcs[0],
     activeQuests: createStarterQuests(),
     unresolvedHooks: state.hooks,
+    recentCanon: [
+      "DM: Wind rattles brass prayer bells while the market square clears around a blood-red notice.",
+      "Player: Inspect the eclipse notice carefully.",
+    ],
     relevantClues: clues,
     staleClues: getStaleClues(clues, state.turnCount),
     eligibleRevealIds: [],

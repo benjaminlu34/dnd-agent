@@ -39,15 +39,33 @@ function formatQuestState(quests: QuestRecord[]) {
     .join("\n");
 }
 
+function formatRecentCanon(entries: string[]) {
+  if (entries.length === 0) {
+    return "None";
+  }
+
+  return entries.map((entry) => `- ${entry}`).join("\n");
+}
+
 export function buildDungeonMasterSystemPrompt() {
   return [
     "You are a strict DM for a deterministic solo fantasy RPG.",
     "Never invent items, gold, quest stages, clues, reveals, NPCs, or facts outside the provided state.",
     "The engine and database are authoritative. You only narrate and propose structured intents.",
-    "Keep the prose vivid, specific, and grounded in the current scene.",
+    "Treat previously narrated events as canon. Do not retcon, replace, or casually contradict established details.",
+    "Keep the prose vivid, specific, grounded in the current scene, and concise.",
+    "Prefer 1-3 short paragraphs instead of long monologues.",
+    "Do not summarize the lesson or explain the meaning of events to the player.",
+    "Avoid lines like 'you learn', 'you realize', 'it is clear', or 'you have learned something useful' unless the character is explicitly thinking them.",
+    "Show consequences through concrete details, dialogue, behavior, and sensory observation.",
+    "Let clues surface naturally. Do not make every clue perfectly convenient or fully explained on arrival.",
+    "Preserve some ambiguity when appropriate.",
+    "Avoid markdown styling such as bold, italics, bullet lists, or headers in narration unless the player is literally reading a sign, inscription, or document.",
+    "Even when showing written text in the world, keep it short and plain.",
     "If a roll is required, output no narration and only request the check in the tool payload.",
     "If no roll is required, narrate immediately and then submit the tool payload.",
     "Eligible reveals may be used at most once and only if dramatically appropriate.",
+    "Suggested actions should be short, concrete, and phrased like natural next moves in the fiction.",
   ].join("\n");
 }
 
@@ -70,6 +88,9 @@ Title: ${promptContext.scene.title}
 Location: ${promptContext.scene.location}
 Summary: ${promptContext.scene.summary}
 Atmosphere: ${promptContext.scene.atmosphere}
+
+RECENT CANON
+${formatRecentCanon(promptContext.recentCanon)}
 
 ACTIVE ARC
 ${promptContext.activeArc ? `${promptContext.activeArc.title}: ${promptContext.activeArc.summary}` : "None"}
@@ -101,6 +122,10 @@ PLAYER ACTION
 ${playerAction}
 
 Decide whether the action needs a check. Checks are only for meaningful uncertainty, danger, or resistance.
+If no check is needed, narrate only the immediate development that follows from the action.
+Do not restage the whole scene.
+Do not over-explain what the player has learned.
+End on a concrete image, line of dialogue, or new pressure.
 `;
 }
 
@@ -120,6 +145,9 @@ Setting: ${blueprint.setting}
 
 CURRENT SCENE
 ${promptContext.scene.title} - ${promptContext.scene.summary}
+
+RECENT CANON
+${formatRecentCanon(promptContext.recentCanon)}
 
 ACTIVE QUESTS
 ${formatQuestState(promptContext.activeQuests)}
@@ -141,6 +169,10 @@ Outcome: ${checkResult.outcome}
 Consequences: ${formatList(checkResult.consequences ?? [])}
 
 Narrate the resolved outcome in a way that matches the exact result above. Then submit the structured tool payload.
+Keep the outcome continuity-safe and focused on the immediate result.
+Do not rewrite earlier scene details unless the new outcome genuinely reveals something hidden.
+Do not explain the scene's meaning after narrating it.
+End on the sharpest new opening, risk, or image.
 `;
 }
 

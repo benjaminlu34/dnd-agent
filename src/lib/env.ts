@@ -28,6 +28,7 @@ export const env = {
   appUrl: readEnv("APP_URL") ?? "http://localhost:3000",
   databaseUrl: readEnv("DATABASE_URL") ?? "",
   directUrl: readEnv("DIRECT_URL") ?? "",
-  anthropicApiKey: readEnv("ANTHROPIC_API_KEY") ?? "",
-  anthropicModel: readEnv("ANTHROPIC_MODEL") ?? "claude-3-7-sonnet-latest",
+  openRouterApiKey: readEnv("OPENROUTER_API_KEY") ?? "",
+  openRouterModel: readEnv("OPENROUTER_MODEL") ?? "anthropic/claude-3.5-sonnet",
+  openRouterSiteName: readEnv("OPENROUTER_SITE_NAME") ?? "AI Solo RPG Engine",
 };

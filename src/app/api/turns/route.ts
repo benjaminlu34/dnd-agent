@@ -18,13 +18,14 @@ export async function POST(request: Request) {
   }
 
   const stream = createNdjsonStream(async (send) => {
+    const bufferedNarration: string[] = [];
     const result = await triageTurn({
       campaignId: body.campaignId!,
       sessionId: body.sessionId!,
       playerAction: body.action!.trim(),
       slowPath: body.slowPath,
       stream: {
-        narration: (chunk) => send({ type: "narration", chunk }),
+        narration: (chunk) => bufferedNarration.push(chunk),
       },
     });
 
@@ -35,6 +36,10 @@ export async function POST(request: Request) {
         check: result.check,
       });
       return;
+    }
+
+    for (const chunk of bufferedNarration) {
+      send({ type: "narration", chunk });
     }
 
     for (const warning of result.validated.warnings) {
