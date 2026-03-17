@@ -9,7 +9,7 @@ import {
   buildQuestRecordsFromSetup,
 } from "@/lib/game/campaign-setup";
 import { campaignCreateRequestSchema } from "@/lib/game/session-zero";
-import { ensureLocalUser, ensureSeedCharacter } from "@/lib/game/repository";
+import { ensureDefaultCharacter, ensureLocalUser } from "@/lib/game/repository";
 
 export const runtime = "nodejs";
 
@@ -27,7 +27,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const [user, character] = await Promise.all([ensureLocalUser(), ensureSeedCharacter()]);
+    const [user, character] = await Promise.all([ensureLocalUser(), ensureDefaultCharacter()]);
     const blueprint = buildCampaignBlueprintFromSetup(payload.data.draft);
     const state = buildCampaignStateFromSetup(payload.data.draft, blueprint);
     const quests = buildQuestRecordsFromSetup(payload.data.draft);

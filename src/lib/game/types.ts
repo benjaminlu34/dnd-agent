@@ -260,6 +260,7 @@ export type ProposedStateDelta = {
   sceneSummary?: string;
   sceneTitle?: string;
   sceneAtmosphere?: string;
+  activeArcId?: string;
   suggestedActions?: string[];
   goldChange?: number;
   rewardQuestId?: string | null;

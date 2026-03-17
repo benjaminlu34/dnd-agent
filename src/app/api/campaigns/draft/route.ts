@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { dmClient } from "@/lib/ai/provider";
 import { campaignDraftRequestSchema } from "@/lib/game/session-zero";
-import { ensureSeedCharacter } from "@/lib/game/repository";
+import { ensureDefaultCharacter } from "@/lib/game/repository";
 
 export const runtime = "nodejs";
 
@@ -19,21 +19,21 @@ export async function POST(request: Request) {
   }
 
   try {
-    const seededCharacter = await ensureSeedCharacter();
+    const defaultCharacter = await ensureDefaultCharacter();
     const draft = await dmClient.generateCampaignSetup(
       {
-        id: seededCharacter.id,
-        name: seededCharacter.name,
-        archetype: seededCharacter.archetype,
+        id: defaultCharacter.id,
+        name: defaultCharacter.name,
+        archetype: defaultCharacter.archetype,
         stats: {
-          strength: seededCharacter.strength,
-          agility: seededCharacter.agility,
-          intellect: seededCharacter.intellect,
-          charisma: seededCharacter.charisma,
-          vitality: seededCharacter.vitality,
+          strength: defaultCharacter.strength,
+          agility: defaultCharacter.agility,
+          intellect: defaultCharacter.intellect,
+          charisma: defaultCharacter.charisma,
+          vitality: defaultCharacter.vitality,
         },
-        maxHealth: seededCharacter.maxHealth,
-        health: seededCharacter.health,
+        maxHealth: defaultCharacter.maxHealth,
+        health: defaultCharacter.health,
       },
       {
         prompt: payload.data.prompt,

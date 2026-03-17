@@ -108,7 +108,7 @@ async function main() {
         runs: 30,
         malformedPayloads: malformed,
         checks,
-        provider: process.env.ANTHROPIC_API_KEY ? "anthropic" : "mock",
+        provider: process.env.OPENROUTER_API_KEY ? "openrouter" : "local",
       },
       null,
       2,

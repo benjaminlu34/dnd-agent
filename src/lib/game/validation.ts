@@ -40,6 +40,7 @@ export function validateDelta({
       suggestedActions:
         proposedDelta.suggestedActions?.slice(0, 4) ?? state.sceneState.suggestedActions,
     },
+    activeArcId: proposedDelta.activeArcId ?? state.activeArcId,
     villainClock: clamp(
       state.villainClock + (proposedDelta.villainClockDelta ?? 0),
       0,
@@ -60,6 +61,12 @@ export function validateDelta({
     add: [] as string[],
     remove: [] as string[],
   };
+  const arcIds = new Set(arcs.map((arc) => arc.id));
+
+  if (proposedDelta.activeArcId && !arcIds.has(proposedDelta.activeArcId)) {
+    warnings.push(`Rejected active arc update for unknown arc ${proposedDelta.activeArcId}.`);
+    nextState.activeArcId = state.activeArcId;
+  }
 
   for (const update of proposedDelta.questAdvancements ?? []) {
     const quest = quests.find((entry) => entry.id === update.questId);

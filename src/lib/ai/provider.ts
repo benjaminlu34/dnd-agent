@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { LocalDungeonMaster } from "@/lib/ai/local-provider";
 import { env } from "@/lib/env";
 import {
   buildDungeonMasterSystemPrompt,
@@ -9,20 +10,11 @@ import {
   resolutionTool,
   triageTool,
 } from "@/lib/game/prompts";
-import {
-  createStarterArcs,
-  createStarterBlueprint,
-  createStarterClues,
-  createStarterNpcs,
-  createStarterQuests,
-  createSeededDummyCharacter,
-  createStarterState,
-} from "@/lib/game/starter-data";
+import { createDefaultCharacterTemplate } from "@/lib/game/starter-data";
 import { generatedCampaignSetupSchema } from "@/lib/game/session-zero";
 import type {
   CampaignBlueprint,
   CharacterSheet,
-  CheckOutcome,
   CheckResult,
   GeneratedCampaignSetup,
   PromptContext,
@@ -237,76 +229,6 @@ function toFunctionTool(
 
 function isGeneratedCampaignSetup(value: unknown): value is GeneratedCampaignSetup {
   return generatedCampaignSetupSchema.safeParse(value).success;
-}
-
-function createMockCampaignSetup(): GeneratedCampaignSetup {
-  const blueprint = createStarterBlueprint();
-  const state = createStarterState(blueprint);
-  const quests = createStarterQuests();
-  const npcs = createStarterNpcs();
-  const clues = createStarterClues();
-  const arcs = createStarterArcs();
-
-  return {
-    publicSynopsis: {
-      title: "Eclipse Over Briar Glen",
-      premise: blueprint.premise,
-      tone: blueprint.tone,
-      setting: blueprint.setting,
-      openingScene: {
-        title: state.sceneState.title,
-        summary: state.sceneState.summary,
-        location: state.sceneState.location,
-        atmosphere: state.sceneState.atmosphere,
-        activeThreat: state.worldState.activeThreat,
-        suggestedActions: state.sceneState.suggestedActions,
-      },
-    },
-    secretEngine: {
-      villain: blueprint.villain,
-      hooks: blueprint.initialHooks.map((hook) => ({ text: hook.text })),
-      arcs: arcs.map((arc) => ({
-        title: arc.title,
-        summary: arc.summary,
-        expectedTurns: arc.expectedTurns,
-      })),
-      reveals: blueprint.hiddenReveals.map((reveal) => ({
-        title: reveal.title,
-        truth: reveal.truth,
-        requiredClueTitles: reveal.requiredClues
-          .map((id) => clues.find((clue) => clue.id === id)?.text)
-          .filter((value): value is string => Boolean(value)),
-        requiredArcTitles: reveal.requiredArcIds
-          .map((id) => arcs.find((arc) => arc.id === id)?.title)
-          .filter((value): value is string => Boolean(value)),
-      })),
-      subplotSeeds: blueprint.subplotSeeds,
-      quests: quests.map((quest) => ({
-        title: quest.title,
-        summary: quest.summary,
-        maxStage: quest.maxStage,
-        rewardGold: quest.rewardGold,
-        rewardItem: quest.rewardItem,
-      })),
-      npcs: npcs.map((npc) => ({
-        name: npc.name,
-        role: npc.role,
-        notes: npc.notes,
-        isCompanion: npc.isCompanion,
-        approval: npc.approval,
-        personalHook: npc.personalHook,
-        status: npc.status,
-      })),
-      clues: clues.map((clue) => ({
-        text: clue.text,
-        source: clue.source,
-        linkedRevealTitle:
-          blueprint.hiddenReveals.find((reveal) => reveal.id === clue.linkedRevealId)?.title ??
-          "Hidden Truth",
-      })),
-      locations: state.locations,
-    },
-  };
 }
 
 function stripCodeFences(value: string) {
@@ -548,152 +470,11 @@ function normalizeResolveDecision(raw: unknown, text: string): ResolveDecision {
   };
 }
 
-class MockDungeonMaster {
-  async generateCampaignSetup(_: CharacterSheet, input?: CampaignSetupGenerationInput) {
-    if (!input?.prompt && !input?.previousDraft) {
-      return createMockCampaignSetup();
-    }
-
-    const baseline = input.previousDraft ?? createMockCampaignSetup();
-    const nextTitle = input.prompt?.trim()
-      ? `${baseline.publicSynopsis.title} Reforged`
-      : baseline.publicSynopsis.title;
-
-    return {
-      ...baseline,
-      publicSynopsis: {
-        ...baseline.publicSynopsis,
-        title: nextTitle,
-        premise: input.prompt?.trim() || baseline.publicSynopsis.premise,
-      },
-    };
-  }
-
-  async triageTurn(input: TurnAIPayload, callbacks?: StreamCallbacks): Promise<TriageDecision> {
-    const action = input.playerAction.toLowerCase();
-    const requiresCheck =
-      /(attack|strike|fight|break|force|sneak|convince|persuade|climb|leap|grab)/.test(action);
-
-    if (!requiresCheck) {
-      const narration = `You press the moment forward in ${input.promptContext.scene.title.toLowerCase()}, and the town answers with one more unsettling detail tied to your goal.`;
-      callbacks?.onNarration?.(narration);
-
-      const clueToDiscover = input.promptContext.relevantClues.find(
-        (clue) => clue.status === "hidden",
-      );
-
-      return {
-        requiresCheck: false,
-        suggestedActions: [
-          "Press the advantage before the cult regroups",
-          "Question someone who noticed the disturbance",
-          "Follow the newest lead into the next district",
-        ],
-        proposedDelta: {
-          sceneSummary: narration,
-          tensionDelta: 4,
-          villainClockDelta: 1,
-          clueDiscoveries: clueToDiscover ? [clueToDiscover.id] : [],
-          suggestedActions: [
-            "Press the advantage before the cult regroups",
-            "Question someone who noticed the disturbance",
-            "Follow the newest lead into the next district",
-          ],
-          arcAdvancements: input.promptContext.activeArc
-            ? [{ arcId: input.promptContext.activeArc.id, currentTurnDelta: 1 }]
-            : [],
-        },
-      };
-    }
-
-    const stat =
-      action.includes("convince") || action.includes("persuade")
-        ? "charisma"
-        : action.includes("sneak")
-          ? "agility"
-          : action.includes("climb") || action.includes("leap")
-            ? "vitality"
-            : "strength";
-
-    return {
-      requiresCheck: true,
-      check: {
-        stat,
-        mode: "normal",
-        reason: `Resolving: ${input.playerAction}`,
-      },
-      suggestedActions: [],
-      proposedDelta: {},
-    };
-  }
-
-  async resolveTurn(
-    input: TurnAIPayload & { checkResult: CheckResult },
-    callbacks?: StreamCallbacks,
-  ): Promise<ResolveDecision> {
-    const toneByOutcome: Record<CheckOutcome, string> = {
-      success:
-        "Your move lands cleanly, and the pressure in the scene briefly breaks in your favor.",
-      partial:
-        "You get forward motion, but the win comes with exposed nerves and a fresh complication.",
-      failure:
-        "The move backfires hard enough to sharpen the danger around you.",
-    };
-
-    const narration = `${toneByOutcome[input.checkResult.outcome]} ${input.promptContext.companion ? `${input.promptContext.companion.name} reacts under their breath as the scene shifts.` : ""}`.trim();
-    callbacks?.onNarration?.(narration);
-
-    const remainingHiddenClue = input.promptContext.relevantClues.find(
-      (clue) => clue.status === "hidden",
-    );
-    const revealId = input.promptContext.eligibleRevealIds[0];
-
-    return {
-      suggestedActions: [
-        "Push deeper while the opening lasts",
-        "Regroup and read the room",
-        "Question your companion about what just changed",
-      ],
-      proposedDelta: {
-        sceneSummary: narration,
-        tensionDelta: input.checkResult.outcome === "failure" ? 10 : 5,
-        villainClockDelta: input.checkResult.outcome === "failure" ? 1 : 0,
-        clueDiscoveries:
-          input.checkResult.outcome !== "failure" && remainingHiddenClue
-            ? [remainingHiddenClue.id]
-            : [],
-        revealTriggers: input.checkResult.outcome === "success" && revealId ? [revealId] : [],
-        suggestedActions: [
-          "Push deeper while the opening lasts",
-          "Regroup and read the room",
-          "Question your companion about what just changed",
-        ],
-        arcAdvancements: input.promptContext.activeArc
-          ? [{ arcId: input.promptContext.activeArc.id, currentTurnDelta: 1 }]
-          : [],
-        npcApprovalChanges: input.promptContext.companion
-          ? [
-              {
-                npcId: input.promptContext.companion.id,
-                approvalDelta: input.checkResult.outcome === "failure" ? -1 : 1,
-                reason: "Shared danger reshaped the bond.",
-              },
-            ]
-          : [],
-      },
-    };
-  }
-
-  async summarizeSession(messages: string[]) {
-    return `Previously on: ${messages.slice(-3).join(" ").slice(0, 220)}`;
-  }
-
-  async generatePreviouslyOn(summary: string, scene: string, clueText: string[]) {
-    return `Previously on: ${summary} Now the story resumes in ${scene} with ${clueText[0] ?? "old secrets"} still unresolved.`;
-  }
-}
+const localDungeonMaster = new LocalDungeonMaster();
 
 class OpenRouterDungeonMaster {
+  private fallback = localDungeonMaster;
+
   private client = new OpenAI({
     apiKey: env.openRouterApiKey,
     baseURL: "https://openrouter.ai/api/v1",
@@ -753,7 +534,7 @@ class OpenRouterDungeonMaster {
     character: CharacterSheet,
     input: CampaignSetupGenerationInput = {},
   ) {
-    const seedCharacter = character ?? createSeededDummyCharacter();
+    const seedCharacter = character ?? createDefaultCharacterTemplate();
     const hasPreviousDraft = Boolean(input.previousDraft);
     const baseMessages = [
       {
@@ -814,111 +595,121 @@ class OpenRouterDungeonMaster {
       // Fall through to raw-JSON generation for providers that reject tool routing.
     }
 
-    const fallbackResponse = await this.client.chat.completions.create({
-      model: env.openRouterModel,
-      messages: [
-        ...baseMessages,
-        {
-          role: "system",
-          content: [
-            "Return only a valid JSON object.",
-            "Do not include markdown, explanations, or code fences.",
-            `JSON schema: ${JSON.stringify(campaignSetupTool.input_schema)}`,
-          ].join("\n"),
-        },
-      ],
-      temperature: 0.75,
-    });
+    try {
+      const fallbackResponse = await this.client.chat.completions.create({
+        model: env.openRouterModel,
+        messages: [
+          ...baseMessages,
+          {
+            role: "system",
+            content: [
+              "Return only a valid JSON object.",
+              "Do not include markdown, explanations, or code fences.",
+              `JSON schema: ${JSON.stringify(campaignSetupTool.input_schema)}`,
+            ].join("\n"),
+          },
+        ],
+        temperature: 0.75,
+      });
 
-    const parsed = safeParseJson(extractMessageText(fallbackResponse.choices[0]?.message?.content));
+      const parsed = safeParseJson(
+        extractMessageText(fallbackResponse.choices[0]?.message?.content),
+      );
 
-    if (!isGeneratedCampaignSetup(parsed)) {
-      throw new Error("Model returned an invalid campaign setup payload.");
+      if (isGeneratedCampaignSetup(parsed)) {
+        return parsed;
+      }
+    } catch {
+      // Fall back to the local deterministic provider below.
     }
 
-    return parsed;
+    return this.fallback.generateCampaignSetup(seedCharacter, input);
   }
 
   async triageTurn(input: TurnAIPayload, callbacks?: StreamCallbacks): Promise<TriageDecision> {
-    const result = await this.runStream({
-      prompt: buildTriageUserPrompt(input),
-      tool: triageTool,
-      onNarration: callbacks?.onNarration,
-    });
+    try {
+      const result = await this.runStream({
+        prompt: buildTriageUserPrompt(input),
+        tool: triageTool,
+        onNarration: callbacks?.onNarration,
+      });
 
-    const normalized = normalizeTriageDecision(result.toolInput, input, result.text);
-    if (isTriageDecision(normalized)) {
-      return normalized;
+      const normalized = normalizeTriageDecision(result.toolInput, input, result.text);
+      if (isTriageDecision(normalized)) {
+        return normalized;
+      }
+    } catch {
+      // Fall back to the local deterministic provider below.
     }
 
-    if (inferRequiresCheck(input.playerAction)) {
-      return {
-        requiresCheck: true,
-        check: {
-          stat: inferCheckStat(input.playerAction),
-          mode: "normal",
-          reason: `Resolving: ${input.playerAction}`,
-        },
-        suggestedActions: [],
-        proposedDelta: {},
-      };
-    }
-
-    return {
-      requiresCheck: false,
-      suggestedActions: [],
-      proposedDelta: {},
-    };
+    return this.fallback.triageTurn(input, callbacks);
   }
 
   async resolveTurn(
     input: TurnAIPayload & { checkResult: CheckResult },
     callbacks?: StreamCallbacks,
   ): Promise<ResolveDecision> {
-    const result = await this.runStream({
-      prompt: buildOutcomeUserPrompt(input),
-      tool: resolutionTool,
-      onNarration: callbacks?.onNarration,
-    });
+    try {
+      const result = await this.runStream({
+        prompt: buildOutcomeUserPrompt(input),
+        tool: resolutionTool,
+        onNarration: callbacks?.onNarration,
+      });
 
-    const normalized = normalizeResolveDecision(result.toolInput, result.text);
-    return isResolveDecision(normalized)
-      ? normalized
-      : {
-          suggestedActions: [],
-          proposedDelta: {},
-        };
+      const normalized = normalizeResolveDecision(result.toolInput, result.text);
+      if (isResolveDecision(normalized)) {
+        return normalized;
+      }
+    } catch {
+      // Fall back to the local deterministic provider below.
+    }
+
+    return this.fallback.resolveTurn(input, callbacks);
   }
 
   async summarizeSession(messages: string[]) {
-    const response = await this.client.chat.completions.create({
-      model: env.openRouterModel,
-      messages: [
-        {
-          role: "user",
-          content: `Summarize this session in 2-3 sentences for future prompt context:\n${messages.join("\n")}`,
-        },
-      ],
-    });
+    try {
+      const response = await this.client.chat.completions.create({
+        model: env.openRouterModel,
+        messages: [
+          {
+            role: "user",
+            content: `Summarize this session in 2-3 sentences for future prompt context:\n${messages.join("\n")}`,
+          },
+        ],
+      });
 
-    return response.choices[0]?.message?.content ?? "The session summary could not be generated.";
+      return (
+        response.choices[0]?.message?.content ??
+        this.fallback.summarizeSession(messages)
+      );
+    } catch {
+      return this.fallback.summarizeSession(messages);
+    }
   }
 
   async generatePreviouslyOn(summary: string, scene: string, clueText: string[]) {
-    const response = await this.client.chat.completions.create({
-      model: env.openRouterModel,
-      messages: [
-        {
-          role: "user",
-          content: `Previous session summary: ${summary}\nCurrent scene: ${scene}\nClues unresolved: ${clueText.join(", ") || "none"}\n\nWrite a dramatic two-sentence "Previously on..." recap.`,
-        },
-      ],
-    });
+    try {
+      const response = await this.client.chat.completions.create({
+        model: env.openRouterModel,
+        messages: [
+          {
+            role: "user",
+            content: `Previous session summary: ${summary}\nCurrent scene: ${scene}\nClues unresolved: ${clueText.join(", ") || "none"}\n\nWrite a dramatic two-sentence "Previously on..." recap.`,
+          },
+        ],
+      });
 
-    return response.choices[0]?.message?.content ?? `Previously on: ${summary}`;
+      return (
+        response.choices[0]?.message?.content ??
+        this.fallback.generatePreviouslyOn(summary, scene, clueText)
+      );
+    } catch {
+      return this.fallback.generatePreviouslyOn(summary, scene, clueText);
+    }
   }
 }
 
 export const dmClient = env.openRouterApiKey
   ? new OpenRouterDungeonMaster()
-  : new MockDungeonMaster();
+  : localDungeonMaster;

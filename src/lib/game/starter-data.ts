@@ -64,7 +64,7 @@ type StarterStateOverrides = {
   dangerLevel?: CampaignState["worldState"]["dangerLevel"];
 };
 
-export function createSeededDummyCharacter(): CharacterSheet {
+export function createDefaultCharacterTemplate(): CharacterSheet {
   return {
     id: "char_session_zero_wayfarer",
     name: "Rowan Vale",
