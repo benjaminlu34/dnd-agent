@@ -46,8 +46,6 @@ export type CampaignCharacter = CharacterTemplate & {
   inventory: string[];
 };
 
-export type CharacterSheet = CampaignCharacter;
-
 export type CharacterTemplateSummary = CharacterTemplate & {
   createdAt: string;
   updatedAt: string;
@@ -242,7 +240,7 @@ export type CampaignSnapshot = {
   setting: string;
   blueprint: CampaignBlueprint;
   state: CampaignState;
-  character: CharacterSheet;
+  character: CampaignCharacter;
   quests: QuestRecord[];
   arcs: ArcRecord[];
   npcs: NpcRecord[];

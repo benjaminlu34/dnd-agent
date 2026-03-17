@@ -1,4 +1,4 @@
-import type { CheckMode, CheckOutcome, CheckResult, CharacterSheet, Stat } from "@/lib/game/types";
+import type { CampaignCharacter, CheckMode, CheckOutcome, CheckResult, Stat } from "@/lib/game/types";
 
 function roll2d6() {
   return Math.ceil(Math.random() * 6) + Math.ceil(Math.random() * 6);
@@ -20,7 +20,7 @@ export function rollCheck(input: {
   stat: Stat;
   mode: CheckMode;
   reason: string;
-  character: CharacterSheet;
+  character: CampaignCharacter;
 }): CheckResult {
   const first = roll2d6();
   const second = roll2d6();

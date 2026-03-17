@@ -31,37 +31,53 @@ function CharacterCard({
   character,
   selected,
   onSelect,
+  onDelete,
+  deleting,
 }: {
   character: CharacterTemplateSummary;
   selected: boolean;
   onSelect: () => void;
+  onDelete: () => void;
+  deleting: boolean;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onSelect}
+    <div
       className={[
-        "rounded-3xl border p-5 text-left transition-colors",
+        "rounded-3xl border p-5 transition-colors",
         selected
           ? "border-zinc-600 bg-black"
           : "border-zinc-800 bg-black hover:border-zinc-700",
       ].join(" ")}
     >
-      <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Character Template</p>
-      <h2 className="mt-3 text-xl font-semibold text-white">{character.name}</h2>
-      <p className="mt-1 text-sm text-zinc-400">{character.archetype}</p>
-      <div className="mt-4 grid grid-cols-3 gap-2 text-xs text-zinc-300">
-        <span>STR {character.strength}</span>
-        <span>AGI {character.agility}</span>
-        <span>INT {character.intellect}</span>
-        <span>CHA {character.charisma}</span>
-        <span>VIT {character.vitality}</span>
-        <span>HP {character.maxHealth}</span>
+      <div className="flex items-start justify-between gap-3">
+        <button type="button" onClick={onSelect} className="min-w-0 flex-1 text-left">
+          <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Character Template</p>
+          <h2 className="mt-3 text-xl font-semibold text-white">{character.name}</h2>
+          <p className="mt-1 text-sm text-zinc-400">{character.archetype}</p>
+        </button>
+        <button
+          type="button"
+          onClick={onDelete}
+          disabled={deleting}
+          className="button-press shrink-0 rounded-full border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-red-200 hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {deleting ? "Deleting..." : "Delete"}
+        </button>
       </div>
-      {character.backstory ? (
-        <p className="mt-4 line-clamp-3 text-sm leading-6 text-zinc-400">{character.backstory}</p>
-      ) : null}
-    </button>
+      <button type="button" onClick={onSelect} className="mt-4 block w-full text-left">
+        <div className="grid grid-cols-3 gap-2 text-xs text-zinc-300">
+          <span>STR {character.strength}</span>
+          <span>AGI {character.agility}</span>
+          <span>INT {character.intellect}</span>
+          <span>CHA {character.charisma}</span>
+          <span>VIT {character.vitality}</span>
+          <span>HP {character.maxHealth}</span>
+        </div>
+        {character.backstory ? (
+          <p className="mt-4 line-clamp-3 text-sm leading-6 text-zinc-400">{character.backstory}</p>
+        ) : null}
+      </button>
+    </div>
   );
 }
 
@@ -71,6 +87,7 @@ export function SessionZeroApp() {
   const [followUpPrompt, setFollowUpPrompt] = useState("");
   const [characters, setCharacters] = useState<CharacterTemplateSummary[]>([]);
   const [charactersLoading, setCharactersLoading] = useState(true);
+  const [deletingTemplateId, setDeletingTemplateId] = useState<string | null>(null);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
   const [draft, setDraft] = useState<GeneratedCampaignSetup | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -126,6 +143,53 @@ export function SessionZeroApp() {
 
   function updateDraft(updater: (current: GeneratedCampaignSetup) => GeneratedCampaignSetup) {
     setDraft((current) => (current ? updater(current) : current));
+  }
+
+  async function deleteCharacter(template: CharacterTemplateSummary) {
+    const confirmed = window.confirm(
+      `Delete ${template.name}? Any campaigns using this character will also be deleted.`,
+    );
+
+    if (!confirmed || deletingTemplateId) {
+      return;
+    }
+
+    setDeletingTemplateId(template.id);
+    setError(null);
+
+    try {
+      const response = await fetch(`/api/characters/${template.id}`, {
+        method: "DELETE",
+      });
+
+      const data = (await response.json()) as {
+        templateId?: string;
+        campaignCount?: number;
+        error?: string;
+      };
+
+      if (!response.ok || !data.templateId) {
+        throw new Error(data.error ?? "Failed to delete character.");
+      }
+
+      setCharacters((current) => {
+        const next = current.filter((entry) => entry.id !== template.id);
+        const deletedSelected = selectedTemplateId === template.id;
+
+        if (deletedSelected) {
+          setSelectedTemplateId(next[0]?.id ?? null);
+          setDraft(null);
+          setShowAdvanced(false);
+          setFollowUpPrompt("");
+        }
+
+        return next;
+      });
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Failed to delete character.");
+    } finally {
+      setDeletingTemplateId(null);
+    }
   }
 
   function updateVillain(field: "name" | "motive" | "progressClock", value: string | number) {
@@ -314,13 +378,22 @@ export function SessionZeroApp() {
             <div className="mt-8">
               <div className="flex items-center justify-between gap-3">
                 <p className="text-[0.68rem] uppercase tracking-[0.24em] text-zinc-500">Step 1: Choose Character</p>
-                <button
-                  type="button"
-                  className="button-press rounded-full border border-zinc-800 px-4 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-200 hover:bg-black"
-                  onClick={() => router.push("/characters/new")}
-                >
-                  Create Character
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    className="button-press rounded-full border border-zinc-800 px-4 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-200 hover:bg-black"
+                    onClick={() => router.push("/")}
+                  >
+                    Home
+                  </button>
+                  <button
+                    type="button"
+                    className="button-press rounded-full border border-zinc-800 px-4 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-200 hover:bg-black"
+                    onClick={() => router.push("/characters")}
+                  >
+                    Character Library
+                  </button>
+                </div>
               </div>
 
               {charactersLoading ? (
@@ -335,6 +408,8 @@ export function SessionZeroApp() {
                       character={character}
                       selected={character.id === selectedTemplateId}
                       onSelect={() => setSelectedTemplateId(character.id)}
+                      onDelete={() => void deleteCharacter(character)}
+                      deleting={deletingTemplateId === character.id}
                     />
                   ))}
                 </div>
@@ -346,7 +421,7 @@ export function SessionZeroApp() {
                   <button
                     type="button"
                     className="button-press mt-4 rounded-full bg-white px-5 py-3 text-sm font-semibold text-black hover:bg-zinc-200"
-                    onClick={() => router.push("/characters/new")}
+                    onClick={() => router.push("/characters")}
                   >
                     Build Your First Character
                   </button>
@@ -392,7 +467,25 @@ export function SessionZeroApp() {
     <main className="min-h-screen bg-black pb-40 text-zinc-50">
       <div className="mx-auto w-full max-w-5xl px-6 py-12">
         <header className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-8">
-          <p className="text-[0.68rem] uppercase tracking-[0.28em] text-zinc-500">The Pitch</p>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-[0.68rem] uppercase tracking-[0.28em] text-zinc-500">The Pitch</p>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className="button-press rounded-full border border-zinc-800 px-4 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-200 hover:bg-black"
+                onClick={() => router.push("/")}
+              >
+                Home
+              </button>
+              <button
+                type="button"
+                className="button-press rounded-full border border-zinc-800 px-4 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-200 hover:bg-black"
+                onClick={() => router.push("/characters")}
+              >
+                Character Library
+              </button>
+            </div>
+          </div>
           <h1 className="mt-4 text-4xl font-semibold tracking-tight text-white">{publicSynopsis.title}</h1>
           <p className="mt-3 max-w-3xl text-sm leading-7 text-zinc-300">{publicSynopsis.premise}</p>
           <div className="mt-8 grid gap-4 md:grid-cols-2">

@@ -18,8 +18,8 @@ export async function POST(request: Request) {
   }
 
   try {
-    const character = await dmClient.generateCharacter(payload.data.prompt);
-    return NextResponse.json({ character });
+    const result = await dmClient.generateCharacter(payload.data.prompt);
+    return NextResponse.json(result);
   } catch (error) {
     return NextResponse.json(
       {

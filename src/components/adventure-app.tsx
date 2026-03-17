@@ -733,6 +733,13 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
                 >
                   {featuredCampaign ? "Resume Latest Chronicle" : "No Campaign Yet"}
                 </button>
+                <button
+                  className="button-press rounded-full border border-zinc-800 px-6 py-3 text-sm font-semibold text-zinc-100 hover:bg-zinc-900"
+                  onClick={() => router.push("/characters")}
+                  disabled={status !== "idle"}
+                >
+                  Character Library
+                </button>
               </div>
               {status === "loading" ? (
                 <p className="mt-4 text-sm text-zinc-400">

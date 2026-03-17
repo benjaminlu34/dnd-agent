@@ -2,8 +2,8 @@ import { toCampaignSeedCharacter } from "@/lib/game/characters";
 import { createDefaultCharacterTemplate } from "@/lib/game/starter-data";
 import type {
   CampaignBlueprint,
+  CampaignCharacter,
   CharacterTemplateDraft,
-  CharacterSheet,
   CheckOutcome,
   CheckResult,
   GeneratedCampaignSetup,
@@ -349,6 +349,102 @@ function lowerFirst(value: string) {
   return value ? value.charAt(0).toLowerCase() + value.slice(1) : value;
 }
 
+function upperFirst(value: string) {
+  return value ? value.charAt(0).toUpperCase() + value.slice(1) : value;
+}
+
+function stripWrappingQuotes(value: string) {
+  return value
+    .trim()
+    .replace(/^["“'`]+/, "")
+    .replace(/["”'`]+$/, "")
+    .trim();
+}
+
+function extractPromptField(prompt: string, patterns: RegExp[]) {
+  for (const pattern of patterns) {
+    const match = prompt.match(pattern);
+
+    if (match?.[1]) {
+      return stripWrappingQuotes(match[1]);
+    }
+  }
+
+  return null;
+}
+
+function extractRequestedCharacter(prompt: string) {
+  const name = extractPromptField(prompt, [
+    /\bnamed\s+["“]?([^"”.,]+(?:\s+[^"”.,]+){0,3})["”]?(?=[,.]|(?:\s+(?:whose|with|who|his|her|their|for|archetype)\b)|$)/i,
+    /\bname\s*(?:is|:)\s*["“]?([^"”\n]+)["”]?/i,
+  ]);
+  const archetype = extractPromptField(prompt, [
+    /\barchetype\s*(?:is|=|:)\s*["“]([^"”]+)["”]/i,
+    /\barchetype\s*(?:is|=|:)\s*([^".,\n]+(?:\s+[^".,\n]+){0,5})/i,
+  ]);
+  const backstory = extractPromptField(prompt, [
+    /\bbackstory\s*(?:is|=|:)?\s*["“]([^"”]+)["”]/i,
+    /\bfor\s+(?:his|her|their)\s+backstory\s*:?\s*["“]([^"”]+)["”]/i,
+  ]);
+  const role = extractPromptField(prompt, [
+    /\bgenerate\s+(?:a|an)\s+([^".,]+?)(?=\s+named\b|[.,]|$)/i,
+    /\bcreate\s+(?:a|an)\s+([^".,]+?)(?=\s+named\b|[.,]|$)/i,
+  ]);
+
+  return { name, archetype, backstory, role };
+}
+
+function buildCharacterStatsFromPrompt(prompt: string, fallbackMaxHealth: number) {
+  const lowered = prompt.toLowerCase();
+  const stats = {
+    strength: 1,
+    agility: 1,
+    intellect: 1,
+    charisma: 1,
+    vitality: 1,
+    maxHealth: fallbackMaxHealth,
+  };
+
+  if (/(rogue|scoundrel|thief|assassin|shadow|fence|cutpurse|sneak)/.test(lowered)) {
+    stats.agility = 3;
+    stats.charisma = 2;
+    stats.intellect = 1;
+    stats.strength = 0;
+    stats.vitality = 1;
+    stats.maxHealth = 10;
+  } else if (/(wizard|mage|scholar|occultist|antiquarian|scribe)/.test(lowered)) {
+    stats.intellect = 3;
+    stats.charisma = 1;
+    stats.agility = 1;
+    stats.strength = 0;
+    stats.vitality = 1;
+    stats.maxHealth = 9;
+  } else if (/(knight|guard|soldier|fighter|blacksmith|mercenary|warrior)/.test(lowered)) {
+    stats.strength = 3;
+    stats.vitality = 2;
+    stats.agility = 1;
+    stats.intellect = 0;
+    stats.charisma = 1;
+    stats.maxHealth = 14;
+  } else if (/(bard|courtier|con artist|diplomat|priest|performer)/.test(lowered)) {
+    stats.charisma = 3;
+    stats.intellect = 2;
+    stats.agility = 1;
+    stats.strength = 0;
+    stats.vitality = 1;
+    stats.maxHealth = 10;
+  } else if (/(ranger|hunter|scout|tracker|wanderer)/.test(lowered)) {
+    stats.agility = 2;
+    stats.vitality = 2;
+    stats.intellect = 1;
+    stats.strength = 1;
+    stats.charisma = 0;
+    stats.maxHealth = 12;
+  }
+
+  return stats;
+}
+
 function summarizeText(value: string, maxLength = 180) {
   const normalized = value.replace(/\s+/g, " ").trim();
 
@@ -393,7 +489,7 @@ function buildVillain(theme: ThemeProfile, rng: () => number) {
   };
 }
 
-function buildThemeSeed(character: CharacterSheet, prompt: string, previousDraft?: GeneratedCampaignSetup) {
+function buildThemeSeed(character: CampaignCharacter, prompt: string, previousDraft?: GeneratedCampaignSetup) {
   return [
     character.name,
     character.archetype,
@@ -406,7 +502,7 @@ function buildThemeSeed(character: CharacterSheet, prompt: string, previousDraft
 }
 
 function buildCampaignPremise(input: {
-  character: CharacterSheet;
+  character: CampaignCharacter;
   setting: string;
   conspiracy: string;
   villainTitle: string;
@@ -778,7 +874,7 @@ function emitNarration(callbacks: StreamCallbacks | undefined, narration: string
 }
 
 function buildCampaignSetup(
-  character: CharacterSheet,
+  character: CampaignCharacter,
   input: CampaignSetupGenerationInput,
 ): GeneratedCampaignSetup {
   const prompt = cleanPrompt(input.prompt);
@@ -1071,7 +1167,7 @@ function buildCampaignSetup(
 
 export class LocalDungeonMaster {
   async generateCampaignSetup(
-    character: CharacterSheet,
+    character: CampaignCharacter,
     input: CampaignSetupGenerationInput = {},
   ) {
     return buildCampaignSetup(
@@ -1085,26 +1181,36 @@ export class LocalDungeonMaster {
     const cleaned = cleanPrompt(prompt);
     const seed = cleaned || `${base.name}|${base.archetype}`;
     const theme = selectTheme(seed);
-    const archetypeFocus = cleaned.split(/\s+/).slice(0, 6).join(" ").trim();
+    const requested = extractRequestedCharacter(cleaned);
     const titlePrefix = pickOne(theme.titlePrefixes, createRng(seed));
-    const archetype = archetypeFocus
-      ? `${titlePrefix} ${archetypeFocus.replace(/^[a-z]/, (char) => char.toUpperCase())}`
-      : base.archetype;
-    const nameSeed = stableHash(`${seed}|name`);
-    const statShift = (offset: number) => ((nameSeed >> offset) % 3) - 1;
+    const fallbackRole = requested.role ? upperFirst(requested.role) : base.archetype;
+    const archetype = requested.archetype ?? `${titlePrefix} ${fallbackRole}`;
+    const name =
+      requested.name ??
+      (() => {
+        const rng = createRng(`${seed}|name`);
+        return `${pickOne(theme.villainNames, rng)} ${pickOne(GENERIC_SURNAMES, rng)}`;
+      })();
+    const stats = buildCharacterStatsFromPrompt(
+      [cleaned, requested.archetype, requested.role].filter(Boolean).join(" "),
+      base.maxHealth,
+    );
+    const backstory =
+      requested.backstory ??
+      (cleaned
+        ? `${name} is known as a ${lowerFirst(archetype)}. ${name} carries a reputation shaped by ${cleaned.toLowerCase()}. They are looking for the next road that will finally make sense of it.`
+        : base.backstory);
 
     return {
-      name: base.name,
+      name,
       archetype,
-      strength: clamp(base.strength + statShift(0), -2, 4),
-      agility: clamp(base.agility + statShift(2), -2, 4),
-      intellect: clamp(base.intellect + statShift(4), -2, 4),
-      charisma: clamp(base.charisma + statShift(6), -2, 4),
-      vitality: clamp(base.vitality + statShift(8), -2, 4),
-      maxHealth: clamp(base.maxHealth + statShift(10), 8, 18),
-      backstory: cleaned
-        ? `${base.name} is known as a ${lowerFirst(archetype)}. ${base.name} carries a reputation shaped by ${cleaned.toLowerCase()}. They are looking for the next road that will finally make sense of it.`
-        : base.backstory,
+      strength: clamp(stats.strength, -2, 4),
+      agility: clamp(stats.agility, -2, 4),
+      intellect: clamp(stats.intellect, -2, 4),
+      charisma: clamp(stats.charisma, -2, 4),
+      vitality: clamp(stats.vitality, -2, 4),
+      maxHealth: clamp(stats.maxHealth, 8, 18),
+      backstory,
     };
   }
 

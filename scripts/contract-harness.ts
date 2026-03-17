@@ -9,9 +9,9 @@ import {
 } from "../src/lib/game/starter-data";
 import { getStaleClues } from "../src/lib/game/reveals";
 import { rollCheck } from "../src/lib/game/checks";
-import type { CharacterSheet, PromptContext } from "../src/lib/game/types";
+import type { CampaignCharacter, PromptContext } from "../src/lib/game/types";
 
-const character: CharacterSheet = {
+const character: CampaignCharacter = {
   id: "harness_char",
   templateId: "harness_char",
   instanceId: "harness_instance",

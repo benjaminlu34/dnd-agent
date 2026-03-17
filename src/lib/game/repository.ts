@@ -129,12 +129,14 @@ export async function listCharacterTemplates(): Promise<CharacterTemplateSummary
 
 export async function getCharacterTemplateForUser(templateId: string) {
   const user = await ensureLocalUser();
-  return prisma.characterTemplate.findFirst({
+  const template = await prisma.characterTemplate.findFirst({
     where: {
       id: templateId,
       userId: user.id,
     },
   });
+
+  return template ? toTemplateRecord(template) : null;
 }
 
 export async function createCharacterTemplate(input: CharacterTemplateDraft) {
@@ -154,6 +156,70 @@ export async function createCharacterTemplate(input: CharacterTemplateDraft) {
       backstory: input.backstory,
     },
   });
+}
+
+export async function updateCharacterTemplateForUser(
+  templateId: string,
+  input: CharacterTemplateDraft,
+) {
+  const user = await ensureLocalUser();
+  const template = await prisma.characterTemplate.findFirst({
+    where: {
+      id: templateId,
+      userId: user.id,
+    },
+    select: { id: true },
+  });
+
+  if (!template) {
+    return null;
+  }
+
+  return prisma.characterTemplate.update({
+    where: { id: template.id },
+    data: {
+      name: input.name,
+      archetype: input.archetype,
+      strength: input.strength,
+      agility: input.agility,
+      intellect: input.intellect,
+      charisma: input.charisma,
+      vitality: input.vitality,
+      maxHealth: input.maxHealth,
+      backstory: input.backstory,
+    },
+  });
+}
+
+export async function deleteCharacterTemplateForUser(templateId: string) {
+  const user = await ensureLocalUser();
+  const template = await prisma.characterTemplate.findFirst({
+    where: {
+      id: templateId,
+      userId: user.id,
+    },
+    select: {
+      id: true,
+      campaigns: {
+        select: { id: true },
+      },
+    },
+  });
+
+  if (!template) {
+    return null;
+  }
+
+  const campaignCount = template.campaigns.length;
+
+  await prisma.characterTemplate.delete({
+    where: { id: template.id },
+  });
+
+  return {
+    templateId: template.id,
+    campaignCount,
+  };
 }
 
 export async function getCampaignAggregate(campaignId: string) {

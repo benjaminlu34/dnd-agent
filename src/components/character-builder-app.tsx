@@ -1,8 +1,9 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
+import type { CharacterTemplate } from "@/lib/game/types";
 
 type CharacterFormValues = {
   name: string;
@@ -14,6 +15,13 @@ type CharacterFormValues = {
   vitality: number;
   maxHealth: number;
   backstory: string;
+};
+
+type CharacterGenerationResponse = {
+  character?: CharacterFormValues & { backstory?: string | null };
+  source?: "openrouter" | "local_fallback";
+  warning?: string;
+  error?: string;
 };
 
 const defaultValues: CharacterFormValues = {
@@ -51,12 +59,22 @@ function BuilderField({
   );
 }
 
-export function CharacterBuilderApp() {
+type CharacterBuilderAppProps = {
+  initialCharacter?: CharacterTemplate | null;
+  mode?: "create" | "edit";
+};
+
+export function CharacterBuilderApp({
+  initialCharacter = null,
+  mode = "create",
+}: CharacterBuilderAppProps) {
   const router = useRouter();
   const [generationPrompt, setGenerationPrompt] = useState("");
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [generationSource, setGenerationSource] = useState<"openrouter" | "local_fallback" | null>(null);
+  const [generationWarning, setGenerationWarning] = useState<string | null>(null);
   const {
     register,
     handleSubmit,
@@ -67,6 +85,25 @@ export function CharacterBuilderApp() {
   } = useForm<CharacterFormValues>({
     defaultValues,
   });
+
+  useEffect(() => {
+    if (!initialCharacter) {
+      reset(defaultValues);
+      return;
+    }
+
+    reset({
+      name: initialCharacter.name,
+      archetype: initialCharacter.archetype,
+      strength: initialCharacter.strength,
+      agility: initialCharacter.agility,
+      intellect: initialCharacter.intellect,
+      charisma: initialCharacter.charisma,
+      vitality: initialCharacter.vitality,
+      maxHealth: initialCharacter.maxHealth,
+      backstory: initialCharacter.backstory ?? "",
+    });
+  }, [initialCharacter, reset]);
 
   const values = watch();
 
@@ -89,6 +126,7 @@ export function CharacterBuilderApp() {
 
     setGenerating(true);
     setError(null);
+    setGenerationWarning(null);
 
     try {
       const response = await fetch("/api/characters/generate", {
@@ -99,10 +137,7 @@ export function CharacterBuilderApp() {
         body: JSON.stringify({ prompt: generationPrompt }),
       });
 
-      const data = (await response.json()) as {
-        character?: CharacterFormValues & { backstory?: string | null };
-        error?: string;
-      };
+      const data = (await response.json()) as CharacterGenerationResponse;
 
       if (!response.ok || !data.character) {
         throw new Error(data.error ?? "Failed to generate character.");
@@ -112,7 +147,10 @@ export function CharacterBuilderApp() {
         ...data.character,
         backstory: data.character.backstory ?? "",
       });
+      setGenerationSource(data.source ?? null);
+      setGenerationWarning(data.warning ?? null);
     } catch (generationError) {
+      setGenerationSource(null);
       setError(
         generationError instanceof Error ? generationError.message : "Failed to generate character.",
       );
@@ -130,21 +168,24 @@ export function CharacterBuilderApp() {
     setError(null);
 
     try {
-      const response = await fetch("/api/characters/create", {
-        method: "POST",
+      const endpoint = mode === "edit" && initialCharacter
+        ? `/api/characters/${initialCharacter.id}`
+        : "/api/characters/create";
+      const result = await fetch(endpoint, {
+        method: mode === "edit" && initialCharacter ? "PATCH" : "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify(formValues),
       });
 
-      const data = (await response.json()) as { templateId?: string; error?: string };
+      const data = (await result.json()) as { templateId?: string; error?: string };
 
-      if (!response.ok || !data.templateId) {
+      if (!result.ok || !data.templateId) {
         throw new Error(data.error ?? "Failed to save character.");
       }
 
-      router.push("/campaigns/new");
+      router.push(mode === "edit" ? "/characters" : "/campaigns/new");
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Failed to save character.");
     } finally {
@@ -168,32 +209,47 @@ export function CharacterBuilderApp() {
   ];
 
   return (
-    <main className="min-h-screen bg-black text-zinc-50">
+    <main className="h-screen overflow-y-auto bg-black text-zinc-50">
       <div className="mx-auto max-w-6xl px-6 py-12">
         <header className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-8">
-          <p className="text-[0.68rem] uppercase tracking-[0.28em] text-zinc-500">Character Forge</p>
+          <p className="text-[0.68rem] uppercase tracking-[0.28em] text-zinc-500">
+            {mode === "edit" ? "Character Workshop" : "Character Forge"}
+          </p>
           <div className="mt-4 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
             <div>
-              <h1 className="text-4xl font-semibold tracking-tight text-white">Build the hero first.</h1>
+              <h1 className="text-4xl font-semibold tracking-tight text-white">
+                {mode === "edit" ? "Refine the hero." : "Build the hero first."}
+              </h1>
               <p className="mt-3 max-w-2xl text-sm leading-7 text-zinc-400">
-                Create a reusable character template for future campaigns, or let the AI sketch one out and tune it by hand.
+                {mode === "edit"
+                  ? "Adjust the template, retune the stats, or rewrite the backstory before the next campaign."
+                  : "Create a reusable character template for future campaigns, or let the AI sketch one out and tune it by hand."}
               </p>
             </div>
-            <button
-              type="button"
-              className="button-press rounded-full border border-zinc-800 px-5 py-3 text-sm font-semibold text-zinc-100 hover:bg-black"
-              onClick={() => router.push("/campaigns/new")}
-            >
-              Back to Session Zero
-            </button>
+            <div className="flex flex-wrap gap-3">
+              <button
+                type="button"
+                className="button-press rounded-full border border-zinc-800 px-5 py-3 text-sm font-semibold text-zinc-100 hover:bg-black"
+                onClick={() => router.push(mode === "edit" ? "/" : "/characters")}
+              >
+                {mode === "edit" ? "Home" : "Character Library"}
+              </button>
+              <button
+                type="button"
+                className="button-press rounded-full border border-zinc-800 px-5 py-3 text-sm font-semibold text-zinc-100 hover:bg-black"
+                onClick={() => router.push(mode === "edit" ? "/characters" : "/campaigns/new")}
+              >
+                {mode === "edit" ? "Back to Library" : "Back to Session Zero"}
+              </button>
+            </div>
           </div>
         </header>
 
         <section className="mt-8 rounded-[2rem] border border-zinc-800 bg-zinc-950 p-8">
           <p className="text-[0.68rem] uppercase tracking-[0.24em] text-zinc-500">AI Assist</p>
           <div className="mt-4 flex flex-col gap-4 lg:flex-row">
-            <input
-              className={fieldClassName()}
+            <textarea
+              className={`${fieldClassName(true)} max-h-40 min-h-24 overflow-y-auto lg:min-h-[3.5rem]`}
               value={generationPrompt}
               onChange={(event) => setGenerationPrompt(event.target.value)}
               placeholder="A grumpy dwarven blacksmith with a saint's relic hidden in his forge..."
@@ -207,6 +263,17 @@ export function CharacterBuilderApp() {
               {generating ? "Generating..." : "Auto-Generate with AI"}
             </button>
           </div>
+          {generationSource ? (
+            <div className="mt-4 flex flex-col gap-2 text-sm">
+              <p className="text-zinc-400">
+                Generation source:{" "}
+                <span className="font-medium text-zinc-100">
+                  {generationSource === "openrouter" ? "OpenRouter AI" : "Local fallback"}
+                </span>
+              </p>
+              {generationWarning ? <p className="text-amber-300">{generationWarning}</p> : null}
+            </div>
+          ) : null}
         </section>
 
         <form onSubmit={(event) => void onSubmit(event)} className="mt-8 grid gap-8 lg:grid-cols-[1.35fr,0.95fr]">
@@ -273,7 +340,13 @@ export function CharacterBuilderApp() {
               className="button-press mt-8 rounded-full bg-white px-6 py-3 text-sm font-semibold text-black hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
               disabled={saving}
             >
-              {saving ? "Saving Character..." : "Save Character"}
+              {saving
+                ? mode === "edit"
+                  ? "Saving Changes..."
+                  : "Saving Character..."
+                : mode === "edit"
+                  ? "Save Changes"
+                  : "Save Character"}
             </button>
           </section>
 

@@ -15,8 +15,8 @@ import { createDefaultCharacterTemplate } from "@/lib/game/starter-data";
 import { generatedCampaignSetupSchema } from "@/lib/game/session-zero";
 import type {
   CampaignBlueprint,
+  CampaignCharacter,
   CharacterTemplateDraft,
-  CharacterSheet,
   CheckResult,
   GeneratedCampaignSetup,
   PromptContext,
@@ -35,6 +35,12 @@ type StreamCallbacks = {
   onNarration?: (chunk: string) => void;
 };
 
+export type CharacterGenerationResult = {
+  character: CharacterTemplateDraft;
+  source: "openrouter" | "local_fallback";
+  warning?: string;
+};
+
 type OpenRouterToolResult = {
   text: string;
   toolInput: unknown;
@@ -45,6 +51,47 @@ type TurnAIPayload = {
   promptContext: PromptContext;
   playerAction: string;
 };
+
+function toStatModifier(value: number) {
+  if (value <= 4 && value >= -5) {
+    return value;
+  }
+
+  return Math.max(-5, Math.min(10, Math.floor((value - 10) / 2)));
+}
+
+function normalizeGeneratedCharacterDraft(value: unknown): CharacterTemplateDraft | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const raw = value as Record<string, unknown>;
+  const normalized = {
+    name: typeof raw.name === "string" ? raw.name.trim() : "",
+    archetype: typeof raw.archetype === "string" ? raw.archetype.trim() : "",
+    strength: toStatModifier(Number(raw.strength ?? 0)),
+    agility: toStatModifier(Number(raw.agility ?? 0)),
+    intellect: toStatModifier(Number(raw.intellect ?? 0)),
+    charisma: toStatModifier(Number(raw.charisma ?? 0)),
+    vitality: toStatModifier(Number(raw.vitality ?? 0)),
+    maxHealth: Math.max(
+      1,
+      Math.min(
+        99,
+        Number(raw.maxHealth ?? 0) > 18
+          ? Math.round(Number(raw.maxHealth ?? 0) / 5)
+          : Math.round(Number(raw.maxHealth ?? 0)),
+      ),
+    ),
+    backstory:
+      typeof raw.backstory === "string" && raw.backstory.trim()
+        ? raw.backstory.trim()
+        : null,
+  };
+
+  const parsed = characterTemplateDraftSchema.safeParse(normalized);
+  return parsed.success ? parsed.data : null;
+}
 
 const campaignSetupTool = {
   name: "generate_campaign_setup",
@@ -225,12 +272,12 @@ const generateCharacterTool = {
     properties: {
       name: { type: "string" },
       archetype: { type: "string" },
-      strength: { type: "number" },
-      agility: { type: "number" },
-      intellect: { type: "number" },
-      charisma: { type: "number" },
-      vitality: { type: "number" },
-      maxHealth: { type: "number" },
+      strength: { type: "number", minimum: -5, maximum: 4 },
+      agility: { type: "number", minimum: -5, maximum: 4 },
+      intellect: { type: "number", minimum: -5, maximum: 4 },
+      charisma: { type: "number", minimum: -5, maximum: 4 },
+      vitality: { type: "number", minimum: -5, maximum: 4 },
+      maxHealth: { type: "number", minimum: 8, maximum: 18 },
       backstory: { type: "string" },
     },
     required: [
@@ -266,10 +313,6 @@ function toFunctionTool(
 
 function isGeneratedCampaignSetup(value: unknown): value is GeneratedCampaignSetup {
   return generatedCampaignSetupSchema.safeParse(value).success;
-}
-
-function isCharacterTemplateDraft(value: unknown): value is CharacterTemplateDraft {
-  return characterTemplateDraftSchema.safeParse(value).success;
 }
 
 function stripCodeFences(value: string) {
@@ -572,7 +615,7 @@ class OpenRouterDungeonMaster {
   }
 
   async generateCampaignSetup(
-    character: CharacterSheet,
+    character: CampaignCharacter,
     input: CampaignSetupGenerationInput = {},
   ) {
     const seedCharacter = character ?? toCampaignSeedCharacter(createDefaultCharacterTemplate());
@@ -667,8 +710,9 @@ class OpenRouterDungeonMaster {
     return this.fallback.generateCampaignSetup(seedCharacter, input);
   }
 
-  async generateCharacter(prompt: string) {
+  async generateCharacter(prompt: string): Promise<CharacterGenerationResult> {
     const trimmedPrompt = prompt.trim();
+    let fallbackWarning: string | undefined;
 
     try {
       const response = await this.client.chat.completions.create({
@@ -679,6 +723,9 @@ class OpenRouterDungeonMaster {
             content: [
               "You create grounded but vivid solo fantasy RPG protagonists.",
               "Return one playable character template.",
+              "If the user provides an exact name, archetype, or backstory, preserve those values exactly.",
+              "IMPORTANT: stats are small modifiers, not D20 ability scores. Use integers in the range -2 to +3.",
+              "IMPORTANT: maxHealth should usually be between 8 and 18.",
               "Keep stats plausible, varied, and coherent with the concept.",
               "Backstory should be concise, specific, and campaign-friendly.",
             ].join("\n"),
@@ -700,11 +747,21 @@ class OpenRouterDungeonMaster {
         ? safeParseJson(args)
         : safeParseJson(extractMessageText(response.choices[0]?.message?.content));
 
-      if (isCharacterTemplateDraft(parsed)) {
-        return parsed;
+      const normalized = normalizeGeneratedCharacterDraft(parsed);
+      if (normalized) {
+        return {
+          character: normalized,
+          source: "openrouter",
+        };
       }
-    } catch {
-      // Fall through to raw-JSON generation for providers that reject tool routing.
+      fallbackWarning = "OpenRouter returned a character payload that did not match the expected schema.";
+      console.warn("[character.generate] OpenRouter tool response failed schema validation.");
+    } catch (error) {
+      fallbackWarning =
+        error instanceof Error
+          ? `OpenRouter tool generation failed: ${error.message}`
+          : "OpenRouter tool generation failed.";
+      console.warn("[character.generate] OpenRouter tool generation failed.", error);
     }
 
     try {
@@ -731,14 +788,30 @@ class OpenRouterDungeonMaster {
         extractMessageText(fallbackResponse.choices[0]?.message?.content),
       );
 
-      if (isCharacterTemplateDraft(parsed)) {
-        return parsed;
+      const normalized = normalizeGeneratedCharacterDraft(parsed);
+      if (normalized) {
+        return {
+          character: normalized,
+          source: "openrouter",
+        };
       }
-    } catch {
-      // Fall back to the local deterministic provider below.
+      fallbackWarning =
+        "OpenRouter raw JSON response did not match the expected schema. Used local fallback instead.";
+      console.warn("[character.generate] OpenRouter raw JSON response failed schema validation.");
+    } catch (error) {
+      fallbackWarning =
+        error instanceof Error
+          ? `OpenRouter raw JSON generation failed: ${error.message}`
+          : "OpenRouter raw JSON generation failed.";
+      console.warn("[character.generate] OpenRouter raw JSON generation failed.", error);
     }
 
-    return this.fallback.generateCharacter(trimmedPrompt);
+    const character = await this.fallback.generateCharacter(trimmedPrompt);
+    return {
+      character,
+      source: "local_fallback",
+      warning: fallbackWarning ?? "Generated with local fallback instead of OpenRouter.",
+    };
   }
 
   async triageTurn(input: TurnAIPayload, callbacks?: StreamCallbacks): Promise<TriageDecision> {
