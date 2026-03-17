@@ -17,6 +17,7 @@ import type {
 import { clamp, slugify } from "@/lib/utils";
 
 type CampaignSetupGenerationInput = {
+  basePrompt?: string;
   prompt?: string;
   previousDraft?: GeneratedCampaignSetup;
 };
@@ -463,6 +464,10 @@ function cleanPrompt(prompt?: string) {
   return prompt?.trim().replace(/\s+/g, " ") ?? "";
 }
 
+function combineCampaignSetupPrompts(basePrompt?: string, prompt?: string) {
+  return [cleanPrompt(basePrompt), cleanPrompt(prompt)].filter(Boolean).join(" ").trim();
+}
+
 function shouldRetitle(prompt: string) {
   return /\b(rename|retitle|different title|new title)\b/i.test(prompt);
 }
@@ -522,6 +527,37 @@ function buildOpeningSuggestions(input: {
     `Question the ${input.authorityRole} before they regain control`,
     `Have ${input.companionName} cover the exits while you press forward`,
   ];
+}
+
+function buildQuietOpeningSuggestions(input: {
+  courierRole: string;
+  routineLocation: string;
+  companionName: string;
+}) {
+  return [
+    `Shadow the ${input.courierRole.toLowerCase()} when they slip away from ${input.routineLocation.toLowerCase()}`,
+    `Lift something small and see who notices`,
+    `Ask ${input.companionName} what feels wrong about the room`,
+  ];
+}
+
+function extractOpeningRevisionDirectives(prompt: string) {
+  return {
+    wantsSlowStart:
+      /\b(slow|slower|slow start|slow opening|keep start innocuous|inocuous|mundane|routine|normal day)\b/i.test(
+        prompt,
+      ),
+    wantsChoiceHook:
+      /\b(choice|player choice|player agency|stumble into|could choose|decide whether|follow, pickpocket, or ignore)\b/i.test(
+        prompt,
+      ),
+    forbidImmediateViolence:
+      /\b(nothing violent|no violence|not dangerous yet|no action|no immediate threat|no fight|no combat)\b/i.test(
+        prompt,
+      ),
+    forbidImmediateEnforcers: /\b(no enforcers|enforcers are later|masked figures are later)\b/i.test(prompt),
+    forbidCollapse: /\b(no one collapses|no collapse|courier.*later|the courier.*later)\b/i.test(prompt),
+  };
 }
 
 function inferActionIntent(playerAction: string, companion: PromptContext["companion"]): ActionIntent {
@@ -878,9 +914,17 @@ function buildCampaignSetup(
   input: CampaignSetupGenerationInput,
 ): GeneratedCampaignSetup {
   const prompt = cleanPrompt(input.prompt);
-  const theme = selectTheme(`${prompt} ${input.previousDraft?.publicSynopsis.setting ?? ""}`);
-  const rng = createRng(buildThemeSeed(character, prompt, input.previousDraft));
+  const effectivePrompt = combineCampaignSetupPrompts(input.basePrompt, input.prompt);
+  const theme = selectTheme(`${effectivePrompt} ${input.previousDraft?.publicSynopsis.setting ?? ""}`);
+  const rng = createRng(buildThemeSeed(character, effectivePrompt, input.previousDraft));
   const previous = input.previousDraft;
+  const openingDirectives = extractOpeningRevisionDirectives(prompt);
+  const openingFocusedRevision = Boolean(
+    previous &&
+      /\b(opening|opening scene|starting hook|hook|start|intro|pacing|slow|routine|choice)\b/i.test(
+        prompt,
+      ),
+  );
 
   const counts = {
     hooks: clampCount(previous?.secretEngine.hooks.length, 2, 3, 2),
@@ -911,22 +955,29 @@ function buildCampaignSetup(
   const climaxLandmark = pickOne(theme.landmarks, rng, landmarkUsed);
   const companionName = pickOne(theme.companionNames, rng, localNameUsed);
   const companionRole = pickOne(theme.companionRoles, rng);
-  const tone = previous?.publicSynopsis.tone && !prompt
-    ? previous.publicSynopsis.tone
-    : pickOne(theme.tone, rng);
+  const requestedToneChange = /\b(tone|darker|lighter|grim|hopeful|comedic|noir|horror|action)\b/i.test(
+    prompt,
+  );
+  const tone =
+    previous?.publicSynopsis.tone && (!prompt || !requestedToneChange)
+      ? previous.publicSynopsis.tone
+      : pickOne(theme.tone, rng);
   const title =
     previous?.publicSynopsis.title && !shouldRetitle(prompt)
       ? previous.publicSynopsis.title
       : `${pickOne(theme.titlePrefixes, rng)} ${pickOne(theme.titleFocuses, rng)} of ${placeName}`;
-  const premise = buildCampaignPremise({
-    character,
-    setting,
-    conspiracy,
-    villainTitle: villain.title,
-    villainName: villain.name,
-    relic,
-  });
-  const openingSceneTitle = `${landmarkOne.replace(/^the /i, "").replace(/\b\w/g, (letter) => letter.toUpperCase())} at Dusk`;
+  const premise =
+    previous?.publicSynopsis.premise && openingFocusedRevision
+      ? previous.publicSynopsis.premise
+      : buildCampaignPremise({
+          character,
+          setting,
+          conspiracy,
+          villainTitle: villain.title,
+          villainName: villain.name,
+          relic,
+        });
+  const baseOpeningSceneTitle = `${landmarkOne.replace(/^the /i, "").replace(/\b\w/g, (letter) => letter.toUpperCase())} at Dusk`;
   const activeThreat = `${villain.title} ${villain.name}'s ${pickOne(theme.threats, rng)} are already sweeping the edges of ${placeName} for the ${relic}.`;
 
   const arcOne = {
@@ -1126,7 +1177,82 @@ function buildCampaignSetup(
     (index) => `${placeName} Annex ${index + 1}`,
   );
 
-  const openingSceneSummary = `Crowds break unevenly around ${landmarkOne}, where word of the missing ${relic} has already reached the wrong ears. ${activeThreat}`;
+  const wantsQuietOpening =
+    openingFocusedRevision &&
+    (openingDirectives.wantsSlowStart ||
+      openingDirectives.wantsChoiceHook ||
+      openingDirectives.forbidImmediateViolence ||
+      openingDirectives.forbidImmediateEnforcers ||
+      openingDirectives.forbidCollapse);
+  const quietRoutineLocation = previous?.secretEngine?.openingScene?.location || landmarkOne;
+  const quietSuspiciousRole =
+    previous?.secretEngine?.npcs.find((npc) => !npc.isCompanion)?.role || suspectRole;
+  const quietCompanionName =
+    previous?.secretEngine?.npcs.find((npc) => npc.isCompanion)?.name || companionName;
+  const openingSceneLocation = wantsQuietOpening ? quietRoutineLocation : placeName;
+  const openingSceneTitle = wantsQuietOpening
+    ? previous?.secretEngine?.openingScene?.title ??
+      previous?.publicSynopsis.openingScene.title ??
+      baseOpeningSceneTitle
+    : baseOpeningSceneTitle;
+  const openingSceneAtmosphere = wantsQuietOpening
+    ? previous?.secretEngine?.openingScene?.atmosphere ?? pickOne(theme.atmospheres, rng)
+    : pickOne(theme.atmospheres, rng);
+  const openingSceneSummary = wantsQuietOpening
+    ? `${character.name} is working a familiar angle around ${quietRoutineLocation}, watching for easy coin and easier mistakes. A nervous ${quietSuspiciousRole} handles a purse, ledger, or sealed note with just enough care to feel wrong, then slips toward a side door. ${character.name} can shadow them, lift something small, or ignore it and stay with the safer job.`
+    : `Crowds break unevenly around ${landmarkOne}, where word of the missing ${relic} has already reached the wrong ears. ${activeThreat}`;
+  const openingHook = wantsQuietOpening
+    ? `A nervous ${quietSuspiciousRole} is about to make a small mistake, and ${character.name} is in the right place to notice it.`
+    : activeThreat;
+  const openingSuggestions = wantsQuietOpening
+    ? buildQuietOpeningSuggestions({
+        courierRole: quietSuspiciousRole,
+        routineLocation: quietRoutineLocation,
+        companionName: quietCompanionName,
+      })
+    : buildOpeningSuggestions({
+        clueSource: landmarkOne,
+        authorityRole,
+        companionName,
+      });
+  const publicOpeningOverview = wantsQuietOpening
+    ? `The adventure begins in ${openingSceneLocation}, where a familiar routine starts to feel subtly wrong and a small secret hints at larger trouble moving through the city.`
+    : `The adventure begins in ${openingSceneLocation}, where rising pressure around a dangerous prize signals that the city's hidden struggle is about to break into the open.`;
+  const secretEngine = openingFocusedRevision
+    ? {
+        ...previous.secretEngine,
+        openingScene: {
+          title: openingSceneTitle,
+          summary: openingSceneSummary,
+          location: openingSceneLocation,
+          atmosphere: openingSceneAtmosphere,
+          activeThreat: openingHook,
+          suggestedActions: openingSuggestions,
+        },
+      }
+    : {
+        openingScene: {
+          title: openingSceneTitle,
+          summary: openingSceneSummary,
+          location: openingSceneLocation,
+          atmosphere: openingSceneAtmosphere,
+          activeThreat: openingHook,
+          suggestedActions: openingSuggestions,
+        },
+        villain: {
+          name: `${villain.title} ${villain.name}`,
+          motive: villain.motive,
+          progressClock: 10,
+        },
+        hooks,
+        arcs,
+        reveals,
+        subplotSeeds,
+        quests,
+        npcs,
+        clues,
+        locations,
+      };
 
   return {
     publicSynopsis: {
@@ -1136,32 +1262,11 @@ function buildCampaignSetup(
       setting,
       openingScene: {
         title: openingSceneTitle,
-        summary: openingSceneSummary,
-        location: placeName,
-        atmosphere: pickOne(theme.atmospheres, rng),
-        activeThreat,
-        suggestedActions: buildOpeningSuggestions({
-          clueSource: landmarkOne,
-          authorityRole,
-          companionName,
-        }),
+        location: openingSceneLocation,
+        overview: publicOpeningOverview,
       },
     },
-    secretEngine: {
-      villain: {
-        name: `${villain.title} ${villain.name}`,
-        motive: villain.motive,
-        progressClock: 10,
-      },
-      hooks,
-      arcs,
-      reveals,
-      subplotSeeds,
-      quests,
-      npcs,
-      clues,
-      locations,
-    },
+    secretEngine,
   };
 }
 

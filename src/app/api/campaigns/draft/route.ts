@@ -22,6 +22,7 @@ export async function POST(request: Request) {
     const draft = await dmClient.generateCampaignSetup(
       toCampaignSeedCharacter(payload.data.character),
       {
+        basePrompt: payload.data.basePrompt,
         prompt: payload.data.prompt,
         previousDraft: payload.data.previousDraft,
       },

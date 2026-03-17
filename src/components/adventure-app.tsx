@@ -304,6 +304,33 @@ function EmptyJournalCopy({ children }: { children: React.ReactNode }) {
   );
 }
 
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildKnowledgeText(snapshot: CampaignSnapshot) {
+  return [
+    snapshot.state.sceneState.title,
+    snapshot.state.sceneState.summary,
+    snapshot.state.sceneState.atmosphere,
+    snapshot.previouslyOn ?? "",
+    ...snapshot.recentMessages.map((message) => message.content),
+    ...snapshot.memories.map((entry) => entry.summary),
+  ]
+    .join(" ")
+    .toLowerCase();
+}
+
+function isNamedInKnowledgeText(knowledgeText: string, value: string) {
+  const trimmed = value.trim().toLowerCase();
+
+  if (!trimmed) {
+    return false;
+  }
+
+  return new RegExp(`\\b${escapeRegExp(trimmed)}\\b`, "i").test(knowledgeText);
+}
+
 export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string }) {
   const router = useRouter();
   const [view, setView] = useState<"home" | "campaign">("home");
@@ -319,7 +346,7 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
   const [error, setError] = useState<string | null>(null);
   const [loadingCampaignId, setLoadingCampaignId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [journalTab, setJournalTab] = useState<JournalTab>("quests");
+  const [journalTab, setJournalTab] = useState<JournalTab>("journal");
   const feedRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const streamingMessageIdRef = useRef<string | null>(null);
@@ -811,9 +838,15 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
     );
   }
 
+  const knowledgeText = buildKnowledgeText(snapshot);
   const discoveredClues = snapshot.clues.filter((clue) => clue.status === "discovered");
-  const visibleQuests = snapshot.quests.filter((quest) => quest.status !== "failed");
-  const knownPeople = snapshot.npcs;
+  const visibleQuests = snapshot.quests.filter(
+    (quest) =>
+      quest.status === "completed" ||
+      quest.stage > 0 ||
+      isNamedInKnowledgeText(knowledgeText, quest.title),
+  );
+  const knownPeople = snapshot.npcs.filter((npc) => isNamedInKnowledgeText(knowledgeText, npc.name));
   const journalEntries = [
     ...(snapshot.previouslyOn
       ? [
@@ -830,9 +863,8 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
       content: entry.summary,
     })),
   ];
-  const activeArc = snapshot.arcs.find((arc) => arc.status === "active");
   const sceneMoments = inferSceneMoments(snapshot);
-  const companion = snapshot.npcs.find((npc) => npc.isCompanion) ?? null;
+  const companion = knownPeople.find((npc) => npc.isCompanion) ?? null;
 
   return (
     <main className="h-screen w-screen overflow-hidden bg-black text-zinc-50">
@@ -1116,10 +1148,6 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
                   <dd>{sceneMoments.weather}</dd>
                 </div>
               ) : null}
-              <div>
-                <dt className="scene-meta-label">Rumor</dt>
-                <dd>{snapshot.state.worldState.activeThreat}</dd>
-              </div>
             </dl>
           </div>
 
@@ -1184,10 +1212,10 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
                   <div className="rounded-2xl border border-zinc-800 bg-black px-4 py-4">
                     <p className="story-kicker">Current chapter</p>
                     <h3 className="text-lg font-semibold text-zinc-50">
-                      {activeArc?.title ?? snapshot.state.sceneState.title}
+                      {snapshot.state.sceneState.title}
                     </h3>
                     <p className="mt-2 text-sm leading-7 text-zinc-400">
-                      {activeArc?.summary ?? snapshot.state.sceneState.summary}
+                      {snapshot.state.sceneState.summary}
                     </p>
                   </div>
 

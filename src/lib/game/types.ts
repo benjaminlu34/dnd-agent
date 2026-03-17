@@ -111,14 +111,19 @@ export type GeneratedCampaignSetup = {
     setting: string;
     openingScene: {
       title: string;
+      location: string;
+      overview: string;
+    };
+  };
+  secretEngine: {
+    openingScene: {
+      title: string;
       summary: string;
       location: string;
       atmosphere: string;
       activeThreat: string;
       suggestedActions: string[];
     };
-  };
-  secretEngine: {
     villain: {
       name: string;
       motive: string;

@@ -27,6 +27,7 @@ import type {
 } from "@/lib/game/types";
 
 type CampaignSetupGenerationInput = {
+  basePrompt?: string;
   prompt?: string;
   previousDraft?: GeneratedCampaignSetup;
 };
@@ -113,6 +114,23 @@ const campaignSetupTool = {
             additionalProperties: false,
             properties: {
               title: { type: "string" },
+              location: { type: "string" },
+              overview: { type: "string" },
+            },
+            required: ["title", "location", "overview"],
+          },
+        },
+        required: ["title", "premise", "tone", "setting", "openingScene"],
+      },
+      secretEngine: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          openingScene: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              title: { type: "string" },
               summary: { type: "string" },
               location: { type: "string" },
               atmosphere: { type: "string" },
@@ -131,13 +149,6 @@ const campaignSetupTool = {
               "suggestedActions",
             ],
           },
-        },
-        required: ["title", "premise", "tone", "setting", "openingScene"],
-      },
-      secretEngine: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
           villain: {
             type: "object",
             additionalProperties: false,
@@ -620,6 +631,8 @@ class OpenRouterDungeonMaster {
   ) {
     const seedCharacter = character ?? toCampaignSeedCharacter(createDefaultCharacterTemplate());
     const hasPreviousDraft = Boolean(input.previousDraft);
+    const revisionPrompt = input.prompt?.trim() ?? "";
+    const basePrompt = input.basePrompt?.trim() ?? "";
     const baseMessages = [
       {
         role: "system" as const,
@@ -630,7 +643,13 @@ class OpenRouterDungeonMaster {
           "Keep titles and summaries clear, concrete, and gameable.",
           "Keep all output inside publicSynopsis and secretEngine.",
           "publicSynopsis is spoiler-safe and must not reveal secretEngine truths, motives, or hidden reveals.",
-          "When revising an existing draft, preserve the overall structure and arrays unless the request requires editing existing values.",
+          "publicSynopsis.openingScene is only a high-level preview for the player-facing pitch.",
+          "publicSynopsis.openingScene.overview must stay descriptive and atmospheric, with no explicit player choices, no branching options, and no DM-style scene instructions.",
+          "Place the full playable opener, immediate pressure, and suggested actions in secretEngine.openingScene.",
+          "When revising an existing draft, treat the revision request as authoritative.",
+          "If the revision conflicts with the previous draft or the original brief, the revision wins and conflicting details must be replaced, not blended.",
+          "Use the previous draft as reference material to preserve what still fits, not as canon that must survive unchanged.",
+          "Keep the JSON schema and item counts stable, but rewrite titles, summaries, hooks, clues, threats, and opening beats as needed to satisfy the revised brief cleanly.",
           "Ensure clue-to-reveal and reveal-to-arc references line up as closely as possible by title.",
           "Do not reuse Briar Glen, Abbess Veyra, the Silver Bell, or other starter campaign names.",
         ].join("\n"),
@@ -641,16 +660,21 @@ class OpenRouterDungeonMaster {
           `Generate a campaign for this character: ${seedCharacter.name}, ${seedCharacter.archetype}.`,
           `Stats: strength ${seedCharacter.stats.strength}, agility ${seedCharacter.stats.agility}, intellect ${seedCharacter.stats.intellect}, charisma ${seedCharacter.stats.charisma}, vitality ${seedCharacter.stats.vitality}.`,
           "Lean toward mystery, momentum, and memorable places over lore dumps.",
-          input.prompt?.trim()
+          revisionPrompt
             ? hasPreviousDraft
               ? [
-                  "Here is the current draft JSON.",
-                  "You must keep all arrays and structures exactly the same, except where needed to implement the specific request below.",
+                  "You are revising an existing campaign draft.",
+                  basePrompt ? `Original player brief: ${basePrompt}` : "Original player brief: not provided.",
+                  `Revision request: ${revisionPrompt}`,
+                  "Build a fresh full draft that satisfies the revised brief.",
+                  "Do not compromise between conflicting directions. The revision request overrides older assumptions, pacing, scene beats, and threat timing.",
+                  "Use the previous draft only to keep strong material that still fits the revised brief.",
+                  "If the revised brief changes pacing or tone, rewrite the opening scene, active threat, hooks, quests, clues, and related summaries so they all point in the new direction.",
                   "Return the full updated JSON, not a partial patch.",
+                  "Reference draft JSON:",
                   JSON.stringify(input.previousDraft),
-                  `Specific revision request: ${input.prompt.trim()}`,
                 ].join("\n")
-              : `Player prompt: ${input.prompt.trim()}`
+              : `Player prompt: ${revisionPrompt}`
             : "Create a fresh campaign draft.",
         ].join("\n"),
       },

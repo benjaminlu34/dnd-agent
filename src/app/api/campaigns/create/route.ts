@@ -45,7 +45,7 @@ export async function POST(request: Request) {
     const arcs = buildArcRecordsFromBlueprint(blueprint);
     const npcs = buildNpcRecordsFromSetup(payload.data.draft);
     const clues = buildClueRecordsFromSetup(payload.data.draft, blueprint);
-    const openingScene = payload.data.draft.publicSynopsis.openingScene;
+    const openingScene = payload.data.draft.secretEngine.openingScene;
 
     const campaign = await prisma.$transaction(async (tx) =>
       tx.campaign.create({

@@ -304,6 +304,7 @@ export function SessionZeroApp() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
+          basePrompt: previousDraft ? prompt : undefined,
           prompt: nextPrompt,
           character: selectedCharacter,
           previousDraft,
@@ -462,7 +463,6 @@ export function SessionZeroApp() {
   }
 
   const { publicSynopsis, secretEngine } = draft;
-
   return (
     <main className="min-h-screen bg-black pb-40 text-zinc-50">
       <div className="mx-auto w-full max-w-5xl px-6 py-12">
@@ -502,12 +502,7 @@ export function SessionZeroApp() {
             <h2 className="text-sm uppercase tracking-[0.22em] text-zinc-500">Opening Scene</h2>
             <h3 className="mt-3 text-xl font-semibold text-white">{publicSynopsis.openingScene.title}</h3>
             <p className="mt-2 text-sm text-zinc-500">{publicSynopsis.openingScene.location}</p>
-            <p className="mt-4 text-sm leading-7 text-zinc-200">{publicSynopsis.openingScene.summary}</p>
-            <p className="mt-4 text-sm leading-7 text-zinc-400">{publicSynopsis.openingScene.atmosphere}</p>
-            <div className="mt-5 rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
-              <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Starting Hook</p>
-              <p className="mt-2 text-sm leading-7 text-zinc-200">{publicSynopsis.openingScene.activeThreat}</p>
-            </div>
+            <p className="mt-4 text-sm leading-7 text-zinc-200">{publicSynopsis.openingScene.overview}</p>
           </section>
           <button
             className="mt-6 text-sm text-zinc-400 underline decoration-zinc-700 underline-offset-4 transition-colors hover:text-zinc-200"
@@ -521,6 +516,21 @@ export function SessionZeroApp() {
         {showAdvanced ? (
           <section className="mt-8 rounded-[2rem] border border-zinc-800 bg-zinc-950 p-8">
             <p className="text-[0.68rem] uppercase tracking-[0.28em] text-zinc-500">The DM Screen</p>
+
+            <div className="mt-6 rounded-3xl border border-zinc-800 bg-black p-5">
+              <h2 className="text-lg font-semibold text-white">Opening Details</h2>
+              <p className="mt-3 text-sm text-zinc-500">{secretEngine.openingScene.location}</p>
+              <p className="mt-4 text-sm leading-7 text-zinc-200">{secretEngine.openingScene.summary}</p>
+              <p className="mt-4 text-sm leading-7 text-zinc-400">{secretEngine.openingScene.atmosphere}</p>
+              <div className="mt-5 rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Starting Hook</p>
+                <p className="mt-2 text-sm leading-7 text-zinc-200">{secretEngine.openingScene.activeThreat}</p>
+                <p className="mt-4 text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Suggested Actions</p>
+                <p className="mt-2 text-sm leading-7 text-zinc-400">
+                  {secretEngine.openingScene.suggestedActions.join(" • ")}
+                </p>
+              </div>
+            </div>
 
             <div className="mt-6 rounded-3xl border border-zinc-800 bg-black p-5">
               <h2 className="text-lg font-semibold text-white">Villain</h2>

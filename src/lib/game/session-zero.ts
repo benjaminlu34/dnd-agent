@@ -3,6 +3,12 @@ import { characterTemplateDraftSchema } from "@/lib/game/characters";
 
 export const openingSceneSchema = z.object({
   title: z.string().trim().min(1),
+  location: z.string().trim().min(1),
+  overview: z.string().trim().min(1),
+});
+
+export const openingSceneDetailsSchema = z.object({
+  title: z.string().trim().min(1),
   summary: z.string().trim().min(1),
   location: z.string().trim().min(1),
   atmosphere: z.string().trim().min(1),
@@ -19,6 +25,7 @@ export const generatedCampaignSetupSchema = z.object({
     openingScene: openingSceneSchema,
   }),
   secretEngine: z.object({
+    openingScene: openingSceneDetailsSchema,
     villain: z.object({
       name: z.string().trim().min(1),
       motive: z.string().trim().min(1),
@@ -83,6 +90,7 @@ export const generatedCampaignSetupSchema = z.object({
 
 export const campaignDraftRequestSchema = z.object({
   prompt: z.string().trim().min(1, "Prompt is required."),
+  basePrompt: z.string().trim().min(1).optional(),
   character: characterTemplateDraftSchema.extend({
     id: z.string().trim().min(1),
   }),
