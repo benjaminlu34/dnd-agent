@@ -202,6 +202,16 @@ export async function getCampaignSnapshot(
 
   const session = campaign.sessions[0];
   const recentMessages = session ? await getRecentMessages(session.id) : [];
+  const latestResolvedTurn = session
+    ? await prisma.turn.findFirst({
+        where: {
+          sessionId: session.id,
+          status: "resolved",
+        },
+        orderBy: { updatedAt: "desc" },
+        select: { id: true, resultJson: true },
+      })
+    : null;
 
   return {
     campaignId: campaign.id,
@@ -220,6 +230,14 @@ export async function getCampaignSnapshot(
     memories: campaign.memories.map(toMemory),
     recentMessages,
     previouslyOn,
+    latestResolvedTurnId: latestResolvedTurn?.id ?? null,
+    canRetryLatestTurn:
+      Boolean(
+        latestResolvedTurn &&
+          latestResolvedTurn.resultJson &&
+          typeof latestResolvedTurn.resultJson === "object" &&
+          "rollback" in (latestResolvedTurn.resultJson as Record<string, unknown>),
+      ),
   };
 }
 

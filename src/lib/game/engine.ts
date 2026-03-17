@@ -26,6 +26,155 @@ type TurnStream = {
   checkResult?: (result: CheckResult) => void;
 };
 
+type TurnRollbackData = {
+  previousState: CampaignSnapshot["state"];
+  previousSessionTurnCount: number;
+  quests: {
+    id: string;
+    stage: number;
+    status: string;
+  }[];
+  arcs: {
+    id: string;
+    currentTurn: number;
+    status: string;
+  }[];
+  npcs: {
+    id: string;
+    approval: number;
+  }[];
+  clues: {
+    id: string;
+    status: string;
+    discoveredAtTurn: number | null;
+  }[];
+  messageIds: string[];
+  memoryEntryId: string | null;
+};
+
+function normalizeActionOptions(actions: string[]) {
+  return Array.from(
+    new Set(actions.map((action) => action.trim()).filter(Boolean)),
+  ).slice(0, 4);
+}
+
+function overlapRatio(a: string[], b: string[]) {
+  if (!a.length || !b.length) {
+    return 0;
+  }
+
+  const left = new Set(a.map((item) => item.toLowerCase()));
+  const right = new Set(b.map((item) => item.toLowerCase()));
+  let overlap = 0;
+
+  for (const value of left) {
+    if (right.has(value)) {
+      overlap += 1;
+    }
+  }
+
+  return overlap / Math.max(left.size, right.size);
+}
+
+function buildFallbackSuggestedActions(input: {
+  currentActions: string[];
+  playerAction: string;
+  narration: string;
+  companionName?: string | null;
+}) {
+  const narration = input.narration.toLowerCase();
+  const companionAction = input.companionName
+    ? `Ask ${input.companionName} what they make of it`
+    : "Question the nearest witness";
+
+  const options = (() => {
+    if (/(figure|cloak|shadow|watcher|stranger|suspect|someone ahead)/.test(narration)) {
+      return [
+        "Follow the figure before they vanish",
+        "Call out and force a reaction",
+        companionAction,
+        "Circle wide and cut off their escape",
+      ];
+    }
+
+    if (/(door|gate|lock|window|threshold|barred)/.test(narration)) {
+      return [
+        "Inspect the barrier more carefully",
+        "Listen for movement beyond it",
+        "Try a subtler way through",
+        companionAction,
+      ];
+    }
+
+    if (/(notice|letter|ledger|map|journal|inscription|seal)/.test(narration)) {
+      return [
+        "Study the writing more closely",
+        "Look for whoever left it here",
+        "Compare it to what you already know",
+        companionAction,
+      ];
+    }
+
+    if (/(crowd|tavern|inn|market|room|patrons|onlookers)/.test(narration)) {
+      return [
+        "Read the room before acting",
+        "Question someone nearby",
+        "Slip after the most suspicious person",
+        companionAction,
+      ];
+    }
+
+    if (/(trail|tracks|soot|blood|mud|footprints)/.test(narration)) {
+      return [
+        "Follow the trail while it is fresh",
+        "Inspect the traces for detail",
+        "Hide your approach and move carefully",
+        companionAction,
+      ];
+    }
+
+    return [
+      "Press this lead before it goes cold",
+      "Pause and study the scene more carefully",
+      companionAction,
+      "Change your approach and test the room",
+    ];
+  })();
+
+  const normalized = normalizeActionOptions(options).filter(
+    (action) => action.toLowerCase() !== input.playerAction.trim().toLowerCase(),
+  );
+
+  if (overlapRatio(normalized, input.currentActions) >= 0.75) {
+    return normalizeActionOptions([
+      "Press forward before the moment closes",
+      companionAction,
+      "Search for the hidden angle here",
+      "Shift position and see what changes",
+    ]);
+  }
+
+  return normalized;
+}
+
+function chooseSuggestedActions(input: {
+  currentActions: string[];
+  candidateActions: string[];
+  playerAction: string;
+  narration: string;
+  companionName?: string | null;
+}) {
+  const candidateActions = normalizeActionOptions(input.candidateActions).filter(
+    (action) => action.toLowerCase() !== input.playerAction.trim().toLowerCase(),
+  );
+
+  if (candidateActions.length >= 2 && overlapRatio(candidateActions, input.currentActions) < 0.75) {
+    return candidateActions;
+  }
+
+  return buildFallbackSuggestedActions(input);
+}
+
 export async function createAdventure() {
   const user = await prisma.user.upsert({
     where: { email: "solo@adventure.local" },
@@ -183,6 +332,32 @@ async function commitValidatedTurn(input: {
   });
 
   await prisma.$transaction(async (tx) => {
+    const rollback: TurnRollbackData = {
+      previousState: snapshot.state,
+      previousSessionTurnCount: snapshot.state.turnCount,
+      quests: snapshot.quests.map((quest) => ({
+        id: quest.id,
+        stage: quest.stage,
+        status: quest.status,
+      })),
+      arcs: snapshot.arcs.map((arc) => ({
+        id: arc.id,
+        currentTurn: arc.currentTurn,
+        status: arc.status,
+      })),
+      npcs: snapshot.npcs.map((npc) => ({
+        id: npc.id,
+        approval: npc.approval,
+      })),
+      clues: snapshot.clues.map((clue) => ({
+        id: clue.id,
+        status: clue.status,
+        discoveredAtTurn: clue.discoveredAtTurn,
+      })),
+      messageIds: [],
+      memoryEntryId: null,
+    };
+
     await tx.campaign.update({
       where: { id: snapshot.campaignId },
       data: {
@@ -242,15 +417,7 @@ async function commitValidatedTurn(input: {
       },
     });
 
-    await tx.turn.update({
-      where: { id: turnId },
-      data: {
-        status: "resolved",
-        resultJson: checkResult ? checkResult : undefined,
-      },
-    });
-
-    await tx.message.create({
+    const userMessage = await tx.message.create({
       data: {
         sessionId,
         role: "user",
@@ -258,9 +425,10 @@ async function commitValidatedTurn(input: {
         content: playerAction,
       },
     });
+    rollback.messageIds.push(userMessage.id);
 
     if (checkResult) {
-      await tx.message.create({
+      const checkMessage = await tx.message.create({
         data: {
           sessionId,
           role: "system",
@@ -269,10 +437,11 @@ async function commitValidatedTurn(input: {
           payload: checkResult,
         },
       });
+      rollback.messageIds.push(checkMessage.id);
     }
 
     if (narration) {
-      await tx.message.create({
+      const narrationMessage = await tx.message.create({
         data: {
           sessionId,
           role: "assistant",
@@ -280,10 +449,11 @@ async function commitValidatedTurn(input: {
           content: companionLine ? `${narration}\n\n${companionLine}` : narration,
         },
       });
+      rollback.messageIds.push(narrationMessage.id);
     }
 
     for (const warning of warnings) {
-      await tx.message.create({
+      const warningMessage = await tx.message.create({
         data: {
           sessionId,
           role: "system",
@@ -291,10 +461,11 @@ async function commitValidatedTurn(input: {
           content: warning,
         },
       });
+      rollback.messageIds.push(warningMessage.id);
     }
 
     if (validated.memorySummary) {
-      await tx.memoryEntry.create({
+      const memoryEntry = await tx.memoryEntry.create({
         data: {
           campaignId: snapshot.campaignId,
           sessionId,
@@ -302,8 +473,182 @@ async function commitValidatedTurn(input: {
           summary: validated.memorySummary,
         },
       });
+      rollback.memoryEntryId = memoryEntry.id;
     }
+
+    await tx.turn.update({
+      where: { id: turnId },
+      data: {
+        status: "resolved",
+        resultJson: {
+          rollback,
+          ...(checkResult ? { checkResult } : {}),
+        },
+      },
+    });
   });
+}
+
+export async function cancelPendingTurn(turnId: string) {
+  const turn = await prisma.turn.findUnique({
+    where: { id: turnId },
+    select: {
+      id: true,
+      campaignId: true,
+      status: true,
+    },
+  });
+
+  if (!turn || turn.status !== "pending_check") {
+    throw new Error("Pending turn not found.");
+  }
+
+  const snapshot = await getCampaignSnapshot(turn.campaignId);
+
+  if (!snapshot) {
+    throw new Error("Campaign not found.");
+  }
+
+  await prisma.$transaction([
+    prisma.turn.update({
+      where: { id: turnId },
+      data: {
+        status: "cancelled",
+        pendingCheckJson: undefined,
+      },
+    }),
+    prisma.campaign.update({
+      where: { id: turn.campaignId },
+      data: {
+        stateJson: {
+          ...(snapshot.state as object),
+          pendingTurnId: null,
+        },
+      },
+    }),
+  ]);
+}
+
+export async function retryLastTurn(turnId: string) {
+  const turn = await prisma.turn.findUnique({
+    where: { id: turnId },
+    select: {
+      id: true,
+      campaignId: true,
+      sessionId: true,
+      status: true,
+      createdAt: true,
+      resultJson: true,
+    },
+  });
+
+  if (!turn || turn.status !== "resolved") {
+    throw new Error("Retry is only available for the latest resolved turn.");
+  }
+
+  const newerTurn = await prisma.turn.findFirst({
+    where: {
+      sessionId: turn.sessionId,
+      createdAt: {
+        gt: turn.createdAt,
+      },
+      status: {
+        notIn: ["cancelled", "retried"],
+      },
+    },
+    select: { id: true },
+  });
+
+  if (newerTurn) {
+    throw new Error("Only the latest turn can be retried.");
+  }
+
+  const resultJson = (turn.resultJson as { rollback?: TurnRollbackData } | null) ?? null;
+  const rollback = resultJson?.rollback;
+
+  if (!rollback) {
+    throw new Error("This turn cannot be retried.");
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.campaign.update({
+      where: { id: turn.campaignId },
+      data: {
+        stateJson: rollback.previousState,
+      },
+    });
+
+    await tx.session.update({
+      where: { id: turn.sessionId },
+      data: {
+        turnCount: rollback.previousSessionTurnCount,
+      },
+    });
+
+    for (const quest of rollback.quests) {
+      await tx.quest.update({
+        where: { id: quest.id },
+        data: {
+          stage: quest.stage,
+          status: quest.status,
+        },
+      });
+    }
+
+    for (const arc of rollback.arcs) {
+      await tx.arc.update({
+        where: { id: arc.id },
+        data: {
+          currentTurn: arc.currentTurn,
+          status: arc.status,
+        },
+      });
+    }
+
+    for (const npc of rollback.npcs) {
+      await tx.nPC.update({
+        where: { id: npc.id },
+        data: {
+          approval: npc.approval,
+        },
+      });
+    }
+
+    for (const clue of rollback.clues) {
+      await tx.clue.update({
+        where: { id: clue.id },
+        data: {
+          status: clue.status,
+          discoveredAtTurn: clue.discoveredAtTurn,
+        },
+      });
+    }
+
+    if (rollback.messageIds.length) {
+      await tx.message.deleteMany({
+        where: {
+          id: {
+            in: rollback.messageIds,
+          },
+        },
+      });
+    }
+
+    if (rollback.memoryEntryId) {
+      await tx.memoryEntry.deleteMany({
+        where: { id: rollback.memoryEntryId },
+      });
+    }
+
+    await tx.turn.update({
+      where: { id: turnId },
+      data: {
+        status: "retried",
+      },
+    });
+  });
+
+  return getCampaignSnapshot(turn.campaignId);
 }
 
 export async function triageTurn(input: {
@@ -345,6 +690,19 @@ export async function triageTurn(input: {
     },
   );
 
+  const narrationForActions = streamedNarration.trim() || decision.proposedDelta.sceneSummary || snapshot.state.sceneState.summary;
+  const suggestedActions = chooseSuggestedActions({
+    currentActions: snapshot.state.sceneState.suggestedActions,
+    candidateActions: decision.suggestedActions,
+    playerAction: input.playerAction,
+    narration: narrationForActions,
+    companionName: promptContext.companion?.name,
+  });
+  const proposedDelta = {
+    ...decision.proposedDelta,
+    suggestedActions,
+  };
+
   if (decision.requiresCheck && decision.check) {
     await prisma.turn.update({
       where: { id: turn.id },
@@ -368,7 +726,7 @@ export async function triageTurn(input: {
       type: "check_required" as const,
       turnId: turn.id,
       check: decision.check,
-      suggestedActions: decision.suggestedActions,
+      suggestedActions,
     };
   }
 
@@ -379,7 +737,7 @@ export async function triageTurn(input: {
     arcs: snapshot.arcs,
     clues: snapshot.clues,
     npcs: snapshot.npcs,
-    proposedDelta: decision.proposedDelta,
+    proposedDelta,
   });
 
   await commitValidatedTurn({
@@ -389,14 +747,14 @@ export async function triageTurn(input: {
     playerAction: input.playerAction,
     validated,
     warnings: validated.warnings,
-    narration: streamedNarration.trim() || decision.proposedDelta.sceneSummary,
+    narration: narrationForActions,
   });
 
   return {
     type: "resolved" as const,
     turnId: turn.id,
     validated,
-    suggestedActions: decision.suggestedActions,
+    suggestedActions: validated.nextState.sceneState.suggestedActions,
   };
 }
 
@@ -448,6 +806,19 @@ export async function resolvePendingCheck(input: {
     },
   );
 
+  const narrationForActions = streamedNarration.trim() || decision.proposedDelta.sceneSummary || snapshot.state.sceneState.summary;
+  const suggestedActions = chooseSuggestedActions({
+    currentActions: snapshot.state.sceneState.suggestedActions,
+    candidateActions: decision.suggestedActions,
+    playerAction: turn.playerAction,
+    narration: narrationForActions,
+    companionName: promptContext.companion?.name,
+  });
+  const proposedDelta = {
+    ...decision.proposedDelta,
+    suggestedActions,
+  };
+
   const validated = validateDelta({
     blueprint: snapshot.blueprint,
     state: snapshot.state,
@@ -455,7 +826,7 @@ export async function resolvePendingCheck(input: {
     arcs: snapshot.arcs,
     clues: snapshot.clues,
     npcs: snapshot.npcs,
-    proposedDelta: decision.proposedDelta,
+    proposedDelta,
   });
 
   await commitValidatedTurn({
@@ -465,14 +836,14 @@ export async function resolvePendingCheck(input: {
     playerAction: turn.playerAction,
     validated,
     warnings: validated.warnings,
-    narration: streamedNarration.trim() || decision.proposedDelta.sceneSummary,
+    narration: narrationForActions,
     checkResult,
   });
 
   return {
     checkResult,
     validated,
-    suggestedActions: decision.suggestedActions,
+    suggestedActions: validated.nextState.sceneState.suggestedActions,
   };
 }
 

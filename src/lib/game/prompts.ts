@@ -66,6 +66,8 @@ export function buildDungeonMasterSystemPrompt() {
     "If no roll is required, narrate immediately and then submit the tool payload.",
     "Eligible reveals may be used at most once and only if dramatically appropriate.",
     "Suggested actions should be short, concrete, and phrased like natural next moves in the fiction.",
+    "Suggested actions must reflect the immediate current moment, not the opening scene or stale earlier options.",
+    "Replace stale suggested actions as the story moves. Do not repeat the same suggestions turn after turn unless the situation is truly unchanged.",
   ].join("\n");
 }
 
@@ -126,6 +128,7 @@ If no check is needed, narrate only the immediate development that follows from 
 Do not restage the whole scene.
 Do not over-explain what the player has learned.
 End on a concrete image, line of dialogue, or new pressure.
+Return 2-4 suggested actions that fit this exact moment and would feel different if the scene has progressed.
 `;
 }
 
@@ -173,6 +176,7 @@ Keep the outcome continuity-safe and focused on the immediate result.
 Do not rewrite earlier scene details unless the new outcome genuinely reveals something hidden.
 Do not explain the scene's meaning after narrating it.
 End on the sharpest new opening, risk, or image.
+Return 2-4 suggested actions that follow from this exact resolved outcome, not from the earlier opening scene.
 `;
 }
 

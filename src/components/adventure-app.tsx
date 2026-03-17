@@ -274,6 +274,27 @@ function MessageBlock({
   );
 }
 
+function DiceIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      fill="none"
+      className="h-4 w-4"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M7 3.5h10l3.5 3.5v10L17 20.5H7L3.5 17V7z" />
+      <circle cx="9" cy="9" r="1" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="15" r="1" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="9" r="1" fill="currentColor" stroke="none" />
+      <circle cx="9" cy="15" r="1" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
 function EmptyJournalCopy({ children }: { children: React.ReactNode }) {
   return (
     <div className="rounded-2xl border border-dashed border-zinc-800 bg-black px-4 py-5 text-sm leading-7 text-zinc-500">
@@ -298,9 +319,11 @@ export function AdventureApp() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [journalTab, setJournalTab] = useState<JournalTab>("quests");
   const feedRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const streamingMessageIdRef = useRef<string | null>(null);
   const [activeNarrationId, setActiveNarrationId] = useState<string | null>(null);
   const [lastCampaignId, setLastCampaignId] = useState<string | null>(null);
+  const [pendingActionDraft, setPendingActionDraft] = useState("");
 
   function removeStreamingNarration() {
     const currentStreamId = streamingMessageIdRef.current;
@@ -312,6 +335,21 @@ export function AdventureApp() {
     setMessages((current) => current.filter((message) => message.id !== currentStreamId));
     streamingMessageIdRef.current = null;
     setActiveNarrationId(null);
+  }
+
+  function removeLatestLocalUserAction() {
+    setMessages((current) => {
+      const next = [...current];
+
+      for (let index = next.length - 1; index >= 0; index -= 1) {
+        if (next[index]?.role === "user" && next[index]?.kind === "action") {
+          next.splice(index, 1);
+          break;
+        }
+      }
+
+      return next;
+    });
   }
 
   useEffect(() => {
@@ -326,6 +364,17 @@ export function AdventureApp() {
       behavior: "smooth",
     });
   }, [messages, pendingCheck, activeNarrationId]);
+
+  useEffect(() => {
+    const textarea = inputRef.current;
+
+    if (!textarea) {
+      return;
+    }
+
+    textarea.style.height = "0px";
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 240)}px`;
+  }, [inputValue]);
 
   async function refreshCampaigns() {
     setCampaignsLoading(true);
@@ -387,6 +436,7 @@ export function AdventureApp() {
       setMessages(nextSnapshot.recentMessages);
       setSuggestedActions(nextSnapshot.state.sceneState.suggestedActions);
       setPendingCheck(null);
+      setPendingActionDraft("");
       streamingMessageIdRef.current = null;
       setActiveNarrationId(null);
     });
@@ -499,6 +549,7 @@ export function AdventureApp() {
     setStatus("streaming");
     setError(null);
     setLastCheckResult(null);
+    setPendingActionDraft(action.trim());
     setMessages((current) => [
       ...current,
       {
@@ -589,6 +640,61 @@ export function AdventureApp() {
       setJournalTab("journal");
     } catch (summaryError) {
       setError(summaryError instanceof Error ? summaryError.message : "Summary failed.");
+    }
+  }
+
+  async function editPendingAction() {
+    if (!pendingCheck) {
+      return;
+    }
+
+    setStatus("loading");
+    setError(null);
+
+    try {
+      const response = await fetch(`/api/turns/${pendingCheck.turnId}/cancel`, {
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        throw new Error("Could not reopen that action.");
+      }
+
+      removeLatestLocalUserAction();
+      setInputValue(pendingActionDraft);
+      setPendingCheck(null);
+      setLastCheckResult(null);
+    } catch (cancelError) {
+      setError(cancelError instanceof Error ? cancelError.message : "Could not reopen action.");
+    } finally {
+      setStatus("idle");
+    }
+  }
+
+  async function retryLatestTurn() {
+    if (!snapshot?.latestResolvedTurnId || !snapshot.canRetryLatestTurn || status !== "idle") {
+      return;
+    }
+
+    setStatus("loading");
+    setError(null);
+
+    try {
+      const response = await fetch(`/api/turns/${snapshot.latestResolvedTurnId}/retry`, {
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        throw new Error("Could not retry the latest turn.");
+      }
+
+      const data = (await response.json()) as { snapshot: CampaignSnapshot };
+      setLastCheckResult(null);
+      applySnapshot(data.snapshot);
+    } catch (retryError) {
+      setError(retryError instanceof Error ? retryError.message : "Could not retry latest turn.");
+    } finally {
+      setStatus("idle");
     }
   }
 
@@ -864,24 +970,33 @@ export function AdventureApp() {
               ) : null}
 
               {pendingCheck ? (
-                <section className="rounded-lg border border-zinc-800 bg-transparent px-5 py-5">
-                  <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="max-w-2xl">
-                      <p className="text-[0.68rem] uppercase tracking-[0.24em] text-zinc-400">
-                        A roll decides what happens next
-                      </p>
-                      <h2 className="mt-2 text-2xl font-semibold capitalize text-zinc-50">{pendingCheck.stat}</h2>
-                      <p className="mt-2 text-sm leading-7 text-zinc-300">{pendingCheck.reason}</p>
-                      <p className="mt-2 text-[0.68rem] uppercase tracking-[0.18em] text-zinc-400">
-                        {pendingCheck.mode} check
-                      </p>
-                    </div>
+                <section className="flex flex-col gap-4 rounded-xl border border-zinc-800 border-l-2 border-l-white bg-zinc-950/80 p-6">
+                  <div className="flex items-start justify-between gap-4">
+                    <h2 className="text-lg font-semibold capitalize text-zinc-100">
+                      {pendingCheck.stat} Check
+                    </h2>
+                    <span className="inline-flex items-center rounded-sm border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] uppercase tracking-wider text-zinc-400">
+                      {pendingCheck.mode} check
+                    </span>
+                  </div>
+                  <p className="max-w-lg text-sm leading-relaxed text-zinc-400">
+                    {pendingCheck.reason}
+                  </p>
+                  <div className="flex justify-between gap-3">
                     <button
-                      className="button-press rounded-full bg-white px-5 py-3 text-sm font-semibold text-black hover:bg-zinc-200"
+                      className="button-press inline-flex items-center rounded-md border border-zinc-700 px-4 py-2.5 text-sm font-medium text-zinc-200 hover:bg-zinc-900"
+                      onClick={editPendingAction}
+                      disabled={status !== "idle"}
+                    >
+                      Edit Action
+                    </button>
+                    <button
+                      className="button-press inline-flex items-center gap-2 rounded-md bg-white px-6 py-2.5 text-sm font-medium text-black shadow-sm transition-colors hover:bg-zinc-200"
                       onClick={resolveCheck}
                       disabled={status !== "idle"}
                     >
-                      Roll Dice
+                      <DiceIcon />
+                      <span>Roll Dice</span>
                     </button>
                   </div>
                 </section>
@@ -905,7 +1020,19 @@ export function AdventureApp() {
                 </section>
               ) : null}
 
-              {suggestedActions.length ? (
+              {!pendingCheck && snapshot.canRetryLatestTurn && snapshot.latestResolvedTurnId ? (
+                <div className="flex justify-end">
+                  <button
+                    className="button-press inline-flex items-center rounded-md border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-900"
+                    onClick={retryLatestTurn}
+                    disabled={status !== "idle"}
+                  >
+                    Retry Last Turn
+                  </button>
+                </div>
+              ) : null}
+
+              {!pendingCheck && suggestedActions.length ? (
                 <div className="flex flex-wrap gap-2">
                   {suggestedActions.map((action) => (
                     <button
@@ -920,29 +1047,41 @@ export function AdventureApp() {
                 </div>
               ) : null}
 
-              <form
-                className="rounded-[1.75rem] border border-zinc-800 bg-zinc-950 p-3 shadow-2xl shadow-black/50 backdrop-blur"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  void submitAction(inputValue);
-                }}
-              >
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-                  <input
-                    value={inputValue}
-                    onChange={(event) => setInputValue(event.target.value)}
-                    placeholder="What do you do next?"
-                    className="min-h-14 flex-1 rounded-2xl border border-zinc-800 bg-black px-4 py-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-zinc-600"
-                    disabled={status !== "idle" || Boolean(pendingCheck)}
-                  />
-                  <button
-                    className="button-press min-h-14 rounded-2xl bg-white px-5 py-3 text-sm font-medium text-black hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
-                    disabled={status !== "idle" || Boolean(pendingCheck) || !inputValue.trim()}
-                  >
-                    {status === "streaming" ? "The world responds..." : "Take Action"}
-                  </button>
-                </div>
-              </form>
+              {!pendingCheck ? (
+                <form
+                  className="rounded-[1.75rem] border border-zinc-800 bg-zinc-950 p-3 shadow-2xl shadow-black/50 backdrop-blur"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void submitAction(inputValue);
+                  }}
+                >
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                    <textarea
+                      ref={inputRef}
+                      value={inputValue}
+                      onChange={(event) => setInputValue(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" && !event.shiftKey) {
+                          event.preventDefault();
+                          if (inputValue.trim() && status === "idle" && !pendingCheck) {
+                            void submitAction(inputValue);
+                          }
+                        }
+                      }}
+                      placeholder="What do you do next?"
+                      rows={1}
+                      className="min-h-14 max-h-60 flex-1 resize-none overflow-y-auto rounded-2xl border border-zinc-800 bg-black px-4 py-4 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-zinc-600"
+                      disabled={status !== "idle" || Boolean(pendingCheck)}
+                    />
+                    <button
+                      className="button-press min-h-14 rounded-2xl bg-white px-5 py-3 text-sm font-medium text-black hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={status !== "idle" || Boolean(pendingCheck) || !inputValue.trim()}
+                    >
+                      {status === "streaming" ? "The world responds..." : "Take Action"}
+                    </button>
+                  </div>
+                </form>
+              ) : null}
             </div>
           </div>
         </section>

@@ -217,6 +217,8 @@ export type CampaignSnapshot = {
   memories: MemoryRecord[];
   recentMessages: StoryMessage[];
   previouslyOn: string | null;
+  latestResolvedTurnId: string | null;
+  canRetryLatestTurn: boolean;
 };
 
 export type CampaignListItem = {

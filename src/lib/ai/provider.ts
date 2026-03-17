@@ -454,6 +454,13 @@ function normalizeTriageDecision(
   ).slice(0, 4);
   const proposedDelta =
     toObject(payload?.proposedDelta ?? payload?.proposed_delta ?? payload?.delta) ?? {};
+  const proposedDeltaWithActions =
+    suggestedActions.length > 0 && !Array.isArray(proposedDelta.suggestedActions)
+      ? {
+          ...proposedDelta,
+          suggestedActions,
+        }
+      : proposedDelta;
   const requiresCheck =
     typeof payload?.requiresCheck === "boolean"
       ? payload.requiresCheck
@@ -499,8 +506,8 @@ function normalizeTriageDecision(
     requiresCheck: false,
     suggestedActions,
     proposedDelta: {
-      ...(proposedDelta as ProposedStateDelta),
-      ...(narration && !(proposedDelta as ProposedStateDelta).sceneSummary
+      ...(proposedDeltaWithActions as ProposedStateDelta),
+      ...(narration && !(proposedDeltaWithActions as ProposedStateDelta).sceneSummary
         ? { sceneSummary: narration }
         : {}),
     },
@@ -517,13 +524,20 @@ function normalizeResolveDecision(raw: unknown, text: string): ResolveDecision {
   ).slice(0, 4);
   const proposedDelta =
     toObject(payload?.proposedDelta ?? payload?.proposed_delta ?? payload?.delta) ?? {};
+  const proposedDeltaWithActions =
+    suggestedActions.length > 0 && !Array.isArray(proposedDelta.suggestedActions)
+      ? {
+          ...proposedDelta,
+          suggestedActions,
+        }
+      : proposedDelta;
   const narration = sanitizeNarration(text);
 
   return {
     suggestedActions,
     proposedDelta: {
-      ...(proposedDelta as ProposedStateDelta),
-      ...(narration && !(proposedDelta as ProposedStateDelta).sceneSummary
+      ...(proposedDeltaWithActions as ProposedStateDelta),
+      ...(narration && !(proposedDeltaWithActions as ProposedStateDelta).sceneSummary
         ? { sceneSummary: narration }
         : {}),
     },
