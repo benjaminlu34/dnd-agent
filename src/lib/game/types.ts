@@ -257,6 +257,55 @@ export type CampaignSnapshot = {
   canRetryLatestTurn: boolean;
 };
 
+export type PlayerCampaignState = {
+  turnCount: number;
+  sceneState: SceneState;
+};
+
+export type PlayerVisibleQuestRecord = {
+  id: string;
+  title: string;
+  summary: string | null;
+  stage: number;
+  maxStage: number;
+  status: QuestStatus;
+};
+
+export type PlayerVisibleNpcRecord = {
+  id: string;
+  name: string;
+  role: string | null;
+  notes: string | null;
+  isCompanion: boolean;
+};
+
+export type PlayerVisibleClue = {
+  id: string;
+  text: string;
+  source: string;
+  status: ClueStatus;
+  discoveredAtTurn: number | null;
+};
+
+export type PlayerCampaignSnapshot = {
+  campaignId: string;
+  sessionId: string;
+  title: string;
+  premise: string;
+  tone: string;
+  setting: string;
+  state: PlayerCampaignState;
+  character: CampaignCharacter;
+  quests: PlayerVisibleQuestRecord[];
+  npcs: PlayerVisibleNpcRecord[];
+  clues: PlayerVisibleClue[];
+  memories: MemoryRecord[];
+  recentMessages: StoryMessage[];
+  previouslyOn: string | null;
+  latestResolvedTurnId: string | null;
+  canRetryLatestTurn: boolean;
+};
+
 export type CampaignListItem = {
   id: string;
   title: string;

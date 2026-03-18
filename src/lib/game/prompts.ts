@@ -58,6 +58,8 @@ export function buildDungeonMasterSystemPrompt() {
     "Do not summarize the lesson or explain the meaning of events to the player.",
     "Avoid lines like 'you learn', 'you realize', 'it is clear', or 'you have learned something useful' unless the character is explicitly thinking them.",
     "Show consequences through concrete details, dialogue, behavior, and sensory observation.",
+    "Do not expose hidden motives, secret identities, unrevealed chapter structure, or backstage quest scaffolding before the fiction earns it.",
+    "When introducing a person, faction, or lead for the first time, show them through action, dialogue, or visible detail instead of dossier-style explanation.",
     "Let clues surface naturally. Do not make every clue perfectly convenient or fully explained on arrival.",
     "Preserve some ambiguity when appropriate.",
     "Avoid markdown styling such as bold, italics, bullet lists, or headers in narration unless the player is literally reading a sign, inscription, or document.",

@@ -25,6 +25,10 @@ import type {
   ClueStatus,
   MemoryRecord,
   NpcRecord,
+  PlayerCampaignSnapshot,
+  PlayerVisibleClue,
+  PlayerVisibleNpcRecord,
+  PlayerVisibleQuestRecord,
   QuestRecord,
   QuestStatus,
   StoryMessage,
@@ -348,6 +352,64 @@ function toMessage(message: Message): StoryMessage {
   };
 }
 
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildPlayerKnowledgeText(snapshot: CampaignSnapshot, previouslyOn?: string | null) {
+  return [
+    snapshot.state.sceneState.title,
+    snapshot.state.sceneState.summary,
+    snapshot.state.sceneState.atmosphere,
+    previouslyOn ?? snapshot.previouslyOn ?? "",
+    ...snapshot.recentMessages.map((message) => message.content),
+    ...snapshot.memories.map((entry) => entry.summary),
+  ]
+    .join(" ")
+    .toLowerCase();
+}
+
+function isNamedInKnowledgeText(knowledgeText: string, value: string) {
+  const trimmed = value.trim().toLowerCase();
+
+  if (!trimmed) {
+    return false;
+  }
+
+  return new RegExp(`\\b${escapeRegExp(trimmed)}\\b`, "i").test(knowledgeText);
+}
+
+function toPlayerQuest(quest: QuestRecord): PlayerVisibleQuestRecord {
+  return {
+    id: quest.id,
+    title: quest.title,
+    summary: null,
+    stage: quest.stage,
+    maxStage: quest.maxStage,
+    status: quest.status,
+  };
+}
+
+function toPlayerNpc(npc: NpcRecord, knowledgeText: string): PlayerVisibleNpcRecord {
+  return {
+    id: npc.id,
+    name: npc.name,
+    role: isNamedInKnowledgeText(knowledgeText, npc.role) ? npc.role : null,
+    notes: null,
+    isCompanion: npc.isCompanion,
+  };
+}
+
+function toPlayerClue(clue: Clue): PlayerVisibleClue {
+  return {
+    id: clue.id,
+    text: clue.text,
+    source: clue.source,
+    status: clue.status,
+    discoveredAtTurn: clue.discoveredAtTurn,
+  };
+}
+
 export async function getRecentMessages(sessionId: string) {
   const messages = await prisma.message.findMany({
     where: { sessionId },
@@ -413,7 +475,46 @@ export async function getCampaignSnapshot(
   };
 }
 
+export function toPlayerCampaignSnapshot(
+  snapshot: CampaignSnapshot,
+  previouslyOn: string | null = snapshot.previouslyOn,
+): PlayerCampaignSnapshot {
+  const knowledgeText = buildPlayerKnowledgeText(snapshot, previouslyOn);
+  const visibleQuests = snapshot.quests
+    .filter((quest) => isNamedInKnowledgeText(knowledgeText, quest.title))
+    .map(toPlayerQuest);
+  const visibleNpcs = snapshot.npcs
+    .filter((npc) => isNamedInKnowledgeText(knowledgeText, npc.name))
+    .map((npc) => toPlayerNpc(npc, knowledgeText));
+  const visibleClues = snapshot.clues
+    .filter((clue) => clue.status === "discovered")
+    .map(toPlayerClue);
+
+  return {
+    campaignId: snapshot.campaignId,
+    sessionId: snapshot.sessionId,
+    title: snapshot.title,
+    premise: snapshot.premise,
+    tone: snapshot.tone,
+    setting: snapshot.setting,
+    state: {
+      turnCount: snapshot.state.turnCount,
+      sceneState: snapshot.state.sceneState,
+    },
+    character: snapshot.character,
+    quests: visibleQuests,
+    npcs: visibleNpcs,
+    clues: visibleClues,
+    memories: snapshot.memories,
+    recentMessages: snapshot.recentMessages,
+    previouslyOn,
+    latestResolvedTurnId: snapshot.latestResolvedTurnId,
+    canRetryLatestTurn: snapshot.canRetryLatestTurn,
+  };
+}
+
 export function getPromptContext(snapshot: CampaignSnapshot) {
+  const playerKnowledgeText = buildPlayerKnowledgeText(snapshot);
   const activeArc = snapshot.arcs.find((arc) => arc.id === snapshot.state.activeArcId);
   const unresolvedHooks = snapshot.state.hooks.filter((hook) => hook.status === "open");
   const recentCanon = snapshot.recentMessages
@@ -435,7 +536,10 @@ export function getPromptContext(snapshot: CampaignSnapshot) {
     (clue) => clue.status === "hidden" || clue.status === "discovered",
   );
   const staleClues = getStaleClues(snapshot.clues, snapshot.state.turnCount);
-  const companion = snapshot.npcs.find((npc) => npc.isCompanion) ?? null;
+  const companion =
+    snapshot.npcs.find(
+      (npc) => npc.isCompanion && isNamedInKnowledgeText(playerKnowledgeText, npc.name),
+    ) ?? null;
   const eligibleRevealIds = snapshot.blueprint.hiddenReveals
     .filter((reveal) => {
       const allCluesFound = reveal.requiredClues.every((clueId) =>

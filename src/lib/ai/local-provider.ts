@@ -1502,22 +1502,22 @@ export class LocalDungeonMaster {
 
   async summarizeSession(messages: string[]) {
     const cleaned = messages.map(stripRolePrefix).filter(Boolean);
-    const opening = cleaned[0] ? summarizeText(cleaned[0], 120) : "The session began under pressure.";
+    const opening = cleaned[0] ? summarizeText(cleaned[0], 110) : "The session opened in a tense quiet.";
     const midpoint = cleaned[Math.max(0, cleaned.length - 3)]
-      ? summarizeText(cleaned[Math.max(0, cleaned.length - 3)]!, 120)
-      : "The player kept pressing the strongest available lead.";
+      ? summarizeText(cleaned[Math.max(0, cleaned.length - 3)]!, 110)
+      : "The trail stayed uncertain.";
     const ending = cleaned.at(-1)
-      ? summarizeText(cleaned.at(-1)!, 120)
-      : "The situation remains unresolved.";
+      ? summarizeText(cleaned.at(-1)!, 110)
+      : "The scene did not settle cleanly.";
 
-    return `${opening} ${midpoint} By the end of the session, ${lowerFirst(ending)}.`;
+    return `${opening} ${midpoint} ${ending}`;
   }
 
   async generatePreviouslyOn(summary: string, scene: string, clueText: string[]) {
     const summaryText = summarizeText(summary.replace(/^Previously on:\s*/i, ""), 180);
     const unresolved =
       clueText.length > 0
-        ? `Two threads still hang in the air: ${clueText.slice(0, 2).map(lowerFirst).join(" and ")}.`
+        ? `A few details still nag at the edges: ${clueText.slice(0, 2).map(lowerFirst).join(" and ")}.`
         : "The last trouble never settled cleanly.";
 
     return `Previously on: ${summaryText} The story resumes in ${scene}, where ${unresolved}`;

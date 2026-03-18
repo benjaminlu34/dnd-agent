@@ -5,9 +5,9 @@ import { useRouter } from "next/navigation";
 import { startTransition, useEffect, useEffectEvent, useRef, useState } from "react";
 import type {
   CampaignListItem,
-  CampaignSnapshot,
   CheckResult,
   PendingCheck,
+  PlayerCampaignSnapshot,
   StoryMessage,
 } from "@/lib/game/types";
 
@@ -16,7 +16,7 @@ type TurnStreamEvent =
   | { type: "check_required"; turnId: string; check: PendingCheck }
   | { type: "check_result"; result: CheckResult }
   | { type: "actions"; actions: string[] }
-  | { type: "state"; snapshot: CampaignSnapshot }
+  | { type: "state"; snapshot: PlayerCampaignSnapshot }
   | { type: "warning"; message: string }
   | { type: "error"; message: string }
   | { type: "done" };
@@ -76,7 +76,7 @@ function usePrefersReducedMotion() {
   return prefersReducedMotion;
 }
 
-function inferSceneMoments(snapshot: CampaignSnapshot) {
+function inferSceneMoments(snapshot: PlayerCampaignSnapshot) {
   const text = `${snapshot.state.sceneState.title} ${snapshot.state.sceneState.summary}`.toLowerCase();
 
   let time = "";
@@ -304,37 +304,10 @@ function EmptyJournalCopy({ children }: { children: React.ReactNode }) {
   );
 }
 
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function buildKnowledgeText(snapshot: CampaignSnapshot) {
-  return [
-    snapshot.state.sceneState.title,
-    snapshot.state.sceneState.summary,
-    snapshot.state.sceneState.atmosphere,
-    snapshot.previouslyOn ?? "",
-    ...snapshot.recentMessages.map((message) => message.content),
-    ...snapshot.memories.map((entry) => entry.summary),
-  ]
-    .join(" ")
-    .toLowerCase();
-}
-
-function isNamedInKnowledgeText(knowledgeText: string, value: string) {
-  const trimmed = value.trim().toLowerCase();
-
-  if (!trimmed) {
-    return false;
-  }
-
-  return new RegExp(`\\b${escapeRegExp(trimmed)}\\b`, "i").test(knowledgeText);
-}
-
 export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string }) {
   const router = useRouter();
   const [view, setView] = useState<"home" | "campaign">("home");
-  const [snapshot, setSnapshot] = useState<CampaignSnapshot | null>(null);
+  const [snapshot, setSnapshot] = useState<PlayerCampaignSnapshot | null>(null);
   const [campaigns, setCampaigns] = useState<CampaignListItem[]>([]);
   const [messages, setMessages] = useState<StoryMessage[]>([]);
   const [suggestedActions, setSuggestedActions] = useState<string[]>([]);
@@ -454,7 +427,7 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
         throw new Error("Unable to load that campaign.");
       }
 
-      const data = (await response.json()) as { snapshot: CampaignSnapshot };
+      const data = (await response.json()) as { snapshot: PlayerCampaignSnapshot };
       applySnapshot(data.snapshot);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to load campaign.");
@@ -464,7 +437,7 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
     }
   }
 
-  function applySnapshot(nextSnapshot: CampaignSnapshot) {
+  function applySnapshot(nextSnapshot: PlayerCampaignSnapshot) {
     window.localStorage.setItem(STORAGE_KEY, nextSnapshot.campaignId);
     setLastCampaignId(nextSnapshot.campaignId);
 
@@ -697,7 +670,7 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
         throw new Error("Could not retry the latest turn.");
       }
 
-      const data = (await response.json()) as { snapshot: CampaignSnapshot };
+      const data = (await response.json()) as { snapshot: PlayerCampaignSnapshot };
       setLastCheckResult(null);
       applySnapshot(data.snapshot);
     } catch (retryError) {
@@ -838,15 +811,9 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
     );
   }
 
-  const knowledgeText = buildKnowledgeText(snapshot);
-  const discoveredClues = snapshot.clues.filter((clue) => clue.status === "discovered");
-  const visibleQuests = snapshot.quests.filter(
-    (quest) =>
-      quest.status === "completed" ||
-      quest.stage > 0 ||
-      isNamedInKnowledgeText(knowledgeText, quest.title),
-  );
-  const knownPeople = snapshot.npcs.filter((npc) => isNamedInKnowledgeText(knowledgeText, npc.name));
+  const discoveredClues = snapshot.clues;
+  const visibleQuests = snapshot.quests.filter((quest) => quest.status !== "failed");
+  const knownPeople = snapshot.npcs;
   const journalEntries = [
     ...(snapshot.previouslyOn
       ? [
@@ -920,8 +887,12 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
               <section className="rounded-2xl border border-zinc-800 bg-black p-4">
                 <p className="story-kicker">Companion</p>
                 <h2 className="text-lg font-semibold text-zinc-50">{companion.name}</h2>
-                <p className="mt-1 text-sm text-zinc-400">{companion.role}</p>
-                <p className="mt-3 text-sm leading-7 text-zinc-300">{companion.notes}</p>
+                {companion.role ? (
+                  <p className="mt-1 text-sm text-zinc-400">{companion.role}</p>
+                ) : null}
+                {companion.notes ? (
+                  <p className="mt-3 text-sm leading-7 text-zinc-300">{companion.notes}</p>
+                ) : null}
               </section>
             ) : null}
 
@@ -1175,7 +1146,9 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
                     <div key={quest.id} className="rounded-2xl border border-zinc-800 bg-black px-4 py-4">
                       <p className="story-kicker">{quest.status === "completed" ? "Completed quest" : "Active quest"}</p>
                       <h3 className="text-lg font-semibold text-zinc-50">{quest.title}</h3>
-                      <p className="mt-2 text-sm leading-7 text-zinc-400">{quest.summary}</p>
+                      {quest.summary ? (
+                        <p className="mt-2 text-sm leading-7 text-zinc-400">{quest.summary}</p>
+                      ) : null}
                       <p className="mt-3 text-xs uppercase tracking-[0.2em] text-zinc-500">
                         {quest.status === "completed"
                           ? "Finished"
@@ -1192,14 +1165,13 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
                 knownPeople.length ? (
                   knownPeople.map((npc) => (
                     <div key={npc.id} className="rounded-2xl border border-zinc-800 bg-black px-4 py-4">
-                      <p className="story-kicker">{npc.role}</p>
+                      {npc.role ? <p className="story-kicker">{npc.role}</p> : null}
                       <h3 className="text-lg font-semibold text-zinc-50">{npc.name}</h3>
-                      <p className="mt-2 text-sm leading-7 text-zinc-400">{npc.notes}</p>
-                      {npc.personalHook ? (
-                        <p className="mt-3 text-sm leading-7 text-zinc-300">
-                          Personal thread: {npc.personalHook}
-                        </p>
-                      ) : null}
+                      {npc.notes ? (
+                        <p className="mt-2 text-sm leading-7 text-zinc-400">{npc.notes}</p>
+                      ) : (
+                        <p className="mt-2 text-sm leading-7 text-zinc-500">Mentioned in the story.</p>
+                      )}
                     </div>
                   ))
                 ) : (

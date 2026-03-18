@@ -885,6 +885,15 @@ class OpenRouterDungeonMaster {
         model: env.openRouterModel,
         messages: [
           {
+            role: "system",
+            content: [
+              "Write a short player-facing session recap for a solo RPG journal.",
+              "Use only facts explicitly present in the transcript.",
+              "Do not infer hidden motives, secret identities, unrevealed clues, or backstage plot structure.",
+              "Keep it concrete, show-not-tell, and limited to 2-3 sentences.",
+            ].join("\n"),
+          },
+          {
             role: "user",
             content: `Summarize this session in 2-3 sentences for future prompt context:\n${messages.join("\n")}`,
           },
@@ -906,8 +915,17 @@ class OpenRouterDungeonMaster {
         model: env.openRouterModel,
         messages: [
           {
+            role: "system",
+            content: [
+              "Write a player-facing 'Previously on...' recap for a solo RPG.",
+              "Use only facts already established in play.",
+              "Do not infer hidden motives, secret roles, unseen clues, or unrevealed structure.",
+              "Keep it to two sentences, concrete, and atmospheric rather than explanatory.",
+            ].join("\n"),
+          },
+          {
             role: "user",
-            content: `Previous session summary: ${summary}\nCurrent scene: ${scene}\nClues unresolved: ${clueText.join(", ") || "none"}\n\nWrite a dramatic two-sentence "Previously on..." recap.`,
+            content: `Previous session summary: ${summary}\nCurrent scene: ${scene}\nDiscovered clues still hanging in the air: ${clueText.join(", ") || "none"}\n\nWrite a dramatic two-sentence "Previously on..." recap.`,
           },
         ],
       });

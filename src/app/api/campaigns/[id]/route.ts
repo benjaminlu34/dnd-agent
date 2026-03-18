@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getCampaignSnapshot } from "@/lib/game/repository";
+import { getCampaignSnapshot, toPlayerCampaignSnapshot } from "@/lib/game/repository";
 import { maybeGeneratePreviouslyOn } from "@/lib/game/engine";
 
 export const runtime = "nodejs";
@@ -19,6 +19,6 @@ export async function GET(_: Request, context: Context) {
   const previouslyOn = await maybeGeneratePreviouslyOn(snapshot);
 
   return NextResponse.json({
-    snapshot: previouslyOn ? { ...snapshot, previouslyOn } : snapshot,
+    snapshot: toPlayerCampaignSnapshot(snapshot, previouslyOn),
   });
 }

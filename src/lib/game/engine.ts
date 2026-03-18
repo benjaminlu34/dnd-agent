@@ -949,7 +949,7 @@ export async function maybeGeneratePreviouslyOn(snapshot: CampaignSnapshot | nul
     dmClient.generatePreviouslyOn(
       lastSummary.summary,
       snapshot.state.sceneState.title,
-      snapshot.clues.filter((clue) => clue.status !== "resolved").map((clue) => clue.text),
+      snapshot.clues.filter((clue) => clue.status === "discovered").map((clue) => clue.text),
     ),
     new Promise<null>((resolve) => {
       setTimeout(() => resolve(null), 1200);

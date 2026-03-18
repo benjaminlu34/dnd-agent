@@ -1,4 +1,4 @@
-import { getCampaignSnapshot } from "@/lib/game/repository";
+import { getCampaignSnapshot, toPlayerCampaignSnapshot } from "@/lib/game/repository";
 import { resolvePendingCheck } from "@/lib/game/engine";
 import { createNdjsonStream } from "@/lib/http/ndjson";
 import { prisma } from "@/lib/prisma";
@@ -53,7 +53,7 @@ export async function POST(_: Request, context: Context) {
     if (snapshot) {
       send({
         type: "state",
-        snapshot,
+        snapshot: toPlayerCampaignSnapshot(snapshot),
       });
     }
   });

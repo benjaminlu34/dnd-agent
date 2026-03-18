@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getCampaignSnapshot } from "@/lib/game/repository";
+import { getCampaignSnapshot, toPlayerCampaignSnapshot } from "@/lib/game/repository";
 import { triageTurn } from "@/lib/game/engine";
 import { createNdjsonStream } from "@/lib/http/ndjson";
 
@@ -62,7 +62,7 @@ export async function POST(request: Request) {
     if (snapshot) {
       send({
         type: "state",
-        snapshot,
+        snapshot: toPlayerCampaignSnapshot(snapshot),
       });
     }
   });
