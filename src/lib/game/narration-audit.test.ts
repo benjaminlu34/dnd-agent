@@ -71,3 +71,21 @@ test("auditRenderedNarration blocks contradictions with the validated beat", () 
   assert.equal(result.highestSeverity, "block");
   assert.ok(result.issues.some((issue) => issue.code === "beat_contradiction"));
 });
+
+test("auditRenderedNarration blocks suggested actions leaking into narration", () => {
+  const result = auditRenderedNarration({
+    mode: "triage",
+    narration:
+      "You wake to the bell tower's clang and sit up in the safehouse room.\n\nSuggested actions:\n- Leave the safehouse\n- Inspect the ledger",
+    playerAction: "Rest and recover your bearings",
+    actionResolution: "You sleep for a few hours and recover your strength.",
+    directlyHandledItems: [],
+    suggestedActions: [
+      "Leave the safehouse",
+      "Inspect the ledger",
+    ],
+  });
+
+  assert.equal(result.highestSeverity, "block");
+  assert.ok(result.issues.some((issue) => issue.code === "suggested_actions_in_narration"));
+});

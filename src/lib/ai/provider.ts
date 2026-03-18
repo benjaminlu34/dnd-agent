@@ -553,6 +553,39 @@ function containsStructuredMetaLeak(text: string) {
   );
 }
 
+function extractSuggestedActionsFooter(text: string) {
+  const cleaned = sanitizeNarration(text);
+  const match = cleaned.match(
+    /^([\s\S]*?)(?:\n{1,2}|\s{2,})(?:suggested actions?|next actions?|next moves?)\s*:\s*([\s\S]+)$/i,
+  );
+
+  if (!match) {
+    return {
+      narration: cleaned,
+      suggestedActions: [] as string[],
+    };
+  }
+
+  const suggestedActions = match[2]
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .map((line) => line.replace(/^[-*•]\s+/, "").replace(/^\d+\.\s+/, "").trim())
+    .filter(Boolean)
+    .slice(0, 4);
+
+  if (suggestedActions.length === 0) {
+    return {
+      narration: cleaned,
+      suggestedActions: [] as string[],
+    };
+  }
+
+  return {
+    narration: match[1].trim(),
+    suggestedActions,
+  };
+}
+
 function extractNarrationValue(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
 }
@@ -740,10 +773,14 @@ function normalizeRendererDecision(raw: unknown, text: string): RendererDecision
   }
 
   const payloadNarration = extractNarrationValue(payload?.narration ?? payload?.text);
-  const narration = payloadNarration || sanitizeNarration(text);
-  const suggestedActions = toStringArray(
+  const fallbackNarration = payloadNarration || sanitizeNarration(text);
+  const splitFooter = extractSuggestedActionsFooter(fallbackNarration);
+  const explicitSuggestedActions = toStringArray(
     payload?.suggestedActions ?? payload?.suggested_actions ?? payload?.actions ?? payload?.nextMoves,
   ).slice(0, 4);
+  const narration = splitFooter.narration;
+  const suggestedActions =
+    explicitSuggestedActions.length > 0 ? explicitSuggestedActions : splitFooter.suggestedActions;
 
   return {
     narration,

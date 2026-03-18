@@ -126,6 +126,8 @@ export function buildTurnRendererSystemPrompt() {
     "Do not invent or alter outcomes, discoveries, checks, state changes, or item handling.",
     "Use the supplied actionResolution as the truth of what happened in this beat.",
     "Render only player-facing narration and suggested actions through the tool call.",
+    "Never write a literal 'Suggested actions:' heading, bullet list, or any action menu inside narration.",
+    "Put suggested actions only in the structured suggestedActions field of the tool call.",
     "suggestedActions must sound natural in-fiction, but must stay faithful to the supplied suggestedActionGoals.",
   ].join("\n");
 }
@@ -403,6 +405,7 @@ Render the beat faithfully from the validated actionResolution.
 Do not invent new discoveries, state changes, checks, or twists.
 Keep the narration concise, concrete, and player-facing.
 End on a concrete image, pressure, or line of dialogue rather than explanation.
+Do not include a literal 'Suggested actions:' footer or bullet list inside the narration text.
 Return 2-4 suggestedActions that sound natural in fiction and stay faithful to the suggestedActionGoals.
 `;
 }

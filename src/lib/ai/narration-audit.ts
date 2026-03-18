@@ -73,7 +73,8 @@ export type NarrationAuditIssue = {
     | "missing_action_resolution"
     | "irrelevant_key_item"
     | "beat_contradiction"
-    | "stale_suggested_actions";
+    | "stale_suggested_actions"
+    | "suggested_actions_in_narration";
   severity: NarrationAuditSeverity;
   message: string;
   directive: string;
@@ -519,6 +520,24 @@ function detectStaleSuggestedActions(
   return null;
 }
 
+function detectSuggestedActionsLeak(narration: string) {
+  const match = narration.match(
+    /\b(?:suggested actions?|next actions?|next moves?)\s*:/i,
+  );
+
+  if (!match) {
+    return null;
+  }
+
+  return issue({
+    code: "suggested_actions_in_narration",
+    severity: "block",
+    message: "Rendered narration leaked a suggested-actions footer into player-facing prose.",
+    directive: "Remove the suggested-actions footer from narration and return those options only in the structured suggestedActions field.",
+    evidence: match[0].trim(),
+  });
+}
+
 export function validateBeatPlan(input: BeatValidationInput): BeatValidationResult {
   const issues: NarrationAuditIssue[] = [];
   const actionResolution = normalizeWhitespace(input.actionResolution);
@@ -608,6 +627,11 @@ export function auditRenderedNarration(input: RenderedNarrationAuditInput): Narr
     const contradiction = detectBeatContradiction(narration, input.actionResolution);
     if (contradiction) {
       issues.push(contradiction);
+    }
+
+    const suggestedActionsLeak = detectSuggestedActionsLeak(narration);
+    if (suggestedActionsLeak) {
+      issues.push(suggestedActionsLeak);
     }
   }
 
