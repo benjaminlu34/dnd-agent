@@ -102,6 +102,7 @@ test("validateDelta accepts valid updates with indexed lookups", () => {
   ]);
   assert.deepEqual(result.acceptedNpcDiscoveries, [fixture.npcs[1]!.id]);
   assert.deepEqual(result.nextState.activeRevealIds, [fixture.blueprint.hiddenReveals[0]!.id]);
+  assert.deepEqual(result.nextState.knownLocations, fixture.state.knownLocations);
 });
 
 test("validateDelta preserves rejection semantics for invalid and duplicate updates", () => {
@@ -190,4 +191,31 @@ test("validateDelta preserves rejection semantics for invalid and duplicate upda
   assert.ok(
     result.warnings.some((warning) => warning.includes("Rejected unknown NPC discovery npc_missing.")),
   );
+});
+
+test("validateDelta records a newly discovered scene location once", () => {
+  const fixture = createValidationFixture();
+  const result = validateDelta({
+    ...fixture,
+    proposedDelta: {
+      sceneLocation: "Old Smithy",
+    },
+  });
+
+  assert.equal(result.nextState.sceneState.location, "Old Smithy");
+  assert.deepEqual(result.nextState.knownLocations, [...fixture.state.knownLocations, "Old Smithy"]);
+});
+
+test("validateDelta reuses established location names without duplicating known locations", () => {
+  const fixture = createValidationFixture();
+  const result = validateDelta({
+    ...fixture,
+    proposedDelta: {
+      sceneTitle: "Ash Market Under Watch",
+      sceneLocation: fixture.state.knownLocations[0],
+    },
+  });
+
+  assert.equal(result.nextState.sceneState.location, fixture.state.knownLocations[0]);
+  assert.deepEqual(result.nextState.knownLocations, fixture.state.knownLocations);
 });

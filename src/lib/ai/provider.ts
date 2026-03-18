@@ -1,20 +1,30 @@
 import OpenAI from "openai";
 import {
   auditNarration,
+  auditRenderedNarration,
   auditSceneSnapshot,
   buildNarrationRetryInstructions,
+  type BeatValidationInput,
   type NarrationAuditIssue,
+  type TurnSuggestedActionGoal,
+  validateBeatPlan,
 } from "@/lib/ai/narration-audit";
 import { LocalDungeonMaster } from "@/lib/ai/local-provider";
 import { env } from "@/lib/env";
 import { characterTemplateDraftSchema } from "@/lib/game/characters";
 import {
   buildDungeonMasterSystemPrompt,
-  buildOutcomeUserPrompt,
-  buildTriageUserPrompt,
+  buildRendererUserPrompt,
+  buildTurnPlannerSystemPrompt,
+  buildTurnRendererSystemPrompt,
+  buildResolutionPlannerUserPrompt,
+  buildTriagePlannerUserPrompt,
   isResolveDecision,
   isTriageDecision,
+  rendererTool,
+  resolutionPlannerTool,
   resolutionTool,
+  triagePlannerTool,
   triageTool,
 } from "@/lib/game/prompts";
 import {
@@ -53,6 +63,7 @@ export type CharacterGenerationResult = {
 
 type OpenRouterToolResult = {
   text: string;
+  rawToolArguments: string;
   toolInput: unknown;
 };
 
@@ -68,6 +79,49 @@ type CampaignOpeningInput = {
   character: CharacterTemplate;
   prompt?: string;
   previousDraft?: GeneratedCampaignOpening;
+};
+
+type PlannerSuggestedActionGoal = TurnSuggestedActionGoal;
+
+type TriagePlannerDecision = {
+  requiresCheck: boolean;
+  isInvestigative: boolean;
+  check?: TriageDecision["check"];
+  proposedDelta: ProposedStateDelta;
+  actionResolution: string;
+  suggestedActionGoals: PlannerSuggestedActionGoal[];
+};
+
+type ResolutionPlannerDecision = {
+  proposedDelta: ProposedStateDelta;
+  actionResolution: string;
+  suggestedActionGoals: PlannerSuggestedActionGoal[];
+};
+
+type RendererDecision = {
+  narration: string;
+  suggestedActions: string[];
+};
+
+type TurnQualityMetadata = {
+  acceptedSeverity: "clean" | "warn" | "block";
+  plannerIssues: string[];
+  rendererIssues: string[];
+  usedPlannerRepair: boolean;
+  usedRendererRepair: boolean;
+  usedFallback: boolean;
+  fallbackReason: string | null;
+};
+
+type TurnQualityMeta = {
+  warnings: string[];
+  quality: TurnQualityMetadata;
+};
+
+const TURN_QUALITY_META = Symbol("turn_quality_meta");
+
+type WithTurnQualityMeta<T> = T & {
+  [TURN_QUALITY_META]?: TurnQualityMeta;
 };
 
 function toStatModifier(value: number) {
@@ -324,6 +378,9 @@ const generateCharacterTool = {
 
 function toFunctionTool(
   tool:
+    | typeof triagePlannerTool
+    | typeof resolutionPlannerTool
+    | typeof rendererTool
     | typeof triageTool
     | typeof resolutionTool
     | typeof campaignSetupTool
@@ -497,6 +554,10 @@ function extractSceneSnapshotValue(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
+function extractSceneLocationValue(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
 function hasFreshNarration(narration: string | null | undefined, text: string) {
   return Boolean(sanitizeNarration(text) || (typeof narration === "string" && narration.trim()));
 }
@@ -526,10 +587,216 @@ function normalizeDiscoveryDelta(value: Record<string, unknown>) {
     normalized.sceneSnapshot = sceneSnapshot;
   }
 
+  const sceneLocation = extractSceneLocationValue(
+    value.sceneLocation ?? value.scene_location ?? value.location,
+  );
+  if (sceneLocation) {
+    normalized.sceneLocation = sceneLocation;
+  }
+
   delete (normalized as Record<string, unknown>).sceneSummary;
   delete (normalized as Record<string, unknown>).scene_summary;
 
   return normalized;
+}
+
+function normalizeSuggestedActionGoals(value: unknown): PlannerSuggestedActionGoal[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => {
+        if (typeof entry === "string" && entry.trim()) {
+          return {
+            goal: entry.trim(),
+            target: null,
+          };
+        }
+
+        const record = toObject(entry);
+        if (!record) {
+          return null;
+        }
+
+        const goal = typeof record.goal === "string" ? record.goal.trim() : "";
+        const target =
+          typeof record.target === "string" && record.target.trim()
+            ? record.target.trim()
+            : null;
+
+        if (!goal) {
+          return null;
+        }
+
+        return { goal, target };
+      })
+      .filter((entry): entry is PlannerSuggestedActionGoal => Boolean(entry))
+      .slice(0, 4);
+  }
+
+  return [];
+}
+
+function normalizeTriagePlannerDecision(
+  raw: unknown,
+  input: TurnAIPayload,
+): TriagePlannerDecision | null {
+  const payload = toObject(unwrapStructuredPayload(raw));
+  if (!payload) {
+    return null;
+  }
+
+  const requiresCheck =
+    typeof payload.requiresCheck === "boolean"
+      ? payload.requiresCheck
+      : typeof payload.requires_check === "boolean"
+        ? payload.requires_check
+        : inferRequiresCheck(input.playerAction);
+  const isInvestigative =
+    typeof payload.isInvestigative === "boolean"
+      ? payload.isInvestigative
+      : typeof payload.is_investigative === "boolean"
+        ? payload.is_investigative
+        : inferInvestigativeAction(input.playerAction);
+  const checkPayload = toObject(payload.check ?? payload.pendingCheck ?? payload.roll);
+  const suggestedActionGoals = normalizeSuggestedActionGoals(
+    payload.suggestedActionGoals ?? payload.suggested_action_goals ?? payload.nextBeatGoals,
+  );
+  const proposedDelta = normalizeDiscoveryDelta(
+    toObject(payload.proposedDelta ?? payload.proposed_delta ?? payload.delta) ?? {},
+  );
+  const actionResolution =
+    extractNarrationValue(
+      payload.actionResolution ?? payload.action_resolution ?? payload.resolution,
+    ) || sanitizeNarration(JSON.stringify(payload.actionResolution ?? payload.action_resolution ?? "")) || "";
+
+  return {
+    requiresCheck,
+    isInvestigative,
+    check:
+      checkPayload
+        ? {
+            stat:
+              checkPayload.stat === "strength" ||
+              checkPayload.stat === "agility" ||
+              checkPayload.stat === "intellect" ||
+              checkPayload.stat === "charisma" ||
+              checkPayload.stat === "vitality"
+                ? checkPayload.stat
+                : inferCheckStat(input.playerAction),
+            mode:
+              checkPayload.mode === "advantage" || checkPayload.mode === "disadvantage"
+                ? checkPayload.mode
+                : "normal",
+            reason:
+              typeof checkPayload.reason === "string" && checkPayload.reason.trim()
+                ? checkPayload.reason.trim()
+                : `Resolving: ${input.playerAction}`,
+          }
+        : undefined,
+    proposedDelta,
+    actionResolution,
+    suggestedActionGoals,
+  };
+}
+
+function normalizeResolutionPlannerDecision(raw: unknown): ResolutionPlannerDecision | null {
+  const payload = toObject(unwrapStructuredPayload(raw));
+  if (!payload) {
+    return null;
+  }
+
+  const suggestedActionGoals = normalizeSuggestedActionGoals(
+    payload.suggestedActionGoals ?? payload.suggested_action_goals ?? payload.nextBeatGoals,
+  );
+  const proposedDelta = normalizeDiscoveryDelta(
+    toObject(payload.proposedDelta ?? payload.proposed_delta ?? payload.delta) ?? {},
+  );
+  const actionResolution =
+    extractNarrationValue(
+      payload.actionResolution ?? payload.action_resolution ?? payload.resolution,
+    ) || "";
+
+  return {
+    proposedDelta,
+    actionResolution,
+    suggestedActionGoals,
+  };
+}
+
+function normalizeRendererDecision(raw: unknown, text: string): RendererDecision | null {
+  const payload = toObject(unwrapStructuredPayload(raw));
+  if (!payload && !text.trim()) {
+    return null;
+  }
+
+  const payloadNarration = extractNarrationValue(payload?.narration ?? payload?.text);
+  const narration = payloadNarration || sanitizeNarration(text);
+  const suggestedActions = toStringArray(
+    payload?.suggestedActions ?? payload?.suggested_actions ?? payload?.actions ?? payload?.nextMoves,
+  ).slice(0, 4);
+
+  return {
+    narration,
+    suggestedActions,
+  };
+}
+
+function buildPlannerRepairPrompt(
+  basePrompt: string,
+  issues: NarrationAuditIssue[],
+  mode: "triage" | "resolution",
+) {
+  return [
+    basePrompt,
+    "",
+    "PLANNER CORRECTION",
+    `Rewrite the ${mode} planner output and return a full replacement tool payload.`,
+    "Fix these specific issues:",
+    buildNarrationRetryInstructions(issues),
+  ].join("\n");
+}
+
+function buildRendererRepairPrompt(
+  basePrompt: string,
+  issues: NarrationAuditIssue[],
+) {
+  return [
+    basePrompt,
+    "",
+    "RENDER CORRECTION",
+    "Rewrite the narration and suggestedActions while preserving the validated actionResolution exactly.",
+    "Fix these specific issues:",
+    buildNarrationRetryInstructions(issues),
+  ].join("\n");
+}
+
+function qualityWarningMessage(input: {
+  usedFallback: boolean;
+  acceptedSeverity: "clean" | "warn" | "block";
+}) {
+  if (input.usedFallback) {
+    return "System: This turn was recovered with a fallback narration pipeline.";
+  }
+
+  if (input.acceptedSeverity === "warn") {
+    return "System: This turn was recovered with reduced narration quality checks.";
+  }
+
+  return null;
+}
+
+function attachTurnQualityMeta<T extends object>(value: T, meta: TurnQualityMeta) {
+  Object.defineProperty(value, TURN_QUALITY_META, {
+    value: meta,
+    enumerable: false,
+    configurable: true,
+    writable: false,
+  });
+
+  return value as WithTurnQualityMeta<T>;
+}
+
+export function getTurnQualityMeta<T extends object>(value: T | null | undefined) {
+  return (value as WithTurnQualityMeta<T> | null | undefined)?.[TURN_QUALITY_META];
 }
 
 function normalizeTriageDecision(
@@ -703,6 +970,72 @@ function chooseCleanerOpening(
   return original;
 }
 
+function severityRank(value: "clean" | "warn" | "block") {
+  switch (value) {
+    case "clean":
+      return 0;
+    case "warn":
+      return 1;
+    default:
+      return 2;
+  }
+}
+
+function worstSeverity(...values: Array<"clean" | "warn" | "block">) {
+  return values.reduce<"clean" | "warn" | "block">(
+    (worst, current) => (severityRank(current) > severityRank(worst) ? current : worst),
+    "clean",
+  );
+}
+
+function choosePreferredAttempt<T extends { narration?: string | null; actionResolution?: string }>(
+  original: { value: T; issues: NarrationAuditIssue[]; highestSeverity: "clean" | "warn" | "block" },
+  retried: { value: T; issues: NarrationAuditIssue[]; highestSeverity: "clean" | "warn" | "block" },
+) {
+  const originalRank = severityRank(original.highestSeverity);
+  const retriedRank = severityRank(retried.highestSeverity);
+
+  if (retriedRank < originalRank) {
+    return retried;
+  }
+
+  if (retriedRank > originalRank) {
+    return original;
+  }
+
+  if (retried.issues.length < original.issues.length) {
+    return retried;
+  }
+
+  if (retried.issues.length > original.issues.length) {
+    return original;
+  }
+
+  const originalText =
+    original.value.narration?.trim() ??
+    original.value.actionResolution?.trim() ??
+    "";
+  const retriedText =
+    retried.value.narration?.trim() ??
+    retried.value.actionResolution?.trim() ??
+    "";
+
+  if (retriedText && (!originalText || retriedText.length <= originalText.length * 1.35)) {
+    return retried;
+  }
+
+  return original;
+}
+
+function truncateForLog(value: string, limit = 1200) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= limit) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, limit)}... [truncated ${normalized.length - limit} chars]`;
+}
+
 const localDungeonMaster = new LocalDungeonMaster();
 
 class OpenRouterDungeonMaster {
@@ -716,6 +1049,47 @@ class OpenRouterDungeonMaster {
       "X-Title": env.openRouterSiteName,
     },
   });
+
+  private async runToolCall(input: {
+    systemPrompt: string;
+    prompt: string;
+    tool:
+      | typeof triagePlannerTool
+      | typeof resolutionPlannerTool
+      | typeof rendererTool
+      | typeof triageTool
+      | typeof resolutionTool;
+    temperature?: number;
+  }): Promise<OpenRouterToolResult> {
+    const response = await this.client.chat.completions.create({
+      model: env.openRouterModel,
+      messages: [
+        {
+          role: "system",
+          content: input.systemPrompt,
+        },
+        {
+          role: "user",
+          content: input.prompt,
+        },
+      ],
+      tools: [toFunctionTool(input.tool)],
+      tool_choice: "auto",
+      temperature: input.temperature ?? 0.4,
+    });
+
+    const message = response.choices[0]?.message;
+    const toolCall = message?.tool_calls?.[0];
+    const toolArguments =
+      toolCall && toolCall.type === "function" ? toolCall.function.arguments ?? "" : "";
+    const text = extractMessageText(message?.content);
+
+    return {
+      text,
+      rawToolArguments: toolArguments,
+      toolInput: toolArguments ? safeParseJson(toolArguments) : safeParseJson(text),
+    };
+  }
 
   private async runStream(input: {
     prompt: string;
@@ -759,6 +1133,7 @@ class OpenRouterDungeonMaster {
 
     return {
       text,
+      rawToolArguments: toolArguments,
       toolInput: toolArguments ? safeParseJson(toolArguments) : safeParseJson(text),
     };
   }
@@ -796,8 +1171,43 @@ class OpenRouterDungeonMaster {
 
     return {
       text,
+      rawToolArguments: toolArguments,
       toolInput: toolArguments ? safeParseJson(toolArguments) : safeParseJson(text),
     };
+  }
+
+  private logTurnFailure(input: {
+    mode: "triage" | "resolution";
+    stage: string;
+    prompt: string;
+    result?: OpenRouterToolResult;
+    error?: unknown;
+    issues?: NarrationAuditIssue[];
+  }) {
+    const errorMessage =
+      input.error instanceof Error
+        ? input.error.message
+        : input.error
+          ? String(input.error)
+          : null;
+
+    console.error(
+      `[dm.${input.mode}] OpenRouter failure at ${input.stage}.`,
+      JSON.stringify(
+        {
+          model: env.openRouterModel,
+          stage: input.stage,
+          issues: input.issues?.map((issue) => issue.code) ?? [],
+          error: errorMessage,
+          prompt: truncateForLog(input.prompt, 1600),
+          rawText: truncateForLog(input.result?.text ?? ""),
+          rawToolArguments: truncateForLog(input.result?.rawToolArguments ?? ""),
+          parsedToolInput: input.result?.toolInput ?? null,
+        },
+        null,
+        2,
+      ),
+    );
   }
 
   private async retryCampaignOpening(
@@ -864,6 +1274,63 @@ class OpenRouterDungeonMaster {
         ...opening.scene,
         summary: await this.compressSceneSnapshot(opening.scene.summary),
       },
+    };
+  }
+
+  private async repairTriagePlanner(
+    input: TurnAIPayload,
+    issues: NarrationAuditIssue[],
+  ) {
+    const retryResult = await this.runToolCall({
+      systemPrompt: buildTurnPlannerSystemPrompt(),
+      prompt: buildPlannerRepairPrompt(buildTriagePlannerUserPrompt(input), issues, "triage"),
+      tool: triagePlannerTool,
+    });
+
+    return normalizeTriagePlannerDecision(retryResult.toolInput, input);
+  }
+
+  private async repairResolutionPlanner(
+    input: TurnAIPayload & { checkResult: CheckResult; isInvestigative: boolean },
+    issues: NarrationAuditIssue[],
+  ) {
+    const retryResult = await this.runToolCall({
+      systemPrompt: buildTurnPlannerSystemPrompt(),
+      prompt: buildPlannerRepairPrompt(buildResolutionPlannerUserPrompt(input), issues, "resolution"),
+      tool: resolutionPlannerTool,
+    });
+
+    return normalizeResolutionPlannerDecision(retryResult.toolInput);
+  }
+
+  private async renderValidatedBeat(input: {
+    mode: "triage" | "resolution";
+    playerAction: string;
+    promptContext: PromptContext;
+    actionResolution: string;
+    suggestedActionGoals: PlannerSuggestedActionGoal[];
+    repairIssues?: NarrationAuditIssue[];
+  }) {
+    const basePrompt = buildRendererUserPrompt({
+      mode: input.mode,
+      playerAction: input.playerAction,
+      promptContext: input.promptContext,
+      actionResolution: input.actionResolution,
+      suggestedActionGoals: input.suggestedActionGoals,
+    });
+
+    const result = await this.runToolCall({
+      systemPrompt: buildTurnRendererSystemPrompt(),
+      prompt: input.repairIssues?.length
+        ? buildRendererRepairPrompt(basePrompt, input.repairIssues)
+        : basePrompt,
+      tool: rendererTool,
+      temperature: 0.55,
+    });
+
+    return {
+      result,
+      normalized: normalizeRendererDecision(result.toolInput, result.text),
     };
   }
 
@@ -1309,186 +1776,513 @@ class OpenRouterDungeonMaster {
   }
 
   async triageTurn(input: TurnAIPayload, callbacks?: StreamCallbacks): Promise<TriageDecision> {
+    const plannerPrompt = buildTriagePlannerUserPrompt(input);
+
     try {
-      const basePrompt = buildTriageUserPrompt(input);
-      const result = await this.runStream({
-        prompt: basePrompt,
-        tool: triageTool,
+      const plannerResult = await this.runToolCall({
+        systemPrompt: buildTurnPlannerSystemPrompt(),
+        prompt: plannerPrompt,
+        tool: triagePlannerTool,
+      });
+      const normalizedPlanner = normalizeTriagePlannerDecision(plannerResult.toolInput, input);
+
+      if (!normalizedPlanner) {
+        this.logTurnFailure({
+          mode: "triage",
+          stage: "planner_payload_invalid",
+          prompt: plannerPrompt,
+          result: plannerResult,
+        });
+        throw new Error("OpenRouter triage planner returned an invalid payload.");
+      }
+
+      const plannerValidationInput: BeatValidationInput = {
+        mode: "triage",
+        playerAction: input.playerAction,
+        actionResolution: normalizedPlanner.actionResolution,
+        suggestedActionGoals: normalizedPlanner.suggestedActionGoals,
+        requiresCheck: normalizedPlanner.requiresCheck,
+        check: normalizedPlanner.check,
+      };
+      let plannerValidation = validateBeatPlan(plannerValidationInput);
+      let selectedPlanner = normalizedPlanner;
+      let selectedPlannerIssues = plannerValidation.issues;
+      let selectedPlannerSeverity = plannerValidation.highestSeverity;
+      let directlyHandledItems = plannerValidation.directlyHandledItems;
+      let usedPlannerRepair = false;
+
+      if (plannerValidation.highestSeverity === "block") {
+        console.warn(
+          `[dm.triage] Beat planner triggered repair: ${plannerValidation.issues.map((issue) => issue.code).join(", ")}.`,
+        );
+        const repairedPlanner = await this.repairTriagePlanner(input, plannerValidation.issues);
+
+        if (repairedPlanner) {
+          usedPlannerRepair = true;
+          const repairedValidation = validateBeatPlan({
+            mode: "triage",
+            playerAction: input.playerAction,
+            actionResolution: repairedPlanner.actionResolution,
+            suggestedActionGoals: repairedPlanner.suggestedActionGoals,
+            requiresCheck: repairedPlanner.requiresCheck,
+            check: repairedPlanner.check,
+          });
+          const chosenPlanner = choosePreferredAttempt(
+            {
+              value: normalizedPlanner,
+              issues: plannerValidation.issues,
+              highestSeverity: plannerValidation.highestSeverity,
+            },
+            {
+              value: repairedPlanner,
+              issues: repairedValidation.issues,
+              highestSeverity: repairedValidation.highestSeverity,
+            },
+          );
+
+          selectedPlanner = chosenPlanner.value;
+          selectedPlannerIssues = chosenPlanner.issues;
+          selectedPlannerSeverity = chosenPlanner.highestSeverity;
+          directlyHandledItems =
+            chosenPlanner.value === repairedPlanner
+              ? repairedValidation.directlyHandledItems
+              : plannerValidation.directlyHandledItems;
+        }
+      }
+
+      if (selectedPlannerSeverity === "block") {
+        const fallback = await this.fallback.triageTurn(input, callbacks);
+        const warning = qualityWarningMessage({
+          usedFallback: true,
+          acceptedSeverity: "warn",
+        });
+
+        return attachTurnQualityMeta(fallback, {
+          warnings: warning ? [warning] : [],
+          quality: {
+            acceptedSeverity: "warn",
+            plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
+            rendererIssues: [],
+            usedPlannerRepair,
+            usedRendererRepair: false,
+            usedFallback: true,
+            fallbackReason: "planner_blocked",
+          },
+        });
+      }
+
+      if (selectedPlanner.requiresCheck) {
+        const decision: TriageDecision = {
+          requiresCheck: true,
+          narration: null,
+          isInvestigative: selectedPlanner.isInvestigative,
+          check: selectedPlanner.check,
+          suggestedActions: [],
+          proposedDelta: selectedPlanner.proposedDelta,
+        };
+        const acceptedSeverity = selectedPlannerSeverity;
+        const warning = qualityWarningMessage({
+          usedFallback: false,
+          acceptedSeverity,
+        });
+
+        return attachTurnQualityMeta(decision, {
+          warnings: warning ? [warning] : [],
+          quality: {
+            acceptedSeverity,
+            plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
+            rendererIssues: [],
+            usedPlannerRepair,
+            usedRendererRepair: false,
+            usedFallback: false,
+            fallbackReason: null,
+          },
+        });
+      }
+
+      const initialRender = await this.renderValidatedBeat({
+        mode: "triage",
+        playerAction: input.playerAction,
+        promptContext: input.promptContext,
+        actionResolution: selectedPlanner.actionResolution,
+        suggestedActionGoals: selectedPlanner.suggestedActionGoals,
+      });
+      let renderDecision = initialRender.normalized ?? { narration: "", suggestedActions: [] };
+      let renderAudit = auditRenderedNarration({
+        mode: "triage",
+        narration: renderDecision.narration,
+        playerAction: input.playerAction,
+        actionResolution: selectedPlanner.actionResolution,
+        directlyHandledItems,
+        suggestedActions: renderDecision.suggestedActions,
+      });
+      let selectedRendererIssues = renderAudit.issues;
+      let selectedRendererSeverity = renderAudit.highestSeverity;
+      let usedRendererRepair = false;
+
+      if (renderAudit.highestSeverity === "block") {
+        console.warn(
+          `[dm.triage] Renderer triggered repair: ${renderAudit.issues.map((issue) => issue.code).join(", ")}.`,
+        );
+        const repairedRender = await this.renderValidatedBeat({
+          mode: "triage",
+          playerAction: input.playerAction,
+          promptContext: input.promptContext,
+          actionResolution: selectedPlanner.actionResolution,
+          suggestedActionGoals: selectedPlanner.suggestedActionGoals,
+          repairIssues: renderAudit.issues,
+        });
+        const repairedDecision = repairedRender.normalized ?? { narration: "", suggestedActions: [] };
+        const repairedAudit = auditRenderedNarration({
+          mode: "triage",
+          narration: repairedDecision.narration,
+          playerAction: input.playerAction,
+          actionResolution: selectedPlanner.actionResolution,
+          directlyHandledItems,
+          suggestedActions: repairedDecision.suggestedActions,
+        });
+        const chosenRenderer = choosePreferredAttempt(
+          {
+            value: renderDecision,
+            issues: renderAudit.issues,
+            highestSeverity: renderAudit.highestSeverity,
+          },
+          {
+            value: repairedDecision,
+            issues: repairedAudit.issues,
+            highestSeverity: repairedAudit.highestSeverity,
+          },
+        );
+        usedRendererRepair = true;
+        renderDecision = chosenRenderer.value;
+        selectedRendererIssues = chosenRenderer.issues;
+        selectedRendererSeverity = chosenRenderer.highestSeverity;
+      }
+
+      if (selectedRendererSeverity === "block") {
+        const fallback = await this.fallback.triageTurn(input, callbacks);
+        const warning = qualityWarningMessage({
+          usedFallback: true,
+          acceptedSeverity: "warn",
+        });
+
+        return attachTurnQualityMeta(fallback, {
+          warnings: warning ? [warning] : [],
+          quality: {
+            acceptedSeverity: "warn",
+            plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
+            rendererIssues: selectedRendererIssues.map((issue) => issue.code),
+            usedPlannerRepair,
+            usedRendererRepair,
+            usedFallback: true,
+            fallbackReason: "renderer_blocked",
+          },
+        });
+      }
+
+      const decision: TriageDecision = {
+        requiresCheck: false,
+        narration: renderDecision.narration || null,
+        isInvestigative: selectedPlanner.isInvestigative,
+        check: selectedPlanner.check,
+        suggestedActions: renderDecision.suggestedActions,
+        proposedDelta: selectedPlanner.proposedDelta,
+      };
+      const acceptedSeverity = worstSeverity(selectedPlannerSeverity, selectedRendererSeverity);
+      const warning = qualityWarningMessage({
+        usedFallback: false,
+        acceptedSeverity,
       });
 
-      const normalized = normalizeTriageDecision(result.toolInput, input, result.text);
-      if (isTriageDecision(normalized)) {
-        if (!normalized.requiresCheck && !hasFreshNarration(normalized.narration, result.text)) {
-          console.warn("[dm.triage] Streaming tool output had no narration. Retrying with required tool payload.");
-          const retryResult = await this.runToolRetry({
-            prompt: basePrompt,
-            tool: triageTool,
-          });
-          const retried = normalizeTriageDecision(retryResult.toolInput, input, retryResult.text);
-          if (isTriageDecision(retried) && (retried.requiresCheck || hasFreshNarration(retried.narration, retryResult.text))) {
-            if (retried.narration?.trim()) {
-              callbacks?.onNarration?.(retried.narration.trim());
-            }
-            return retried;
-          }
-
-          throw new Error("OpenRouter triage returned no fresh narration for a no-check turn.");
-        }
-
-        if (!normalized.requiresCheck && normalized.narration) {
-          const audit = auditNarration({
-            mode: "triage",
-            narration: normalized.narration,
-            playerAction: input.playerAction,
-            recentTurnLedger: input.promptContext.recentTurnLedger,
-          });
-
-          if (audit.shouldRetry) {
-            console.warn(
-              `[dm.triage] Narration audit triggered retry: ${audit.issues.map((issue) => issue.code).join(", ")}.`,
-            );
-            const retryResult = await this.runToolRetry({
-              prompt: buildTurnRetryPrompt(basePrompt, audit.issues),
-              tool: triageTool,
-            });
-            const retried = normalizeTriageDecision(retryResult.toolInput, input, retryResult.text);
-
-            if (isTriageDecision(retried) && !retried.requiresCheck && retried.narration) {
-              const retriedAudit = auditNarration({
-                mode: "triage",
-                narration: retried.narration,
-                playerAction: input.playerAction,
-                recentTurnLedger: input.promptContext.recentTurnLedger,
-              });
-              const chosen = chooseCleanerNarration(
-                { value: normalized, issues: audit.issues },
-                { value: retried, issues: retriedAudit.issues },
-              );
-
-              if (retriedAudit.issues.length > 0 && chosen.value === normalized) {
-                console.warn(
-                  `[dm.triage] Retry still triggered narration audit: ${retriedAudit.issues.map((issue) => issue.code).join(", ")}.`,
-                );
-              }
-
-              const chosenIssues = chosen.value === normalized ? audit.issues : retriedAudit.issues;
-              if (chosenIssues.length > 0) {
-                console.warn(
-                  `[dm.triage] OpenRouter narration still failed audit after retry: ${chosenIssues.map((issue) => issue.code).join(", ")}. Falling back to local turn narration.`,
-                );
-                return this.fallback.triageTurn(input, callbacks);
-              }
-
-              if (chosen.value.narration?.trim()) {
-                callbacks?.onNarration?.(chosen.value.narration.trim());
-              }
-              return chosen.value;
-            }
-          }
-        }
-
-        if (normalized.narration?.trim()) {
-          callbacks?.onNarration?.(normalized.narration.trim());
-        }
-        return normalized;
+      if (decision.narration?.trim()) {
+        callbacks?.onNarration?.(decision.narration.trim());
       }
-    } catch {
-      // Fall back to the local deterministic provider below.
-    }
 
-    return this.fallback.triageTurn(input, callbacks);
+      return attachTurnQualityMeta(decision, {
+        warnings: warning ? [warning] : [],
+        quality: {
+          acceptedSeverity,
+          plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
+          rendererIssues: selectedRendererIssues.map((issue) => issue.code),
+          usedPlannerRepair,
+          usedRendererRepair,
+          usedFallback: false,
+          fallbackReason: null,
+        },
+      });
+    } catch (error) {
+      this.logTurnFailure({
+        mode: "triage",
+        stage: "exception",
+        prompt: plannerPrompt,
+        error,
+      });
+
+      try {
+        const fallback = await this.fallback.triageTurn(input, callbacks);
+        const warning = qualityWarningMessage({
+          usedFallback: true,
+          acceptedSeverity: "warn",
+        });
+
+        return attachTurnQualityMeta(fallback, {
+          warnings: warning ? [warning] : [],
+          quality: {
+            acceptedSeverity: "warn",
+            plannerIssues: [],
+            rendererIssues: [],
+            usedPlannerRepair: false,
+            usedRendererRepair: false,
+            usedFallback: true,
+            fallbackReason: "openrouter_exception",
+          },
+        });
+      } catch (fallbackError) {
+        throw fallbackError instanceof Error
+          ? fallbackError
+          : error instanceof Error
+            ? error
+            : new Error("OpenRouter triage failed.");
+      }
+    }
   }
 
   async resolveTurn(
     input: TurnAIPayload & { checkResult: CheckResult; isInvestigative: boolean },
     callbacks?: StreamCallbacks,
   ): Promise<ResolveDecision> {
+    const plannerPrompt = buildResolutionPlannerUserPrompt(input);
+
     try {
-      const basePrompt = buildOutcomeUserPrompt(input);
-      const result = await this.runStream({
-        prompt: basePrompt,
-        tool: resolutionTool,
+      const plannerResult = await this.runToolCall({
+        systemPrompt: buildTurnPlannerSystemPrompt(),
+        prompt: plannerPrompt,
+        tool: resolutionPlannerTool,
       });
+      const normalizedPlanner = normalizeResolutionPlannerDecision(plannerResult.toolInput);
 
-      const normalized = normalizeResolveDecision(result.toolInput, result.text);
-      if (isResolveDecision(normalized)) {
-        if (!hasFreshNarration(normalized.narration, result.text)) {
-          console.warn("[dm.resolve] Streaming tool output had no narration. Retrying with required tool payload.");
-          const retryResult = await this.runToolRetry({
-            prompt: basePrompt,
-            tool: resolutionTool,
-          });
-          const retried = normalizeResolveDecision(retryResult.toolInput, retryResult.text);
-          if (isResolveDecision(retried) && hasFreshNarration(retried.narration, retryResult.text)) {
-            if (retried.narration?.trim()) {
-              callbacks?.onNarration?.(retried.narration.trim());
-            }
-            return retried;
-          }
-
-          throw new Error("OpenRouter resolution returned no fresh narration.");
-        }
-
-        const audit = auditNarration({
+      if (!normalizedPlanner) {
+        this.logTurnFailure({
           mode: "resolution",
-          narration: normalized.narration,
-          playerAction: input.playerAction,
-          recentTurnLedger: input.promptContext.recentTurnLedger,
+          stage: "planner_payload_invalid",
+          prompt: plannerPrompt,
+          result: plannerResult,
+        });
+        throw new Error("OpenRouter resolution planner returned an invalid payload.");
+      }
+
+      const plannerValidation = validateBeatPlan({
+        mode: "resolution",
+        playerAction: input.playerAction,
+        actionResolution: normalizedPlanner.actionResolution,
+        suggestedActionGoals: normalizedPlanner.suggestedActionGoals,
+      });
+      let selectedPlanner = normalizedPlanner;
+      let selectedPlannerIssues = plannerValidation.issues;
+      let selectedPlannerSeverity = plannerValidation.highestSeverity;
+      let directlyHandledItems = plannerValidation.directlyHandledItems;
+      let usedPlannerRepair = false;
+
+      if (plannerValidation.highestSeverity === "block") {
+        console.warn(
+          `[dm.resolve] Beat planner triggered repair: ${plannerValidation.issues.map((issue) => issue.code).join(", ")}.`,
+        );
+        const repairedPlanner = await this.repairResolutionPlanner(input, plannerValidation.issues);
+
+        if (repairedPlanner) {
+          usedPlannerRepair = true;
+          const repairedValidation = validateBeatPlan({
+            mode: "resolution",
+            playerAction: input.playerAction,
+            actionResolution: repairedPlanner.actionResolution,
+            suggestedActionGoals: repairedPlanner.suggestedActionGoals,
+          });
+          const chosenPlanner = choosePreferredAttempt(
+            {
+              value: normalizedPlanner,
+              issues: plannerValidation.issues,
+              highestSeverity: plannerValidation.highestSeverity,
+            },
+            {
+              value: repairedPlanner,
+              issues: repairedValidation.issues,
+              highestSeverity: repairedValidation.highestSeverity,
+            },
+          );
+
+          selectedPlanner = chosenPlanner.value;
+          selectedPlannerIssues = chosenPlanner.issues;
+          selectedPlannerSeverity = chosenPlanner.highestSeverity;
+          directlyHandledItems =
+            chosenPlanner.value === repairedPlanner
+              ? repairedValidation.directlyHandledItems
+              : plannerValidation.directlyHandledItems;
+        }
+      }
+
+      if (selectedPlannerSeverity === "block") {
+        const fallback = await this.fallback.resolveTurn(input, callbacks);
+        const warning = qualityWarningMessage({
+          usedFallback: true,
+          acceptedSeverity: "warn",
         });
 
-        if (audit.shouldRetry) {
-          console.warn(
-            `[dm.resolve] Narration audit triggered retry: ${audit.issues.map((issue) => issue.code).join(", ")}.`,
-          );
-          const retryResult = await this.runToolRetry({
-            prompt: buildTurnRetryPrompt(basePrompt, audit.issues),
-            tool: resolutionTool,
-          });
-          const retried = normalizeResolveDecision(retryResult.toolInput, retryResult.text);
-
-          if (isResolveDecision(retried) && retried.narration) {
-            const retriedAudit = auditNarration({
-              mode: "resolution",
-              narration: retried.narration,
-              playerAction: input.playerAction,
-              recentTurnLedger: input.promptContext.recentTurnLedger,
-            });
-            const chosen = chooseCleanerNarration(
-              { value: normalized, issues: audit.issues },
-              { value: retried, issues: retriedAudit.issues },
-            );
-
-            if (retriedAudit.issues.length > 0 && chosen.value === normalized) {
-              console.warn(
-                `[dm.resolve] Retry still triggered narration audit: ${retriedAudit.issues.map((issue) => issue.code).join(", ")}.`,
-              );
-            }
-
-            const chosenIssues = chosen.value === normalized ? audit.issues : retriedAudit.issues;
-            if (chosenIssues.length > 0) {
-              console.warn(
-                `[dm.resolve] OpenRouter narration still failed audit after retry: ${chosenIssues.map((issue) => issue.code).join(", ")}. Falling back to local turn narration.`,
-              );
-              return this.fallback.resolveTurn(input, callbacks);
-            }
-
-            if (chosen.value.narration?.trim()) {
-              callbacks?.onNarration?.(chosen.value.narration.trim());
-            }
-            return chosen.value;
-          }
-        }
-
-        if (normalized.narration.trim()) {
-          callbacks?.onNarration?.(normalized.narration.trim());
-        }
-        return normalized;
+        return attachTurnQualityMeta(fallback, {
+          warnings: warning ? [warning] : [],
+          quality: {
+            acceptedSeverity: "warn",
+            plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
+            rendererIssues: [],
+            usedPlannerRepair,
+            usedRendererRepair: false,
+            usedFallback: true,
+            fallbackReason: "planner_blocked",
+          },
+        });
       }
-    } catch {
-      // Fall back to the local deterministic provider below.
-    }
 
-    return this.fallback.resolveTurn(input, callbacks);
+      const initialRender = await this.renderValidatedBeat({
+        mode: "resolution",
+        playerAction: input.playerAction,
+        promptContext: input.promptContext,
+        actionResolution: selectedPlanner.actionResolution,
+        suggestedActionGoals: selectedPlanner.suggestedActionGoals,
+      });
+      let renderDecision = initialRender.normalized ?? { narration: "", suggestedActions: [] };
+      let renderAudit = auditRenderedNarration({
+        mode: "resolution",
+        narration: renderDecision.narration,
+        playerAction: input.playerAction,
+        actionResolution: selectedPlanner.actionResolution,
+        directlyHandledItems,
+        suggestedActions: renderDecision.suggestedActions,
+      });
+      let selectedRendererIssues = renderAudit.issues;
+      let selectedRendererSeverity = renderAudit.highestSeverity;
+      let usedRendererRepair = false;
+
+      if (renderAudit.highestSeverity === "block") {
+        console.warn(
+          `[dm.resolve] Renderer triggered repair: ${renderAudit.issues.map((issue) => issue.code).join(", ")}.`,
+        );
+        const repairedRender = await this.renderValidatedBeat({
+          mode: "resolution",
+          playerAction: input.playerAction,
+          promptContext: input.promptContext,
+          actionResolution: selectedPlanner.actionResolution,
+          suggestedActionGoals: selectedPlanner.suggestedActionGoals,
+          repairIssues: renderAudit.issues,
+        });
+        const repairedDecision = repairedRender.normalized ?? { narration: "", suggestedActions: [] };
+        const repairedAudit = auditRenderedNarration({
+          mode: "resolution",
+          narration: repairedDecision.narration,
+          playerAction: input.playerAction,
+          actionResolution: selectedPlanner.actionResolution,
+          directlyHandledItems,
+          suggestedActions: repairedDecision.suggestedActions,
+        });
+        const chosenRenderer = choosePreferredAttempt(
+          {
+            value: renderDecision,
+            issues: renderAudit.issues,
+            highestSeverity: renderAudit.highestSeverity,
+          },
+          {
+            value: repairedDecision,
+            issues: repairedAudit.issues,
+            highestSeverity: repairedAudit.highestSeverity,
+          },
+        );
+        usedRendererRepair = true;
+        renderDecision = chosenRenderer.value;
+        selectedRendererIssues = chosenRenderer.issues;
+        selectedRendererSeverity = chosenRenderer.highestSeverity;
+      }
+
+      if (selectedRendererSeverity === "block") {
+        const fallback = await this.fallback.resolveTurn(input, callbacks);
+        const warning = qualityWarningMessage({
+          usedFallback: true,
+          acceptedSeverity: "warn",
+        });
+
+        return attachTurnQualityMeta(fallback, {
+          warnings: warning ? [warning] : [],
+          quality: {
+            acceptedSeverity: "warn",
+            plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
+            rendererIssues: selectedRendererIssues.map((issue) => issue.code),
+            usedPlannerRepair,
+            usedRendererRepair,
+            usedFallback: true,
+            fallbackReason: "renderer_blocked",
+          },
+        });
+      }
+
+      const decision: ResolveDecision = {
+        narration: renderDecision.narration,
+        suggestedActions: renderDecision.suggestedActions,
+        proposedDelta: selectedPlanner.proposedDelta,
+      };
+      const acceptedSeverity = worstSeverity(selectedPlannerSeverity, selectedRendererSeverity);
+      const warning = qualityWarningMessage({
+        usedFallback: false,
+        acceptedSeverity,
+      });
+
+      if (decision.narration.trim()) {
+        callbacks?.onNarration?.(decision.narration.trim());
+      }
+
+      return attachTurnQualityMeta(decision, {
+        warnings: warning ? [warning] : [],
+        quality: {
+          acceptedSeverity,
+          plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
+          rendererIssues: selectedRendererIssues.map((issue) => issue.code),
+          usedPlannerRepair,
+          usedRendererRepair,
+          usedFallback: false,
+          fallbackReason: null,
+        },
+      });
+    } catch (error) {
+      this.logTurnFailure({
+        mode: "resolution",
+        stage: "exception",
+        prompt: plannerPrompt,
+        error,
+      });
+
+      try {
+        const fallback = await this.fallback.resolveTurn(input, callbacks);
+        const warning = qualityWarningMessage({
+          usedFallback: true,
+          acceptedSeverity: "warn",
+        });
+
+        return attachTurnQualityMeta(fallback, {
+          warnings: warning ? [warning] : [],
+          quality: {
+            acceptedSeverity: "warn",
+            plannerIssues: [],
+            rendererIssues: [],
+            usedPlannerRepair: false,
+            usedRendererRepair: false,
+            usedFallback: true,
+            fallbackReason: "openrouter_exception",
+          },
+        });
+      } catch (fallbackError) {
+        throw fallbackError instanceof Error
+          ? fallbackError
+          : error instanceof Error
+            ? error
+            : new Error("OpenRouter resolution failed.");
+      }
+    }
   }
 
   async summarizeSession(messages: string[]) {

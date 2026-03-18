@@ -1,4 +1,8 @@
-import { auditNarration } from "../src/lib/ai/narration-audit";
+import {
+  auditNarration,
+  auditRenderedNarration,
+  validateBeatPlan,
+} from "../src/lib/ai/narration-audit";
 import { dmClient } from "../src/lib/ai/provider";
 import { LocalDungeonMaster } from "../src/lib/ai/local-provider";
 import {
@@ -99,7 +103,6 @@ async function runProviderChecks(name: string, provider: HarnessProvider, failur
       mode: "triage",
       narration: triage.narration,
       playerAction: ambushAction,
-      recentTurnLedger: promptContext.recentTurnLedger,
     });
     assertCase(
       !triageAudit.issues.some((issue) => issue.code === "action_deferral"),
@@ -131,7 +134,6 @@ async function runProviderChecks(name: string, provider: HarnessProvider, failur
     mode: "resolution",
     narration: resolution.narration,
     playerAction: observationAction,
-    recentTurnLedger: promptContext.recentTurnLedger,
   });
   assertCase(
     !resolutionAudit.issues.some((issue) =>
@@ -182,19 +184,80 @@ async function main() {
       expectIssue: "editorial_closer",
     },
     {
-      label: "repeated key item should fail",
+      label: "repeated key item within narration should fail",
       result: auditNarration({
         mode: "triage",
-        narration: "The ledger weighs at your side again as the guard closes in.",
+        narration: "The ledger thumps against the chair leg, and the ledger's clasp clicks softly as you set it down.",
         playerAction: "I draw the guard away from the alley.",
-        recentTurnLedger: [
-          '[Turn 1] Action: "I grab the ledger and break into a run." | Roll: none | HP: 0 | Discoveries: none | SceneChanged: yes',
-          '[Turn 2] Action: "I cut across the wharf with the ledger hidden under my coat." | Roll: none | HP: 0 | Discoveries: none | SceneChanged: yes',
-          '[Turn 3] Action: "I hide behind the net stacks." | Roll: none | HP: 0 | Discoveries: none | SceneChanged: no',
-          "[Turn 4] Action: \"I keep the ledger hidden while the pursuit closes.\" | Roll: none | HP: 0 | Discoveries: none | SceneChanged: no",
-        ],
       }),
       expectIssue: "repeated_key_item",
+    },
+    {
+      label: "single key item mention without action relevance should fail",
+      result: auditNarration({
+        mode: "triage",
+        narration: "You set the ledger on the table and listen to the tavern below.",
+        playerAction: "I bar the door and listen for footsteps on the stairs.",
+      }),
+      expectIssue: "repeated_key_item",
+    },
+    {
+      label: "single key item mention with direct action relevance should pass",
+      result: auditNarration({
+        mode: "triage",
+        narration: "You slide the ledger beneath the mattress and pull the blanket smooth over it.",
+        playerAction: "I hide it beneath the bed before anyone comes upstairs.",
+      }),
+      expectIssue: null,
+    },
+  ];
+
+  const beatCases = [
+    {
+      label: "planner should block irrelevant key item surfacing",
+      result: validateBeatPlan({
+        mode: "triage",
+        playerAction: "I bar the door and listen for footsteps on the stairs.",
+        actionResolution: "You set the ledger on the table and listen for movement beyond the door.",
+        suggestedActionGoals: [
+          { goal: "fortify the room", target: null },
+          { goal: "check the stairwell", target: null },
+        ],
+        requiresCheck: false,
+      }),
+      expectSeverity: "block",
+      expectIssue: "irrelevant_key_item",
+    },
+    {
+      label: "planner should accept direct handling through pronoun actions",
+      result: validateBeatPlan({
+        mode: "triage",
+        playerAction: "I hide it beneath the bed before anyone comes upstairs.",
+        actionResolution: "You slide the ledger beneath the mattress and smooth the blanket over it.",
+        suggestedActionGoals: [
+          { goal: "wait for the hallway to settle", target: null },
+          { goal: "leave before dawn", target: null },
+        ],
+        requiresCheck: false,
+      }),
+      expectSeverity: "clean",
+      expectIssue: null,
+    },
+    {
+      label: "renderer should block contradictions with the beat plan",
+      result: auditRenderedNarration({
+        mode: "triage",
+        narration: "You wait in the dark and plan your next move.",
+        playerAction: "I spring the ambush the moment he clears the corner.",
+        actionResolution: "You catch the veteran by the collar and slam him into the stacked crates.",
+        directlyHandledItems: [],
+        suggestedActions: [
+          "Pin him before he can shout",
+          "Search him for orders",
+        ],
+      }),
+      expectSeverity: "block",
+      expectIssue: "beat_contradiction",
     },
   ];
 
@@ -208,6 +271,22 @@ async function main() {
       );
     } else {
       assertCase(codes.length === 0, `Static case failed: ${testCase.label}.`, failures);
+    }
+  }
+
+  for (const testCase of beatCases) {
+    assertCase(
+      testCase.result.highestSeverity === testCase.expectSeverity,
+      `Beat case failed: ${testCase.label}.`,
+      failures,
+    );
+    const codes = testCase.result.issues.map((issue) => issue.code);
+    if (testCase.expectIssue) {
+      assertCase(
+        codes.includes(testCase.expectIssue as never),
+        `Beat case failed: ${testCase.label}.`,
+        failures,
+      );
     }
   }
 

@@ -200,6 +200,7 @@ export type CampaignState = {
   };
   sceneState: SceneState;
   locations: string[];
+  knownLocations: string[];
   hooks: Hook[];
   villainClock: number;
   tensionScore: number;
@@ -313,6 +314,7 @@ export type PlayerCampaignSnapshot = {
   premise: string;
   tone: string;
   setting: string;
+  knownLocations: string[];
   state: PlayerCampaignState;
   character: CampaignCharacter;
   quests: PlayerVisibleQuestRecord[];
@@ -359,6 +361,7 @@ export type StructuredActionIntent =
 export type ProposedStateDelta = {
   sceneSnapshot?: string;
   sceneTitle?: string;
+  sceneLocation?: string;
   sceneAtmosphere?: string;
   activeArcId?: string;
   suggestedActions?: string[];

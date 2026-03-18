@@ -39,7 +39,7 @@ export async function POST(_: Request, context: Context) {
       },
     });
 
-    for (const warning of result.validated.warnings) {
+    for (const warning of result.warnings) {
       send({ type: "warning", message: warning });
     }
 

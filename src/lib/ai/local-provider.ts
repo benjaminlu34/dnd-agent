@@ -643,6 +643,61 @@ function isInvestigativeIntent(intent: ActionIntent, playerAction: string) {
   );
 }
 
+function toTitleCase(value: string) {
+  return value.replace(/\b[a-z]/g, (letter) => letter.toUpperCase());
+}
+
+function normalizeSceneLocationKey(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/\b(a|an|the)\b/g, " ")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function inferSceneLocation(
+  promptContext: PromptContext,
+  playerAction: string,
+  intent: ActionIntent,
+) {
+  if (intent.kind !== "travel") {
+    return undefined;
+  }
+
+  const lowerAction = playerAction.toLowerCase();
+  const travelMatch = lowerAction.match(
+    /\b(?:go to|head to|move to|travel to|return to|enter|approach|follow)\s+(.+)$/,
+  );
+
+  if (!travelMatch) {
+    return undefined;
+  }
+
+  const candidate = travelMatch[1]
+    .replace(/\b(with|while|before|after|and|but)\b.*$/i, "")
+    .replace(/^[^a-z0-9]+/i, "")
+    .replace(/[^a-z0-9'\s-]+$/i, "")
+    .trim();
+
+  if (!candidate) {
+    return undefined;
+  }
+
+  const normalizedCandidate = normalizeSceneLocationKey(candidate);
+  const normalizedCurrent = normalizeSceneLocationKey(promptContext.scene.location);
+
+  if (!normalizedCandidate) {
+    return undefined;
+  }
+
+  if (normalizedCandidate === normalizedCurrent) {
+    return promptContext.scene.location;
+  }
+
+  return toTitleCase(candidate.replace(/^(a|an|the)\s+/i, "").trim());
+}
+
 function chooseHiddenClue(promptContext: PromptContext, intent: ActionIntent) {
   if (!["inspect", "social", "travel", "ritual"].includes(intent.kind)) {
     return null;
@@ -1586,6 +1641,7 @@ export class LocalDungeonMaster {
           revealText,
           discoveredQuestTitle: questDiscovery?.title ?? null,
         }),
+        sceneLocation: inferSceneLocation(input.promptContext, input.playerAction, intent),
         healthDelta: buildHealthDelta({ intent }),
         sceneAtmosphere:
           intent.kind === "rest"
@@ -1690,6 +1746,7 @@ export class LocalDungeonMaster {
           discoveredQuestTitle: questDiscovery?.title ?? null,
           outcome: input.checkResult.outcome,
         }),
+        sceneLocation: inferSceneLocation(input.promptContext, input.playerAction, intent),
         healthDelta: buildHealthDelta({
           intent,
           outcome: input.checkResult.outcome,

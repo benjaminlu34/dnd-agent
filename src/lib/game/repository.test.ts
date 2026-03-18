@@ -10,7 +10,12 @@ import {
   createStarterQuests,
   createStarterState,
 } from "./starter-data";
-import { buildRecentTurnLedger, getPromptContext } from "./repository";
+import {
+  buildRecentTurnLedger,
+  getPromptContext,
+  orderRecentMessages,
+  toPlayerCampaignSnapshot,
+} from "./repository";
 
 function createSnapshot(overrides: Partial<CampaignSnapshot> = {}): CampaignSnapshot {
   const blueprint = createStarterBlueprint();
@@ -191,4 +196,73 @@ test("getPromptContext classifies snapshot data without extra turn queries", asy
     buildRecentTurnLedger(snapshot.state.turnCount, recentResolvedTurns),
   );
   assert.equal(context.promptSceneSummary, snapshot.state.sceneState.summary);
+});
+
+test("recent transcript snapshots should keep the latest 30 messages in reading order", () => {
+  const messages = Array.from({ length: 35 }, (_, index) => ({
+    id: `message_${index + 1}`,
+    role: "assistant" as const,
+    kind: "narration" as const,
+    content: `Message ${index + 1}`,
+    createdAt: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
+  }));
+
+  const latestThirty = orderRecentMessages(messages, 30);
+
+  assert.deepEqual(
+    latestThirty.map((message) => message.id),
+    [
+      "message_6",
+      "message_7",
+      "message_8",
+      "message_9",
+      "message_10",
+      "message_11",
+      "message_12",
+      "message_13",
+      "message_14",
+      "message_15",
+      "message_16",
+      "message_17",
+      "message_18",
+      "message_19",
+      "message_20",
+      "message_21",
+      "message_22",
+      "message_23",
+      "message_24",
+      "message_25",
+      "message_26",
+      "message_27",
+      "message_28",
+      "message_29",
+      "message_30",
+      "message_31",
+      "message_32",
+      "message_33",
+      "message_34",
+      "message_35",
+    ],
+  );
+});
+
+test("toPlayerCampaignSnapshot exposes known locations without leaking hidden state locations", () => {
+  const snapshot = createSnapshot({
+    state: {
+      ...createSnapshot().state,
+      knownLocations: ["Briar Glen", "Old Smithy"],
+      locations: ["Briar Glen", "Old Smithy", "Lantern Catacombs"],
+    },
+    npcs: [
+      {
+        ...createStarterNpcs()[0]!,
+        discoveredAtTurn: 0,
+      },
+    ],
+  });
+
+  const playerSnapshot = toPlayerCampaignSnapshot(snapshot);
+
+  assert.deepEqual(playerSnapshot.knownLocations, ["Briar Glen", "Old Smithy"]);
+  assert.equal("locations" in playerSnapshot, false);
 });

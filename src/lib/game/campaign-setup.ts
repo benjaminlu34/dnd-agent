@@ -12,6 +12,26 @@ import {
 import { createStarterState } from "@/lib/game/starter-data";
 import { slugify } from "@/lib/utils";
 
+const PUBLIC_NPC_ROLE_KEYWORDS = [
+  "authority",
+  "guard",
+  "warden",
+  "keeper",
+  "steward",
+  "marshal",
+  "judge",
+  "captain",
+  "merchant",
+  "seller",
+  "smith",
+  "scribe",
+  "apothecary",
+  "physician",
+  "mason",
+  "miller",
+  "copyist",
+];
+
 function makeId(prefix: string, value: string, fallback: string) {
   const slug = slugify(value);
   return `${prefix}_${slug || fallback}`;
@@ -42,6 +62,22 @@ function buildNormalizedIdMap<T>(
   });
 
   return map;
+}
+
+function uniqueStrings(values: Array<string | null | undefined>) {
+  return Array.from(
+    new Set(
+      values
+        .filter((value): value is string => typeof value === "string")
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
+function isPublicNpcRole(role: string) {
+  const normalizedRole = role.trim().toLowerCase();
+  return PUBLIC_NPC_ROLE_KEYWORDS.some((keyword) => normalizedRole.includes(keyword));
 }
 
 export function buildCampaignBlueprintFromSetup(
@@ -126,6 +162,7 @@ export function buildCampaignStateFromSetup(
     },
     activeThreat: opening.activeThreat,
     locations: setup.secretEngine.locations,
+    knownLocations: uniqueStrings([setup.publicSynopsis.setting, opening.scene.location]),
   });
 }
 
@@ -156,22 +193,26 @@ export function buildArcRecordsFromBlueprint(blueprint: CampaignBlueprint): ArcR
 }
 
 export function buildNpcRecordsFromSetup(setup: GeneratedCampaignSetup): NpcRecord[] {
-  return setup.secretEngine.npcs.slice(0, 4).map((npc, index) => ({
-    id: makeId("npc", npc.name, `npc_${index + 1}`),
-    name: npc.name,
-    role: npc.role,
-    status: npc.status ?? "present",
-    isCompanion: Boolean(npc.isCompanion) && index === 0
+  return setup.secretEngine.npcs.slice(0, 4).map((npc, index) => {
+    const isCompanion = Boolean(npc.isCompanion) && index === 0
       ? true
       : Boolean(
           npc.isCompanion &&
             !setup.secretEngine.npcs.slice(0, index).some((entry) => entry.isCompanion),
-        ),
-    approval: npc.approval ?? 0,
-    personalHook: npc.personalHook ?? null,
-    notes: npc.notes,
-    discoveredAtTurn: null,
-  }));
+        );
+
+    return {
+      id: makeId("npc", npc.name, `npc_${index + 1}`),
+      name: npc.name,
+      role: npc.role,
+      status: npc.status ?? "present",
+      isCompanion,
+      approval: npc.approval ?? 0,
+      personalHook: npc.personalHook ?? null,
+      notes: npc.notes,
+      discoveredAtTurn: isCompanion || isPublicNpcRole(npc.role) ? 0 : null,
+    };
+  });
 }
 
 export function buildClueRecordsFromSetup(

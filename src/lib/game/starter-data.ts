@@ -61,6 +61,7 @@ type StarterStateOverrides = {
   openingScene?: Omit<SceneState, "id"> & { id?: string };
   activeThreat?: string;
   locations?: string[];
+  knownLocations?: string[];
   villainClock?: number;
   tensionScore?: number;
   dangerLevel?: CampaignState["worldState"]["dangerLevel"];
@@ -306,6 +307,7 @@ export function createStarterState(
     },
     sceneState,
     locations: overrides.locations ?? ["Ash Market", "Old Smithy", "Lantern Catacombs"],
+    knownLocations: overrides.knownLocations ?? [sceneState.location],
     hooks: blueprint.initialHooks,
     villainClock: overrides.villainClock ?? 2,
     tensionScore: overrides.tensionScore ?? 28,

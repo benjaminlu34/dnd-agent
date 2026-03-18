@@ -941,11 +941,17 @@ function toPlayerClue(clue: Clue): PlayerVisibleClue {
 export async function getRecentMessages(sessionId: string) {
   const messages = await prisma.message.findMany({
     where: { sessionId },
-    orderBy: { createdAt: "asc" },
+    orderBy: { createdAt: "desc" },
     take: 30,
   });
 
-  return messages.map(toMessage);
+  return orderRecentMessages(messages.map(toMessage));
+}
+
+export function orderRecentMessages<T extends { createdAt: string }>(messages: T[], take = 30) {
+  return [...messages]
+    .sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime())
+    .slice(-take);
 }
 
 async function getRecentResolvedTurns(sessionId: string, take = 4): Promise<RecentResolvedTurn[]> {
@@ -1143,6 +1149,7 @@ export function toPlayerCampaignSnapshot(
     premise: snapshot.premise,
     tone: snapshot.tone,
     setting: snapshot.setting,
+    knownLocations: snapshot.state.knownLocations,
     state: {
       turnCount: snapshot.state.turnCount,
       sceneState: {

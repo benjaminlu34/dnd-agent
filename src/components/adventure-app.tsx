@@ -21,7 +21,7 @@ type TurnStreamEvent =
   | { type: "error"; message: string }
   | { type: "done" };
 
-type JournalTab = "quests" | "people" | "journal" | "clues";
+type JournalTab = "quests" | "known-world" | "journal" | "clues";
 
 const STORAGE_KEY = "dnd-agent:last-campaign-id";
 
@@ -859,6 +859,7 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
   const discoveredClues = snapshot.clues;
   const visibleQuests = snapshot.quests.filter((quest) => quest.status !== "failed");
   const knownPeople = snapshot.npcs;
+  const knownLocations = snapshot.knownLocations;
   const journalEntries = [
     ...(snapshot.previouslyOn
       ? [
@@ -1208,7 +1209,7 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
           </div>
 
           <div className="mb-4 flex flex-wrap gap-2">
-            {(["quests", "people", "journal", "clues"] as JournalTab[]).map((tab) => (
+            {(["quests", "known-world", "journal", "clues"] as JournalTab[]).map((tab) => (
               <button
                 key={tab}
                 className={clsx(
@@ -1219,7 +1220,7 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
                 )}
                 onClick={() => setJournalTab(tab)}
               >
-                {tab}
+                {tab === "known-world" ? "Known World" : tab}
               </button>
             ))}
           </div>
@@ -1248,22 +1249,50 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
                 )
               ) : null}
 
-              {journalTab === "people" ? (
-                knownPeople.length ? (
-                  knownPeople.map((npc) => (
-                    <div key={npc.id} className="rounded-2xl border border-zinc-800 bg-black px-4 py-4">
-                      <p className="story-kicker">{npc.role ?? "Identity Unknown"}</p>
-                      <h3 className="text-lg font-semibold text-zinc-50">{npc.name}</h3>
-                      {npc.notes ? (
-                        <p className="mt-2 text-sm leading-7 text-zinc-400">{npc.notes}</p>
-                      ) : (
-                        <p className="mt-2 text-sm leading-7 text-zinc-500">This figure has entered the story, but their place in it is still unclear.</p>
-                      )}
-                    </div>
-                  ))
-                ) : (
-                  <EmptyJournalCopy>No one has left a strong enough impression to enter the journal yet.</EmptyJournalCopy>
-                )
+              {journalTab === "known-world" ? (
+                <div className="space-y-4">
+                  <div className="rounded-2xl border border-zinc-800 bg-black px-4 py-4">
+                    <p className="story-kicker">Locations</p>
+                    {knownLocations.length ? (
+                      <ul className="mt-3 space-y-2 text-sm leading-7 text-zinc-300">
+                        {knownLocations.map((location) => (
+                          <li key={location}>{location}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="mt-2 text-sm leading-7 text-zinc-500">
+                        No places have been written into the journal yet.
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="rounded-2xl border border-zinc-800 bg-black px-4 py-4">
+                    <p className="story-kicker">People</p>
+                    {knownPeople.length ? (
+                      <div className="mt-3 space-y-4">
+                        {knownPeople.map((npc) => (
+                          <div key={npc.id}>
+                            <p className="text-xs uppercase tracking-[0.2em] text-zinc-500">
+                              {npc.role ?? "Identity Unknown"}
+                            </p>
+                            <h3 className="mt-1 text-lg font-semibold text-zinc-50">{npc.name}</h3>
+                            {npc.notes ? (
+                              <p className="mt-2 text-sm leading-7 text-zinc-400">{npc.notes}</p>
+                            ) : (
+                              <p className="mt-2 text-sm leading-7 text-zinc-500">
+                                This figure has entered the story, but their place in it is still unclear.
+                              </p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="mt-2 text-sm leading-7 text-zinc-500">
+                        No one has left a strong enough impression to enter the journal yet.
+                      </p>
+                    )}
+                  </div>
+                </div>
               ) : null}
 
               {journalTab === "journal" ? (

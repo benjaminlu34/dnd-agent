@@ -1,5 +1,6 @@
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { dmClient } from "@/lib/ai/provider";
+import { dmClient, getTurnQualityMeta } from "@/lib/ai/provider";
 import { rollCheck } from "@/lib/game/checks";
 import {
   createStarterCharacter,
@@ -331,8 +332,19 @@ async function commitValidatedTurn(input: {
   warnings: string[];
   narration?: string;
   checkResult?: CheckResult;
+  qualityMetadata?: Record<string, unknown>;
 }) {
-  const { snapshot, validated, sessionId, playerAction, narration, warnings, checkResult, turnId } = input;
+  const {
+    snapshot,
+    validated,
+    sessionId,
+    playerAction,
+    narration,
+    warnings,
+    checkResult,
+    turnId,
+    qualityMetadata,
+  } = input;
   const turnFacts = buildTurnFacts({
     snapshot,
     playerAction,
@@ -538,7 +550,8 @@ async function commitValidatedTurn(input: {
           rollback,
           ...(checkResult ? { checkResult } : {}),
           turnFacts,
-        },
+          ...(qualityMetadata ? { aiQuality: qualityMetadata } : {}),
+        } as Prisma.InputJsonValue,
       },
     });
   });
@@ -795,6 +808,8 @@ export async function triageTurn(input: {
       },
     },
   );
+  const qualityMeta = getTurnQualityMeta(decision);
+  const providerWarnings = qualityMeta?.warnings ?? [];
 
   const narration = streamedNarration.trim() || decision.narration?.trim() || "";
   const narrationForActions = narration || snapshot.state.sceneState.summary;
@@ -839,6 +854,7 @@ export async function triageTurn(input: {
       turnId: turn.id,
       check: pendingCheck,
       suggestedActions,
+      warnings: providerWarnings,
     };
   }
 
@@ -859,8 +875,9 @@ export async function triageTurn(input: {
     turnId: turn.id,
     playerAction: input.playerAction,
     validated,
-    warnings: validated.warnings,
+    warnings: [...validated.warnings, ...providerWarnings],
     narration: narration || undefined,
+    qualityMetadata: qualityMeta?.quality as Record<string, unknown> | undefined,
   });
 
   return {
@@ -868,6 +885,7 @@ export async function triageTurn(input: {
     turnId: turn.id,
     validated,
     suggestedActions: validated.nextState.sceneState.suggestedActions,
+    warnings: [...validated.warnings, ...providerWarnings],
   };
 }
 
@@ -919,6 +937,8 @@ export async function resolvePendingCheck(input: {
       },
     },
   );
+  const qualityMeta = getTurnQualityMeta(decision);
+  const providerWarnings = qualityMeta?.warnings ?? [];
 
   const narration = streamedNarration.trim() || decision.narration.trim() || "";
   const narrationForActions = narration || snapshot.state.sceneState.summary;
@@ -951,15 +971,17 @@ export async function resolvePendingCheck(input: {
     turnId: turn.id,
     playerAction: turn.playerAction,
     validated,
-    warnings: validated.warnings,
+    warnings: [...validated.warnings, ...providerWarnings],
     narration: narration || undefined,
     checkResult,
+    qualityMetadata: qualityMeta?.quality as Record<string, unknown> | undefined,
   });
 
   return {
     checkResult,
     validated,
     suggestedActions: validated.nextState.sceneState.suggestedActions,
+    warnings: [...validated.warnings, ...providerWarnings],
   };
 }
 

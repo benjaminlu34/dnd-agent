@@ -74,7 +74,7 @@ export function buildDungeonMasterSystemPrompt() {
     "The engine and database are authoritative. You only narrate and propose structured intents.",
     "Treat previously narrated events as canon. Do not retcon, replace, or casually contradict established details.",
     "Keep the prose vivid, specific, grounded in the current scene, and concise.",
-    "Prefer 1-3 short paragraphs instead of long monologues.",
+    "Prefer 1-5 paragraphs instead of long monologues.",
     "Narration and scene state are separate: narration is the player-facing prose for this beat, while proposedDelta.sceneSnapshot is only a short current-state note when the tactical picture materially changes.",
     "Do not paste the full narration into proposedDelta.sceneSnapshot.",
     "proposedDelta.sceneSnapshot must be exactly one factual sentence about physical position, threat, or opportunity.",
@@ -104,7 +104,65 @@ export function buildDungeonMasterSystemPrompt() {
     "Suggested actions must reflect the immediate current moment, not the opening scene or stale earlier options.",
     "Replace stale suggested actions as the story moves. Do not repeat the same suggestions turn after turn unless the situation is truly unchanged.",
     "Use healthDelta (negative for damage, positive for healing) to reflect physical consequences.",
+    "If you set proposedDelta.sceneLocation, reuse the exact established location name unless the player has explicitly traveled into a newly discovered area.",
   ].join("\n");
+}
+
+export function buildTurnPlannerSystemPrompt() {
+  return [
+    buildDungeonMasterSystemPrompt(),
+    "You are planning the beat, not writing the final player-facing prose.",
+    "Return only structured planner output through the tool call.",
+    "actionResolution must be a short external-facing mechanical summary of what actually happens in this beat.",
+    "suggestedActionGoals must be short next-beat intents, not polished player-facing action text.",
+    "Do not include narration in planner output.",
+  ].join("\n");
+}
+
+export function buildTurnRendererSystemPrompt() {
+  return [
+    buildDungeonMasterSystemPrompt(),
+    "You are rendering from a validated beat plan that is already authoritative.",
+    "Do not invent or alter outcomes, discoveries, checks, state changes, or item handling.",
+    "Use the supplied actionResolution as the truth of what happened in this beat.",
+    "Render only player-facing narration and suggested actions through the tool call.",
+    "suggestedActions must sound natural in-fiction, but must stay faithful to the supplied suggestedActionGoals.",
+  ].join("\n");
+}
+
+function buildSharedTurnContext(input: {
+  blueprint: CampaignBlueprint;
+  promptContext: PromptContext;
+}) {
+  const { blueprint, promptContext } = input;
+
+  return `
+CAMPAIGN
+Premise: ${blueprint.premise}
+Tone: ${blueprint.tone}
+Setting: ${blueprint.setting}
+
+CURRENT SCENE
+Title: ${promptContext.scene.title}
+Location: ${promptContext.scene.location}
+Summary: ${promptContext.promptSceneSummary}
+Atmosphere: ${promptContext.scene.atmosphere}
+
+RECENT TURN LEDGER
+${formatRecentTurnLedger(promptContext.recentTurnLedger)}
+
+ACTIVE ARC
+${promptContext.activeArc ? `${promptContext.activeArc.title}: ${promptContext.activeArc.summary}` : "None"}
+
+ACTIVE QUESTS
+${formatQuestState(promptContext.activeQuests)}
+
+DISCOVERED CLUES
+${formatDiscoveredClues(promptContext.discoveredClues)}
+
+COMPANION
+${promptContext.companion ? `${promptContext.companion.name}: approval ${promptContext.companion.approval}` : "None"}
+`;
 }
 
 export function buildTriageUserPrompt(input: {
@@ -166,8 +224,43 @@ If a check is required, set narration to null.
 Set isInvestigative to true only if the player's primary action is searching, studying, observing, interrogating, following a lead, looting, or otherwise trying to uncover hidden information.
 If the tactical picture materially changes, include a one-sentence present-tense update in proposedDelta.sceneSnapshot. Do not copy the full narration there. If the scene state has not materially changed, omit sceneSnapshot.
 proposedDelta.sceneSnapshot must be one factual sentence with no metaphors, emotional language, or atmospheric flourish.
+If the scene has moved, set proposedDelta.sceneLocation to the current location name and reuse previously established names exactly unless the player explicitly reached a newly discovered area.
 If a hidden NPC is encountered or a hidden quest is logged, record that in proposedDelta using the exact entity IDs.
 Use healthDelta (negative for damage, positive for healing) to reflect physical consequences.
+`;
+}
+
+export function buildTriagePlannerUserPrompt(input: {
+  blueprint: CampaignBlueprint;
+  promptContext: PromptContext;
+  playerAction: string;
+}) {
+  const { promptContext, playerAction } = input;
+
+  return `
+${buildSharedTurnContext(input)}
+
+DISCOVERY CANDIDATES
+Compact IDs only. These are the only hidden quests or NPCs you may discover, and only if the fiction directly earns it.
+${formatDiscoveryCandidates(promptContext.discoveryCandidates, true)}
+
+PACING
+Villain progress: ${promptContext.villainClock}/${input.blueprint.villain.progressClock}
+Current tension: ${promptContext.tensionScore}/100
+${promptContext.arcPacingHint ?? "No arc pacing warning."}
+
+PLAYER ACTION
+${playerAction}
+
+Plan the immediate beat only.
+Decide whether the action needs a check. Checks are only for meaningful uncertainty, danger, or resistance.
+If a check is required, output requiresCheck true, provide the check payload, leave proposedDelta empty or minimal, and still explain the unresolved beat mechanically in actionResolution.
+If no check is required, resolve the declared action itself in actionResolution. Do not restage the whole scene or defer into suspense.
+actionResolution must be 1-2 short sentences of concrete external outcome, not polished narration.
+suggestedActionGoals must be 2-4 short intent summaries for the next beat, not final player-facing menu copy.
+If the tactical picture materially changes, include a one-sentence factual proposedDelta.sceneSnapshot. If it does not materially change, omit it.
+If a hidden NPC is encountered or a hidden quest is logged, record it in proposedDelta using exact IDs.
+Use healthDelta (negative for damage, positive for healing) for physical consequences.
 `;
 }
 
@@ -229,10 +322,242 @@ Return 2-4 suggested actions that follow from this exact resolved outcome, not f
 Include the narration text in the top-level tool field narration.
 If the tactical picture materially changes, include a one-sentence present-tense update in proposedDelta.sceneSnapshot. Do not copy the full narration there. If the scene state has not materially changed, omit sceneSnapshot.
 proposedDelta.sceneSnapshot must be one factual sentence with no metaphors, emotional language, or atmospheric flourish.
+If the scene has moved, set proposedDelta.sceneLocation to the current location name and reuse previously established names exactly unless the player explicitly reached a newly discovered area.
 If a hidden NPC is encountered or a hidden quest is logged in this outcome, record that in proposedDelta using the exact entity IDs.
 Use healthDelta (negative for damage, positive for healing) to reflect physical consequences.
 `;
 }
+
+export function buildResolutionPlannerUserPrompt(input: {
+  blueprint: CampaignBlueprint;
+  promptContext: PromptContext;
+  playerAction: string;
+  checkResult: CheckResult;
+  isInvestigative: boolean;
+}) {
+  const { promptContext, playerAction, checkResult, isInvestigative } = input;
+
+  return `
+${buildSharedTurnContext(input)}
+
+DISCOVERY CANDIDATES
+Only use these if the turn is investigative and the resolved fiction directly earns the discovery.
+${formatDiscoveryCandidates(promptContext.discoveryCandidates, isInvestigative)}
+
+PLAYER ACTION
+${playerAction}
+
+AUTHORITATIVE CHECK RESULT
+Stat: ${checkResult.stat}
+Mode: ${checkResult.mode}
+Reason: ${checkResult.reason}
+Rolls: ${checkResult.rolls[0]}, ${checkResult.rolls[1]}
+Modifier: ${checkResult.modifier}
+Total: ${checkResult.total}
+Outcome: ${checkResult.outcome}
+Consequences: ${formatList(checkResult.consequences ?? [])}
+
+Plan the resolved beat only.
+actionResolution must match the exact outcome above and describe the concrete external result in 1-2 short sentences.
+Do not write polished narration here.
+Use suggestedActionGoals for 2-4 short intent summaries that follow from this exact resolved outcome.
+If the tactical picture materially changes, include a factual proposedDelta.sceneSnapshot. Otherwise omit it.
+If a hidden NPC is encountered or a hidden quest is logged in this outcome, record it in proposedDelta using exact IDs.
+Use healthDelta (negative for damage, positive for healing) for physical consequences.
+`;
+}
+
+export function buildRendererUserPrompt(input: {
+  mode: "triage" | "resolution";
+  playerAction: string;
+  promptContext: PromptContext;
+  actionResolution: string;
+  suggestedActionGoals: Array<{ goal: string; target: string | null }>;
+}) {
+  const goals = input.suggestedActionGoals.length
+    ? input.suggestedActionGoals
+        .map((goal, index) => `- Goal ${index + 1}: ${goal.goal}${goal.target ? ` | Target: ${goal.target}` : ""}`)
+        .join("\n")
+    : "None";
+
+  return `
+CURRENT SCENE
+Title: ${input.promptContext.scene.title}
+Location: ${input.promptContext.scene.location}
+Summary: ${input.promptContext.promptSceneSummary}
+Atmosphere: ${input.promptContext.scene.atmosphere}
+
+MODE
+${input.mode}
+
+PLAYER ACTION
+${input.playerAction}
+
+VALIDATED ACTION RESOLUTION
+${input.actionResolution}
+
+VALIDATED SUGGESTED ACTION GOALS
+${goals}
+
+Render the beat faithfully from the validated actionResolution.
+Do not invent new discoveries, state changes, checks, or twists.
+Keep the narration concise, concrete, and player-facing.
+End on a concrete image, pressure, or line of dialogue rather than explanation.
+Return 2-4 suggestedActions that sound natural in fiction and stay faithful to the suggestedActionGoals.
+`;
+}
+
+export const triagePlannerTool = {
+  name: "plan_turn_triage",
+  description: "Plan the structured semantic result for a player turn triage without writing final narration.",
+  input_schema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      requiresCheck: { type: "boolean" },
+      isInvestigative: {
+        type: "boolean",
+        description:
+          "True if the player's primary action is searching, studying, observing, interrogating, following a lead, looting, or otherwise trying to uncover hidden information.",
+      },
+      check: {
+        type: "object",
+        nullable: true,
+        additionalProperties: false,
+        properties: {
+          stat: {
+            type: "string",
+            enum: ["strength", "agility", "intellect", "charisma", "vitality"],
+          },
+          mode: {
+            type: "string",
+            enum: ["normal", "advantage", "disadvantage"],
+          },
+          reason: { type: "string" },
+        },
+        required: ["stat", "mode", "reason"],
+      },
+      actionResolution: {
+        type: "string",
+      },
+      suggestedActionGoals: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            goal: { type: "string" },
+            target: { type: ["string", "null"] },
+          },
+          required: ["goal", "target"],
+        },
+      },
+      proposedDelta: {
+        type: "object",
+        properties: {
+          healthDelta: {
+            type: "integer",
+          },
+          sceneSnapshot: {
+            type: "string",
+            description:
+              "One factual sentence describing the updated physical or tactical state. No metaphors, atmospheric flourish, emotional language, or recap prose.",
+          },
+          sceneLocation: {
+            type: "string",
+            description:
+              "The name of the current location. Must match previously established location names exactly unless the player has explicitly traveled to a newly discovered area.",
+          },
+          npcDiscoveries: {
+            type: "array",
+            items: { type: "string" },
+          },
+          questDiscoveries: {
+            type: "array",
+            items: { type: "string" },
+          },
+        },
+        additionalProperties: true,
+      },
+    },
+    required: [
+      "requiresCheck",
+      "isInvestigative",
+      "actionResolution",
+      "suggestedActionGoals",
+      "proposedDelta",
+    ],
+  },
+};
+
+export const resolutionPlannerTool = {
+  name: "plan_turn_resolution",
+  description: "Plan the semantic result for a resolved turn after an authoritative check result.",
+  input_schema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      actionResolution: { type: "string" },
+      suggestedActionGoals: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            goal: { type: "string" },
+            target: { type: ["string", "null"] },
+          },
+          required: ["goal", "target"],
+        },
+      },
+      proposedDelta: {
+        type: "object",
+        properties: {
+          healthDelta: {
+            type: "integer",
+          },
+          sceneSnapshot: {
+            type: "string",
+            description:
+              "One factual sentence describing the updated physical or tactical state. No metaphors, atmospheric flourish, emotional language, or recap prose.",
+          },
+          sceneLocation: {
+            type: "string",
+            description:
+              "The name of the current location. Must match previously established location names exactly unless the player has explicitly traveled to a newly discovered area.",
+          },
+          npcDiscoveries: {
+            type: "array",
+            items: { type: "string" },
+          },
+          questDiscoveries: {
+            type: "array",
+            items: { type: "string" },
+          },
+        },
+        additionalProperties: true,
+      },
+    },
+    required: ["actionResolution", "suggestedActionGoals", "proposedDelta"],
+  },
+};
+
+export const rendererTool = {
+  name: "render_turn_beat",
+  description: "Render final player-facing narration and suggested actions from a validated beat plan.",
+  input_schema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      narration: { type: "string" },
+      suggestedActions: {
+        type: "array",
+        items: { type: "string" },
+      },
+    },
+    required: ["narration", "suggestedActions"],
+  },
+};
 
 export const triageTool = {
   name: "submit_turn_triage",
@@ -247,8 +572,6 @@ export const triageTool = {
       },
       isInvestigative: {
         type: "boolean",
-        description:
-          "True if the player's primary action is searching, studying, observing, interrogating, following a lead, looting, or otherwise trying to uncover hidden information.",
       },
       check: {
         type: "object",
@@ -281,6 +604,11 @@ export const triageTool = {
             type: "string",
             description:
               "One factual sentence describing the updated physical or tactical state. No metaphors, atmospheric flourish, emotional language, or recap prose.",
+          },
+          sceneLocation: {
+            type: "string",
+            description:
+              "The name of the current location. Must match previously established location names exactly unless the player has explicitly traveled to a newly discovered area.",
           },
           npcDiscoveries: {
             type: "array",
@@ -320,6 +648,11 @@ export const resolutionTool = {
             type: "string",
             description:
               "One factual sentence describing the updated physical or tactical state. No metaphors, atmospheric flourish, emotional language, or recap prose.",
+          },
+          sceneLocation: {
+            type: "string",
+            description:
+              "The name of the current location. Must match previously established location names exactly unless the player has explicitly traveled to a newly discovered area.",
           },
           npcDiscoveries: {
             type: "array",

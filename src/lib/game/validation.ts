@@ -36,16 +36,25 @@ export function validateDelta({
   const healthDelta = Number.isFinite(proposedDelta.healthDelta)
     ? Math.trunc(proposedDelta.healthDelta as number)
     : 0;
+  const nextSceneLocation =
+    typeof proposedDelta.sceneLocation === "string" && proposedDelta.sceneLocation.trim()
+      ? proposedDelta.sceneLocation.trim()
+      : state.sceneState.location;
+  const nextKnownLocations = state.knownLocations.includes(nextSceneLocation)
+    ? state.knownLocations
+    : [...state.knownLocations, nextSceneLocation];
   const nextState: CampaignState = {
     ...state,
     sceneState: {
       ...state.sceneState,
       summary: proposedDelta.sceneSnapshot ?? state.sceneState.summary,
       title: proposedDelta.sceneTitle ?? state.sceneState.title,
+      location: nextSceneLocation,
       atmosphere: proposedDelta.sceneAtmosphere ?? state.sceneState.atmosphere,
       suggestedActions:
         proposedDelta.suggestedActions?.slice(0, 4) ?? state.sceneState.suggestedActions,
     },
+    knownLocations: nextKnownLocations,
     activeArcId: proposedDelta.activeArcId ?? state.activeArcId,
     villainClock: clamp(
       state.villainClock + (proposedDelta.villainClockDelta ?? 0),

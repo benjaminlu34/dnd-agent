@@ -9,7 +9,22 @@ export function parseBlueprint(value: unknown) {
 }
 
 export function parseCampaignState(value: unknown) {
-  return value as CampaignState;
+  const state = value as CampaignState;
+  const knownLocations = Array.isArray(state?.knownLocations)
+    ? state.knownLocations
+    : [state?.sceneState?.location];
+
+  return {
+    ...state,
+    knownLocations: Array.from(
+      new Set(
+        knownLocations
+          .filter((entry): entry is string => typeof entry === "string")
+          .map((entry) => entry.trim())
+          .filter(Boolean),
+      ),
+    ),
+  } as CampaignState;
 }
 
 export function parseGeneratedCampaignSetup(

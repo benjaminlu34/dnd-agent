@@ -37,6 +37,9 @@ export async function POST(request: Request) {
     });
 
     if (result.type === "check_required") {
+      for (const warning of result.warnings) {
+        send({ type: "warning", message: warning });
+      }
       send({
         type: "check_required",
         turnId: result.turnId,
@@ -49,7 +52,7 @@ export async function POST(request: Request) {
       send({ type: "narration", chunk });
     }
 
-    for (const warning of result.validated.warnings) {
+    for (const warning of result.warnings) {
       send({ type: "warning", message: warning });
     }
 
