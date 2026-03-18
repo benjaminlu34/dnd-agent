@@ -176,7 +176,7 @@ function chooseSuggestedActions(input: {
 
 export async function createAdventure() {
   const character = createStarterCharacter();
-  const setup = await dmClient.generateCampaignSetup(character);
+  const setup = await dmClient.generateCampaignSetup();
   const user = await prisma.user.upsert({
     where: { email: "solo@adventure.local" },
     update: {},

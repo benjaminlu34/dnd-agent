@@ -54,6 +54,7 @@ import {
   createDefaultAdventureModuleSetup,
   createDefaultCharacterTemplate,
 } from "@/lib/game/starter-data";
+import { dmClient } from "@/lib/ai/provider";
 import { prisma } from "@/lib/prisma";
 
 export async function ensureLocalUser() {
@@ -165,9 +166,10 @@ async function createCampaignInTx(
     userId: string;
     module: ModuleWithSetup;
     template: CharacterTemplate;
+    openingNarration: string;
   },
 ) {
-  const { state, quests, arcs, npcs, clues, openingScene, template } = buildCampaignCreationData(input);
+  const { state, quests, arcs, npcs, clues, template } = buildCampaignCreationData(input);
 
   return tx.campaign.create({
     data: {
@@ -191,7 +193,7 @@ async function createCampaignInTx(
             create: {
               role: "assistant",
               kind: "narration",
-              content: openingScene.summary,
+              content: input.openingNarration,
             },
           },
         },
@@ -404,40 +406,46 @@ export async function createCampaignFromModuleForUser(input: {
   templateId: string;
 }) {
   const user = await ensureLocalUser();
-  const result = await prisma.$transaction(async (tx) => {
-    const [module, template] = await Promise.all([
-      tx.adventureModule.findFirst({
-        where: {
-          id: input.moduleId,
-          userId: user.id,
-        },
-      }),
-      tx.characterTemplate.findFirst({
-        where: {
-          id: input.templateId,
-          userId: user.id,
-        },
-      }),
-    ]);
+  const [module, template] = await Promise.all([
+    prisma.adventureModule.findFirst({
+      where: {
+        id: input.moduleId,
+        userId: user.id,
+      },
+    }),
+    prisma.characterTemplate.findFirst({
+      where: {
+        id: input.templateId,
+        userId: user.id,
+      },
+    }),
+  ]);
 
-    if (!module) {
-      return { error: "module_not_found" as const };
-    }
+  if (!module) {
+    return { error: "module_not_found" as const };
+  }
 
-    if (!template) {
-      return { error: "template_not_found" as const };
-    }
+  if (!template) {
+    return { error: "template_not_found" as const };
+  }
 
-    const campaign = await createCampaignInTx(tx, {
-      userId: user.id,
-      module,
-      template: toTemplateRecord(template),
-    });
-
-    return { campaignId: campaign.id };
+  const templateRecord = toTemplateRecord(template);
+  const setup = toGeneratedCampaignSetup(module);
+  const openingNarration = await dmClient.generateCampaignOpening({
+    setup,
+    character: templateRecord,
   });
 
-  return result;
+  const campaign = await prisma.$transaction((tx) =>
+    createCampaignInTx(tx, {
+      userId: user.id,
+      module,
+      template: templateRecord,
+      openingNarration,
+    }),
+  );
+
+  return { campaignId: campaign.id };
 }
 
 export async function createCharacterTemplate(input: CharacterTemplateDraft) {

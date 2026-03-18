@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import { LocalDungeonMaster } from "@/lib/ai/local-provider";
 import { env } from "@/lib/env";
-import { characterTemplateDraftSchema, toCampaignSeedCharacter } from "@/lib/game/characters";
+import { characterTemplateDraftSchema } from "@/lib/game/characters";
 import {
   buildDungeonMasterSystemPrompt,
   buildOutcomeUserPrompt,
@@ -11,11 +11,10 @@ import {
   resolutionTool,
   triageTool,
 } from "@/lib/game/prompts";
-import { createDefaultCharacterTemplate } from "@/lib/game/starter-data";
 import { generatedCampaignSetupSchema } from "@/lib/game/session-zero";
 import type {
   CampaignBlueprint,
-  CampaignCharacter,
+  CharacterTemplate,
   CharacterTemplateDraft,
   CheckResult,
   GeneratedCampaignSetup,
@@ -51,6 +50,11 @@ type TurnAIPayload = {
   blueprint: CampaignBlueprint;
   promptContext: PromptContext;
   playerAction: string;
+};
+
+type CampaignOpeningInput = {
+  setup: GeneratedCampaignSetup;
+  character: CharacterTemplate;
 };
 
 function toStatModifier(value: number) {
@@ -649,10 +653,8 @@ class OpenRouterDungeonMaster {
   }
 
   async generateCampaignSetup(
-    character: CampaignCharacter,
     input: CampaignSetupGenerationInput = {},
   ) {
-    const seedCharacter = character ?? toCampaignSeedCharacter(createDefaultCharacterTemplate());
     const hasPreviousDraft = Boolean(input.previousDraft);
     const revisionPrompt = input.prompt?.trim() ?? "";
     const basePrompt = input.basePrompt?.trim() ?? "";
@@ -660,11 +662,14 @@ class OpenRouterDungeonMaster {
       {
         role: "system" as const,
         content: [
-          "You are generating a fresh starting campaign setup for a solo fantasy RPG.",
+          "You are generating a fresh reusable adventure module for a solo fantasy RPG.",
+          "The module must be character-agnostic by default.",
           "Create a cohesive opening campaign with 2 arcs, 1-2 quests, 2-4 NPCs, 3-5 clues, 1-2 reveals, and 3 opening suggested actions.",
           "Make it immediately playable.",
           "Keep titles and summaries clear, concrete, and gameable.",
           "Keep all output inside publicSynopsis and secretEngine.",
+          "Do not write the premise, opener, or hook around a named protagonist, class, or build.",
+          "Describe a world, situation, and immediate pressure that different heroes could enter from different perspectives.",
           "publicSynopsis is spoiler-safe and must not reveal secretEngine truths, motives, or hidden reveals.",
           "publicSynopsis.openingScene is only a high-level preview for the player-facing pitch.",
           "publicSynopsis.openingScene.overview must stay descriptive and atmospheric, with no explicit player choices, no branching options, and no DM-style scene instructions.",
@@ -680,8 +685,6 @@ class OpenRouterDungeonMaster {
       {
         role: "user" as const,
         content: [
-          `Generate a campaign for this character: ${seedCharacter.name}, ${seedCharacter.archetype}.`,
-          `Stats: strength ${seedCharacter.stats.strength}, agility ${seedCharacter.stats.agility}, intellect ${seedCharacter.stats.intellect}, charisma ${seedCharacter.stats.charisma}, vitality ${seedCharacter.stats.vitality}.`,
           "Lean toward mystery, momentum, and memorable places over lore dumps.",
           revisionPrompt
             ? hasPreviousDraft
@@ -754,7 +757,7 @@ class OpenRouterDungeonMaster {
       // Fall back to the local deterministic provider below.
     }
 
-    return this.fallback.generateCampaignSetup(seedCharacter, input);
+    return this.fallback.generateCampaignSetup(input);
   }
 
   async generateCharacter(prompt: string): Promise<CharacterGenerationResult> {
@@ -859,6 +862,50 @@ class OpenRouterDungeonMaster {
       source: "local_fallback",
       warning: fallbackWarning ?? "Generated with local fallback instead of OpenRouter.",
     };
+  }
+
+  async generateCampaignOpening(input: CampaignOpeningInput) {
+    try {
+      const response = await this.client.chat.completions.create({
+        model: env.openRouterModel,
+        messages: [
+          {
+            role: "system",
+            content: [
+              "Write the opening narration for a new solo RPG campaign.",
+              "The world/module is already defined. Your job is to frame this specific hero's entrance into it.",
+              "Be character-specific, but do not rewrite module facts, secret truths, or the core opening pressure.",
+              "Different heroes should plausibly enter the same module from very different angles.",
+              "Use 2-3 short paragraphs.",
+              "Keep it vivid, specific, and player-facing.",
+              "Do not expose hidden motives, unrevealed truths, or backstage structure.",
+              "End with immediate pressure or a concrete choice point.",
+              "Return only the narration text.",
+            ].join("\n"),
+          },
+          {
+            role: "user",
+            content: [
+              `Character: ${input.character.name}, ${input.character.archetype}.`,
+              `Backstory: ${input.character.backstory ?? "None provided."}`,
+              `Public synopsis: ${JSON.stringify(input.setup.publicSynopsis)}`,
+              `Playable opener: ${JSON.stringify(input.setup.secretEngine.openingScene)}`,
+              "Write this hero's first entrance into the module.",
+            ].join("\n"),
+          },
+        ],
+        temperature: 0.9,
+      });
+
+      const text = extractMessageText(response.choices[0]?.message?.content).trim();
+      if (text) {
+        return text;
+      }
+    } catch {
+      // Fall back to the local provider below.
+    }
+
+    return this.fallback.generateCampaignOpening(input);
   }
 
   async triageTurn(input: TurnAIPayload, callbacks?: StreamCallbacks): Promise<TriageDecision> {

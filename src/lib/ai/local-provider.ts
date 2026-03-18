@@ -1,8 +1,7 @@
-import { toCampaignSeedCharacter } from "@/lib/game/characters";
 import { createDefaultCharacterTemplate } from "@/lib/game/starter-data";
 import type {
   CampaignBlueprint,
-  CampaignCharacter,
+  CharacterTemplate,
   CharacterTemplateDraft,
   CheckOutcome,
   CheckResult,
@@ -30,6 +29,11 @@ type TurnAIPayload = {
   blueprint: CampaignBlueprint;
   promptContext: PromptContext;
   playerAction: string;
+};
+
+type CampaignOpeningInput = {
+  setup: GeneratedCampaignSetup;
+  character: CharacterTemplate;
 };
 
 type ThemeProfile = {
@@ -494,10 +498,8 @@ function buildVillain(theme: ThemeProfile, rng: () => number) {
   };
 }
 
-function buildThemeSeed(character: CampaignCharacter, prompt: string, previousDraft?: GeneratedCampaignSetup) {
+function buildThemeSeed(prompt: string, previousDraft?: GeneratedCampaignSetup) {
   return [
-    character.name,
-    character.archetype,
     prompt,
     previousDraft?.publicSynopsis.title,
     previousDraft?.publicSynopsis.setting,
@@ -507,14 +509,13 @@ function buildThemeSeed(character: CampaignCharacter, prompt: string, previousDr
 }
 
 function buildCampaignPremise(input: {
-  character: CampaignCharacter;
   setting: string;
   conspiracy: string;
   villainTitle: string;
   villainName: string;
   relic: string;
 }) {
-  return `${input.character.name}, a ${lowerFirst(input.character.archetype)}, is drawn into ${input.conspiracy} in ${input.setting}, where ${lowerFirst(input.villainTitle)} ${input.villainName} is closing in on the ${input.relic}.`;
+  return `${upperFirst(input.conspiracy)} is taking hold in ${input.setting}, where ${lowerFirst(input.villainTitle)} ${input.villainName} is closing in on the ${input.relic}.`;
 }
 
 function buildOpeningSuggestions(input: {
@@ -994,14 +995,53 @@ function emitNarration(callbacks: StreamCallbacks | undefined, narration: string
   }
 }
 
-function buildCampaignSetup(
-  character: CampaignCharacter,
-  input: CampaignSetupGenerationInput,
-): GeneratedCampaignSetup {
+function pickRandom<T>(items: T[]) {
+  return items[Math.floor(Math.random() * items.length)]!;
+}
+
+function buildCampaignOpening(input: CampaignOpeningInput) {
+  const opening = input.setup.secretEngine.openingScene;
+  const backstory = input.character.backstory?.trim();
+  const archetype = input.character.archetype.toLowerCase();
+  const relation =
+    /\b(lord|lady|captain|magistrate|regent|commander|overlord)\b/i.test(archetype)
+      ? pickRandom([
+          `${input.character.name} arrives used to being noticed, and ${opening.location} notices back.`,
+          `People make room for ${input.character.name} on instinct, even here in ${opening.location}.`,
+        ])
+      : /\b(peasant|farmer|laborer|urchin|servant|villager)\b/i.test(archetype)
+        ? pickRandom([
+            `${input.character.name} knows what it means when a place like ${opening.location} goes tight and watchful all at once.`,
+            `${input.character.name} reads the ordinary strain under the scene before the louder danger shows itself.`,
+          ])
+        : /\b(rogue|scout|wanderer|ranger|traveler|smuggler|thief)\b/i.test(archetype)
+          ? pickRandom([
+              `${input.character.name} comes into ${opening.location} as an outsider with good instincts and no reason to trust the surface of things.`,
+              `${input.character.name} reaches ${opening.location} already reading exits, blind corners, and the places where trouble likes to wait.`,
+            ])
+          : pickRandom([
+              `${input.character.name} steps into ${opening.location} just as its nerves start to show.`,
+              `${input.character.name} enters ${opening.location} at the exact moment its ordinary rhythm begins to fail.`,
+            ]);
+
+  const personalAngle = backstory
+    ? pickRandom([
+        `Old habits rise with the pressure. ${backstory}`,
+        `Something in the scene catches against ${input.character.name}'s past before the first decision is even made.`,
+      ])
+    : pickRandom([
+        `${input.character.name} has only a breath to take in the place before the opening pressure tightens.`,
+        `There is barely time to get oriented before the first thread of danger pulls tight.`,
+      ]);
+
+  return `${relation}\n\n${personalAngle}\n\n${opening.summary}`;
+}
+
+function buildCampaignSetup(input: CampaignSetupGenerationInput): GeneratedCampaignSetup {
   const prompt = cleanPrompt(input.prompt);
   const effectivePrompt = combineCampaignSetupPrompts(input.basePrompt, input.prompt);
   const theme = selectTheme(`${effectivePrompt} ${input.previousDraft?.publicSynopsis.setting ?? ""}`);
-  const rng = createRng(buildThemeSeed(character, effectivePrompt, input.previousDraft));
+  const rng = createRng(buildThemeSeed(effectivePrompt, input.previousDraft));
   const previous = input.previousDraft;
   const openingDirectives = extractOpeningRevisionDirectives(prompt);
   const openingFocusedRevision = Boolean(
@@ -1055,7 +1095,6 @@ function buildCampaignSetup(
     previous?.publicSynopsis.premise && openingFocusedRevision
       ? previous.publicSynopsis.premise
       : buildCampaignPremise({
-          character,
           setting,
           conspiracy,
           villainTitle: villain.title,
@@ -1284,10 +1323,10 @@ function buildCampaignSetup(
     ? previous?.secretEngine?.openingScene?.atmosphere ?? pickOne(theme.atmospheres, rng)
     : pickOne(theme.atmospheres, rng);
   const openingSceneSummary = wantsQuietOpening
-    ? `${character.name} is working a familiar angle around ${quietRoutineLocation}, watching for easy coin and easier mistakes. A nervous ${quietSuspiciousRole} handles a purse, ledger, or sealed note with just enough care to feel wrong, then slips toward a side door. ${character.name} can shadow them, lift something small, or ignore it and stay with the safer job.`
+    ? `A familiar routine unfolds around ${quietRoutineLocation} until a nervous ${quietSuspiciousRole} handles a purse, ledger, or sealed note with just enough care to feel wrong, then slips toward a side door. Anyone paying attention could shadow them, lift something small, or ignore it and keep to the safer path.`
     : `Crowds break unevenly around ${landmarkOne}, where word of the missing ${relic} has already reached the wrong ears. ${activeThreat}`;
   const openingHook = wantsQuietOpening
-    ? `A nervous ${quietSuspiciousRole} is about to make a small mistake, and ${character.name} is in the right place to notice it.`
+    ? `A nervous ${quietSuspiciousRole} is about to make a small mistake, and anyone watching closely could catch it.`
     : activeThreat;
   const openingSuggestions = wantsQuietOpening
     ? buildQuietOpeningSuggestions({
@@ -1356,14 +1395,8 @@ function buildCampaignSetup(
 }
 
 export class LocalDungeonMaster {
-  async generateCampaignSetup(
-    character: CampaignCharacter,
-    input: CampaignSetupGenerationInput = {},
-  ) {
-    return buildCampaignSetup(
-      character ?? toCampaignSeedCharacter(createDefaultCharacterTemplate()),
-      input,
-    );
+  async generateCampaignSetup(input: CampaignSetupGenerationInput = {}) {
+    return buildCampaignSetup(input);
   }
 
   async generateCharacter(prompt: string): Promise<CharacterTemplateDraft> {
@@ -1402,6 +1435,10 @@ export class LocalDungeonMaster {
       maxHealth: clamp(stats.maxHealth, 8, 18),
       backstory,
     };
+  }
+
+  async generateCampaignOpening(input: CampaignOpeningInput) {
+    return buildCampaignOpening(input);
   }
 
   async triageTurn(input: TurnAIPayload, callbacks?: StreamCallbacks): Promise<TriageDecision> {

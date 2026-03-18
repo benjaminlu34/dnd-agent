@@ -481,7 +481,7 @@ export function SessionZeroApp() {
     const { publicSynopsis, secretEngine } = draft;
 
     return (
-      <main className="min-h-screen bg-black pb-40 text-zinc-50">
+      <main className="h-screen overflow-y-scroll bg-black pb-20 text-zinc-50 md:pb-12">
         <div className="mx-auto w-full max-w-5xl px-6 py-12">
           <header className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-8">
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -765,26 +765,28 @@ export function SessionZeroApp() {
           ) : null}
         </div>
 
-        <div className="fixed inset-x-0 bottom-0 border-t border-zinc-800 bg-black/95 backdrop-blur">
-          <div className="mx-auto flex max-w-5xl flex-col gap-4 px-6 py-4 md:flex-row md:items-end">
-            <FieldShell label="Refine This Draft">
-              <input
-                className={inputClassName()}
-                value={followUpPrompt}
-                onChange={(event) => setFollowUpPrompt(event.target.value)}
-                placeholder="Tweak this module..."
-              />
-            </FieldShell>
-            <div className="flex shrink-0 gap-3">
+        <div className="sticky bottom-0 z-20 border-t border-zinc-800 bg-black/95 backdrop-blur">
+          <div className="mx-auto flex max-w-5xl flex-col gap-4 px-4 py-4 sm:px-6 md:flex-row md:items-end">
+            <div className="min-w-0 flex-1">
+              <FieldShell label="Refine This Draft">
+                <input
+                  className={inputClassName()}
+                  value={followUpPrompt}
+                  onChange={(event) => setFollowUpPrompt(event.target.value)}
+                  placeholder="Tweak this module..."
+                />
+              </FieldShell>
+            </div>
+            <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap md:shrink-0 md:justify-end">
               <button
-                className="button-press rounded-full border border-zinc-700 px-5 py-3 text-sm font-semibold text-zinc-100 hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-60"
+                className="button-press w-full rounded-full border border-zinc-700 px-5 py-3 text-sm font-semibold text-zinc-100 hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
                 onClick={() => void generateDraft(followUpPrompt, draft)}
                 disabled={drafting || savingModule || !followUpPrompt.trim()}
               >
                 {drafting ? "Updating..." : "Update"}
               </button>
               <button
-                className="button-press rounded-full border border-zinc-700 px-5 py-3 text-sm font-semibold text-zinc-100 hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-60"
+                className="button-press w-full rounded-full border border-zinc-700 px-5 py-3 text-sm font-semibold text-zinc-100 hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
                 onClick={() => {
                   setDraft(null);
                   setShowAdvanced(false);
@@ -795,7 +797,7 @@ export function SessionZeroApp() {
                 Back to Library
               </button>
               <button
-                className="button-press rounded-full bg-white px-5 py-3 text-sm font-semibold text-black hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
+                className="button-press w-full rounded-full bg-white px-5 py-3 text-sm font-semibold text-black hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
                 onClick={() => void saveDraftAsModule()}
                 disabled={drafting || savingModule}
               >
@@ -810,7 +812,7 @@ export function SessionZeroApp() {
   }
 
   return (
-    <main className="min-h-screen bg-black text-zinc-50">
+    <main className="h-screen overflow-y-scroll bg-black text-zinc-50">
       <div className="mx-auto max-w-6xl px-6 py-16">
         <section className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-8 shadow-[0_0_0_1px_rgba(24,24,27,0.4)]">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -883,6 +885,10 @@ export function SessionZeroApp() {
                 <p className="mt-3 text-sm leading-7 text-zinc-400">
                   Describe the world, tone, or rule constraints you want. The first pass stays
                   spoiler-safe, then you can open the DM screen and save the result into your module library.
+                </p>
+                <p className="mt-3 text-sm leading-7 text-zinc-500">
+                  Drafts are character-agnostic by default. Choose the hero only when you launch a
+                  specific campaign from a saved module.
                 </p>
                 <FieldShell label="Module Brief">
                   <textarea

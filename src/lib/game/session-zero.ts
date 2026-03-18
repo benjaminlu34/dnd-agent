@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { characterTemplateDraftSchema } from "@/lib/game/characters";
 
 export const openingSceneSchema = z.object({
   title: z.string().trim().min(1),
@@ -91,11 +90,6 @@ export const generatedCampaignSetupSchema = z.object({
 export const campaignDraftRequestSchema = z.object({
   prompt: z.string().trim().min(1, "Prompt is required."),
   basePrompt: z.string().trim().min(1).optional(),
-  character: characterTemplateDraftSchema
-    .extend({
-      id: z.string().trim().min(1),
-    })
-    .optional(),
   previousDraft: generatedCampaignSetupSchema.optional(),
 });
 
