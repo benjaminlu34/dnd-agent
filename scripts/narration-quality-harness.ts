@@ -25,24 +25,36 @@ function buildPromptContext(): PromptContext {
   const state = createStarterState(blueprint);
   const arcs = createStarterArcs();
   const clues = createStarterClues();
+  const quests = createStarterQuests();
+  const npcs = createStarterNpcs();
 
   return {
     scene: state.sceneState,
+    promptSceneSummary:
+      "You are on the dockside roofline above a narrow alley while two enforcers search below and the nearest veteran is approaching the junction.",
     activeArc: arcs[0],
     activeQuests: [],
-    hiddenQuests: createStarterQuests(),
-    unresolvedHooks: state.hooks,
-    recentCanon: [
-      "DM: The ledger thumps against your ribs while fog slides over the dock lamps.",
-      "Player: I vanish up the wall and prepare an ambush from the roofline.",
-      "DM: The ledger weighs in your satchel as the pursuers pause below.",
+    hiddenQuests: quests,
+    recentTurnLedger: [
+      '[Turn 2] Action: "I vanish up the wall and prepare an ambush from the roofline." | Roll: agility success (13) | HP: 0 | Discoveries: none | SceneChanged: yes',
     ],
     relevantClues: clues,
     staleClues: getStaleClues(clues, state.turnCount),
     eligibleRevealIds: [],
-    eligibleRevealTexts: [],
+    discoveredClues: clues.filter((clue) => clue.status === "discovered"),
     companion: null,
-    hiddenNpcs: createStarterNpcs(),
+    hiddenNpcs: npcs,
+    discoveryCandidates: {
+      quests: quests.map((quest) => ({
+        id: quest.id,
+        title: quest.title,
+      })),
+      npcs: npcs.map((npc) => ({
+        id: npc.id,
+        name: npc.name,
+        role: npc.role,
+      })),
+    },
     villainClock: state.villainClock,
     tensionScore: state.tensionScore,
     arcPacingHint: null,
@@ -87,7 +99,7 @@ async function runProviderChecks(name: string, provider: HarnessProvider, failur
       mode: "triage",
       narration: triage.narration,
       playerAction: ambushAction,
-      recentCanon: promptContext.recentCanon,
+      recentTurnLedger: promptContext.recentTurnLedger,
     });
     assertCase(
       !triageAudit.issues.some((issue) => issue.code === "action_deferral"),
@@ -113,12 +125,13 @@ async function runProviderChecks(name: string, provider: HarnessProvider, failur
     promptContext,
     playerAction: observationAction,
     checkResult,
+    isInvestigative: true,
   });
   const resolutionAudit = auditNarration({
     mode: "resolution",
     narration: resolution.narration,
     playerAction: observationAction,
-    recentCanon: promptContext.recentCanon,
+    recentTurnLedger: promptContext.recentTurnLedger,
   });
   assertCase(
     !resolutionAudit.issues.some((issue) =>
@@ -174,9 +187,11 @@ async function main() {
         mode: "triage",
         narration: "The ledger weighs at your side again as the guard closes in.",
         playerAction: "I draw the guard away from the alley.",
-        recentCanon: [
-          "DM: The ledger weighs in your satchel while the docks close around you.",
-          "DM: The ledger presses against your ribs as the bell tolls.",
+        recentTurnLedger: [
+          '[Turn 1] Action: "I grab the ledger and break into a run." | Roll: none | HP: 0 | Discoveries: none | SceneChanged: yes',
+          '[Turn 2] Action: "I cut across the wharf with the ledger hidden under my coat." | Roll: none | HP: 0 | Discoveries: none | SceneChanged: yes',
+          '[Turn 3] Action: "I hide behind the net stacks." | Roll: none | HP: 0 | Discoveries: none | SceneChanged: no',
+          "[Turn 4] Action: \"I keep the ledger hidden while the pursuit closes.\" | Roll: none | HP: 0 | Discoveries: none | SceneChanged: no",
         ],
       }),
       expectIssue: "repeated_key_item",

@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import {
   auditNarration,
+  auditSceneSnapshot,
   buildNarrationRetryInstructions,
   type NarrationAuditIssue,
 } from "@/lib/ai/narration-audit";
@@ -59,6 +60,7 @@ type TurnAIPayload = {
   blueprint: CampaignBlueprint;
   promptContext: PromptContext;
   playerAction: string;
+  isInvestigative?: boolean;
 };
 
 type CampaignOpeningInput = {
@@ -270,7 +272,11 @@ const campaignOpeningTool = {
         additionalProperties: false,
         properties: {
           title: { type: "string" },
-          summary: { type: "string" },
+          summary: {
+            type: "string",
+            description:
+              "One factual 1-2 sentence tactical snapshot of the current scene state. No metaphors, atmospheric flourish, emotional language, or recap prose.",
+          },
           location: { type: "string" },
           atmosphere: { type: "string" },
           suggestedActions: {
@@ -465,6 +471,12 @@ function inferRequiresCheck(playerAction: string) {
   );
 }
 
+function inferInvestigativeAction(playerAction: string) {
+  return /(inspect|investigate|search|study|observe|watch|listen|track|follow|question|interrogate|ask|read|examine|loot|check|decipher)/i.test(
+    playerAction,
+  );
+}
+
 function sanitizeNarration(text: string) {
   const cleaned = stripCodeFences(text)
     .replace(/^\s*(json|tool|result)\s*:?/i, "")
@@ -545,6 +557,12 @@ function normalizeTriageDecision(
           suggestedActions,
         }
       : proposedDelta;
+  const isInvestigative =
+    typeof payload?.isInvestigative === "boolean"
+      ? payload.isInvestigative
+      : typeof payload?.is_investigative === "boolean"
+        ? payload.is_investigative
+        : inferInvestigativeAction(input.playerAction);
   const requiresCheck =
     typeof payload?.requiresCheck === "boolean"
       ? payload.requiresCheck
@@ -562,6 +580,7 @@ function normalizeTriageDecision(
     return {
       requiresCheck: true,
       narration: null,
+      isInvestigative,
       check: {
         stat:
           checkPayload?.stat === "strength" ||
@@ -591,6 +610,7 @@ function normalizeTriageDecision(
   return {
     requiresCheck: false,
     narration: normalizedNarration || null,
+    isInvestigative,
     suggestedActions,
     proposedDelta: proposedDeltaWithActions as ProposedStateDelta,
   };
@@ -829,6 +849,64 @@ class OpenRouterDungeonMaster {
       : safeParseJson(extractMessageText(response.choices[0]?.message?.content));
 
     return isGeneratedCampaignOpening(parsed) ? parsed : null;
+  }
+
+  private async ensureOpeningSceneSummary(opening: GeneratedCampaignOpening) {
+    const audit = auditSceneSnapshot(opening.scene.summary);
+
+    if (!audit.shouldCompress) {
+      return opening;
+    }
+
+    return {
+      ...opening,
+      scene: {
+        ...opening.scene,
+        summary: await this.compressSceneSnapshot(opening.scene.summary),
+      },
+    };
+  }
+
+  async compressSceneSnapshot(summary: string) {
+    const normalized = stripCodeFences(summary).replace(/\s+/g, " ").trim();
+
+    if (!normalized) {
+      return "";
+    }
+
+    try {
+      const compressionModel = env.openRouterCompressionModel || env.openRouterModel;
+      const response = await this.client.chat.completions.create({
+        model: compressionModel,
+        messages: [
+          {
+            role: "system",
+            content: [
+              "Compress a scene summary into a factual tactical snapshot.",
+              "Return only 1-2 short sentences.",
+              "Keep only what is explicitly present in the input.",
+              "Do not invent enemies, cover, objects, motives, or opportunities that are not stated.",
+              "Do not use metaphors, thematic lines, emotional language, recap framing, or atmospheric flourish.",
+              "Focus on who or what is physically present, the current pressure, and the immediate opening or threat.",
+            ].join("\n"),
+          },
+          {
+            role: "user",
+            content: normalized,
+          },
+        ],
+        temperature: 0,
+        top_p: 1,
+      });
+
+      const compressed = extractMessageText(response.choices[0]?.message?.content)
+        .replace(/\s+/g, " ")
+        .trim();
+
+      return compressed || this.fallback.compressSceneSnapshot(normalized);
+    } catch {
+      return this.fallback.compressSceneSnapshot(normalized);
+    }
   }
 
   async generateCampaignSetup(
@@ -1103,12 +1181,13 @@ class OpenRouterDungeonMaster {
         : safeParseJson(extractMessageText(response.choices[0]?.message?.content));
 
       if (isGeneratedCampaignOpening(parsed)) {
+        const normalizedOpening = await this.ensureOpeningSceneSummary(parsed);
         const openingAudit = auditNarration({
           mode: "opening",
-          narration: parsed.narration,
+          narration: normalizedOpening.narration,
         });
         if (!openingAudit.shouldRetry) {
-          return parsed;
+          return normalizedOpening;
         }
 
         console.warn(
@@ -1116,13 +1195,14 @@ class OpenRouterDungeonMaster {
         );
         const retried = await this.retryCampaignOpening(input, openingAudit.issues);
         if (retried) {
+          const normalizedRetry = await this.ensureOpeningSceneSummary(retried);
           const retriedAudit = auditNarration({
             mode: "opening",
-            narration: retried.narration,
+            narration: normalizedRetry.narration,
           });
           const chosen = chooseCleanerOpening(
-            { value: parsed, issues: openingAudit.issues },
-            { value: retried, issues: retriedAudit.issues },
+            { value: normalizedOpening, issues: openingAudit.issues },
+            { value: normalizedRetry, issues: retriedAudit.issues },
           );
           if (chosen.issues.length === 0) {
             return chosen.value;
@@ -1131,11 +1211,11 @@ class OpenRouterDungeonMaster {
           console.warn(
             `[dm.opening] OpenRouter opening still failed narration audit after retry: ${chosen.issues.map((issue) => issue.code).join(", ")}. Falling back to local opening.`,
           );
-          return this.fallback.generateCampaignOpening(input);
+          return this.ensureOpeningSceneSummary(await this.fallback.generateCampaignOpening(input));
         }
 
         console.warn("[dm.opening] Retry did not return a valid opening. Falling back to local opening.");
-        return this.fallback.generateCampaignOpening(input);
+        return this.ensureOpeningSceneSummary(await this.fallback.generateCampaignOpening(input));
       }
     } catch {
       // Fall through to raw-JSON generation or local fallback below.
@@ -1185,12 +1265,13 @@ class OpenRouterDungeonMaster {
       );
 
       if (isGeneratedCampaignOpening(parsed)) {
+        const normalizedOpening = await this.ensureOpeningSceneSummary(parsed);
         const openingAudit = auditNarration({
           mode: "opening",
-          narration: parsed.narration,
+          narration: normalizedOpening.narration,
         });
         if (!openingAudit.shouldRetry) {
-          return parsed;
+          return normalizedOpening;
         }
 
         console.warn(
@@ -1198,13 +1279,14 @@ class OpenRouterDungeonMaster {
         );
         const retried = await this.retryCampaignOpening(input, openingAudit.issues);
         if (retried) {
+          const normalizedRetry = await this.ensureOpeningSceneSummary(retried);
           const retriedAudit = auditNarration({
             mode: "opening",
-            narration: retried.narration,
+            narration: normalizedRetry.narration,
           });
           const chosen = chooseCleanerOpening(
-            { value: parsed, issues: openingAudit.issues },
-            { value: retried, issues: retriedAudit.issues },
+            { value: normalizedOpening, issues: openingAudit.issues },
+            { value: normalizedRetry, issues: retriedAudit.issues },
           );
           if (chosen.issues.length === 0) {
             return chosen.value;
@@ -1213,17 +1295,17 @@ class OpenRouterDungeonMaster {
           console.warn(
             `[dm.opening] Raw JSON opening still failed narration audit after retry: ${chosen.issues.map((issue) => issue.code).join(", ")}. Falling back to local opening.`,
           );
-          return this.fallback.generateCampaignOpening(input);
+          return this.ensureOpeningSceneSummary(await this.fallback.generateCampaignOpening(input));
         }
 
         console.warn("[dm.opening] Retry did not return a valid opening. Falling back to local opening.");
-        return this.fallback.generateCampaignOpening(input);
+        return this.ensureOpeningSceneSummary(await this.fallback.generateCampaignOpening(input));
       }
     } catch {
       // Fall back to the local provider below.
     }
 
-    return this.fallback.generateCampaignOpening(input);
+    return this.ensureOpeningSceneSummary(await this.fallback.generateCampaignOpening(input));
   }
 
   async triageTurn(input: TurnAIPayload, callbacks?: StreamCallbacks): Promise<TriageDecision> {
@@ -1258,7 +1340,7 @@ class OpenRouterDungeonMaster {
             mode: "triage",
             narration: normalized.narration,
             playerAction: input.playerAction,
-            recentCanon: input.promptContext.recentCanon,
+            recentTurnLedger: input.promptContext.recentTurnLedger,
           });
 
           if (audit.shouldRetry) {
@@ -1276,7 +1358,7 @@ class OpenRouterDungeonMaster {
                 mode: "triage",
                 narration: retried.narration,
                 playerAction: input.playerAction,
-                recentCanon: input.promptContext.recentCanon,
+                recentTurnLedger: input.promptContext.recentTurnLedger,
               });
               const chosen = chooseCleanerNarration(
                 { value: normalized, issues: audit.issues },
@@ -1318,7 +1400,7 @@ class OpenRouterDungeonMaster {
   }
 
   async resolveTurn(
-    input: TurnAIPayload & { checkResult: CheckResult },
+    input: TurnAIPayload & { checkResult: CheckResult; isInvestigative: boolean },
     callbacks?: StreamCallbacks,
   ): Promise<ResolveDecision> {
     try {
@@ -1351,7 +1433,7 @@ class OpenRouterDungeonMaster {
           mode: "resolution",
           narration: normalized.narration,
           playerAction: input.playerAction,
-          recentCanon: input.promptContext.recentCanon,
+          recentTurnLedger: input.promptContext.recentTurnLedger,
         });
 
         if (audit.shouldRetry) {
@@ -1369,7 +1451,7 @@ class OpenRouterDungeonMaster {
               mode: "resolution",
               narration: retried.narration,
               playerAction: input.playerAction,
-              recentCanon: input.promptContext.recentCanon,
+              recentTurnLedger: input.promptContext.recentTurnLedger,
             });
             const chosen = chooseCleanerNarration(
               { value: normalized, issues: audit.issues },

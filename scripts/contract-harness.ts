@@ -49,23 +49,36 @@ function buildPromptContext(): PromptContext {
   const state = createStarterState(blueprint);
   const arcs = createStarterArcs();
   const clues = createStarterClues();
+  const quests = createStarterQuests();
+  const npcs = createStarterNpcs();
 
   return {
     scene: state.sceneState,
+    promptSceneSummary:
+      "You are in the market square with a blood-red notice nailed to the post while townsfolk keep their distance.",
     activeArc: arcs[0],
     activeQuests: [],
-    hiddenQuests: createStarterQuests(),
-    unresolvedHooks: state.hooks,
-    recentCanon: [
-      "DM: Wind rattles brass prayer bells while the market square clears around a blood-red notice.",
-      "Player: Inspect the eclipse notice carefully.",
+    hiddenQuests: quests,
+    recentTurnLedger: [
+      '[Turn 1] Action: "Inspect the eclipse notice carefully." | Roll: none | HP: 0 | Discoveries: none | SceneChanged: no',
     ],
     relevantClues: clues,
     staleClues: getStaleClues(clues, state.turnCount),
     eligibleRevealIds: [],
-    eligibleRevealTexts: [],
+    discoveredClues: clues.filter((clue) => clue.status === "discovered"),
     companion: null,
-    hiddenNpcs: createStarterNpcs(),
+    hiddenNpcs: npcs,
+    discoveryCandidates: {
+      quests: quests.map((quest) => ({
+        id: quest.id,
+        title: quest.title,
+      })),
+      npcs: npcs.map((npc) => ({
+        id: npc.id,
+        name: npc.name,
+        role: npc.role,
+      })),
+    },
     villainClock: state.villainClock,
     tensionScore: state.tensionScore,
     arcPacingHint: null,
@@ -106,6 +119,7 @@ async function main() {
         promptContext,
         playerAction: action,
         checkResult: result,
+        isInvestigative: triage.isInvestigative,
       });
 
       if (!resolution || !Array.isArray(resolution.suggestedActions)) {

@@ -73,6 +73,8 @@ Turn-by-turn DM prose should also meet these narration-specific rules:
 ### Prompt-context filtering
 - Prevent unseen companions from appearing in prompt context as established participants.
 - Continue reviewing which hidden structures are necessary for orchestration versus likely to leak into narration.
+- Sanitize legacy `sceneState.summary` before using it in turn prompts or opening generation; prompt context should consume factual tactical snapshots, not stored purple prose.
+- `OPENROUTER_COMPRESSION_MODEL` is recommended for this sanitization path. If it is unset, compression falls back to `OPENROUTER_MODEL`, which is simpler operationally but can add noticeable latency when loading or resuming older campaigns.
 
 ### Recap and journal policy
 - Summaries and recaps must only use established facts.
@@ -90,6 +92,7 @@ Turn-by-turn DM prose should also meet these narration-specific rules:
 - Removed sidebar threat leakage and kept the player journal focused on scene-visible state.
 - Hardened recap prompts and `Previously on` clue selection.
 - Prevented unseen companions from being assumed present in prompt context.
+- Replaced raw recent narration in turn prompts with a mechanical turn ledger and added runtime scene-summary sanitization for poisoned legacy saves.
 
 ## Recommended Next Step
 Implement explicit discovery state for NPCs and quests. The current payload sanitization is safe, but a first-class discovery model would let the engine decide what becomes journaled, named, and summarized without relying on conservative filters.

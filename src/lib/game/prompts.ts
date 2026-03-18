@@ -2,9 +2,7 @@ import type {
   CampaignBlueprint,
   CheckResult,
   Clue,
-  NpcRecord,
   PromptContext,
-  QuestRecord,
   ResolveDecision,
   TriageDecision,
 } from "@/lib/game/types";
@@ -17,17 +15,20 @@ function formatList(items: string[]) {
   return items.map((item) => `- ${item}`).join("\n");
 }
 
-function formatRelevantClues(clues: Clue[]) {
+function formatDiscoveredClues(clues: Clue[]) {
   if (clues.length === 0) {
     return "None";
   }
 
   return clues
-    .map((clue) => `- ${clue.text} (${clue.status}${clue.discoveredAtTurn ? `, turn ${clue.discoveredAtTurn}` : ""})`)
+    .map(
+      (clue) =>
+        `- ${clue.text} (${clue.status}${clue.discoveredAtTurn ? `, turn ${clue.discoveredAtTurn}` : ""})`,
+    )
     .join("\n");
 }
 
-function formatQuestState(quests: QuestRecord[]) {
+function formatQuestState(quests: PromptContext["activeQuests"]) {
   if (quests.length === 0) {
     return "None";
   }
@@ -40,25 +41,25 @@ function formatQuestState(quests: QuestRecord[]) {
     .join("\n");
 }
 
-function formatHiddenQuestState(quests: QuestRecord[]) {
-  if (quests.length === 0) {
-    return "None";
+function formatDiscoveryCandidates(
+  candidates: PromptContext["discoveryCandidates"],
+  isInvestigative: boolean,
+) {
+  if (!isInvestigative) {
+    return "Omit hidden candidates from this resolution because the turn is not investigative.";
   }
 
-  return quests.map((quest) => `- ${quest.id}: ${quest.title} - ${quest.summary}`).join("\n");
+  const questLines = candidates.quests.length
+    ? candidates.quests.map((quest) => `- quest:${quest.id} -> ${quest.title}`)
+    : ["- quests: none"];
+  const npcLines = candidates.npcs.length
+    ? candidates.npcs.map((npc) => `- npc:${npc.id} -> ${npc.name} (${npc.role})`)
+    : ["- npcs: none"];
+
+  return [...questLines, ...npcLines].join("\n");
 }
 
-function formatHiddenNpcState(npcs: NpcRecord[]) {
-  if (npcs.length === 0) {
-    return "None";
-  }
-
-  return npcs
-    .map((npc) => `- ${npc.id}: ${npc.name} (${npc.role}) - ${npc.notes}`)
-    .join("\n");
-}
-
-function formatRecentCanon(entries: string[]) {
+function formatRecentTurnLedger(entries: string[]) {
   if (entries.length === 0) {
     return "None";
   }
@@ -76,6 +77,8 @@ export function buildDungeonMasterSystemPrompt() {
     "Prefer 1-3 short paragraphs instead of long monologues.",
     "Narration and scene state are separate: narration is the player-facing prose for this beat, while proposedDelta.sceneSnapshot is only a short current-state note when the tactical picture materially changes.",
     "Do not paste the full narration into proposedDelta.sceneSnapshot.",
+    "proposedDelta.sceneSnapshot must be exactly one factual sentence about physical position, threat, or opportunity.",
+    "proposedDelta.sceneSnapshot must not use metaphors, atmospheric flourish, emotional language, or recap prose.",
     "Do not summarize the lesson or explain the meaning of events to the player.",
     "Avoid lines like 'you learn', 'you realize', 'it is clear', or 'you have learned something useful' unless the character is explicitly thinking them.",
     "Do not narrate the player's feelings, motives, confidence, certainty, or interior monologue unless the player explicitly stated them.",
@@ -116,16 +119,15 @@ CAMPAIGN
 Premise: ${blueprint.premise}
 Tone: ${blueprint.tone}
 Setting: ${blueprint.setting}
-Villain: ${blueprint.villain.name} - ${blueprint.villain.motive}
 
 CURRENT SCENE
 Title: ${promptContext.scene.title}
 Location: ${promptContext.scene.location}
-Summary: ${promptContext.scene.summary}
+Summary: ${promptContext.promptSceneSummary}
 Atmosphere: ${promptContext.scene.atmosphere}
 
-RECENT CANON
-${formatRecentCanon(promptContext.recentCanon)}
+RECENT TURN LEDGER
+${formatRecentTurnLedger(promptContext.recentTurnLedger)}
 
 ACTIVE ARC
 ${promptContext.activeArc ? `${promptContext.activeArc.title}: ${promptContext.activeArc.summary}` : "None"}
@@ -133,26 +135,15 @@ ${promptContext.activeArc ? `${promptContext.activeArc.title}: ${promptContext.a
 ACTIVE QUESTS
 ${formatQuestState(promptContext.activeQuests)}
 
-HIDDEN QUESTS AVAILABLE TO DISCOVER
-${formatHiddenQuestState(promptContext.hiddenQuests)}
-
-UNRESOLVED HOOKS
-${formatList(promptContext.unresolvedHooks.map((hook) => hook.text))}
-
-RELEVANT CLUES
-${formatRelevantClues(promptContext.relevantClues)}
-
-STALE CLUES
-${formatList(promptContext.staleClues.map((clue) => clue.text))}
-
-ELIGIBLE REVEALS (you MAY reveal one this turn if dramatically appropriate)
-${formatList(promptContext.eligibleRevealTexts)}
+DISCOVERED CLUES
+${formatDiscoveredClues(promptContext.discoveredClues)}
 
 COMPANION
-${promptContext.companion ? `${promptContext.companion.name}: approval ${promptContext.companion.approval}, ${promptContext.companion.notes}` : "None"}
+${promptContext.companion ? `${promptContext.companion.name}: approval ${promptContext.companion.approval}` : "None"}
 
-HIDDEN NPCS AVAILABLE TO DISCOVER
-${formatHiddenNpcState(promptContext.hiddenNpcs)}
+DISCOVERY CANDIDATES
+Compact IDs only. These are the only hidden quests or NPCs you may discover, and only if the fiction directly earns it.
+${formatDiscoveryCandidates(promptContext.discoveryCandidates, true)}
 
 PACING
 Villain progress: ${promptContext.villainClock}/${blueprint.villain.progressClock}
@@ -172,7 +163,9 @@ End on a concrete image, line of dialogue, or new pressure.
 Return 2-4 suggested actions that fit this exact moment and would feel different if the scene has progressed.
 If no check is required, include the narration text in the top-level tool field narration.
 If a check is required, set narration to null.
+Set isInvestigative to true only if the player's primary action is searching, studying, observing, interrogating, following a lead, looting, or otherwise trying to uncover hidden information.
 If the tactical picture materially changes, include a one-sentence present-tense update in proposedDelta.sceneSnapshot. Do not copy the full narration there. If the scene state has not materially changed, omit sceneSnapshot.
+proposedDelta.sceneSnapshot must be one factual sentence with no metaphors, emotional language, or atmospheric flourish.
 If a hidden NPC is encountered or a hidden quest is logged, record that in proposedDelta using the exact entity IDs.
 Use healthDelta (negative for damage, positive for healing) to reflect physical consequences.
 `;
@@ -183,8 +176,9 @@ export function buildOutcomeUserPrompt(input: {
   promptContext: PromptContext;
   playerAction: string;
   checkResult: CheckResult;
+  isInvestigative: boolean;
 }) {
-  const { blueprint, promptContext, playerAction, checkResult } = input;
+  const { blueprint, promptContext, playerAction, checkResult, isInvestigative } = input;
 
   return `
 CAMPAIGN
@@ -193,22 +187,23 @@ Tone: ${blueprint.tone}
 Setting: ${blueprint.setting}
 
 CURRENT SCENE
-${promptContext.scene.title} - ${promptContext.scene.summary}
+Title: ${promptContext.scene.title}
+Location: ${promptContext.scene.location}
+Summary: ${promptContext.promptSceneSummary}
+Atmosphere: ${promptContext.scene.atmosphere}
 
-RECENT CANON
-${formatRecentCanon(promptContext.recentCanon)}
+RECENT TURN LEDGER
+${formatRecentTurnLedger(promptContext.recentTurnLedger)}
 
 ACTIVE QUESTS
 ${formatQuestState(promptContext.activeQuests)}
 
-HIDDEN QUESTS AVAILABLE TO DISCOVER
-${formatHiddenQuestState(promptContext.hiddenQuests)}
+DISCOVERED CLUES
+${formatDiscoveredClues(promptContext.discoveredClues)}
 
-ELIGIBLE REVEALS
-${formatList(promptContext.eligibleRevealTexts)}
-
-HIDDEN NPCS AVAILABLE TO DISCOVER
-${formatHiddenNpcState(promptContext.hiddenNpcs)}
+DISCOVERY CANDIDATES
+Only use these if the action is investigative and the resolved fiction directly earns the discovery.
+${formatDiscoveryCandidates(promptContext.discoveryCandidates, isInvestigative)}
 
 PLAYER ACTION
 ${playerAction}
@@ -233,6 +228,7 @@ End on the sharpest new opening, risk, or image.
 Return 2-4 suggested actions that follow from this exact resolved outcome, not from the earlier opening scene.
 Include the narration text in the top-level tool field narration.
 If the tactical picture materially changes, include a one-sentence present-tense update in proposedDelta.sceneSnapshot. Do not copy the full narration there. If the scene state has not materially changed, omit sceneSnapshot.
+proposedDelta.sceneSnapshot must be one factual sentence with no metaphors, emotional language, or atmospheric flourish.
 If a hidden NPC is encountered or a hidden quest is logged in this outcome, record that in proposedDelta using the exact entity IDs.
 Use healthDelta (negative for damage, positive for healing) to reflect physical consequences.
 `;
@@ -248,6 +244,11 @@ export const triageTool = {
       requiresCheck: { type: "boolean" },
       narration: {
         type: ["string", "null"],
+      },
+      isInvestigative: {
+        type: "boolean",
+        description:
+          "True if the player's primary action is searching, studying, observing, interrogating, following a lead, looting, or otherwise trying to uncover hidden information.",
       },
       check: {
         type: "object",
@@ -278,6 +279,8 @@ export const triageTool = {
           },
           sceneSnapshot: {
             type: "string",
+            description:
+              "One factual sentence describing the updated physical or tactical state. No metaphors, atmospheric flourish, emotional language, or recap prose.",
           },
           npcDiscoveries: {
             type: "array",
@@ -291,7 +294,7 @@ export const triageTool = {
         additionalProperties: true,
       },
     },
-    required: ["requiresCheck", "narration", "suggestedActions", "proposedDelta"],
+    required: ["requiresCheck", "narration", "isInvestigative", "suggestedActions", "proposedDelta"],
   },
 };
 
@@ -315,6 +318,8 @@ export const resolutionTool = {
           },
           sceneSnapshot: {
             type: "string",
+            description:
+              "One factual sentence describing the updated physical or tactical state. No metaphors, atmospheric flourish, emotional language, or recap prose.",
           },
           npcDiscoveries: {
             type: "array",

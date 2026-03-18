@@ -15,6 +15,7 @@ import {
   toCampaignCharacter,
   toCharacterStats,
 } from "@/lib/game/characters";
+import { auditSceneSnapshot } from "@/lib/ai/narration-audit";
 import {
   buildArcRecordsFromBlueprint,
   buildCampaignBlueprintFromSetup,
@@ -32,12 +33,14 @@ import type {
   CharacterTemplate,
   CharacterTemplateDraft,
   CharacterTemplateSummary,
+  CheckResult,
   Clue,
   ClueStatus,
   GeneratedCampaignOpening,
   GeneratedCampaignSetup,
   MemoryRecord,
   NpcRecord,
+  PromptContext,
   PlayerCampaignSnapshot,
   PlayerVisibleClue,
   PlayerVisibleNpcRecord,
@@ -45,6 +48,7 @@ import type {
   QuestRecord,
   QuestStatus,
   StoryMessage,
+  TurnFacts,
 } from "@/lib/game/types";
 import {
   parseCampaignState,
@@ -769,6 +773,82 @@ function buildPlayerKnowledgeText(snapshot: CampaignSnapshot, previouslyOn?: str
     .toLowerCase();
 }
 
+function normalizeTurnFacts(value: unknown, playerAction: string): TurnFacts | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const raw = value as Record<string, unknown>;
+  const discoveries = Array.isArray(raw.discoveries)
+    ? raw.discoveries.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+    : [];
+  const healthDelta = Number.isFinite(Number(raw.healthDelta)) ? Math.trunc(Number(raw.healthDelta)) : 0;
+
+  if (typeof raw.action !== "string" || !raw.action.trim()) {
+    return null;
+  }
+
+  return {
+    action: raw.action.trim() || playerAction,
+    roll: typeof raw.roll === "string" && raw.roll.trim() ? raw.roll.trim() : undefined,
+    healthDelta,
+    discoveries,
+    sceneChanged: Boolean(raw.sceneChanged),
+  };
+}
+
+function formatCheckRoll(result: CheckResult) {
+  return `${result.stat} ${result.outcome} (${result.total})`;
+}
+
+function extractTurnFacts(resultJson: unknown, playerAction: string): TurnFacts {
+  if (resultJson && typeof resultJson === "object" && !Array.isArray(resultJson)) {
+    const record = resultJson as Record<string, unknown>;
+    const normalized = normalizeTurnFacts(record.turnFacts, playerAction);
+
+    if (normalized) {
+      return normalized;
+    }
+
+    const rawCheck = record.checkResult;
+    if (rawCheck && typeof rawCheck === "object" && !Array.isArray(rawCheck)) {
+      const parsed = rawCheck as CheckResult;
+      return {
+        action: playerAction,
+        roll: formatCheckRoll(parsed),
+        healthDelta: 0,
+        discoveries: [],
+        sceneChanged: false,
+      };
+    }
+  }
+
+  return {
+    action: playerAction,
+    healthDelta: 0,
+    discoveries: [],
+    sceneChanged: false,
+  };
+}
+
+function formatTurnLedgerEntry(turnNumber: number, facts: TurnFacts) {
+  const roll = facts.roll ?? "none";
+  const discoveries = facts.discoveries.length ? facts.discoveries.join(", ") : "none";
+
+  return `[Turn ${turnNumber}] Action: "${facts.action}" | Roll: ${roll} | HP: ${facts.healthDelta} | Discoveries: ${discoveries} | SceneChanged: ${facts.sceneChanged ? "yes" : "no"}`;
+}
+
+async function sanitizePromptSceneSummary(summary: string) {
+  const normalized = summary.trim();
+  const audit = auditSceneSnapshot(normalized);
+
+  if (!audit.shouldCompress) {
+    return normalized;
+  }
+
+  return dmClient.compressSceneSnapshot(normalized);
+}
+
 function isExactPhraseInKnowledgeText(knowledgeText: string, value: string) {
   const trimmed = value.trim().toLowerCase();
 
@@ -907,6 +987,47 @@ export async function backfillLegacyDiscoveries(campaignId: string) {
   return true;
 }
 
+export async function backfillLegacySceneSummary(campaignId: string) {
+  const campaign = await prisma.campaign.findUnique({
+    where: { id: campaignId },
+    select: {
+      id: true,
+      stateJson: true,
+    },
+  });
+
+  if (!campaign) {
+    return false;
+  }
+
+  const state = parseCampaignState(campaign.stateJson);
+  const audit = auditSceneSnapshot(state.sceneState.summary);
+
+  if (!audit.shouldCompress) {
+    return false;
+  }
+
+  const compressed = await dmClient.compressSceneSnapshot(state.sceneState.summary);
+  if (!compressed || compressed === state.sceneState.summary) {
+    return false;
+  }
+
+  await prisma.campaign.update({
+    where: { id: campaignId },
+    data: {
+      stateJson: {
+        ...(state as object),
+        sceneState: {
+          ...state.sceneState,
+          summary: compressed,
+        },
+      },
+    },
+  });
+
+  return true;
+}
+
 export async function getCampaignSnapshot(
   campaignId: string,
   previouslyOn: string | null = null,
@@ -1007,28 +1128,13 @@ export function toPlayerCampaignSnapshot(
   };
 }
 
-export function getPromptContext(snapshot: CampaignSnapshot) {
+export async function getPromptContext(snapshot: CampaignSnapshot): Promise<PromptContext> {
   const activeArc = snapshot.arcs.find((arc) => arc.id === snapshot.state.activeArcId);
-  const unresolvedHooks = snapshot.state.hooks.filter((hook) => hook.status === "open");
-  const recentCanon = snapshot.recentMessages
-    .filter((message) => message.kind !== "warning")
-    .slice(-6)
-    .map((message) => {
-      const speaker =
-        message.role === "assistant"
-          ? "DM"
-          : message.role === "user"
-            ? "Player"
-            : message.kind === "check"
-              ? "Check"
-              : "System";
-
-      return `${speaker}: ${message.content}`;
-    });
   const clueWindow = snapshot.clues.filter(
     (clue) => clue.status === "hidden" || clue.status === "discovered",
   );
   const staleClues = getStaleClues(snapshot.clues, snapshot.state.turnCount);
+  const discoveredClues = snapshot.clues.filter((clue) => clue.status === "discovered");
   const companion =
     snapshot.npcs.find(
       (npc) => npc.isCompanion && npc.discoveredAtTurn !== null,
@@ -1045,10 +1151,29 @@ export function getPromptContext(snapshot: CampaignSnapshot) {
       return allCluesFound && arcReady && !snapshot.state.activeRevealIds.includes(reveal.id);
     })
     .map((reveal) => reveal.id);
-
-  const eligibleRevealTexts = snapshot.blueprint.hiddenReveals
-    .filter((reveal) => eligibleRevealIds.includes(reveal.id))
-    .map((reveal) => `${reveal.title}: ${reveal.truth}`);
+  const promptSceneSummary = await sanitizePromptSceneSummary(snapshot.state.sceneState.summary);
+  const recentTurns = snapshot.sessionId
+    ? await prisma.turn.findMany({
+        where: {
+          sessionId: snapshot.sessionId,
+          status: "resolved",
+        },
+        orderBy: { updatedAt: "desc" },
+        take: 4,
+        select: {
+          playerAction: true,
+          resultJson: true,
+        },
+      })
+    : [];
+  const recentTurnLedger = recentTurns
+    .reverse()
+    .map((turn, index) =>
+      formatTurnLedgerEntry(
+        Math.max(snapshot.state.turnCount - recentTurns.length + index + 1, 1),
+        extractTurnFacts(turn.resultJson, turn.playerAction),
+      ),
+    );
 
   const arcPacingHint = activeArc
     ? activeArc.currentTurn / activeArc.expectedTurns >= 0.8
@@ -1058,19 +1183,34 @@ export function getPromptContext(snapshot: CampaignSnapshot) {
 
   return {
     scene: snapshot.state.sceneState,
+    promptSceneSummary,
     activeArc,
     activeQuests: snapshot.quests.filter(
       (quest) => quest.status === "active" && quest.discoveredAtTurn !== null,
     ),
     hiddenQuests: snapshot.quests.filter((quest) => quest.discoveredAtTurn === null),
-    unresolvedHooks,
-    recentCanon,
+    recentTurnLedger,
     relevantClues: clueWindow,
     staleClues,
     eligibleRevealIds,
-    eligibleRevealTexts,
+    discoveredClues,
     companion,
     hiddenNpcs: snapshot.npcs.filter((npc) => npc.discoveredAtTurn === null),
+    discoveryCandidates: {
+      quests: snapshot.quests
+        .filter((quest) => quest.discoveredAtTurn === null && quest.status === "active")
+        .map((quest) => ({
+          id: quest.id,
+          title: quest.title,
+        })),
+      npcs: snapshot.npcs
+        .filter((npc) => npc.discoveredAtTurn === null)
+        .map((npc) => ({
+          id: npc.id,
+          name: npc.name,
+          role: npc.role,
+        })),
+    },
     villainClock: snapshot.state.villainClock,
     tensionScore: snapshot.state.tensionScore,
     arcPacingHint,

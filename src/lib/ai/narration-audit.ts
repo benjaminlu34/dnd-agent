@@ -42,7 +42,7 @@ export type NarrationAuditInput = {
   mode: NarrationAuditMode;
   narration: string;
   playerAction?: string;
-  recentCanon?: string[];
+  recentTurnLedger?: string[];
 };
 
 export type NarrationAuditResult = {
@@ -158,10 +158,14 @@ function detectSummaryEnding(narration: string) {
   return null;
 }
 
-function detectRepeatedKeyItem(narration: string, playerAction: string | undefined, recentCanon: string[]) {
+function detectRepeatedKeyItem(
+  narration: string,
+  playerAction: string | undefined,
+  recentTurnLedger: string[],
+) {
   const lowerNarration = narration.toLowerCase();
   const lowerAction = (playerAction ?? "").toLowerCase();
-  const canonText = recentCanon.join(" ").toLowerCase();
+  const canonText = recentTurnLedger.join(" ").toLowerCase();
 
   for (const word of REPEATED_ITEM_WORDS) {
     const canonMatches = canonText.match(new RegExp(`\\b${word}\\b`, "g")) ?? [];
@@ -232,8 +236,12 @@ export function auditNarration(input: NarrationAuditInput): NarrationAuditResult
     issues.push(ending);
   }
 
-  if (input.recentCanon?.length) {
-    const keyItem = detectRepeatedKeyItem(narration, input.playerAction, input.recentCanon);
+  if (input.recentTurnLedger?.length) {
+    const keyItem = detectRepeatedKeyItem(
+      narration,
+      input.playerAction,
+      input.recentTurnLedger,
+    );
     if (keyItem) {
       issues.push(keyItem);
     }
@@ -254,4 +262,41 @@ export function auditNarration(input: NarrationAuditInput): NarrationAuditResult
 
 export function buildNarrationRetryInstructions(issues: NarrationAuditIssue[]) {
   return issues.map((entry) => `- ${entry.directive}`).join("\n");
+}
+
+export function auditSceneSnapshot(summary: string) {
+  const normalized = normalizeWhitespace(summary);
+  const issues: string[] = [];
+
+  if (!normalized) {
+    return {
+      shouldCompress: false,
+      issues,
+    };
+  }
+
+  if (/\n\s*\n|\r\n\s*\r\n/.test(summary)) {
+    issues.push("paragraph_breaks");
+  }
+
+  if (detectPlayerPsychology(normalized)) {
+    issues.push("player_psychology");
+  }
+
+  if (detectEditorialCloser(normalized)) {
+    issues.push("editorial_closer");
+  }
+
+  if (detectSummaryEnding(normalized)) {
+    issues.push("summary_ending");
+  }
+
+  if (detectOpeningRecap(normalized)) {
+    issues.push("opening_recap");
+  }
+
+  return {
+    shouldCompress: issues.length > 0,
+    issues,
+  };
 }

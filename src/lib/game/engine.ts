@@ -15,6 +15,7 @@ import type {
   CheckResult,
   PendingCheck,
   ProposedStateDelta,
+  TurnFacts,
 } from "@/lib/game/types";
 
 type TurnStream = {
@@ -294,6 +295,33 @@ function companionInterjection(snapshot: CampaignSnapshot, proposedDelta: Propos
   return null;
 }
 
+function buildTurnFacts(input: {
+  snapshot: CampaignSnapshot;
+  playerAction: string;
+  validated: ReturnType<typeof validateDelta>;
+  checkResult?: CheckResult;
+}): TurnFacts {
+  const { snapshot, playerAction, validated, checkResult } = input;
+
+  return {
+    action: playerAction,
+    roll: checkResult
+      ? `${checkResult.stat} ${checkResult.outcome} (${checkResult.total})`
+      : undefined,
+    healthDelta: validated.healthDelta ?? 0,
+    discoveries: [
+      ...validated.acceptedQuestDiscoveries,
+      ...validated.acceptedClueDiscoveries,
+      ...validated.acceptedRevealTriggers,
+      ...validated.acceptedNpcDiscoveries,
+    ],
+    sceneChanged:
+      validated.nextState.sceneState.summary !== snapshot.state.sceneState.summary ||
+      validated.nextState.sceneState.title !== snapshot.state.sceneState.title ||
+      validated.nextState.sceneState.atmosphere !== snapshot.state.sceneState.atmosphere,
+  };
+}
+
 async function commitValidatedTurn(input: {
   snapshot: CampaignSnapshot;
   sessionId: string;
@@ -305,6 +333,12 @@ async function commitValidatedTurn(input: {
   checkResult?: CheckResult;
 }) {
   const { snapshot, validated, sessionId, playerAction, narration, warnings, checkResult, turnId } = input;
+  const turnFacts = buildTurnFacts({
+    snapshot,
+    playerAction,
+    validated,
+    checkResult,
+  });
 
   const companionLine = companionInterjection(snapshot, {
     tensionDelta: validated.nextState.tensionScore - snapshot.state.tensionScore,
@@ -503,6 +537,7 @@ async function commitValidatedTurn(input: {
         resultJson: {
           rollback,
           ...(checkResult ? { checkResult } : {}),
+          turnFacts,
         },
       },
     });
@@ -695,7 +730,7 @@ export async function triageTurn(input: {
     throw new Error("Campaign not found.");
   }
 
-  const promptContext = getPromptContext(snapshot);
+  const promptContext = await getPromptContext(snapshot);
   let streamedNarration = "";
   const turn = await prisma.turn.create({
     data: {
@@ -736,11 +771,16 @@ export async function triageTurn(input: {
   };
 
   if (decision.requiresCheck && decision.check) {
+    const pendingCheck: PendingCheck = {
+      ...decision.check,
+      isInvestigative: decision.isInvestigative,
+    };
+
     await prisma.turn.update({
       where: { id: turn.id },
       data: {
         status: "pending_check",
-        pendingCheckJson: decision.check,
+        pendingCheckJson: pendingCheck,
       },
     });
 
@@ -757,7 +797,7 @@ export async function triageTurn(input: {
     return {
       type: "check_required" as const,
       turnId: turn.id,
-      check: decision.check,
+      check: pendingCheck,
       suggestedActions,
     };
   }
@@ -822,7 +862,7 @@ export async function resolvePendingCheck(input: {
   });
   input.stream?.checkResult?.(checkResult);
 
-  const promptContext = getPromptContext(snapshot);
+  const promptContext = await getPromptContext(snapshot);
   let streamedNarration = "";
   const decision = await dmClient.resolveTurn(
     {
@@ -830,6 +870,7 @@ export async function resolvePendingCheck(input: {
       promptContext,
       playerAction: turn.playerAction,
       checkResult,
+      isInvestigative: pendingCheck.isInvestigative,
     },
     {
       onNarration: (chunk) => {

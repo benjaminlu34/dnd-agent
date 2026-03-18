@@ -387,6 +387,14 @@ export type ProposedStateDelta = {
   actionIntents?: StructuredActionIntent[];
 };
 
+export type TurnFacts = {
+  action: string;
+  roll?: string;
+  healthDelta: number;
+  discoveries: string[];
+  sceneChanged: boolean;
+};
+
 export type ValidatedDelta = {
   nextState: CampaignState;
   nextCharacter: Pick<CampaignCharacter, "health" | "gold" | "inventory">;
@@ -418,6 +426,7 @@ export type CheckResult = {
 export type TriageDecision = {
   requiresCheck: boolean;
   narration: string | null;
+  isInvestigative: boolean;
   check?: {
     stat: Stat;
     mode: CheckMode;
@@ -435,17 +444,28 @@ export type ResolveDecision = {
 
 export type PromptContext = {
   scene: SceneState;
+  promptSceneSummary: string;
   activeArc: ArcRecord | undefined;
   activeQuests: QuestRecord[];
   hiddenQuests: QuestRecord[];
-  unresolvedHooks: Hook[];
-  recentCanon: string[];
+  recentTurnLedger: string[];
   relevantClues: Clue[];
   staleClues: Clue[];
   eligibleRevealIds: string[];
-  eligibleRevealTexts: string[];
+  discoveredClues: Clue[];
   companion: NpcRecord | null;
   hiddenNpcs: NpcRecord[];
+  discoveryCandidates: {
+    quests: {
+      id: string;
+      title: string;
+    }[];
+    npcs: {
+      id: string;
+      name: string;
+      role: string;
+    }[];
+  };
   villainClock: number;
   tensionScore: number;
   arcPacingHint: string | null;
@@ -455,4 +475,5 @@ export type PendingCheck = {
   stat: Stat;
   mode: CheckMode;
   reason: string;
+  isInvestigative: boolean;
 };

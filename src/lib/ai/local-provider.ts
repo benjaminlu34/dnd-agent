@@ -1,4 +1,5 @@
 import { createDefaultCharacterTemplate } from "@/lib/game/starter-data";
+import { auditSceneSnapshot } from "@/lib/ai/narration-audit";
 import type {
   CampaignBlueprint,
   CharacterTemplate,
@@ -626,6 +627,20 @@ function inferActionIntent(playerAction: string, companion: PromptContext["compa
     requiresCheck: /(convince|persuade|jump|rush|grab)/.test(action),
     mode: "normal",
   };
+}
+
+function isInvestigativeIntent(intent: ActionIntent, playerAction: string) {
+  if (intent.kind === "inspect") {
+    return true;
+  }
+
+  if (intent.kind === "social" && /(ask|question|interrogate|press|grill|demand answers|probe)/i.test(playerAction)) {
+    return true;
+  }
+
+  return /(loot|check pockets|rifle through|search|study|observe|track|follow up|read|decipher)/i.test(
+    playerAction,
+  );
 }
 
 function chooseHiddenClue(promptContext: PromptContext, intent: ActionIntent) {
@@ -1452,16 +1467,57 @@ export class LocalDungeonMaster {
   }
 
   async generateCampaignOpening(input: CampaignOpeningInput) {
-    return buildCampaignOpening(input);
+    const opening = buildCampaignOpening(input);
+    const audit = auditSceneSnapshot(opening.scene.summary);
+
+    if (!audit.shouldCompress) {
+      return opening;
+    }
+
+    return {
+      ...opening,
+      scene: {
+        ...opening.scene,
+        summary: await this.compressSceneSnapshot(opening.scene.summary),
+      },
+    };
+  }
+
+  async compressSceneSnapshot(summary: string) {
+    const normalized = summary.replace(/\s+/g, " ").trim();
+
+    if (!normalized) {
+      return "";
+    }
+
+    const stripped = normalized
+      .replace(/\byou (?:realize|learn|know|suspect|understand)\b[^.?!]*[.?!]?/gi, "")
+      .replace(/\byou feel (?!the |a |an )[^.?!]*[.?!]?/gi, "")
+      .replace(/\b(the night|the city|the dark|this place|the hunter|the hunted)[^.?!]*[.?!]?/gi, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    const sentences = stripped
+      .split(/(?<=[.!?])\s+/)
+      .map((sentence) => sentence.trim())
+      .filter(Boolean);
+
+    if (sentences.length === 0) {
+      return "The current scene continues.";
+    }
+
+    return sentences.slice(0, 2).join(" ");
   }
 
   async triageTurn(input: TurnAIPayload, callbacks?: StreamCallbacks): Promise<TriageDecision> {
     const intent = inferActionIntent(input.playerAction, input.promptContext.companion);
+    const isInvestigative = isInvestigativeIntent(intent, input.playerAction);
 
     if (intent.requiresCheck) {
       return {
         requiresCheck: true,
         narration: null,
+        isInvestigative,
         check: {
           stat: intent.stat,
           mode: intent.mode,
@@ -1520,6 +1576,7 @@ export class LocalDungeonMaster {
     return {
       requiresCheck: false,
       narration,
+      isInvestigative,
       suggestedActions,
       proposedDelta: {
         sceneSnapshot: buildSceneSnapshot({
@@ -1566,7 +1623,7 @@ export class LocalDungeonMaster {
   }
 
   async resolveTurn(
-    input: TurnAIPayload & { checkResult: CheckResult },
+    input: TurnAIPayload & { checkResult: CheckResult; isInvestigative: boolean },
     callbacks?: StreamCallbacks,
   ): Promise<ResolveDecision> {
     const intent = inferActionIntent(input.playerAction, input.promptContext.companion);
