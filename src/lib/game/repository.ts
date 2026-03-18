@@ -446,6 +446,7 @@ export async function getCharacterTemplateForUser(templateId: string) {
 export async function createCampaignFromModuleForUser(input: {
   moduleId: string;
   templateId: string;
+  opening?: GeneratedCampaignOpening;
 }) {
   const user = await ensureLocalUser();
   const [module, template] = await Promise.all([
@@ -473,10 +474,12 @@ export async function createCampaignFromModuleForUser(input: {
 
   const templateRecord = toTemplateRecord(template);
   const setup = toGeneratedCampaignSetup(module);
-  const opening = await dmClient.generateCampaignOpening({
-    setup,
-    character: templateRecord,
-  });
+  const opening =
+    input.opening ??
+    (await dmClient.generateCampaignOpening({
+      setup,
+      character: templateRecord,
+    }));
 
   const campaign = await prisma.$transaction((tx) =>
     createCampaignInTx(tx, {
@@ -488,6 +491,48 @@ export async function createCampaignFromModuleForUser(input: {
   );
 
   return { campaignId: campaign.id };
+}
+
+export async function generateCampaignOpeningDraftForUser(input: {
+  moduleId: string;
+  templateId: string;
+  prompt?: string;
+  previousDraft?: GeneratedCampaignOpening;
+}) {
+  const user = await ensureLocalUser();
+  const [module, template] = await Promise.all([
+    prisma.adventureModule.findFirst({
+      where: {
+        id: input.moduleId,
+        userId: user.id,
+      },
+    }),
+    prisma.characterTemplate.findFirst({
+      where: {
+        id: input.templateId,
+        userId: user.id,
+      },
+    }),
+  ]);
+
+  if (!module) {
+    return { error: "module_not_found" as const };
+  }
+
+  if (!template) {
+    return { error: "template_not_found" as const };
+  }
+
+  const setup = toGeneratedCampaignSetup(module);
+  const character = toTemplateRecord(template);
+  const draft = await dmClient.generateCampaignOpening({
+    setup,
+    character,
+    prompt: input.prompt,
+    previousDraft: input.previousDraft,
+  });
+
+  return { draft };
 }
 
 export async function createCharacterTemplate(input: CharacterTemplateDraft) {

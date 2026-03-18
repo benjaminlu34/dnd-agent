@@ -35,6 +35,8 @@ type TurnAIPayload = {
 type CampaignOpeningInput = {
   setup: GeneratedCampaignSetup;
   character: CharacterTemplate;
+  prompt?: string;
+  previousDraft?: GeneratedCampaignOpening;
 };
 
 type ThemeProfile = {
@@ -982,6 +984,8 @@ function pickRandom<T>(items: T[]) {
 }
 
 function buildCampaignOpening(input: CampaignOpeningInput): GeneratedCampaignOpening {
+  const prompt = cleanPrompt(input.prompt);
+  const previous = input.previousDraft;
   const backstory = input.character.backstory?.trim();
   const archetype = input.character.archetype.toLowerCase();
   const locations =
@@ -993,8 +997,8 @@ function buildCampaignOpening(input: CampaignOpeningInput): GeneratedCampaignOpe
   const authorityFigure = input.setup.secretEngine.npcs.find((npc) => !npc.isCompanion);
   const quest = input.setup.secretEngine.quests[0];
   const hook = input.setup.secretEngine.hooks[0];
-  const location = pickRandom(locations);
-  const title =
+  const location = previous?.scene.location ?? pickRandom(locations);
+  const generatedTitle =
     /\b(lord|lady|captain|magistrate|regent|commander|overlord)\b/i.test(archetype)
       ? `${location} Under Petition`
       : /\b(peasant|farmer|laborer|urchin|servant|villager)\b/i.test(archetype)
@@ -1002,12 +1006,13 @@ function buildCampaignOpening(input: CampaignOpeningInput): GeneratedCampaignOpe
         : /\b(rogue|scout|wanderer|ranger|traveler|smuggler|thief)\b/i.test(archetype)
           ? `First Glimpse of ${location}`
           : `${location} at the Breaking Point`;
-  const atmosphere = pickRandom([
+  const title = previous?.scene.title ?? generatedTitle;
+  const atmosphere = previous?.scene.atmosphere ?? pickRandom([
     `Tense and uncertain beneath the module's ${input.setup.publicSynopsis.tone.toLowerCase()}`,
     `Restless, crowded, and full of pressure that has nowhere clean to go`,
     `Charged with rumor, caution, and the sense that someone has moved first`,
   ]);
-  const activeThreat = pickRandom([
+  const generatedThreat = pickRandom([
     hook?.text ?? `Pressure is mounting around ${location}.`,
     quest
       ? `${quest.title} is no longer distant trouble. The first opening around it is happening right now.`
@@ -1016,6 +1021,7 @@ function buildCampaignOpening(input: CampaignOpeningInput): GeneratedCampaignOpe
       ? `${authorityFigure.name} is tied to the pressure building in ${location}, whether they admit it or not.`
       : `Someone in ${location} is about to force the next move.`,
   ]);
+  const activeThreat = previous?.activeThreat ?? generatedThreat;
   const relation =
     /\b(lord|lady|captain|magistrate|regent|commander|overlord)\b/i.test(archetype)
       ? pickRandom([
@@ -1046,16 +1052,23 @@ function buildCampaignOpening(input: CampaignOpeningInput): GeneratedCampaignOpe
         `${input.character.name} has only a breath to take in the place before the opening pressure tightens.`,
         `There is barely time to get oriented before the first thread of danger pulls tight.`,
       ]);
-  const summary = [
-    `${input.setup.publicSynopsis.premise}`,
-    companion
-      ? `${companion.name}${companion.personalHook ? `, ${companion.personalHook.toLowerCase()},` : ""} is close enough to matter if ${input.character.name} chooses to engage.`
-      : null,
-    activeThreat,
-  ]
-    .filter(Boolean)
-    .join(" ");
+  const summary =
+    previous?.scene.summary && !prompt
+      ? previous.scene.summary
+      : [
+          `${input.setup.publicSynopsis.premise}`,
+          companion
+            ? `${companion.name}${companion.personalHook ? `, ${companion.personalHook.toLowerCase()},` : ""} is close enough to matter if ${input.character.name} chooses to engage.`
+            : null,
+          activeThreat,
+          prompt ? `Lean the situation toward this direction: ${prompt}.` : null,
+        ]
+          .filter(Boolean)
+          .join(" ");
   const suggestedActions =
+    previous?.scene.suggestedActions && !prompt
+      ? previous.scene.suggestedActions
+      :
     /\b(rogue|scout|wanderer|ranger|traveler|smuggler|thief)\b/i.test(archetype)
       ? buildQuietOpeningSuggestions({
           courierRole: authorityFigure?.role ?? "local fixer",
@@ -1067,7 +1080,10 @@ function buildCampaignOpening(input: CampaignOpeningInput): GeneratedCampaignOpe
           authorityRole: authorityFigure?.role ?? "local authority",
           companionName: companion?.name ?? "your ally",
         });
-  const narration = `${relation}\n\n${personalAngle}\n\n${summary}`;
+  const narration =
+    previous?.narration && !prompt
+      ? previous.narration
+      : `${relation}\n\n${personalAngle}\n\n${summary}`;
 
   return {
     narration,

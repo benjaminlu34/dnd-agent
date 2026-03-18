@@ -160,7 +160,7 @@ export function SessionZeroApp() {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [drafting, setDrafting] = useState(false);
   const [savingModule, setSavingModule] = useState(false);
-  const [launching, setLaunching] = useState(false);
+  const [continuing, setContinuing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const selectedModule = modules.find((module) => module.id === selectedModuleId) ?? null;
@@ -505,37 +505,28 @@ export function SessionZeroApp() {
     }
   }
 
-  async function launchCampaign() {
-    if (!selectedModule || !selectedCharacter || launching) {
+  async function continueToCampaignSetup() {
+    if (!selectedModule || !selectedCharacter || continuing) {
       return;
     }
 
-    setLaunching(true);
+    setContinuing(true);
     setError(null);
 
     try {
-      const response = await fetch("/api/campaigns/create", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          moduleId: selectedModule.id,
-          templateId: selectedCharacter.id,
-        }),
+      const params = new URLSearchParams({
+        moduleId: selectedModule.id,
+        templateId: selectedCharacter.id,
       });
-
-      const data = (await response.json()) as { campaignId?: string; error?: string };
-
-      if (!response.ok || !data.campaignId) {
-        throw new Error(data.error ?? "Failed to create campaign.");
-      }
-
-      router.push(`/play/${data.campaignId}`);
+      router.push(`/campaigns/create?${params.toString()}`);
     } catch (launchError) {
-      setError(launchError instanceof Error ? launchError.message : "Failed to launch campaign.");
+      setError(
+        launchError instanceof Error
+          ? launchError.message
+          : "Failed to continue to campaign setup.",
+      );
     } finally {
-      setLaunching(false);
+      setContinuing(false);
     }
   }
 
@@ -1013,7 +1004,7 @@ export function SessionZeroApp() {
           </section>
 
           <section className="mt-10 rounded-3xl border border-zinc-800 bg-black p-6">
-            <p className="text-[0.68rem] uppercase tracking-[0.24em] text-zinc-500">Step 3: Launch</p>
+            <p className="text-[0.68rem] uppercase tracking-[0.24em] text-zinc-500">Step 3: Campaign Setup</p>
             <div className="mt-5 grid gap-4 md:grid-cols-2">
               <div className="rounded-3xl border border-zinc-800 bg-zinc-950 p-5">
                 <p className="text-[0.68rem] uppercase tracking-[0.18em] text-zinc-500">Module</p>
@@ -1022,7 +1013,7 @@ export function SessionZeroApp() {
                 </h2>
                 <p className="mt-3 text-sm leading-7 text-zinc-400">
                   {selectedModule?.premise ??
-                    "Pick a saved module or draft a new one before launching the campaign."}
+                    "Pick a saved module or draft a new one before continuing to campaign setup."}
                 </p>
               </div>
               <div className="rounded-3xl border border-zinc-800 bg-zinc-950 p-5">
@@ -1039,10 +1030,10 @@ export function SessionZeroApp() {
             </div>
             <button
               className="button-press mt-6 rounded-full bg-white px-6 py-3 text-sm font-semibold tracking-wide text-black hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
-              onClick={() => void launchCampaign()}
-              disabled={launching || !selectedModule || !selectedCharacter}
+              onClick={() => void continueToCampaignSetup()}
+              disabled={continuing || !selectedModule || !selectedCharacter}
             >
-              {launching ? "Launching Adventure..." : "Launch Adventure"}
+              {continuing ? "Opening Campaign Setup..." : "Continue to Campaign Setup"}
             </button>
           </section>
 

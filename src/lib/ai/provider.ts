@@ -59,6 +59,8 @@ type TurnAIPayload = {
 type CampaignOpeningInput = {
   setup: GeneratedCampaignSetup;
   character: CharacterTemplate;
+  prompt?: string;
+  previousDraft?: GeneratedCampaignOpening;
 };
 
 function toStatModifier(value: number) {
@@ -870,6 +872,9 @@ class OpenRouterDungeonMaster {
   }
 
   async generateCampaignOpening(input: CampaignOpeningInput) {
+    const revisionPrompt = input.prompt?.trim() ?? "";
+    const hasPreviousDraft = Boolean(input.previousDraft);
+
     try {
       const response = await this.client.chat.completions.create({
         model: env.openRouterModel,
@@ -895,7 +900,17 @@ class OpenRouterDungeonMaster {
               `Backstory: ${input.character.backstory ?? "None provided."}`,
               `Public synopsis: ${JSON.stringify(input.setup.publicSynopsis)}`,
               `Secret engine: ${JSON.stringify(input.setup.secretEngine)}`,
-              "Create this hero's first entrance into the module as a concrete starting scene.",
+              revisionPrompt
+                ? hasPreviousDraft
+                  ? [
+                      `Revision request: ${revisionPrompt}`,
+                      "Revise the previous opening draft for this same hero and module.",
+                      "Preserve good material unless the revision conflicts with it.",
+                      "Return the full updated structured opening draft, not a partial patch.",
+                      `Previous draft: ${JSON.stringify(input.previousDraft)}`,
+                    ].join("\n")
+                  : `Create this hero's first entrance into the module as a concrete starting scene. Additional direction: ${revisionPrompt}`
+                : "Create this hero's first entrance into the module as a concrete starting scene.",
             ].join("\n"),
           },
         ],
@@ -938,6 +953,15 @@ class OpenRouterDungeonMaster {
               `Backstory: ${input.character.backstory ?? "None provided."}`,
               `Public synopsis: ${JSON.stringify(input.setup.publicSynopsis)}`,
               `Secret engine: ${JSON.stringify(input.setup.secretEngine)}`,
+              revisionPrompt
+                ? hasPreviousDraft
+                  ? [
+                      `Revision request: ${revisionPrompt}`,
+                      "Revise the previous opening draft for this same hero and module.",
+                      `Previous draft: ${JSON.stringify(input.previousDraft)}`,
+                    ].join("\n")
+                  : `Additional direction: ${revisionPrompt}`
+                : "",
             ].join("\n"),
           },
         ],

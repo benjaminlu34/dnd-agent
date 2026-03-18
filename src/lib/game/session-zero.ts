@@ -88,9 +88,17 @@ export const campaignDraftRequestSchema = z.object({
   previousDraft: generatedCampaignSetupSchema.optional(),
 });
 
+export const campaignOpeningDraftRequestSchema = z.object({
+  moduleId: z.string().trim().min(1, "Module selection is required."),
+  templateId: z.string().trim().min(1, "Template selection is required."),
+  prompt: z.string().trim().optional(),
+  previousDraft: generatedCampaignOpeningSchema.optional(),
+});
+
 export const campaignCreateRequestSchema = z.object({
   moduleId: z.string().trim().min(1, "Module selection is required."),
   templateId: z.string().trim().min(1, "Template selection is required."),
+  opening: generatedCampaignOpeningSchema,
 });
 
 export const moduleCreateRequestSchema = z.object({
@@ -98,5 +106,6 @@ export const moduleCreateRequestSchema = z.object({
 });
 
 export type CampaignDraftRequest = z.infer<typeof campaignDraftRequestSchema>;
+export type CampaignOpeningDraftRequest = z.infer<typeof campaignOpeningDraftRequestSchema>;
 export type CampaignCreateRequest = z.infer<typeof campaignCreateRequestSchema>;
 export type ModuleCreateRequest = z.infer<typeof moduleCreateRequestSchema>;
