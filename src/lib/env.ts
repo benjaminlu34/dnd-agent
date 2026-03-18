@@ -30,6 +30,8 @@ export const env = {
   directUrl: readEnv("DIRECT_URL") ?? "",
   openRouterApiKey: readEnv("OPENROUTER_API_KEY") ?? "",
   openRouterModel: readEnv("OPENROUTER_MODEL") ?? "anthropic/claude-3.5-sonnet",
+  openRouterPlannerModel: readEnv("OPENROUTER_PLANNER_MODEL") ?? "",
+  openRouterBackupRendererModel: readEnv("OPENROUTER_BACKUP_RENDERER_MODEL") ?? "",
   openRouterCompressionModel: readEnv("OPENROUTER_COMPRESSION_MODEL") ?? "",
   openRouterSiteName: readEnv("OPENROUTER_SITE_NAME") ?? "AI Solo RPG Engine",
 };

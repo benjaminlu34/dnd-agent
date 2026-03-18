@@ -9,7 +9,6 @@ import {
   type TurnSuggestedActionGoal,
   validateBeatPlan,
 } from "@/lib/ai/narration-audit";
-import { LocalDungeonMaster } from "@/lib/ai/local-provider";
 import { env } from "@/lib/env";
 import { characterTemplateDraftSchema } from "@/lib/game/characters";
 import {
@@ -57,11 +56,12 @@ type StreamCallbacks = {
 
 export type CharacterGenerationResult = {
   character: CharacterTemplateDraft;
-  source: "openrouter" | "local_fallback";
+  source: "openrouter";
   warning?: string;
 };
 
 type OpenRouterToolResult = {
+  model: string;
   text: string;
   rawToolArguments: string;
   toolInput: unknown;
@@ -109,6 +109,7 @@ type TurnQualityMetadata = {
   rendererIssues: string[];
   usedPlannerRepair: boolean;
   usedRendererRepair: boolean;
+  usedBackupRenderer: boolean;
   usedFallback: boolean;
   fallbackReason: string | null;
 };
@@ -774,7 +775,7 @@ function qualityWarningMessage(input: {
   acceptedSeverity: "clean" | "warn" | "block";
 }) {
   if (input.usedFallback) {
-    return "System: This turn was recovered with a fallback narration pipeline.";
+    return "System: This turn was recovered with an alternate AI generation path.";
   }
 
   if (input.acceptedSeverity === "warn") {
@@ -1036,11 +1037,7 @@ function truncateForLog(value: string, limit = 1200) {
   return `${normalized.slice(0, limit)}... [truncated ${normalized.length - limit} chars]`;
 }
 
-const localDungeonMaster = new LocalDungeonMaster();
-
 class OpenRouterDungeonMaster {
-  private fallback = localDungeonMaster;
-
   private client = new OpenAI({
     apiKey: env.openRouterApiKey,
     baseURL: "https://openrouter.ai/api/v1",
@@ -1049,6 +1046,30 @@ class OpenRouterDungeonMaster {
       "X-Title": env.openRouterSiteName,
     },
   });
+
+  private ensureConfigured() {
+    if (!env.openRouterApiKey) {
+      throw new Error("OPENROUTER_API_KEY is required for AI generation.");
+    }
+  }
+
+  private toolModel(
+    tool:
+      | typeof triagePlannerTool
+      | typeof resolutionPlannerTool
+      | typeof rendererTool
+      | typeof triageTool
+      | typeof resolutionTool
+      | typeof campaignSetupTool
+      | typeof campaignOpeningTool
+      | typeof generateCharacterTool,
+  ) {
+    if (tool === triagePlannerTool || tool === resolutionPlannerTool) {
+      return env.openRouterPlannerModel || env.openRouterModel;
+    }
+
+    return env.openRouterModel;
+  }
 
   private async runToolCall(input: {
     systemPrompt: string;
@@ -1060,9 +1081,12 @@ class OpenRouterDungeonMaster {
       | typeof triageTool
       | typeof resolutionTool;
     temperature?: number;
+    modelOverride?: string;
   }): Promise<OpenRouterToolResult> {
+    this.ensureConfigured();
+    const model = input.modelOverride || this.toolModel(input.tool);
     const response = await this.client.chat.completions.create({
-      model: env.openRouterModel,
+      model,
       messages: [
         {
           role: "system",
@@ -1085,6 +1109,7 @@ class OpenRouterDungeonMaster {
     const text = extractMessageText(message?.content);
 
     return {
+      model,
       text,
       rawToolArguments: toolArguments,
       toolInput: toolArguments ? safeParseJson(toolArguments) : safeParseJson(text),
@@ -1132,6 +1157,7 @@ class OpenRouterDungeonMaster {
     }
 
     return {
+      model: env.openRouterModel,
       text,
       rawToolArguments: toolArguments,
       toolInput: toolArguments ? safeParseJson(toolArguments) : safeParseJson(text),
@@ -1170,6 +1196,7 @@ class OpenRouterDungeonMaster {
     const text = extractMessageText(message?.content);
 
     return {
+      model: env.openRouterModel,
       text,
       rawToolArguments: toolArguments,
       toolInput: toolArguments ? safeParseJson(toolArguments) : safeParseJson(text),
@@ -1195,7 +1222,7 @@ class OpenRouterDungeonMaster {
       `[dm.${input.mode}] OpenRouter failure at ${input.stage}.`,
       JSON.stringify(
         {
-          model: env.openRouterModel,
+          model: input.result?.model ?? env.openRouterModel,
           stage: input.stage,
           issues: input.issues?.map((issue) => issue.code) ?? [],
           error: errorMessage,
@@ -1203,6 +1230,60 @@ class OpenRouterDungeonMaster {
           rawText: truncateForLog(input.result?.text ?? ""),
           rawToolArguments: truncateForLog(input.result?.rawToolArguments ?? ""),
           parsedToolInput: input.result?.toolInput ?? null,
+        },
+        null,
+        2,
+      ),
+    );
+  }
+
+  private logTurnTrace(input: {
+    mode: "triage" | "resolution";
+    stage: string;
+    prompt?: string;
+    result?: OpenRouterToolResult;
+    planner?: TriagePlannerDecision | ResolutionPlannerDecision;
+    renderer?: RendererDecision;
+    issues?: NarrationAuditIssue[];
+    directlyHandledItems?: string[];
+    metadata?: TurnQualityMetadata;
+  }) {
+    console.info(
+      `[dm.${input.mode}] Trace at ${input.stage}.`,
+      JSON.stringify(
+        {
+          model: input.result?.model ?? null,
+          stage: input.stage,
+          issues: input.issues?.map((issue) => ({
+            code: issue.code,
+            severity: issue.severity,
+            evidence: issue.evidence ?? null,
+          })) ?? [],
+          prompt: input.prompt ? truncateForLog(input.prompt, 1400) : null,
+          rawText: input.result ? truncateForLog(input.result.text ?? "", 1000) : null,
+          rawToolArguments: input.result
+            ? truncateForLog(input.result.rawToolArguments ?? "", 1400)
+            : null,
+          planner: input.planner
+            ? {
+                requiresCheck:
+                  "requiresCheck" in input.planner ? input.planner.requiresCheck : undefined,
+                isInvestigative:
+                  "isInvestigative" in input.planner ? input.planner.isInvestigative : undefined,
+                check: "check" in input.planner ? input.planner.check ?? null : null,
+                actionResolution: truncateForLog(input.planner.actionResolution, 500),
+                suggestedActionGoals: input.planner.suggestedActionGoals,
+                proposedDelta: input.planner.proposedDelta,
+              }
+            : null,
+          renderer: input.renderer
+            ? {
+                narration: truncateForLog(input.renderer.narration, 700),
+                suggestedActions: input.renderer.suggestedActions,
+              }
+            : null,
+          directlyHandledItems: input.directlyHandledItems ?? [],
+          metadata: input.metadata ?? null,
         },
         null,
         2,
@@ -1310,6 +1391,7 @@ class OpenRouterDungeonMaster {
     actionResolution: string;
     suggestedActionGoals: PlannerSuggestedActionGoal[];
     repairIssues?: NarrationAuditIssue[];
+    modelOverride?: string;
   }) {
     const basePrompt = buildRendererUserPrompt({
       mode: input.mode,
@@ -1326,6 +1408,7 @@ class OpenRouterDungeonMaster {
         : basePrompt,
       tool: rendererTool,
       temperature: 0.55,
+      modelOverride: input.modelOverride,
     });
 
     return {
@@ -1335,6 +1418,7 @@ class OpenRouterDungeonMaster {
   }
 
   async compressSceneSnapshot(summary: string) {
+    this.ensureConfigured();
     const normalized = stripCodeFences(summary).replace(/\s+/g, " ").trim();
 
     if (!normalized) {
@@ -1370,15 +1454,16 @@ class OpenRouterDungeonMaster {
         .replace(/\s+/g, " ")
         .trim();
 
-      return compressed || this.fallback.compressSceneSnapshot(normalized);
+      return compressed || normalized;
     } catch {
-      return this.fallback.compressSceneSnapshot(normalized);
+      return normalized;
     }
   }
 
   async generateCampaignSetup(
     input: CampaignSetupGenerationInput = {},
-  ) {
+  ): Promise<GeneratedCampaignSetup> {
+    this.ensureConfigured();
     const hasPreviousDraft = Boolean(input.previousDraft);
     const revisionPrompt = input.prompt?.trim() ?? "";
     const basePrompt = input.basePrompt?.trim() ?? "";
@@ -1478,13 +1563,14 @@ class OpenRouterDungeonMaster {
         return parsed;
       }
     } catch {
-      // Fall back to the local deterministic provider below.
+      throw new Error("OpenRouter campaign setup generation failed.");
     }
 
-    return this.fallback.generateCampaignSetup(input);
+    throw new Error("OpenRouter campaign setup returned an invalid payload.");
   }
 
   async generateCharacter(prompt: string): Promise<CharacterGenerationResult> {
+    this.ensureConfigured();
     const trimmedPrompt = prompt.trim();
     let fallbackWarning: string | undefined;
 
@@ -1570,7 +1656,7 @@ class OpenRouterDungeonMaster {
         };
       }
       fallbackWarning =
-        "OpenRouter raw JSON response did not match the expected schema. Used local fallback instead.";
+        "OpenRouter raw JSON response did not match the expected schema.";
       console.warn("[character.generate] OpenRouter raw JSON response failed schema validation.");
     } catch (error) {
       fallbackWarning =
@@ -1580,15 +1666,11 @@ class OpenRouterDungeonMaster {
       console.warn("[character.generate] OpenRouter raw JSON generation failed.", error);
     }
 
-    const character = await this.fallback.generateCharacter(trimmedPrompt);
-    return {
-      character,
-      source: "local_fallback",
-      warning: fallbackWarning ?? "Generated with local fallback instead of OpenRouter.",
-    };
+    throw new Error(fallbackWarning ?? "OpenRouter character generation failed.");
   }
 
-  async generateCampaignOpening(input: CampaignOpeningInput) {
+  async generateCampaignOpening(input: CampaignOpeningInput): Promise<GeneratedCampaignOpening> {
+    this.ensureConfigured();
     const revisionPrompt = input.prompt?.trim() ?? "";
     const hasPreviousDraft = Boolean(input.previousDraft);
 
@@ -1676,16 +1758,18 @@ class OpenRouterDungeonMaster {
           }
 
           console.warn(
-            `[dm.opening] OpenRouter opening still failed narration audit after retry: ${chosen.issues.map((issue) => issue.code).join(", ")}. Falling back to local opening.`,
+            `[dm.opening] OpenRouter opening still failed narration audit after retry: ${chosen.issues.map((issue) => issue.code).join(", ")}.`,
           );
-          return this.ensureOpeningSceneSummary(await this.fallback.generateCampaignOpening(input));
+          throw new Error(
+            `OpenRouter opening failed narration audit after retry: ${chosen.issues.map((issue) => issue.code).join(", ")}.`,
+          );
         }
 
-        console.warn("[dm.opening] Retry did not return a valid opening. Falling back to local opening.");
-        return this.ensureOpeningSceneSummary(await this.fallback.generateCampaignOpening(input));
+        console.warn("[dm.opening] Retry did not return a valid opening.");
+        throw new Error("OpenRouter opening retry returned an invalid payload.");
       }
     } catch {
-      // Fall through to raw-JSON generation or local fallback below.
+      // Fall through to raw-JSON generation below.
     }
 
     try {
@@ -1760,19 +1844,21 @@ class OpenRouterDungeonMaster {
           }
 
           console.warn(
-            `[dm.opening] Raw JSON opening still failed narration audit after retry: ${chosen.issues.map((issue) => issue.code).join(", ")}. Falling back to local opening.`,
+            `[dm.opening] Raw JSON opening still failed narration audit after retry: ${chosen.issues.map((issue) => issue.code).join(", ")}.`,
           );
-          return this.ensureOpeningSceneSummary(await this.fallback.generateCampaignOpening(input));
+          throw new Error(
+            `OpenRouter raw JSON opening failed narration audit after retry: ${chosen.issues.map((issue) => issue.code).join(", ")}.`,
+          );
         }
 
-        console.warn("[dm.opening] Retry did not return a valid opening. Falling back to local opening.");
-        return this.ensureOpeningSceneSummary(await this.fallback.generateCampaignOpening(input));
+        console.warn("[dm.opening] Retry did not return a valid opening.");
+        throw new Error("OpenRouter opening retry returned an invalid payload.");
       }
     } catch {
-      // Fall back to the local provider below.
+      throw new Error("OpenRouter campaign opening generation failed.");
     }
 
-    return this.ensureOpeningSceneSummary(await this.fallback.generateCampaignOpening(input));
+    throw new Error("OpenRouter campaign opening returned an invalid payload.");
   }
 
   async triageTurn(input: TurnAIPayload, callbacks?: StreamCallbacks): Promise<TriageDecision> {
@@ -1811,6 +1897,16 @@ class OpenRouterDungeonMaster {
       let directlyHandledItems = plannerValidation.directlyHandledItems;
       let usedPlannerRepair = false;
 
+      this.logTurnTrace({
+        mode: "triage",
+        stage: "planner_received",
+        prompt: plannerPrompt,
+        result: plannerResult,
+        planner: normalizedPlanner,
+        issues: plannerValidation.issues,
+        directlyHandledItems,
+      });
+
       if (plannerValidation.highestSeverity === "block") {
         console.warn(
           `[dm.triage] Beat planner triggered repair: ${plannerValidation.issues.map((issue) => issue.code).join(", ")}.`,
@@ -1847,28 +1943,41 @@ class OpenRouterDungeonMaster {
             chosenPlanner.value === repairedPlanner
               ? repairedValidation.directlyHandledItems
               : plannerValidation.directlyHandledItems;
+
+          this.logTurnTrace({
+            mode: "triage",
+            stage: "planner_repaired",
+            planner: selectedPlanner,
+            issues: selectedPlannerIssues,
+            directlyHandledItems,
+          });
         }
       }
 
       if (selectedPlannerSeverity === "block") {
-        const fallback = await this.fallback.triageTurn(input, callbacks);
-        const warning = qualityWarningMessage({
-          usedFallback: true,
-          acceptedSeverity: "warn",
+        const metadata: TurnQualityMetadata = {
+          acceptedSeverity: "block",
+          plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
+          rendererIssues: [],
+          usedPlannerRepair,
+          usedRendererRepair: false,
+          usedBackupRenderer: false,
+          usedFallback: false,
+          fallbackReason: null,
+        };
+
+        this.logTurnTrace({
+          mode: "triage",
+          stage: "planner_blocked",
+          planner: selectedPlanner,
+          issues: selectedPlannerIssues,
+          directlyHandledItems,
+          metadata,
         });
 
-        return attachTurnQualityMeta(fallback, {
-          warnings: warning ? [warning] : [],
-          quality: {
-            acceptedSeverity: "warn",
-            plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
-            rendererIssues: [],
-            usedPlannerRepair,
-            usedRendererRepair: false,
-            usedFallback: true,
-            fallbackReason: "planner_blocked",
-          },
-        });
+        throw new Error(
+          `OpenRouter triage planner failed validation: ${selectedPlannerIssues.map((issue) => issue.code).join(", ")}.`,
+        );
       }
 
       if (selectedPlanner.requiresCheck) {
@@ -1885,18 +1994,29 @@ class OpenRouterDungeonMaster {
           usedFallback: false,
           acceptedSeverity,
         });
+        const metadata: TurnQualityMetadata = {
+          acceptedSeverity,
+          plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
+          rendererIssues: [],
+          usedPlannerRepair,
+          usedRendererRepair: false,
+          usedBackupRenderer: false,
+          usedFallback: false,
+          fallbackReason: null,
+        };
+
+        this.logTurnTrace({
+          mode: "triage",
+          stage: "planner_accept_check",
+          planner: selectedPlanner,
+          issues: selectedPlannerIssues,
+          directlyHandledItems,
+          metadata,
+        });
 
         return attachTurnQualityMeta(decision, {
           warnings: warning ? [warning] : [],
-          quality: {
-            acceptedSeverity,
-            plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
-            rendererIssues: [],
-            usedPlannerRepair,
-            usedRendererRepair: false,
-            usedFallback: false,
-            fallbackReason: null,
-          },
+          quality: metadata,
         });
       }
 
@@ -1919,6 +2039,24 @@ class OpenRouterDungeonMaster {
       let selectedRendererIssues = renderAudit.issues;
       let selectedRendererSeverity = renderAudit.highestSeverity;
       let usedRendererRepair = false;
+      let usedBackupRenderer = false;
+
+      this.logTurnTrace({
+        mode: "triage",
+        stage: "renderer_received",
+        prompt: buildRendererUserPrompt({
+          mode: "triage",
+          playerAction: input.playerAction,
+          promptContext: input.promptContext,
+          actionResolution: selectedPlanner.actionResolution,
+          suggestedActionGoals: selectedPlanner.suggestedActionGoals,
+        }),
+        result: initialRender.result,
+        planner: selectedPlanner,
+        renderer: renderDecision,
+        issues: renderAudit.issues,
+        directlyHandledItems,
+      });
 
       if (renderAudit.highestSeverity === "block") {
         console.warn(
@@ -1957,27 +2095,114 @@ class OpenRouterDungeonMaster {
         renderDecision = chosenRenderer.value;
         selectedRendererIssues = chosenRenderer.issues;
         selectedRendererSeverity = chosenRenderer.highestSeverity;
+
+        this.logTurnTrace({
+          mode: "triage",
+          stage: "renderer_repaired",
+          planner: selectedPlanner,
+          renderer: renderDecision,
+          issues: selectedRendererIssues,
+          directlyHandledItems,
+        });
       }
 
       if (selectedRendererSeverity === "block") {
-        const fallback = await this.fallback.triageTurn(input, callbacks);
-        const warning = qualityWarningMessage({
-          usedFallback: true,
-          acceptedSeverity: "warn",
-        });
+        const backupRendererModel =
+          env.openRouterBackupRendererModel &&
+          env.openRouterBackupRendererModel !== env.openRouterModel
+            ? env.openRouterBackupRendererModel
+            : "";
 
-        return attachTurnQualityMeta(fallback, {
-          warnings: warning ? [warning] : [],
-          quality: {
-            acceptedSeverity: "warn",
+        if (backupRendererModel) {
+          console.warn(
+            `[dm.triage] Renderer escalating to backup model: ${selectedRendererIssues.map((issue) => issue.code).join(", ")}.`,
+          );
+          const backupRender = await this.renderValidatedBeat({
+            mode: "triage",
+            playerAction: input.playerAction,
+            promptContext: input.promptContext,
+            actionResolution: selectedPlanner.actionResolution,
+            suggestedActionGoals: selectedPlanner.suggestedActionGoals,
+            repairIssues: selectedRendererIssues,
+            modelOverride: backupRendererModel,
+          });
+          const backupDecision = backupRender.normalized ?? { narration: "", suggestedActions: [] };
+          const backupAudit = auditRenderedNarration({
+            mode: "triage",
+            narration: backupDecision.narration,
+            playerAction: input.playerAction,
+            actionResolution: selectedPlanner.actionResolution,
+            directlyHandledItems,
+            suggestedActions: backupDecision.suggestedActions,
+          });
+          const chosenRenderer = choosePreferredAttempt(
+            {
+              value: renderDecision,
+              issues: selectedRendererIssues,
+              highestSeverity: selectedRendererSeverity,
+            },
+            {
+              value: backupDecision,
+              issues: backupAudit.issues,
+              highestSeverity: backupAudit.highestSeverity,
+            },
+          );
+
+          if (chosenRenderer.value === backupDecision) {
+            usedBackupRenderer = true;
+          }
+
+          renderDecision = chosenRenderer.value;
+          selectedRendererIssues = chosenRenderer.issues;
+          selectedRendererSeverity = chosenRenderer.highestSeverity;
+
+          this.logTurnTrace({
+            mode: "triage",
+            stage: "renderer_backup_received",
+            result: backupRender.result,
+            planner: selectedPlanner,
+            renderer: backupDecision,
+            issues: backupAudit.issues,
+            directlyHandledItems,
+            metadata: {
+              acceptedSeverity: backupAudit.highestSeverity,
+              plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
+              rendererIssues: backupAudit.issues.map((issue) => issue.code),
+              usedPlannerRepair,
+              usedRendererRepair,
+              usedBackupRenderer: true,
+              usedFallback: false,
+              fallbackReason: "backup_renderer_model",
+            },
+          });
+        }
+
+        if (selectedRendererSeverity === "block") {
+          const metadata: TurnQualityMetadata = {
+            acceptedSeverity: "block",
             plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
             rendererIssues: selectedRendererIssues.map((issue) => issue.code),
             usedPlannerRepair,
             usedRendererRepair,
-            usedFallback: true,
-            fallbackReason: "renderer_blocked",
-          },
-        });
+            usedBackupRenderer,
+            usedFallback: false,
+            fallbackReason: null,
+          };
+
+          this.logTurnTrace({
+            mode: "triage",
+            stage: "renderer_blocked",
+            planner: selectedPlanner,
+            renderer: renderDecision,
+            issues: selectedRendererIssues,
+            directlyHandledItems,
+            metadata,
+          });
+
+          throw new Error(
+            `OpenRouter triage narration failed audit after retry: ${selectedRendererIssues.map((issue) => issue.code).join(", ")}.`,
+          );
+        }
       }
 
       const decision: TriageDecision = {
@@ -1998,17 +2223,30 @@ class OpenRouterDungeonMaster {
         callbacks?.onNarration?.(decision.narration.trim());
       }
 
+      const metadata: TurnQualityMetadata = {
+        acceptedSeverity,
+        plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
+        rendererIssues: selectedRendererIssues.map((issue) => issue.code),
+        usedPlannerRepair,
+        usedRendererRepair,
+        usedBackupRenderer,
+        usedFallback: false,
+        fallbackReason: null,
+      };
+
+      this.logTurnTrace({
+        mode: "triage",
+        stage: "accepted",
+        planner: selectedPlanner,
+        renderer: renderDecision,
+        issues: [...selectedPlannerIssues, ...selectedRendererIssues],
+        directlyHandledItems,
+        metadata,
+      });
+
       return attachTurnQualityMeta(decision, {
         warnings: warning ? [warning] : [],
-        quality: {
-          acceptedSeverity,
-          plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
-          rendererIssues: selectedRendererIssues.map((issue) => issue.code),
-          usedPlannerRepair,
-          usedRendererRepair,
-          usedFallback: false,
-          fallbackReason: null,
-        },
+        quality: metadata,
       });
     } catch (error) {
       this.logTurnFailure({
@@ -2017,33 +2255,7 @@ class OpenRouterDungeonMaster {
         prompt: plannerPrompt,
         error,
       });
-
-      try {
-        const fallback = await this.fallback.triageTurn(input, callbacks);
-        const warning = qualityWarningMessage({
-          usedFallback: true,
-          acceptedSeverity: "warn",
-        });
-
-        return attachTurnQualityMeta(fallback, {
-          warnings: warning ? [warning] : [],
-          quality: {
-            acceptedSeverity: "warn",
-            plannerIssues: [],
-            rendererIssues: [],
-            usedPlannerRepair: false,
-            usedRendererRepair: false,
-            usedFallback: true,
-            fallbackReason: "openrouter_exception",
-          },
-        });
-      } catch (fallbackError) {
-        throw fallbackError instanceof Error
-          ? fallbackError
-          : error instanceof Error
-            ? error
-            : new Error("OpenRouter triage failed.");
-      }
+      throw error instanceof Error ? error : new Error("OpenRouter triage failed.");
     }
   }
 
@@ -2051,6 +2263,7 @@ class OpenRouterDungeonMaster {
     input: TurnAIPayload & { checkResult: CheckResult; isInvestigative: boolean },
     callbacks?: StreamCallbacks,
   ): Promise<ResolveDecision> {
+    this.ensureConfigured();
     const plannerPrompt = buildResolutionPlannerUserPrompt(input);
 
     try {
@@ -2121,24 +2334,9 @@ class OpenRouterDungeonMaster {
       }
 
       if (selectedPlannerSeverity === "block") {
-        const fallback = await this.fallback.resolveTurn(input, callbacks);
-        const warning = qualityWarningMessage({
-          usedFallback: true,
-          acceptedSeverity: "warn",
-        });
-
-        return attachTurnQualityMeta(fallback, {
-          warnings: warning ? [warning] : [],
-          quality: {
-            acceptedSeverity: "warn",
-            plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
-            rendererIssues: [],
-            usedPlannerRepair,
-            usedRendererRepair: false,
-            usedFallback: true,
-            fallbackReason: "planner_blocked",
-          },
-        });
+        throw new Error(
+          `OpenRouter resolution planner failed validation: ${selectedPlannerIssues.map((issue) => issue.code).join(", ")}.`,
+        );
       }
 
       const initialRender = await this.renderValidatedBeat({
@@ -2160,6 +2358,7 @@ class OpenRouterDungeonMaster {
       let selectedRendererIssues = renderAudit.issues;
       let selectedRendererSeverity = renderAudit.highestSeverity;
       let usedRendererRepair = false;
+      let usedBackupRenderer = false;
 
       if (renderAudit.highestSeverity === "block") {
         console.warn(
@@ -2201,24 +2400,81 @@ class OpenRouterDungeonMaster {
       }
 
       if (selectedRendererSeverity === "block") {
-        const fallback = await this.fallback.resolveTurn(input, callbacks);
-        const warning = qualityWarningMessage({
-          usedFallback: true,
-          acceptedSeverity: "warn",
-        });
+        const backupRendererModel =
+          env.openRouterBackupRendererModel &&
+          env.openRouterBackupRendererModel !== env.openRouterModel
+            ? env.openRouterBackupRendererModel
+            : "";
 
-        return attachTurnQualityMeta(fallback, {
-          warnings: warning ? [warning] : [],
-          quality: {
-            acceptedSeverity: "warn",
-            plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
-            rendererIssues: selectedRendererIssues.map((issue) => issue.code),
-            usedPlannerRepair,
-            usedRendererRepair,
-            usedFallback: true,
-            fallbackReason: "renderer_blocked",
-          },
-        });
+        if (backupRendererModel) {
+          console.warn(
+            `[dm.resolve] Renderer escalating to backup model: ${selectedRendererIssues.map((issue) => issue.code).join(", ")}.`,
+          );
+          const backupRender = await this.renderValidatedBeat({
+            mode: "resolution",
+            playerAction: input.playerAction,
+            promptContext: input.promptContext,
+            actionResolution: selectedPlanner.actionResolution,
+            suggestedActionGoals: selectedPlanner.suggestedActionGoals,
+            repairIssues: selectedRendererIssues,
+            modelOverride: backupRendererModel,
+          });
+          const backupDecision = backupRender.normalized ?? { narration: "", suggestedActions: [] };
+          const backupAudit = auditRenderedNarration({
+            mode: "resolution",
+            narration: backupDecision.narration,
+            playerAction: input.playerAction,
+            actionResolution: selectedPlanner.actionResolution,
+            directlyHandledItems,
+            suggestedActions: backupDecision.suggestedActions,
+          });
+          const chosenRenderer = choosePreferredAttempt(
+            {
+              value: renderDecision,
+              issues: selectedRendererIssues,
+              highestSeverity: selectedRendererSeverity,
+            },
+            {
+              value: backupDecision,
+              issues: backupAudit.issues,
+              highestSeverity: backupAudit.highestSeverity,
+            },
+          );
+
+          if (chosenRenderer.value === backupDecision) {
+            usedBackupRenderer = true;
+          }
+
+          renderDecision = chosenRenderer.value;
+          selectedRendererIssues = chosenRenderer.issues;
+          selectedRendererSeverity = chosenRenderer.highestSeverity;
+
+          this.logTurnTrace({
+            mode: "resolution",
+            stage: "renderer_backup_received",
+            result: backupRender.result,
+            planner: selectedPlanner,
+            renderer: backupDecision,
+            issues: backupAudit.issues,
+            directlyHandledItems,
+            metadata: {
+              acceptedSeverity: backupAudit.highestSeverity,
+              plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
+              rendererIssues: backupAudit.issues.map((issue) => issue.code),
+              usedPlannerRepair,
+              usedRendererRepair,
+              usedBackupRenderer: true,
+              usedFallback: false,
+              fallbackReason: "backup_renderer_model",
+            },
+          });
+        }
+
+        if (selectedRendererSeverity === "block") {
+          throw new Error(
+            `OpenRouter resolution narration failed audit after retry: ${selectedRendererIssues.map((issue) => issue.code).join(", ")}.`,
+          );
+        }
       }
 
       const decision: ResolveDecision = {
@@ -2244,6 +2500,7 @@ class OpenRouterDungeonMaster {
           rendererIssues: selectedRendererIssues.map((issue) => issue.code),
           usedPlannerRepair,
           usedRendererRepair,
+          usedBackupRenderer,
           usedFallback: false,
           fallbackReason: null,
         },
@@ -2255,37 +2512,12 @@ class OpenRouterDungeonMaster {
         prompt: plannerPrompt,
         error,
       });
-
-      try {
-        const fallback = await this.fallback.resolveTurn(input, callbacks);
-        const warning = qualityWarningMessage({
-          usedFallback: true,
-          acceptedSeverity: "warn",
-        });
-
-        return attachTurnQualityMeta(fallback, {
-          warnings: warning ? [warning] : [],
-          quality: {
-            acceptedSeverity: "warn",
-            plannerIssues: [],
-            rendererIssues: [],
-            usedPlannerRepair: false,
-            usedRendererRepair: false,
-            usedFallback: true,
-            fallbackReason: "openrouter_exception",
-          },
-        });
-      } catch (fallbackError) {
-        throw fallbackError instanceof Error
-          ? fallbackError
-          : error instanceof Error
-            ? error
-            : new Error("OpenRouter resolution failed.");
-      }
+      throw error instanceof Error ? error : new Error("OpenRouter resolution failed.");
     }
   }
 
   async summarizeSession(messages: string[]) {
+    this.ensureConfigured();
     try {
       const response = await this.client.chat.completions.create({
         model: env.openRouterModel,
@@ -2306,16 +2538,14 @@ class OpenRouterDungeonMaster {
         ],
       });
 
-      return (
-        response.choices[0]?.message?.content ??
-        this.fallback.summarizeSession(messages)
-      );
+      return response.choices[0]?.message?.content ?? "";
     } catch {
-      return this.fallback.summarizeSession(messages);
+      throw new Error("OpenRouter session summary failed.");
     }
   }
 
   async generatePreviouslyOn(summary: string, scene: string, clueText: string[]) {
+    this.ensureConfigured();
     try {
       const response = await this.client.chat.completions.create({
         model: env.openRouterModel,
@@ -2336,16 +2566,11 @@ class OpenRouterDungeonMaster {
         ],
       });
 
-      return (
-        response.choices[0]?.message?.content ??
-        this.fallback.generatePreviouslyOn(summary, scene, clueText)
-      );
+      return response.choices[0]?.message?.content ?? "";
     } catch {
-      return this.fallback.generatePreviouslyOn(summary, scene, clueText);
+      throw new Error("OpenRouter previously-on generation failed.");
     }
   }
 }
 
-export const dmClient = env.openRouterApiKey
-  ? new OpenRouterDungeonMaster()
-  : localDungeonMaster;
+export const dmClient = new OpenRouterDungeonMaster();

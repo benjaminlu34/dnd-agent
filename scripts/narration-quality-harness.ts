@@ -4,7 +4,6 @@ import {
   validateBeatPlan,
 } from "../src/lib/ai/narration-audit";
 import { dmClient } from "../src/lib/ai/provider";
-import { LocalDungeonMaster } from "../src/lib/ai/local-provider";
 import {
   createDefaultAdventureModuleSetup,
   createDefaultCharacterTemplate,
@@ -290,8 +289,6 @@ async function main() {
     }
   }
 
-  await runProviderChecks("local", new LocalDungeonMaster(), failures);
-
   if (process.env.OPENROUTER_API_KEY) {
     await runProviderChecks("openrouter", dmClient, failures);
   }
@@ -299,7 +296,7 @@ async function main() {
   console.log(
     JSON.stringify(
       {
-        provider: process.env.OPENROUTER_API_KEY ? "local+openrouter" : "local",
+        provider: process.env.OPENROUTER_API_KEY ? "openrouter" : "not_configured",
         staticCases: staticCases.length,
         failures,
       },

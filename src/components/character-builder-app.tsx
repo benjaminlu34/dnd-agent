@@ -19,7 +19,7 @@ type CharacterFormValues = {
 
 type CharacterGenerationResponse = {
   character?: CharacterFormValues & { backstory?: string | null };
-  source?: "openrouter" | "local_fallback";
+  source?: "openrouter";
   warning?: string;
   error?: string;
 };
@@ -73,7 +73,7 @@ export function CharacterBuilderApp({
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [generationSource, setGenerationSource] = useState<"openrouter" | "local_fallback" | null>(null);
+  const [generationSource, setGenerationSource] = useState<"openrouter" | null>(null);
   const [generationWarning, setGenerationWarning] = useState<string | null>(null);
   const {
     register,
@@ -268,7 +268,7 @@ export function CharacterBuilderApp({
               <p className="text-zinc-400">
                 Generation source:{" "}
                 <span className="font-medium text-zinc-100">
-                  {generationSource === "openrouter" ? "OpenRouter AI" : "Local fallback"}
+                  OpenRouter AI
                 </span>
               </p>
               {generationWarning ? <p className="text-amber-300">{generationWarning}</p> : null}
