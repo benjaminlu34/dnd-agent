@@ -132,6 +132,20 @@ export function buildTurnRendererSystemPrompt() {
   ].join("\n");
 }
 
+export function buildTurnRenderAuditorSystemPrompt() {
+  return [
+    buildDungeonMasterSystemPrompt(),
+    "You are auditing a rendered turn beat against an already-validated beat plan.",
+    "Judge content quality semantically, not by exact wording overlap.",
+    "Paraphrase counts as faithful if the narration clearly depicts the validated actionResolution.",
+    "Judge suggestedActions against the validated suggestedActionGoals, not against raw keyword overlap with actionResolution.",
+    "Flag when narration invents new state changes, shifts the beat away from the validated actionResolution, over-focuses a repeated key item, leaks player psychology, or closes with editorializing.",
+    "Return a structured audit only through the tool call.",
+    "Use severity clean when the render is acceptable, warn when it is playable but imperfect, and block when it needs a rewrite before acceptance.",
+    "If severity is block, return concrete repairInstructions that a renderer rewrite can follow directly.",
+  ].join("\n");
+}
+
 function buildSharedTurnContext(input: {
   blueprint: CampaignBlueprint;
   promptContext: PromptContext;
@@ -410,6 +424,56 @@ Return 2-4 suggestedActions that sound natural in fiction and stay faithful to t
 `;
 }
 
+export function buildTurnRenderAuditorUserPrompt(input: {
+  mode: "triage" | "resolution";
+  playerAction: string;
+  promptContext: PromptContext;
+  actionResolution: string;
+  suggestedActionGoals: Array<{ goal: string; target: string | null }>;
+  narration: string;
+  suggestedActions: string[];
+}) {
+  const goals = input.suggestedActionGoals.length
+    ? input.suggestedActionGoals
+        .map((goal, index) => `- Goal ${index + 1}: ${goal.goal}${goal.target ? ` | Target: ${goal.target}` : ""}`)
+        .join("\n")
+    : "None";
+  const renderedSuggestedActions = input.suggestedActions.length
+    ? input.suggestedActions.map((action) => `- ${action}`).join("\n")
+    : "None";
+
+  return `
+CURRENT SCENE
+Title: ${input.promptContext.scene.title}
+Location: ${input.promptContext.scene.location}
+Summary: ${input.promptContext.promptSceneSummary}
+Atmosphere: ${input.promptContext.scene.atmosphere}
+
+MODE
+${input.mode}
+
+PLAYER ACTION
+${input.playerAction}
+
+VALIDATED ACTION RESOLUTION
+${input.actionResolution}
+
+VALIDATED SUGGESTED ACTION GOALS
+${goals}
+
+RENDERED NARRATION
+${input.narration}
+
+RENDERED SUGGESTED ACTIONS
+${renderedSuggestedActions}
+
+Audit whether the rendered narration and suggested actions stay faithful to the validated beat.
+Suggested actions should be judged as follow-ups to the suggestedActionGoals, even if they do not repeat actionResolution wording.
+Paraphrased recovery, observation, concealment, or movement beats should count as faithful if the scene clearly depicts them.
+Do not treat simple atmospheric support around the beat as a failure unless it meaningfully redirects the scene.
+`;
+}
+
 export const triagePlannerTool = {
   name: "plan_turn_triage",
   description: "Plan the structured semantic result for a player turn triage without writing final narration.",
@@ -559,6 +623,39 @@ export const rendererTool = {
       },
     },
     required: ["narration", "suggestedActions"],
+  },
+};
+
+export const auditTurnRenderTool = {
+  name: "audit_turn_render",
+  description: "Audit rendered turn narration and suggested actions against a validated beat plan.",
+  input_schema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      severity: {
+        type: "string",
+        enum: ["clean", "warn", "block"],
+      },
+      issues: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            code: { type: "string" },
+            rationale: { type: "string" },
+            evidence: { type: ["string", "null"] },
+          },
+          required: ["code", "rationale", "evidence"],
+        },
+      },
+      repairInstructions: {
+        type: "array",
+        items: { type: "string" },
+      },
+    },
+    required: ["severity", "issues", "repairInstructions"],
   },
 };
 

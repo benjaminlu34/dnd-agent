@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   auditRenderedNarration,
+  auditRenderedNarrationStructure,
   validateBeatPlan,
 } from "../ai/narration-audit";
 
@@ -84,6 +85,17 @@ test("auditRenderedNarration blocks suggested actions leaking into narration", (
       "Leave the safehouse",
       "Inspect the ledger",
     ],
+  });
+
+  assert.equal(result.highestSeverity, "block");
+  assert.ok(result.issues.some((issue) => issue.code === "suggested_actions_in_narration"));
+});
+
+test("auditRenderedNarrationStructure blocks suggested actions leaking into narration", () => {
+  const result = auditRenderedNarrationStructure({
+    narration:
+      "You wake to the bell tower's clang and sit up in the safehouse room.\n\nSuggested actions:\n- Leave the safehouse\n- Inspect the ledger",
+    suggestedActions: [],
   });
 
   assert.equal(result.highestSeverity, "block");

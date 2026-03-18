@@ -71,6 +71,7 @@ export type NarrationAuditIssue = {
     | "action_deferral"
     | "invalid_check"
     | "missing_action_resolution"
+    | "missing_narration"
     | "irrelevant_key_item"
     | "beat_contradiction"
     | "stale_suggested_actions"
@@ -123,6 +124,11 @@ export type RenderedNarrationAuditInput = {
   playerAction: string;
   actionResolution: string;
   directlyHandledItems: string[];
+  suggestedActions: string[];
+};
+
+export type RenderedNarrationStructureAuditInput = {
+  narration: string;
   suggestedActions: string[];
 };
 
@@ -642,6 +648,35 @@ export function auditRenderedNarration(input: RenderedNarrationAuditInput): Narr
   );
   if (staleSuggestedActions) {
     issues.push(staleSuggestedActions);
+  }
+
+  return {
+    issues,
+    shouldRetry: issues.length > 0,
+    highestSeverity: highestSeverity(issues),
+  };
+}
+
+export function auditRenderedNarrationStructure(
+  input: RenderedNarrationStructureAuditInput,
+): NarrationAuditResult {
+  const issues: NarrationAuditIssue[] = [];
+  const narration = normalizeWhitespace(input.narration);
+
+  if (!narration) {
+    issues.push(
+      issue({
+        code: "missing_narration",
+        severity: "block",
+        message: "Renderer returned no player-facing narration.",
+        directive: "Return a non-empty narration field in the renderer tool payload.",
+      }),
+    );
+  } else {
+    const suggestedActionsLeak = detectSuggestedActionsLeak(narration);
+    if (suggestedActionsLeak) {
+      issues.push(suggestedActionsLeak);
+    }
   }
 
   return {

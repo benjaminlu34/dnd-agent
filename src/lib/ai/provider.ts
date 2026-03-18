@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import {
   auditNarration,
   auditRenderedNarration,
+  auditRenderedNarrationStructure,
   auditSceneSnapshot,
   buildNarrationRetryInstructions,
   type BeatValidationInput,
@@ -14,10 +15,13 @@ import { characterTemplateDraftSchema } from "@/lib/game/characters";
 import {
   buildDungeonMasterSystemPrompt,
   buildRendererUserPrompt,
+  buildTurnRenderAuditorSystemPrompt,
+  buildTurnRenderAuditorUserPrompt,
   buildTurnPlannerSystemPrompt,
   buildTurnRendererSystemPrompt,
   buildResolutionPlannerUserPrompt,
   buildTriagePlannerUserPrompt,
+  auditTurnRenderTool,
   isResolveDecision,
   isTriageDecision,
   rendererTool,
@@ -103,15 +107,32 @@ type RendererDecision = {
   suggestedActions: string[];
 };
 
+type TurnRenderAuditIssue = {
+  code: string;
+  rationale: string;
+  evidence: string | null;
+};
+
+type TurnRenderAuditDecision = {
+  severity: "clean" | "warn" | "block";
+  issues: TurnRenderAuditIssue[];
+  repairInstructions: string[];
+};
+
 type TurnQualityMetadata = {
   acceptedSeverity: "clean" | "warn" | "block";
   plannerIssues: string[];
   rendererIssues: string[];
+  aiAuditSeverity: "clean" | "warn" | "block";
+  aiAuditIssues: string[];
   usedPlannerRepair: boolean;
   usedRendererRepair: boolean;
   usedBackupRenderer: boolean;
+  usedAiRenderAudit: boolean;
+  usedAiAuditRepair: boolean;
   usedFallback: boolean;
   fallbackReason: string | null;
+  legacyRendererIssues: string[];
 };
 
 type TurnQualityMeta = {
@@ -382,6 +403,7 @@ function toFunctionTool(
     | typeof triagePlannerTool
     | typeof resolutionPlannerTool
     | typeof rendererTool
+    | typeof auditTurnRenderTool
     | typeof triageTool
     | typeof resolutionTool
     | typeof campaignSetupTool
@@ -762,7 +784,7 @@ function normalizeResolutionPlannerDecision(raw: unknown): ResolutionPlannerDeci
   };
 }
 
-function normalizeRendererDecision(raw: unknown, text: string): RendererDecision | null {
+export function normalizeRendererDecision(raw: unknown, text: string): RendererDecision | null {
   const payload = toObject(unwrapStructuredPayload(raw));
   if (!payload && !text.trim()) {
     return null;
@@ -786,6 +808,83 @@ function normalizeRendererDecision(raw: unknown, text: string): RendererDecision
     narration,
     suggestedActions,
   };
+}
+
+export function normalizeTurnRenderAuditDecision(raw: unknown): TurnRenderAuditDecision | null {
+  const payload = toObject(unwrapStructuredPayload(raw));
+  if (!payload) {
+    return null;
+  }
+
+  const severity =
+    payload.severity === "clean" || payload.severity === "warn" || payload.severity === "block"
+      ? payload.severity
+      : null;
+  if (!severity) {
+    return null;
+  }
+
+  const issues = Array.isArray(payload.issues)
+    ? payload.issues
+        .map((entry) => {
+          const record = toObject(entry);
+          if (!record) {
+            return null;
+          }
+
+          const code =
+            typeof record.code === "string" && record.code.trim() ? record.code.trim() : "";
+          const rationale =
+            typeof record.rationale === "string" && record.rationale.trim()
+              ? record.rationale.trim()
+              : "";
+          const evidence =
+            typeof record.evidence === "string" && record.evidence.trim()
+              ? record.evidence.trim()
+              : record.evidence === null
+                ? null
+                : null;
+
+          if (!code || !rationale) {
+            return null;
+          }
+
+          return { code, rationale, evidence };
+        })
+        .filter((entry): entry is TurnRenderAuditIssue => Boolean(entry))
+    : [];
+
+  return {
+    severity,
+    issues,
+    repairInstructions: toStringArray(payload.repairInstructions ?? payload.repair_instructions),
+  };
+}
+
+export function validateTurnRenderAuditDecision(
+  decision: TurnRenderAuditDecision | null,
+): { valid: boolean; error: string | null } {
+  if (!decision) {
+    return { valid: false, error: "AI render audit returned no valid payload." };
+  }
+
+  if (
+    decision.severity !== "clean" &&
+    decision.severity !== "warn" &&
+    decision.severity !== "block"
+  ) {
+    return { valid: false, error: `AI render audit returned invalid severity: ${String(decision.severity)}.` };
+  }
+
+  if (decision.severity !== "clean" && decision.issues.length === 0) {
+    return { valid: false, error: "AI render audit must include at least one issue for warn or block severity." };
+  }
+
+  if (decision.severity === "block" && decision.repairInstructions.length === 0) {
+    return { valid: false, error: "AI render audit must include repairInstructions for block severity." };
+  }
+
+  return { valid: true, error: null };
 }
 
 function buildPlannerRepairPrompt(
@@ -814,6 +913,21 @@ function buildRendererRepairPrompt(
     "Rewrite the narration and suggestedActions while preserving the validated actionResolution exactly.",
     "Fix these specific issues:",
     buildNarrationRetryInstructions(issues),
+  ].join("\n");
+}
+
+function buildRendererRepairPromptFromInstructions(
+  basePrompt: string,
+  heading: string,
+  instructions: string[],
+) {
+  return [
+    basePrompt,
+    "",
+    heading,
+    "Rewrite the narration and suggestedActions while preserving the validated actionResolution exactly.",
+    "Fix these specific issues:",
+    ...instructions.map((instruction) => `- ${instruction}`),
   ].join("\n");
 }
 
@@ -1075,6 +1189,54 @@ function choosePreferredAttempt<T extends { narration?: string | null; actionRes
   return original;
 }
 
+function choosePreferredAuditedRenderAttempt(
+  original: { value: RendererDecision; structuralIssues: NarrationAuditIssue[]; aiAudit: TurnRenderAuditDecision },
+  retried: { value: RendererDecision; structuralIssues: NarrationAuditIssue[]; aiAudit: TurnRenderAuditDecision },
+) {
+  const originalStructuralRank = severityRank(
+    original.structuralIssues.length > 0 ? "block" : "clean",
+  );
+  const retriedStructuralRank = severityRank(
+    retried.structuralIssues.length > 0 ? "block" : "clean",
+  );
+
+  if (retriedStructuralRank < originalStructuralRank) {
+    return retried;
+  }
+
+  if (retriedStructuralRank > originalStructuralRank) {
+    return original;
+  }
+
+  const originalAuditRank = severityRank(original.aiAudit.severity);
+  const retriedAuditRank = severityRank(retried.aiAudit.severity);
+
+  if (retriedAuditRank < originalAuditRank) {
+    return retried;
+  }
+
+  if (retriedAuditRank > originalAuditRank) {
+    return original;
+  }
+
+  if (retried.aiAudit.issues.length < original.aiAudit.issues.length) {
+    return retried;
+  }
+
+  if (retried.aiAudit.issues.length > original.aiAudit.issues.length) {
+    return original;
+  }
+
+  const originalText = original.value.narration.trim();
+  const retriedText = retried.value.narration.trim();
+
+  if (retriedText && (!originalText || retriedText.length <= originalText.length * 1.35)) {
+    return retried;
+  }
+
+  return original;
+}
+
 function truncateForLog(value: string, limit = 1200) {
   const normalized = value.replace(/\s+/g, " ").trim();
   if (normalized.length <= limit) {
@@ -1105,6 +1267,7 @@ class OpenRouterDungeonMaster {
       | typeof triagePlannerTool
       | typeof resolutionPlannerTool
       | typeof rendererTool
+      | typeof auditTurnRenderTool
       | typeof triageTool
       | typeof resolutionTool
       | typeof campaignSetupTool
@@ -1125,6 +1288,7 @@ class OpenRouterDungeonMaster {
       | typeof triagePlannerTool
       | typeof resolutionPlannerTool
       | typeof rendererTool
+      | typeof auditTurnRenderTool
       | typeof triageTool
       | typeof resolutionTool;
     temperature?: number;
@@ -1291,9 +1455,9 @@ class OpenRouterDungeonMaster {
     result?: OpenRouterToolResult;
     planner?: TriagePlannerDecision | ResolutionPlannerDecision;
     renderer?: RendererDecision;
-    issues?: NarrationAuditIssue[];
+    issues?: Array<{ code: string; severity?: string; evidence?: string | null }>;
     directlyHandledItems?: string[];
-    metadata?: TurnQualityMetadata;
+    metadata?: Partial<TurnQualityMetadata>;
   }) {
     console.info(
       `[dm.${input.mode}] Trace at ${input.stage}.`,
@@ -1438,6 +1602,8 @@ class OpenRouterDungeonMaster {
     actionResolution: string;
     suggestedActionGoals: PlannerSuggestedActionGoal[];
     repairIssues?: NarrationAuditIssue[];
+    repairInstructions?: string[];
+    repairHeading?: string;
     modelOverride?: string;
   }) {
     const basePrompt = buildRendererUserPrompt({
@@ -1450,9 +1616,15 @@ class OpenRouterDungeonMaster {
 
     const result = await this.runToolCall({
       systemPrompt: buildTurnRendererSystemPrompt(),
-      prompt: input.repairIssues?.length
-        ? buildRendererRepairPrompt(basePrompt, input.repairIssues)
-        : basePrompt,
+      prompt: input.repairInstructions?.length
+        ? buildRendererRepairPromptFromInstructions(
+            basePrompt,
+            input.repairHeading ?? "RENDER CORRECTION",
+            input.repairInstructions,
+          )
+        : input.repairIssues?.length
+          ? buildRendererRepairPrompt(basePrompt, input.repairIssues)
+          : basePrompt,
       tool: rendererTool,
       temperature: 0.55,
       modelOverride: input.modelOverride,
@@ -1461,6 +1633,64 @@ class OpenRouterDungeonMaster {
     return {
       result,
       normalized: normalizeRendererDecision(result.toolInput, result.text),
+    };
+  }
+
+  private invalidTurnRenderAuditDecision(message: string): TurnRenderAuditDecision {
+    return {
+      severity: "block",
+      issues: [
+        {
+          code: "invalid_audit_payload",
+          rationale: message,
+          evidence: null,
+        },
+      ],
+      repairInstructions: [
+        "Keep the narration tightly faithful to the validated actionResolution.",
+        "Keep suggestedActions aligned to the validated suggestedActionGoals.",
+        "Do not foreground repeated key items unless the beat materially handles them.",
+      ],
+    };
+  }
+
+  private async auditTurnRender(input: {
+    mode: "triage" | "resolution";
+    playerAction: string;
+    promptContext: PromptContext;
+    actionResolution: string;
+    suggestedActionGoals: PlannerSuggestedActionGoal[];
+    renderer: RendererDecision;
+  }) {
+    const prompt = buildTurnRenderAuditorUserPrompt({
+      mode: input.mode,
+      playerAction: input.playerAction,
+      promptContext: input.promptContext,
+      actionResolution: input.actionResolution,
+      suggestedActionGoals: input.suggestedActionGoals,
+      narration: input.renderer.narration,
+      suggestedActions: input.renderer.suggestedActions,
+    });
+
+    const result = await this.runToolCall({
+      systemPrompt: buildTurnRenderAuditorSystemPrompt(),
+      prompt,
+      tool: auditTurnRenderTool,
+      temperature: 0,
+      modelOverride: env.openRouterModel,
+    });
+
+    const normalized = normalizeTurnRenderAuditDecision(result.toolInput);
+    const validation = validateTurnRenderAuditDecision(normalized);
+
+    return {
+      result,
+      decision:
+        validation.valid && normalized
+          ? normalized
+          : this.invalidTurnRenderAuditDecision(validation.error ?? "AI render audit returned an invalid payload."),
+      validationError: validation.error,
+      prompt,
     };
   }
 
@@ -2006,11 +2236,16 @@ class OpenRouterDungeonMaster {
           acceptedSeverity: "block",
           plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
           rendererIssues: [],
+          aiAuditSeverity: "block",
+          aiAuditIssues: [],
           usedPlannerRepair,
           usedRendererRepair: false,
           usedBackupRenderer: false,
+          usedAiRenderAudit: false,
+          usedAiAuditRepair: false,
           usedFallback: false,
           fallbackReason: null,
+          legacyRendererIssues: [],
         };
 
         this.logTurnTrace({
@@ -2045,11 +2280,16 @@ class OpenRouterDungeonMaster {
           acceptedSeverity,
           plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
           rendererIssues: [],
+          aiAuditSeverity: "clean",
+          aiAuditIssues: [],
           usedPlannerRepair,
           usedRendererRepair: false,
           usedBackupRenderer: false,
+          usedAiRenderAudit: false,
+          usedAiAuditRepair: false,
           usedFallback: false,
           fallbackReason: null,
+          legacyRendererIssues: [],
         };
 
         this.logTurnTrace({
@@ -2075,7 +2315,13 @@ class OpenRouterDungeonMaster {
         suggestedActionGoals: selectedPlanner.suggestedActionGoals,
       });
       let renderDecision = initialRender.normalized ?? { narration: "", suggestedActions: [] };
-      let renderAudit = auditRenderedNarration({
+      let structuralRenderAudit = auditRenderedNarrationStructure({
+        narration: renderDecision.narration,
+        suggestedActions: renderDecision.suggestedActions,
+      });
+      let selectedRendererIssues = structuralRenderAudit.issues;
+      let selectedRendererSeverity = structuralRenderAudit.highestSeverity;
+      let legacyRenderAudit = auditRenderedNarration({
         mode: "triage",
         narration: renderDecision.narration,
         playerAction: input.playerAction,
@@ -2083,10 +2329,11 @@ class OpenRouterDungeonMaster {
         directlyHandledItems,
         suggestedActions: renderDecision.suggestedActions,
       });
-      let selectedRendererIssues = renderAudit.issues;
-      let selectedRendererSeverity = renderAudit.highestSeverity;
+      let selectedLegacyRendererIssues = legacyRenderAudit.issues;
       let usedRendererRepair = false;
       let usedBackupRenderer = false;
+      let usedAiRenderAudit = false;
+      let usedAiAuditRepair = false;
 
       this.logTurnTrace({
         mode: "triage",
@@ -2101,13 +2348,16 @@ class OpenRouterDungeonMaster {
         result: initialRender.result,
         planner: selectedPlanner,
         renderer: renderDecision,
-        issues: renderAudit.issues,
+        issues: selectedRendererIssues,
         directlyHandledItems,
+        metadata: {
+          legacyRendererIssues: selectedLegacyRendererIssues.map((issue) => issue.code),
+        },
       });
 
-      if (renderAudit.highestSeverity === "block") {
+      if (selectedRendererSeverity === "block") {
         console.warn(
-          `[dm.triage] Renderer triggered repair: ${renderAudit.issues.map((issue) => issue.code).join(", ")}.`,
+          `[dm.triage] Renderer triggered structural repair: ${selectedRendererIssues.map((issue) => issue.code).join(", ")}.`,
         );
         const repairedRender = await this.renderValidatedBeat({
           mode: "triage",
@@ -2115,10 +2365,14 @@ class OpenRouterDungeonMaster {
           promptContext: input.promptContext,
           actionResolution: selectedPlanner.actionResolution,
           suggestedActionGoals: selectedPlanner.suggestedActionGoals,
-          repairIssues: renderAudit.issues,
+          repairIssues: selectedRendererIssues,
         });
         const repairedDecision = repairedRender.normalized ?? { narration: "", suggestedActions: [] };
-        const repairedAudit = auditRenderedNarration({
+        const repairedStructuralAudit = auditRenderedNarrationStructure({
+          narration: repairedDecision.narration,
+          suggestedActions: repairedDecision.suggestedActions,
+        });
+        const repairedLegacyAudit = auditRenderedNarration({
           mode: "triage",
           narration: repairedDecision.narration,
           playerAction: input.playerAction,
@@ -2129,31 +2383,196 @@ class OpenRouterDungeonMaster {
         const chosenRenderer = choosePreferredAttempt(
           {
             value: renderDecision,
-            issues: renderAudit.issues,
-            highestSeverity: renderAudit.highestSeverity,
+            issues: selectedRendererIssues,
+            highestSeverity: selectedRendererSeverity,
           },
           {
             value: repairedDecision,
-            issues: repairedAudit.issues,
-            highestSeverity: repairedAudit.highestSeverity,
+            issues: repairedStructuralAudit.issues,
+            highestSeverity: repairedStructuralAudit.highestSeverity,
           },
         );
         usedRendererRepair = true;
         renderDecision = chosenRenderer.value;
-        selectedRendererIssues = chosenRenderer.issues;
-        selectedRendererSeverity = chosenRenderer.highestSeverity;
+        selectedRendererIssues =
+          chosenRenderer.value === repairedDecision
+            ? repairedStructuralAudit.issues
+            : selectedRendererIssues;
+        selectedRendererSeverity =
+          chosenRenderer.value === repairedDecision
+            ? repairedStructuralAudit.highestSeverity
+            : selectedRendererSeverity;
+        selectedLegacyRendererIssues =
+          chosenRenderer.value === repairedDecision
+            ? repairedLegacyAudit.issues
+            : selectedLegacyRendererIssues;
 
         this.logTurnTrace({
           mode: "triage",
           stage: "renderer_repaired",
+          result: repairedRender.result,
           planner: selectedPlanner,
           renderer: renderDecision,
           issues: selectedRendererIssues,
           directlyHandledItems,
+          metadata: {
+            legacyRendererIssues: selectedLegacyRendererIssues.map((issue) => issue.code),
+          },
         });
       }
 
       if (selectedRendererSeverity === "block") {
+        const metadata: TurnQualityMetadata = {
+          acceptedSeverity: "block",
+          plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
+          rendererIssues: selectedRendererIssues.map((issue) => issue.code),
+          aiAuditSeverity: "block",
+          aiAuditIssues: [],
+          usedPlannerRepair,
+          usedRendererRepair,
+          usedBackupRenderer,
+          usedAiRenderAudit: false,
+          usedAiAuditRepair: false,
+          usedFallback: false,
+          fallbackReason: null,
+          legacyRendererIssues: selectedLegacyRendererIssues.map((issue) => issue.code),
+        };
+
+        this.logTurnTrace({
+          mode: "triage",
+          stage: "renderer_blocked",
+          planner: selectedPlanner,
+          renderer: renderDecision,
+          issues: selectedRendererIssues,
+          directlyHandledItems,
+          metadata,
+        });
+
+        throw new Error(
+          `OpenRouter triage renderer failed structural audit after retry: ${selectedRendererIssues.map((issue) => issue.code).join(", ")}.`,
+        );
+      }
+
+      let aiAuditResult = await this.auditTurnRender({
+        mode: "triage",
+        playerAction: input.playerAction,
+        promptContext: input.promptContext,
+        actionResolution: selectedPlanner.actionResolution,
+        suggestedActionGoals: selectedPlanner.suggestedActionGoals,
+        renderer: renderDecision,
+      });
+      let selectedAiAudit = aiAuditResult.decision;
+      usedAiRenderAudit = true;
+
+      this.logTurnTrace({
+        mode: "triage",
+        stage: "render_audit_received",
+        prompt: aiAuditResult.prompt,
+        result: aiAuditResult.result,
+        planner: selectedPlanner,
+        renderer: renderDecision,
+        issues: selectedAiAudit.issues.map((issue) => ({
+          code: issue.code,
+          severity: selectedAiAudit.severity,
+          evidence: issue.evidence,
+        })),
+        directlyHandledItems,
+        metadata: {
+          aiAuditSeverity: selectedAiAudit.severity,
+          aiAuditIssues: selectedAiAudit.issues.map((issue) => issue.code),
+          legacyRendererIssues: selectedLegacyRendererIssues.map((issue) => issue.code),
+          usedAiRenderAudit,
+        },
+      });
+
+      if (selectedAiAudit.severity === "block") {
+        console.warn(
+          `[dm.triage] AI render audit triggered repair: ${selectedAiAudit.issues.map((issue) => issue.code).join(", ")}.`,
+        );
+        const repairedRender = await this.renderValidatedBeat({
+          mode: "triage",
+          playerAction: input.playerAction,
+          promptContext: input.promptContext,
+          actionResolution: selectedPlanner.actionResolution,
+          suggestedActionGoals: selectedPlanner.suggestedActionGoals,
+          repairInstructions: selectedAiAudit.repairInstructions,
+          repairHeading: "AI AUDIT CORRECTION",
+        });
+        const repairedDecision = repairedRender.normalized ?? { narration: "", suggestedActions: [] };
+        const repairedStructuralAudit = auditRenderedNarrationStructure({
+          narration: repairedDecision.narration,
+          suggestedActions: repairedDecision.suggestedActions,
+        });
+        const repairedLegacyAudit = auditRenderedNarration({
+          mode: "triage",
+          narration: repairedDecision.narration,
+          playerAction: input.playerAction,
+          actionResolution: selectedPlanner.actionResolution,
+          directlyHandledItems,
+          suggestedActions: repairedDecision.suggestedActions,
+        });
+
+        if (repairedStructuralAudit.highestSeverity !== "block") {
+          const repairedAiAuditResult = await this.auditTurnRender({
+            mode: "triage",
+            playerAction: input.playerAction,
+            promptContext: input.promptContext,
+            actionResolution: selectedPlanner.actionResolution,
+            suggestedActionGoals: selectedPlanner.suggestedActionGoals,
+            renderer: repairedDecision,
+          });
+          const chosenRenderer = choosePreferredAuditedRenderAttempt(
+            {
+              value: renderDecision,
+              structuralIssues: selectedRendererIssues,
+              aiAudit: selectedAiAudit,
+            },
+            {
+              value: repairedDecision,
+              structuralIssues: repairedStructuralAudit.issues,
+              aiAudit: repairedAiAuditResult.decision,
+            },
+          );
+          usedAiAuditRepair = true;
+          usedRendererRepair = true;
+          if (chosenRenderer.value === repairedDecision) {
+            renderDecision = repairedDecision;
+            selectedRendererIssues = repairedStructuralAudit.issues;
+            selectedRendererSeverity = repairedStructuralAudit.highestSeverity;
+            selectedLegacyRendererIssues = repairedLegacyAudit.issues;
+            selectedAiAudit = repairedAiAuditResult.decision;
+          }
+
+          this.logTurnTrace({
+            mode: "triage",
+            stage: "render_audit_repaired",
+            prompt: repairedAiAuditResult.prompt,
+            result: repairedAiAuditResult.result,
+            planner: selectedPlanner,
+            renderer: renderDecision,
+            issues: selectedAiAudit.issues.map((issue) => ({
+              code: issue.code,
+              severity: selectedAiAudit.severity,
+              evidence: issue.evidence,
+            })),
+            directlyHandledItems,
+            metadata: {
+              aiAuditSeverity: selectedAiAudit.severity,
+              aiAuditIssues: selectedAiAudit.issues.map((issue) => issue.code),
+              legacyRendererIssues: selectedLegacyRendererIssues.map((issue) => issue.code),
+              usedAiRenderAudit,
+              usedAiAuditRepair,
+            },
+          });
+        } else {
+          usedAiAuditRepair = true;
+          selectedRendererIssues = repairedStructuralAudit.issues;
+          selectedRendererSeverity = repairedStructuralAudit.highestSeverity;
+          selectedLegacyRendererIssues = repairedLegacyAudit.issues;
+        }
+      }
+
+      if (selectedAiAudit.severity === "block") {
         const backupRendererModel =
           env.openRouterBackupRendererModel &&
           env.openRouterBackupRendererModel !== env.openRouterModel
@@ -2162,7 +2581,7 @@ class OpenRouterDungeonMaster {
 
         if (backupRendererModel) {
           console.warn(
-            `[dm.triage] Renderer escalating to backup model: ${selectedRendererIssues.map((issue) => issue.code).join(", ")}.`,
+            `[dm.triage] AI render audit escalating to backup model: ${selectedAiAudit.issues.map((issue) => issue.code).join(", ")}.`,
           );
           const backupRender = await this.renderValidatedBeat({
             mode: "triage",
@@ -2170,11 +2589,16 @@ class OpenRouterDungeonMaster {
             promptContext: input.promptContext,
             actionResolution: selectedPlanner.actionResolution,
             suggestedActionGoals: selectedPlanner.suggestedActionGoals,
-            repairIssues: selectedRendererIssues,
+            repairInstructions: selectedAiAudit.repairInstructions,
+            repairHeading: "AI AUDIT CORRECTION",
             modelOverride: backupRendererModel,
           });
           const backupDecision = backupRender.normalized ?? { narration: "", suggestedActions: [] };
-          const backupAudit = auditRenderedNarration({
+          const backupStructuralAudit = auditRenderedNarrationStructure({
+            narration: backupDecision.narration,
+            suggestedActions: backupDecision.suggestedActions,
+          });
+          const backupLegacyAudit = auditRenderedNarration({
             mode: "triage",
             narration: backupDecision.narration,
             playerAction: input.playerAction,
@@ -2182,72 +2606,96 @@ class OpenRouterDungeonMaster {
             directlyHandledItems,
             suggestedActions: backupDecision.suggestedActions,
           });
-          const chosenRenderer = choosePreferredAttempt(
-            {
-              value: renderDecision,
-              issues: selectedRendererIssues,
-              highestSeverity: selectedRendererSeverity,
-            },
-            {
-              value: backupDecision,
-              issues: backupAudit.issues,
-              highestSeverity: backupAudit.highestSeverity,
-            },
-          );
 
-          if (chosenRenderer.value === backupDecision) {
-            usedBackupRenderer = true;
+          if (backupStructuralAudit.highestSeverity !== "block") {
+            const backupAiAuditResult = await this.auditTurnRender({
+              mode: "triage",
+              playerAction: input.playerAction,
+              promptContext: input.promptContext,
+              actionResolution: selectedPlanner.actionResolution,
+              suggestedActionGoals: selectedPlanner.suggestedActionGoals,
+              renderer: backupDecision,
+            });
+            const chosenRenderer = choosePreferredAuditedRenderAttempt(
+              {
+                value: renderDecision,
+                structuralIssues: selectedRendererIssues,
+                aiAudit: selectedAiAudit,
+              },
+              {
+                value: backupDecision,
+                structuralIssues: backupStructuralAudit.issues,
+                aiAudit: backupAiAuditResult.decision,
+              },
+            );
+
+            if (chosenRenderer.value === backupDecision) {
+              usedBackupRenderer = true;
+              renderDecision = backupDecision;
+              selectedRendererIssues = backupStructuralAudit.issues;
+              selectedRendererSeverity = backupStructuralAudit.highestSeverity;
+              selectedLegacyRendererIssues = backupLegacyAudit.issues;
+              selectedAiAudit = backupAiAuditResult.decision;
+            }
+
+            this.logTurnTrace({
+              mode: "triage",
+              stage: "render_audit_backup_received",
+              prompt: backupAiAuditResult.prompt,
+              result: backupAiAuditResult.result,
+              planner: selectedPlanner,
+              renderer: backupDecision,
+              issues: backupAiAuditResult.decision.issues.map((issue) => ({
+                code: issue.code,
+                severity: backupAiAuditResult.decision.severity,
+                evidence: issue.evidence,
+              })),
+              directlyHandledItems,
+              metadata: {
+                aiAuditSeverity: backupAiAuditResult.decision.severity,
+                aiAuditIssues: backupAiAuditResult.decision.issues.map((issue) => issue.code),
+                legacyRendererIssues: backupLegacyAudit.issues.map((issue) => issue.code),
+                usedAiRenderAudit,
+                usedAiAuditRepair,
+                usedBackupRenderer: true,
+              },
+            });
           }
-
-          renderDecision = chosenRenderer.value;
-          selectedRendererIssues = chosenRenderer.issues;
-          selectedRendererSeverity = chosenRenderer.highestSeverity;
-
-          this.logTurnTrace({
-            mode: "triage",
-            stage: "renderer_backup_received",
-            result: backupRender.result,
-            planner: selectedPlanner,
-            renderer: backupDecision,
-            issues: backupAudit.issues,
-            directlyHandledItems,
-            metadata: {
-              acceptedSeverity: backupAudit.highestSeverity,
-              plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
-              rendererIssues: backupAudit.issues.map((issue) => issue.code),
-              usedPlannerRepair,
-              usedRendererRepair,
-              usedBackupRenderer: true,
-              usedFallback: false,
-              fallbackReason: "backup_renderer_model",
-            },
-          });
         }
 
-        if (selectedRendererSeverity === "block") {
+        if (selectedAiAudit.severity === "block") {
           const metadata: TurnQualityMetadata = {
             acceptedSeverity: "block",
             plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
             rendererIssues: selectedRendererIssues.map((issue) => issue.code),
+            aiAuditSeverity: selectedAiAudit.severity,
+            aiAuditIssues: selectedAiAudit.issues.map((issue) => issue.code),
             usedPlannerRepair,
             usedRendererRepair,
             usedBackupRenderer,
+            usedAiRenderAudit,
+            usedAiAuditRepair,
             usedFallback: false,
             fallbackReason: null,
+            legacyRendererIssues: selectedLegacyRendererIssues.map((issue) => issue.code),
           };
 
           this.logTurnTrace({
             mode: "triage",
-            stage: "renderer_blocked",
+            stage: "render_audit_blocked",
             planner: selectedPlanner,
             renderer: renderDecision,
-            issues: selectedRendererIssues,
+            issues: selectedAiAudit.issues.map((issue) => ({
+              code: issue.code,
+              severity: selectedAiAudit.severity,
+              evidence: issue.evidence,
+            })),
             directlyHandledItems,
             metadata,
           });
 
           throw new Error(
-            `OpenRouter triage narration failed audit after retry: ${selectedRendererIssues.map((issue) => issue.code).join(", ")}.`,
+            `OpenRouter triage narration failed audit after retry: ${selectedAiAudit.issues.map((issue) => issue.code).join(", ")}.`,
           );
         }
       }
@@ -2260,7 +2708,7 @@ class OpenRouterDungeonMaster {
         suggestedActions: renderDecision.suggestedActions,
         proposedDelta: selectedPlanner.proposedDelta,
       };
-      const acceptedSeverity = worstSeverity(selectedPlannerSeverity, selectedRendererSeverity);
+      const acceptedSeverity = worstSeverity(selectedPlannerSeverity, selectedAiAudit.severity);
       const warning = qualityWarningMessage({
         usedFallback: false,
         acceptedSeverity,
@@ -2274,11 +2722,16 @@ class OpenRouterDungeonMaster {
         acceptedSeverity,
         plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
         rendererIssues: selectedRendererIssues.map((issue) => issue.code),
+        aiAuditSeverity: selectedAiAudit.severity,
+        aiAuditIssues: selectedAiAudit.issues.map((issue) => issue.code),
         usedPlannerRepair,
         usedRendererRepair,
         usedBackupRenderer,
+        usedAiRenderAudit,
+        usedAiAuditRepair,
         usedFallback: false,
         fallbackReason: null,
+        legacyRendererIssues: selectedLegacyRendererIssues.map((issue) => issue.code),
       };
 
       this.logTurnTrace({
@@ -2286,7 +2739,11 @@ class OpenRouterDungeonMaster {
         stage: "accepted",
         planner: selectedPlanner,
         renderer: renderDecision,
-        issues: [...selectedPlannerIssues, ...selectedRendererIssues],
+        issues: selectedAiAudit.issues.map((issue) => ({
+          code: issue.code,
+          severity: selectedAiAudit.severity,
+          evidence: issue.evidence,
+        })),
         directlyHandledItems,
         metadata,
       });
@@ -2394,7 +2851,13 @@ class OpenRouterDungeonMaster {
         suggestedActionGoals: selectedPlanner.suggestedActionGoals,
       });
       let renderDecision = initialRender.normalized ?? { narration: "", suggestedActions: [] };
-      let renderAudit = auditRenderedNarration({
+      let structuralRenderAudit = auditRenderedNarrationStructure({
+        narration: renderDecision.narration,
+        suggestedActions: renderDecision.suggestedActions,
+      });
+      let selectedRendererIssues = structuralRenderAudit.issues;
+      let selectedRendererSeverity = structuralRenderAudit.highestSeverity;
+      let legacyRenderAudit = auditRenderedNarration({
         mode: "resolution",
         narration: renderDecision.narration,
         playerAction: input.playerAction,
@@ -2402,14 +2865,35 @@ class OpenRouterDungeonMaster {
         directlyHandledItems,
         suggestedActions: renderDecision.suggestedActions,
       });
-      let selectedRendererIssues = renderAudit.issues;
-      let selectedRendererSeverity = renderAudit.highestSeverity;
+      let selectedLegacyRendererIssues = legacyRenderAudit.issues;
       let usedRendererRepair = false;
       let usedBackupRenderer = false;
+      let usedAiRenderAudit = false;
+      let usedAiAuditRepair = false;
 
-      if (renderAudit.highestSeverity === "block") {
+      this.logTurnTrace({
+        mode: "resolution",
+        stage: "renderer_received",
+        prompt: buildRendererUserPrompt({
+          mode: "resolution",
+          playerAction: input.playerAction,
+          promptContext: input.promptContext,
+          actionResolution: selectedPlanner.actionResolution,
+          suggestedActionGoals: selectedPlanner.suggestedActionGoals,
+        }),
+        result: initialRender.result,
+        planner: selectedPlanner,
+        renderer: renderDecision,
+        issues: selectedRendererIssues,
+        directlyHandledItems,
+        metadata: {
+          legacyRendererIssues: selectedLegacyRendererIssues.map((issue) => issue.code),
+        },
+      });
+
+      if (selectedRendererSeverity === "block") {
         console.warn(
-          `[dm.resolve] Renderer triggered repair: ${renderAudit.issues.map((issue) => issue.code).join(", ")}.`,
+          `[dm.resolve] Renderer triggered structural repair: ${selectedRendererIssues.map((issue) => issue.code).join(", ")}.`,
         );
         const repairedRender = await this.renderValidatedBeat({
           mode: "resolution",
@@ -2417,10 +2901,14 @@ class OpenRouterDungeonMaster {
           promptContext: input.promptContext,
           actionResolution: selectedPlanner.actionResolution,
           suggestedActionGoals: selectedPlanner.suggestedActionGoals,
-          repairIssues: renderAudit.issues,
+          repairIssues: selectedRendererIssues,
         });
         const repairedDecision = repairedRender.normalized ?? { narration: "", suggestedActions: [] };
-        const repairedAudit = auditRenderedNarration({
+        const repairedStructuralAudit = auditRenderedNarrationStructure({
+          narration: repairedDecision.narration,
+          suggestedActions: repairedDecision.suggestedActions,
+        });
+        const repairedLegacyAudit = auditRenderedNarration({
           mode: "resolution",
           narration: repairedDecision.narration,
           playerAction: input.playerAction,
@@ -2431,22 +2919,170 @@ class OpenRouterDungeonMaster {
         const chosenRenderer = choosePreferredAttempt(
           {
             value: renderDecision,
-            issues: renderAudit.issues,
-            highestSeverity: renderAudit.highestSeverity,
+            issues: selectedRendererIssues,
+            highestSeverity: selectedRendererSeverity,
           },
           {
             value: repairedDecision,
-            issues: repairedAudit.issues,
-            highestSeverity: repairedAudit.highestSeverity,
+            issues: repairedStructuralAudit.issues,
+            highestSeverity: repairedStructuralAudit.highestSeverity,
           },
         );
         usedRendererRepair = true;
         renderDecision = chosenRenderer.value;
-        selectedRendererIssues = chosenRenderer.issues;
-        selectedRendererSeverity = chosenRenderer.highestSeverity;
+        selectedRendererIssues =
+          chosenRenderer.value === repairedDecision
+            ? repairedStructuralAudit.issues
+            : selectedRendererIssues;
+        selectedRendererSeverity =
+          chosenRenderer.value === repairedDecision
+            ? repairedStructuralAudit.highestSeverity
+            : selectedRendererSeverity;
+        selectedLegacyRendererIssues =
+          chosenRenderer.value === repairedDecision
+            ? repairedLegacyAudit.issues
+            : selectedLegacyRendererIssues;
+
+        this.logTurnTrace({
+          mode: "resolution",
+          stage: "renderer_repaired",
+          result: repairedRender.result,
+          planner: selectedPlanner,
+          renderer: renderDecision,
+          issues: selectedRendererIssues,
+          directlyHandledItems,
+          metadata: {
+            legacyRendererIssues: selectedLegacyRendererIssues.map((issue) => issue.code),
+          },
+        });
       }
 
       if (selectedRendererSeverity === "block") {
+        throw new Error(
+          `OpenRouter resolution renderer failed structural audit after retry: ${selectedRendererIssues.map((issue) => issue.code).join(", ")}.`,
+        );
+      }
+
+      let aiAuditResult = await this.auditTurnRender({
+        mode: "resolution",
+        playerAction: input.playerAction,
+        promptContext: input.promptContext,
+        actionResolution: selectedPlanner.actionResolution,
+        suggestedActionGoals: selectedPlanner.suggestedActionGoals,
+        renderer: renderDecision,
+      });
+      let selectedAiAudit = aiAuditResult.decision;
+      usedAiRenderAudit = true;
+
+      this.logTurnTrace({
+        mode: "resolution",
+        stage: "render_audit_received",
+        prompt: aiAuditResult.prompt,
+        result: aiAuditResult.result,
+        planner: selectedPlanner,
+        renderer: renderDecision,
+        issues: selectedAiAudit.issues.map((issue) => ({
+          code: issue.code,
+          severity: selectedAiAudit.severity,
+          evidence: issue.evidence,
+        })),
+        directlyHandledItems,
+        metadata: {
+          aiAuditSeverity: selectedAiAudit.severity,
+          aiAuditIssues: selectedAiAudit.issues.map((issue) => issue.code),
+          legacyRendererIssues: selectedLegacyRendererIssues.map((issue) => issue.code),
+          usedAiRenderAudit,
+        },
+      });
+
+      if (selectedAiAudit.severity === "block") {
+        console.warn(
+          `[dm.resolve] AI render audit triggered repair: ${selectedAiAudit.issues.map((issue) => issue.code).join(", ")}.`,
+        );
+        const repairedRender = await this.renderValidatedBeat({
+          mode: "resolution",
+          playerAction: input.playerAction,
+          promptContext: input.promptContext,
+          actionResolution: selectedPlanner.actionResolution,
+          suggestedActionGoals: selectedPlanner.suggestedActionGoals,
+          repairInstructions: selectedAiAudit.repairInstructions,
+          repairHeading: "AI AUDIT CORRECTION",
+        });
+        const repairedDecision = repairedRender.normalized ?? { narration: "", suggestedActions: [] };
+        const repairedStructuralAudit = auditRenderedNarrationStructure({
+          narration: repairedDecision.narration,
+          suggestedActions: repairedDecision.suggestedActions,
+        });
+        const repairedLegacyAudit = auditRenderedNarration({
+          mode: "resolution",
+          narration: repairedDecision.narration,
+          playerAction: input.playerAction,
+          actionResolution: selectedPlanner.actionResolution,
+          directlyHandledItems,
+          suggestedActions: repairedDecision.suggestedActions,
+        });
+
+        if (repairedStructuralAudit.highestSeverity !== "block") {
+          const repairedAiAuditResult = await this.auditTurnRender({
+            mode: "resolution",
+            playerAction: input.playerAction,
+            promptContext: input.promptContext,
+            actionResolution: selectedPlanner.actionResolution,
+            suggestedActionGoals: selectedPlanner.suggestedActionGoals,
+            renderer: repairedDecision,
+          });
+          const chosenRenderer = choosePreferredAuditedRenderAttempt(
+            {
+              value: renderDecision,
+              structuralIssues: selectedRendererIssues,
+              aiAudit: selectedAiAudit,
+            },
+            {
+              value: repairedDecision,
+              structuralIssues: repairedStructuralAudit.issues,
+              aiAudit: repairedAiAuditResult.decision,
+            },
+          );
+          usedAiAuditRepair = true;
+          usedRendererRepair = true;
+          if (chosenRenderer.value === repairedDecision) {
+            renderDecision = repairedDecision;
+            selectedRendererIssues = repairedStructuralAudit.issues;
+            selectedRendererSeverity = repairedStructuralAudit.highestSeverity;
+            selectedLegacyRendererIssues = repairedLegacyAudit.issues;
+            selectedAiAudit = repairedAiAuditResult.decision;
+          }
+
+          this.logTurnTrace({
+            mode: "resolution",
+            stage: "render_audit_repaired",
+            prompt: repairedAiAuditResult.prompt,
+            result: repairedAiAuditResult.result,
+            planner: selectedPlanner,
+            renderer: renderDecision,
+            issues: selectedAiAudit.issues.map((issue) => ({
+              code: issue.code,
+              severity: selectedAiAudit.severity,
+              evidence: issue.evidence,
+            })),
+            directlyHandledItems,
+            metadata: {
+              aiAuditSeverity: selectedAiAudit.severity,
+              aiAuditIssues: selectedAiAudit.issues.map((issue) => issue.code),
+              legacyRendererIssues: selectedLegacyRendererIssues.map((issue) => issue.code),
+              usedAiRenderAudit,
+              usedAiAuditRepair,
+            },
+          });
+        } else {
+          usedAiAuditRepair = true;
+          selectedRendererIssues = repairedStructuralAudit.issues;
+          selectedRendererSeverity = repairedStructuralAudit.highestSeverity;
+          selectedLegacyRendererIssues = repairedLegacyAudit.issues;
+        }
+      }
+
+      if (selectedAiAudit.severity === "block") {
         const backupRendererModel =
           env.openRouterBackupRendererModel &&
           env.openRouterBackupRendererModel !== env.openRouterModel
@@ -2455,7 +3091,7 @@ class OpenRouterDungeonMaster {
 
         if (backupRendererModel) {
           console.warn(
-            `[dm.resolve] Renderer escalating to backup model: ${selectedRendererIssues.map((issue) => issue.code).join(", ")}.`,
+            `[dm.resolve] AI render audit escalating to backup model: ${selectedAiAudit.issues.map((issue) => issue.code).join(", ")}.`,
           );
           const backupRender = await this.renderValidatedBeat({
             mode: "resolution",
@@ -2463,11 +3099,16 @@ class OpenRouterDungeonMaster {
             promptContext: input.promptContext,
             actionResolution: selectedPlanner.actionResolution,
             suggestedActionGoals: selectedPlanner.suggestedActionGoals,
-            repairIssues: selectedRendererIssues,
+            repairInstructions: selectedAiAudit.repairInstructions,
+            repairHeading: "AI AUDIT CORRECTION",
             modelOverride: backupRendererModel,
           });
           const backupDecision = backupRender.normalized ?? { narration: "", suggestedActions: [] };
-          const backupAudit = auditRenderedNarration({
+          const backupStructuralAudit = auditRenderedNarrationStructure({
+            narration: backupDecision.narration,
+            suggestedActions: backupDecision.suggestedActions,
+          });
+          const backupLegacyAudit = auditRenderedNarration({
             mode: "resolution",
             narration: backupDecision.narration,
             playerAction: input.playerAction,
@@ -2475,51 +3116,66 @@ class OpenRouterDungeonMaster {
             directlyHandledItems,
             suggestedActions: backupDecision.suggestedActions,
           });
-          const chosenRenderer = choosePreferredAttempt(
-            {
-              value: renderDecision,
-              issues: selectedRendererIssues,
-              highestSeverity: selectedRendererSeverity,
-            },
-            {
-              value: backupDecision,
-              issues: backupAudit.issues,
-              highestSeverity: backupAudit.highestSeverity,
-            },
-          );
 
-          if (chosenRenderer.value === backupDecision) {
-            usedBackupRenderer = true;
+          if (backupStructuralAudit.highestSeverity !== "block") {
+            const backupAiAuditResult = await this.auditTurnRender({
+              mode: "resolution",
+              playerAction: input.playerAction,
+              promptContext: input.promptContext,
+              actionResolution: selectedPlanner.actionResolution,
+              suggestedActionGoals: selectedPlanner.suggestedActionGoals,
+              renderer: backupDecision,
+            });
+            const chosenRenderer = choosePreferredAuditedRenderAttempt(
+              {
+                value: renderDecision,
+                structuralIssues: selectedRendererIssues,
+                aiAudit: selectedAiAudit,
+              },
+              {
+                value: backupDecision,
+                structuralIssues: backupStructuralAudit.issues,
+                aiAudit: backupAiAuditResult.decision,
+              },
+            );
+
+            if (chosenRenderer.value === backupDecision) {
+              usedBackupRenderer = true;
+              renderDecision = backupDecision;
+              selectedRendererIssues = backupStructuralAudit.issues;
+              selectedRendererSeverity = backupStructuralAudit.highestSeverity;
+              selectedLegacyRendererIssues = backupLegacyAudit.issues;
+              selectedAiAudit = backupAiAuditResult.decision;
+            }
+
+            this.logTurnTrace({
+              mode: "resolution",
+              stage: "render_audit_backup_received",
+              prompt: backupAiAuditResult.prompt,
+              result: backupAiAuditResult.result,
+              planner: selectedPlanner,
+              renderer: backupDecision,
+              issues: backupAiAuditResult.decision.issues.map((issue) => ({
+                code: issue.code,
+                severity: backupAiAuditResult.decision.severity,
+                evidence: issue.evidence,
+              })),
+              directlyHandledItems,
+              metadata: {
+                aiAuditSeverity: backupAiAuditResult.decision.severity,
+                aiAuditIssues: backupAiAuditResult.decision.issues.map((issue) => issue.code),
+                legacyRendererIssues: backupLegacyAudit.issues.map((issue) => issue.code),
+                usedAiRenderAudit,
+                usedAiAuditRepair,
+                usedBackupRenderer: true,
+              },
+            });
           }
-
-          renderDecision = chosenRenderer.value;
-          selectedRendererIssues = chosenRenderer.issues;
-          selectedRendererSeverity = chosenRenderer.highestSeverity;
-
-          this.logTurnTrace({
-            mode: "resolution",
-            stage: "renderer_backup_received",
-            result: backupRender.result,
-            planner: selectedPlanner,
-            renderer: backupDecision,
-            issues: backupAudit.issues,
-            directlyHandledItems,
-            metadata: {
-              acceptedSeverity: backupAudit.highestSeverity,
-              plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
-              rendererIssues: backupAudit.issues.map((issue) => issue.code),
-              usedPlannerRepair,
-              usedRendererRepair,
-              usedBackupRenderer: true,
-              usedFallback: false,
-              fallbackReason: "backup_renderer_model",
-            },
-          });
         }
 
-        if (selectedRendererSeverity === "block") {
+        if (selectedAiAudit.severity === "block") {
           throw new Error(
-            `OpenRouter resolution narration failed audit after retry: ${selectedRendererIssues.map((issue) => issue.code).join(", ")}.`,
+            `OpenRouter resolution narration failed audit after retry: ${selectedAiAudit.issues.map((issue) => issue.code).join(", ")}.`,
           );
         }
       }
@@ -2529,7 +3185,7 @@ class OpenRouterDungeonMaster {
         suggestedActions: renderDecision.suggestedActions,
         proposedDelta: selectedPlanner.proposedDelta,
       };
-      const acceptedSeverity = worstSeverity(selectedPlannerSeverity, selectedRendererSeverity);
+      const acceptedSeverity = worstSeverity(selectedPlannerSeverity, selectedAiAudit.severity);
       const warning = qualityWarningMessage({
         usedFallback: false,
         acceptedSeverity,
@@ -2545,11 +3201,16 @@ class OpenRouterDungeonMaster {
           acceptedSeverity,
           plannerIssues: selectedPlannerIssues.map((issue) => issue.code),
           rendererIssues: selectedRendererIssues.map((issue) => issue.code),
+          aiAuditSeverity: selectedAiAudit.severity,
+          aiAuditIssues: selectedAiAudit.issues.map((issue) => issue.code),
           usedPlannerRepair,
           usedRendererRepair,
           usedBackupRenderer,
+          usedAiRenderAudit,
+          usedAiAuditRepair,
           usedFallback: false,
           fallbackReason: null,
+          legacyRendererIssues: selectedLegacyRendererIssues.map((issue) => issue.code),
         },
       });
     } catch (error) {
