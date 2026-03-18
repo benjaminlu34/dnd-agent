@@ -72,6 +72,10 @@ function normalizeActionOptions(actions: string[]) {
   ).slice(0, 4);
 }
 
+function dedupeWarnings(warnings: string[]) {
+  return Array.from(new Set(warnings.map((warning) => warning.trim()).filter(Boolean)));
+}
+
 function keywordSet(value: string) {
   return new Set(
     value
@@ -869,13 +873,15 @@ export async function triageTurn(input: {
     proposedDelta,
   });
 
+  const combinedWarnings = dedupeWarnings([...validated.warnings, ...providerWarnings]);
+
   await commitValidatedTurn({
     snapshot,
     sessionId: input.sessionId,
     turnId: turn.id,
     playerAction: input.playerAction,
     validated,
-    warnings: [...validated.warnings, ...providerWarnings],
+    warnings: combinedWarnings,
     narration: narration || undefined,
     qualityMetadata: qualityMeta?.quality as Record<string, unknown> | undefined,
   });
@@ -885,7 +891,7 @@ export async function triageTurn(input: {
     turnId: turn.id,
     validated,
     suggestedActions: validated.nextState.sceneState.suggestedActions,
-    warnings: [...validated.warnings, ...providerWarnings],
+    warnings: combinedWarnings,
   };
 }
 
@@ -965,13 +971,15 @@ export async function resolvePendingCheck(input: {
     proposedDelta,
   });
 
+  const combinedWarnings = dedupeWarnings([...validated.warnings, ...providerWarnings]);
+
   await commitValidatedTurn({
     snapshot,
     sessionId: turn.sessionId,
     turnId: turn.id,
     playerAction: turn.playerAction,
     validated,
-    warnings: [...validated.warnings, ...providerWarnings],
+    warnings: combinedWarnings,
     narration: narration || undefined,
     checkResult,
     qualityMetadata: qualityMeta?.quality as Record<string, unknown> | undefined,
@@ -981,7 +989,7 @@ export async function resolvePendingCheck(input: {
     checkResult,
     validated,
     suggestedActions: validated.nextState.sceneState.suggestedActions,
-    warnings: [...validated.warnings, ...providerWarnings],
+    warnings: combinedWarnings,
   };
 }
 

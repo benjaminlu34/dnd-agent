@@ -547,6 +547,12 @@ function sanitizeNarration(text: string) {
   return cleaned;
 }
 
+function containsStructuredMetaLeak(text: string) {
+  return /(?:^|\n)\s*(?:proposedDelta|sceneSnapshot|npcDiscoveries|questDiscoveries|healthDelta|itemChanges|sceneLocation|roll|reveals|actionResolution|suggestedActions|narration)\s*[:.]/i.test(
+    text,
+  );
+}
+
 function extractNarrationValue(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
 }
@@ -726,6 +732,10 @@ function normalizeResolutionPlannerDecision(raw: unknown): ResolutionPlannerDeci
 function normalizeRendererDecision(raw: unknown, text: string): RendererDecision | null {
   const payload = toObject(unwrapStructuredPayload(raw));
   if (!payload && !text.trim()) {
+    return null;
+  }
+
+  if (!payload && containsStructuredMetaLeak(text)) {
     return null;
   }
 

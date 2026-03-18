@@ -327,6 +327,7 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
   const [status, setStatus] = useState<"idle" | "loading" | "streaming">("idle");
   const [campaignsLoading, setCampaignsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [warningNotice, setWarningNotice] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [loadingCampaignId, setLoadingCampaignId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -446,6 +447,7 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
       setSuggestedActions(nextSnapshot.state.sceneState.suggestedActions);
       setPendingCheck(null);
       setPendingActionDraft("");
+      setWarningNotice(null);
       streamingMessageIdRef.current = null;
       setActiveNarrationId(null);
     });
@@ -511,7 +513,11 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
       }
 
       if (event.type === "warning" || event.type === "error") {
-        setError(event.message);
+        if (event.type === "warning") {
+          setWarningNotice(event.message);
+        } else {
+          setError(event.message);
+        }
       }
 
       if (event.type === "done") {
@@ -529,6 +535,7 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
 
     setStatus("streaming");
     setError(null);
+    setWarningNotice(null);
     setNotice(null);
     setLastCheckResult(null);
     setNotice(null);
@@ -1001,6 +1008,12 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
               {error ? (
                 <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">
                   {error}
+                </div>
+              ) : null}
+
+              {warningNotice ? (
+                <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+                  {warningNotice}
                 </div>
               ) : null}
 

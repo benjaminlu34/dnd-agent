@@ -39,10 +39,6 @@ export async function POST(_: Request, context: Context) {
       },
     });
 
-    for (const warning of result.warnings) {
-      send({ type: "warning", message: warning });
-    }
-
     send({
       type: "actions",
       actions: result.suggestedActions,

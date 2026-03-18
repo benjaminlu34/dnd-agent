@@ -52,10 +52,6 @@ export async function POST(request: Request) {
       send({ type: "narration", chunk });
     }
 
-    for (const warning of result.warnings) {
-      send({ type: "warning", message: warning });
-    }
-
     send({
       type: "actions",
       actions: result.suggestedActions,
