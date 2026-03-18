@@ -472,6 +472,17 @@ function sanitizeNarration(text: string) {
   return cleaned;
 }
 
+function extractNarrationValue(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+function hasFreshNarration(proposedDelta: ProposedStateDelta, text: string) {
+  return Boolean(
+    sanitizeNarration(text) ||
+      (typeof proposedDelta.sceneSummary === "string" && proposedDelta.sceneSummary.trim()),
+  );
+}
+
 function normalizeDiscoveryDelta(value: Record<string, unknown>) {
   const normalized = {
     ...value,
@@ -499,6 +510,7 @@ function normalizeTriageDecision(
   text: string,
 ): TriageDecision {
   const payload = toObject(unwrapStructuredPayload(raw));
+  const payloadNarration = extractNarrationValue(payload?.narration ?? payload?.sceneSummary);
   const suggestedActions = toStringArray(
     payload?.suggestedActions ??
       payload?.suggested_actions ??
@@ -555,14 +567,15 @@ function normalizeTriageDecision(
   }
 
   const narration = sanitizeNarration(text);
+  const normalizedNarration = payloadNarration || narration;
 
   return {
     requiresCheck: false,
     suggestedActions,
     proposedDelta: {
       ...(proposedDeltaWithActions as ProposedStateDelta),
-      ...(narration && !(proposedDeltaWithActions as ProposedStateDelta).sceneSummary
-        ? { sceneSummary: narration }
+      ...(normalizedNarration && !(proposedDeltaWithActions as ProposedStateDelta).sceneSummary
+        ? { sceneSummary: normalizedNarration }
         : {}),
     },
   };
@@ -570,6 +583,7 @@ function normalizeTriageDecision(
 
 function normalizeResolveDecision(raw: unknown, text: string): ResolveDecision {
   const payload = toObject(unwrapStructuredPayload(raw));
+  const payloadNarration = extractNarrationValue(payload?.narration ?? payload?.sceneSummary);
   const suggestedActions = toStringArray(
     payload?.suggestedActions ??
       payload?.suggested_actions ??
@@ -587,13 +601,14 @@ function normalizeResolveDecision(raw: unknown, text: string): ResolveDecision {
         }
       : proposedDelta;
   const narration = sanitizeNarration(text);
+  const normalizedNarration = payloadNarration || narration;
 
   return {
     suggestedActions,
     proposedDelta: {
       ...(proposedDeltaWithActions as ProposedStateDelta),
-      ...(narration && !(proposedDeltaWithActions as ProposedStateDelta).sceneSummary
-        ? { sceneSummary: narration }
+      ...(normalizedNarration && !(proposedDeltaWithActions as ProposedStateDelta).sceneSummary
+        ? { sceneSummary: normalizedNarration }
         : {}),
     },
   };
@@ -652,6 +667,43 @@ class OpenRouterDungeonMaster {
         toolArguments += toolCall.function.arguments;
       }
     }
+
+    return {
+      text,
+      toolInput: toolArguments ? safeParseJson(toolArguments) : safeParseJson(text),
+    };
+  }
+
+  private async runToolRetry(input: {
+    prompt: string;
+    tool: typeof triageTool | typeof resolutionTool;
+  }): Promise<OpenRouterToolResult> {
+    const response = await this.client.chat.completions.create({
+      model: env.openRouterModel,
+      messages: [
+        {
+          role: "system",
+          content: [
+            buildDungeonMasterSystemPrompt(),
+            "Return the narration inside the tool payload field narration.",
+            "Do not rely on assistant text outside the tool call.",
+          ].join("\n"),
+        },
+        {
+          role: "user",
+          content: input.prompt,
+        },
+      ],
+      tools: [toFunctionTool(input.tool)],
+      tool_choice: "auto",
+      temperature: 0.65,
+    });
+
+    const message = response.choices[0]?.message;
+    const toolCall = message?.tool_calls?.[0];
+    const toolArguments =
+      toolCall && toolCall.type === "function" ? toolCall.function.arguments ?? "" : "";
+    const text = extractMessageText(message?.content);
 
     return {
       text,
@@ -992,6 +1044,32 @@ class OpenRouterDungeonMaster {
 
       const normalized = normalizeTriageDecision(result.toolInput, input, result.text);
       if (isTriageDecision(normalized)) {
+        if (!sanitizeNarration(result.text)) {
+          const payloadNarration = normalized.proposedDelta.sceneSummary?.trim();
+          if (payloadNarration) {
+            callbacks?.onNarration?.(payloadNarration);
+          }
+        }
+        if (!normalized.requiresCheck && !hasFreshNarration(normalized.proposedDelta, result.text)) {
+          console.warn("[dm.triage] Streaming tool output had no narration. Retrying with required tool payload.");
+          const retryResult = await this.runToolRetry({
+            prompt: buildTriageUserPrompt(input),
+            tool: triageTool,
+          });
+          const retried = normalizeTriageDecision(retryResult.toolInput, input, retryResult.text);
+          if (
+            isTriageDecision(retried) &&
+            (retried.requiresCheck || hasFreshNarration(retried.proposedDelta, retryResult.text))
+          ) {
+            const finalNarration = retried.proposedDelta.sceneSummary?.trim();
+            if (finalNarration) {
+              callbacks?.onNarration?.(finalNarration);
+            }
+            return retried;
+          }
+
+          throw new Error("OpenRouter triage returned no fresh narration for a no-check turn.");
+        }
         return normalized;
       }
     } catch {
@@ -1014,6 +1092,29 @@ class OpenRouterDungeonMaster {
 
       const normalized = normalizeResolveDecision(result.toolInput, result.text);
       if (isResolveDecision(normalized)) {
+        if (!sanitizeNarration(result.text)) {
+          const payloadNarration = normalized.proposedDelta.sceneSummary?.trim();
+          if (payloadNarration) {
+            callbacks?.onNarration?.(payloadNarration);
+          }
+        }
+        if (!hasFreshNarration(normalized.proposedDelta, result.text)) {
+          console.warn("[dm.resolve] Streaming tool output had no narration. Retrying with required tool payload.");
+          const retryResult = await this.runToolRetry({
+            prompt: buildOutcomeUserPrompt(input),
+            tool: resolutionTool,
+          });
+          const retried = normalizeResolveDecision(retryResult.toolInput, retryResult.text);
+          if (isResolveDecision(retried) && hasFreshNarration(retried.proposedDelta, retryResult.text)) {
+            const finalNarration = retried.proposedDelta.sceneSummary?.trim();
+            if (finalNarration) {
+              callbacks?.onNarration?.(finalNarration);
+            }
+            return retried;
+          }
+
+          throw new Error("OpenRouter resolution returned no fresh narration.");
+        }
         return normalized;
       }
     } catch {

@@ -668,7 +668,8 @@ export async function triageTurn(input: {
     },
   );
 
-  const narrationForActions = streamedNarration.trim() || decision.proposedDelta.sceneSummary || snapshot.state.sceneState.summary;
+  const narration = streamedNarration.trim() || decision.proposedDelta.sceneSummary?.trim() || "";
+  const narrationForActions = narration || snapshot.state.sceneState.summary;
   const suggestedActions = chooseSuggestedActions({
     currentActions: snapshot.state.sceneState.suggestedActions,
     candidateActions: decision.suggestedActions,
@@ -726,7 +727,7 @@ export async function triageTurn(input: {
     playerAction: input.playerAction,
     validated,
     warnings: validated.warnings,
-    narration: narrationForActions,
+    narration: narration || undefined,
   });
 
   return {
@@ -785,7 +786,8 @@ export async function resolvePendingCheck(input: {
     },
   );
 
-  const narrationForActions = streamedNarration.trim() || decision.proposedDelta.sceneSummary || snapshot.state.sceneState.summary;
+  const narration = streamedNarration.trim() || decision.proposedDelta.sceneSummary?.trim() || "";
+  const narrationForActions = narration || snapshot.state.sceneState.summary;
   const suggestedActions = chooseSuggestedActions({
     currentActions: snapshot.state.sceneState.suggestedActions,
     candidateActions: decision.suggestedActions,
@@ -816,7 +818,7 @@ export async function resolvePendingCheck(input: {
     playerAction: turn.playerAction,
     validated,
     warnings: validated.warnings,
-    narration: narrationForActions,
+    narration: narration || undefined,
     checkResult,
   });
 

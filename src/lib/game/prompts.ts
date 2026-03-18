@@ -87,7 +87,7 @@ export function buildDungeonMasterSystemPrompt() {
     "Avoid markdown styling such as bold, italics, bullet lists, or headers in narration unless the player is literally reading a sign, inscription, or document.",
     "Even when showing written text in the world, keep it short and plain.",
     "If a roll is required, output no narration and only request the check in the tool payload.",
-    "If no roll is required, narrate immediately and then submit the tool payload.",
+    "If no roll is required, narrate immediately and include that exact prose in the tool payload field narration.",
     "Eligible reveals may be used at most once and only if dramatically appropriate.",
     "Suggested actions should be short, concrete, and phrased like natural next moves in the fiction.",
     "Suggested actions must reflect the immediate current moment, not the opening scene or stale earlier options.",
@@ -160,6 +160,8 @@ Do not restage the whole scene.
 Do not over-explain what the player has learned.
 End on a concrete image, line of dialogue, or new pressure.
 Return 2-4 suggested actions that fit this exact moment and would feel different if the scene has progressed.
+If no check is required, include the narration text in the top-level tool field narration.
+If a check is required, set narration to null.
 If a hidden NPC is encountered or a hidden quest is logged, record that in proposedDelta using the exact entity IDs.
 Use healthDelta (negative for damage, positive for healing) to reflect physical consequences.
 `;
@@ -216,6 +218,7 @@ Do not rewrite earlier scene details unless the new outcome genuinely reveals so
 Do not explain the scene's meaning after narrating it.
 End on the sharpest new opening, risk, or image.
 Return 2-4 suggested actions that follow from this exact resolved outcome, not from the earlier opening scene.
+Include the narration text in the top-level tool field narration.
 If a hidden NPC is encountered or a hidden quest is logged in this outcome, record that in proposedDelta using the exact entity IDs.
 Use healthDelta (negative for damage, positive for healing) to reflect physical consequences.
 `;
@@ -229,6 +232,9 @@ export const triageTool = {
     additionalProperties: false,
     properties: {
       requiresCheck: { type: "boolean" },
+      narration: {
+        type: ["string", "null"],
+      },
       check: {
         type: "object",
         nullable: true,
@@ -268,7 +274,7 @@ export const triageTool = {
         additionalProperties: true,
       },
     },
-    required: ["requiresCheck", "suggestedActions", "proposedDelta"],
+    required: ["requiresCheck", "narration", "suggestedActions", "proposedDelta"],
   },
 };
 
@@ -279,6 +285,7 @@ export const resolutionTool = {
     type: "object",
     additionalProperties: false,
     properties: {
+      narration: { type: "string" },
       suggestedActions: {
         type: "array",
         items: { type: "string" },
@@ -301,7 +308,7 @@ export const resolutionTool = {
         additionalProperties: true,
       },
     },
-    required: ["suggestedActions", "proposedDelta"],
+    required: ["narration", "suggestedActions", "proposedDelta"],
   },
 };
 

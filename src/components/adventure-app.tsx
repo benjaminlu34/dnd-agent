@@ -109,6 +109,16 @@ function toNarrativeAction(action: string) {
   return `Try to ${trimmed.charAt(0).toLowerCase()}${trimmed.slice(1)}`;
 }
 
+function toPendingCheckDraft(check: PendingCheck) {
+  const reason = check.reason.replace(/^Resolving:\s*/i, "").trim();
+
+  if (reason) {
+    return reason;
+  }
+
+  return `${check.stat} ${check.mode} check`;
+}
+
 function formatCampaignDate(value: string) {
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
@@ -492,6 +502,7 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
 
       if (event.type === "check_required") {
         removeStreamingNarration();
+        setPendingActionDraft(toPendingCheckDraft(event.check));
         setPendingCheck({
           ...event.check,
           turnId: event.turnId,
