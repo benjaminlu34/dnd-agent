@@ -3,10 +3,6 @@ import { prisma } from "@/lib/prisma";
 import { dmClient, getTurnQualityMeta } from "@/lib/ai/provider";
 import { rollCheck } from "@/lib/game/checks";
 import {
-  createStarterCharacter,
-} from "@/lib/game/starter-data";
-import {
-  createCampaignFromModuleForUser,
   getCampaignSnapshot,
   getPromptContext,
 } from "@/lib/game/repository";
@@ -233,55 +229,6 @@ function chooseSuggestedActions(input: {
   return buildFallbackSuggestedActions(input);
 }
 
-export async function createAdventure() {
-  const character = createStarterCharacter();
-  const setup = await dmClient.generateCampaignSetup();
-  const user = await prisma.user.upsert({
-    where: { email: "solo@adventure.local" },
-    update: {},
-    create: {
-      email: "solo@adventure.local",
-      name: "Solo Adventurer",
-    },
-  });
-
-  const [createdTemplate, module] = await prisma.$transaction([
-    prisma.characterTemplate.create({
-      data: {
-        userId: user.id,
-        name: character.name,
-        archetype: character.archetype,
-        strength: character.strength,
-        dexterity: character.dexterity,
-        constitution: character.constitution,
-        intelligence: character.intelligence,
-        wisdom: character.wisdom,
-        charisma: character.charisma,
-        maxHealth: character.maxHealth,
-        backstory: character.backstory,
-      },
-    }),
-    prisma.adventureModule.create({
-      data: {
-        userId: user.id,
-        title: setup.publicSynopsis.title,
-        publicSynopsis: setup.publicSynopsis,
-        secretEngine: setup.secretEngine,
-      },
-    }),
-  ]);
-
-  const result = await createCampaignFromModuleForUser({
-    moduleId: module.id,
-    templateId: createdTemplate.id,
-  });
-
-  if ("error" in result) {
-    throw new Error("Failed to initialize the generated adventure.");
-  }
-
-  return getCampaignSnapshot(result.campaignId);
-}
 function companionInterjection(snapshot: CampaignSnapshot, proposedDelta: ProposedStateDelta) {
   const companion = snapshot.npcs.find((npc) => npc.isCompanion && npc.discoveredAtTurn !== null);
 

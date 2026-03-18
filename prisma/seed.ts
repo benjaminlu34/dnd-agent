@@ -1,13 +1,20 @@
 import { PrismaClient } from "@prisma/client";
-import {
-  createDefaultAdventureModuleSetup,
-  createDefaultCharacterTemplate,
-} from "../src/lib/game/starter-data";
+import { loadEnvConfig } from "@next/env";
 
-const prisma = new PrismaClient();
+loadEnvConfig(process.cwd());
+
+const datasourceUrl = process.env.DIRECT_URL?.trim() || process.env.DATABASE_URL?.trim();
+
+if (!datasourceUrl) {
+  throw new Error("Missing DIRECT_URL or DATABASE_URL for Prisma seed.");
+}
+
+const prisma = new PrismaClient({
+  datasourceUrl,
+});
 
 async function main() {
-  const user = await prisma.user.upsert({
+  await prisma.user.upsert({
     where: { email: "solo@adventure.local" },
     update: {},
     create: {
@@ -15,52 +22,6 @@ async function main() {
       name: "Solo Adventurer",
     },
   });
-
-  const defaultCharacter = createDefaultCharacterTemplate();
-  const existingCharacter = await prisma.characterTemplate.findFirst({
-    where: {
-      userId: user.id,
-      name: defaultCharacter.name,
-      archetype: defaultCharacter.archetype,
-    },
-  });
-
-  if (!existingCharacter) {
-    await prisma.characterTemplate.create({
-      data: {
-        userId: user.id,
-        name: defaultCharacter.name,
-        archetype: defaultCharacter.archetype,
-        strength: defaultCharacter.strength,
-        dexterity: defaultCharacter.dexterity,
-        constitution: defaultCharacter.constitution,
-        intelligence: defaultCharacter.intelligence,
-        wisdom: defaultCharacter.wisdom,
-        charisma: defaultCharacter.charisma,
-        maxHealth: defaultCharacter.maxHealth,
-        backstory: defaultCharacter.backstory ?? null,
-      },
-    });
-  }
-
-  const defaultModule = createDefaultAdventureModuleSetup();
-  const existingModule = await prisma.adventureModule.findFirst({
-    where: {
-      userId: user.id,
-      title: defaultModule.publicSynopsis.title,
-    },
-  });
-
-  if (!existingModule) {
-    await prisma.adventureModule.create({
-      data: {
-        userId: user.id,
-        title: defaultModule.publicSynopsis.title,
-        publicSynopsis: defaultModule.publicSynopsis,
-        secretEngine: defaultModule.secretEngine,
-      },
-    });
-  }
 }
 
 main()

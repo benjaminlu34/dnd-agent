@@ -856,7 +856,7 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
               </div>
             ) : (
               <div className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-6 text-sm leading-7 text-zinc-400">
-                No campaigns yet. Start a new adventure and your first chronicle will appear here.
+                No campaigns yet. Create a character, build a module in Session Zero, and launch your first campaign.
               </div>
             )}
           </section>

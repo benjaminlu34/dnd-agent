@@ -56,10 +56,6 @@ import {
   parseGeneratedCampaignSetup,
 } from "@/lib/game/serialization";
 import { getStaleClues } from "@/lib/game/reveals";
-import {
-  createDefaultAdventureModuleSetup,
-  createDefaultCharacterTemplate,
-} from "@/lib/game/starter-data";
 import { dmClient } from "@/lib/ai/provider";
 import { prisma } from "@/lib/prisma";
 
@@ -282,64 +278,6 @@ async function createCampaignInTx(
         : {}),
     },
     select: { id: true },
-  });
-}
-
-export async function ensureDefaultCharacterTemplate() {
-  const user = await ensureLocalUser();
-  const defaultTemplate = createDefaultCharacterTemplate();
-  const existing = await prisma.characterTemplate.findFirst({
-    where: {
-      userId: user.id,
-      name: defaultTemplate.name,
-      archetype: defaultTemplate.archetype,
-    },
-    orderBy: { createdAt: "asc" },
-  });
-
-  if (existing) {
-    return existing;
-  }
-
-  return prisma.characterTemplate.create({
-    data: {
-      userId: user.id,
-      name: defaultTemplate.name,
-      archetype: defaultTemplate.archetype,
-      strength: defaultTemplate.strength,
-      dexterity: defaultTemplate.dexterity,
-      constitution: defaultTemplate.constitution,
-      intelligence: defaultTemplate.intelligence,
-      wisdom: defaultTemplate.wisdom,
-      charisma: defaultTemplate.charisma,
-      maxHealth: defaultTemplate.maxHealth,
-      backstory: defaultTemplate.backstory,
-    },
-  });
-}
-
-export async function ensureDefaultAdventureModule() {
-  const user = await ensureLocalUser();
-  const defaultModule = createDefaultAdventureModuleSetup();
-  const existing = await prisma.adventureModule.findFirst({
-    where: {
-      userId: user.id,
-      title: defaultModule.publicSynopsis.title,
-    },
-    orderBy: { createdAt: "asc" },
-  });
-
-  if (existing) {
-    return existing;
-  }
-
-  return prisma.adventureModule.create({
-    data: {
-      userId: user.id,
-      title: defaultModule.publicSynopsis.title,
-      publicSynopsis: defaultModule.publicSynopsis,
-      secretEngine: defaultModule.secretEngine,
-    },
   });
 }
 
