@@ -14,8 +14,21 @@ model User {
   name               String
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
+  adventureModules   AdventureModule[]
   campaigns          Campaign[]
   characterTemplates CharacterTemplate[]
+}
+
+model AdventureModule {
+  id             String     @id @default(cuid())
+  userId         String
+  title          String
+  publicSynopsis Json
+  secretEngine   Json
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  user           User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  campaigns      Campaign[]
 }
 
 model CharacterTemplate {
@@ -53,16 +66,13 @@ model CharacterInstance {
 model Campaign {
   id                String             @id @default(cuid())
   userId            String
+  moduleId          String
   templateId        String
-  title             String
-  premise           String
-  tone              String
-  setting           String
-  blueprint         Json
   stateJson         Json
   createdAt         DateTime           @default(now())
   updatedAt         DateTime           @updatedAt
   user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  module            AdventureModule    @relation(fields: [moduleId], references: [id], onDelete: Cascade)
   template          CharacterTemplate  @relation(fields: [templateId], references: [id], onDelete: Cascade)
   characterInstance CharacterInstance?
   sessions          Session[]

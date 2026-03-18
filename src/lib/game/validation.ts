@@ -33,6 +33,9 @@ export function validateDelta({
   proposedDelta,
 }: ValidationInput): ValidatedDelta {
   const warnings: string[] = [];
+  const healthDelta = Number.isFinite(proposedDelta.healthDelta)
+    ? Math.trunc(proposedDelta.healthDelta as number)
+    : 0;
   const nextState: CampaignState = {
     ...state,
     sceneState: {
@@ -211,10 +214,11 @@ export function validateDelta({
   return {
     nextState,
     nextCharacter: {
-      health: character.health,
+      health: Math.max(0, Math.min(character.health + healthDelta, character.maxHealth)),
       gold: character.gold + awardedGold,
       inventory: [...character.inventory, ...acceptedInventoryChanges.add],
     },
+    healthDelta,
     warnings,
     acceptedQuestAdvancements,
     acceptedQuestDiscoveries,

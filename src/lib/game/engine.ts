@@ -2,17 +2,13 @@ import { prisma } from "@/lib/prisma";
 import { dmClient } from "@/lib/ai/provider";
 import { rollCheck } from "@/lib/game/checks";
 import {
-  buildArcRecordsFromBlueprint,
-  buildCampaignBlueprintFromSetup,
-  buildCampaignStateFromSetup,
-  buildClueRecordsFromSetup,
-  buildNpcRecordsFromSetup,
-  buildQuestRecordsFromSetup,
-} from "@/lib/game/campaign-setup";
-import {
   createStarterCharacter,
 } from "@/lib/game/starter-data";
-import { getCampaignSnapshot, getPromptContext } from "@/lib/game/repository";
+import {
+  createCampaignFromModuleForUser,
+  getCampaignSnapshot,
+  getPromptContext,
+} from "@/lib/game/repository";
 import { validateDelta } from "@/lib/game/validation";
 import type {
   CampaignSnapshot,
@@ -179,6 +175,8 @@ function chooseSuggestedActions(input: {
 }
 
 export async function createAdventure() {
+  const character = createStarterCharacter();
+  const setup = await dmClient.generateCampaignSetup(character);
   const user = await prisma.user.upsert({
     where: { email: "solo@adventure.local" },
     update: {},
@@ -188,125 +186,41 @@ export async function createAdventure() {
     },
   });
 
-  const character = createStarterCharacter();
-  const setup = await dmClient.generateCampaignSetup(character);
-  const blueprint = buildCampaignBlueprintFromSetup(setup);
-  const state = buildCampaignStateFromSetup(setup, blueprint);
-  const quests = buildQuestRecordsFromSetup(setup);
-  const arcs = buildArcRecordsFromBlueprint(blueprint);
-  const npcs = buildNpcRecordsFromSetup(setup);
-  const clues = buildClueRecordsFromSetup(setup, blueprint);
-  const createdTemplate = await prisma.characterTemplate.create({
-    data: {
-      userId: user.id,
-      name: character.name,
-      archetype: character.archetype,
-      strength: character.strength,
-      agility: character.agility,
-      intellect: character.intellect,
-      charisma: character.charisma,
-      vitality: character.vitality,
-      maxHealth: character.maxHealth,
-      backstory: character.backstory,
-    },
+  const [createdTemplate, module] = await prisma.$transaction([
+    prisma.characterTemplate.create({
+      data: {
+        userId: user.id,
+        name: character.name,
+        archetype: character.archetype,
+        strength: character.strength,
+        agility: character.agility,
+        intellect: character.intellect,
+        charisma: character.charisma,
+        vitality: character.vitality,
+        maxHealth: character.maxHealth,
+        backstory: character.backstory,
+      },
+    }),
+    prisma.adventureModule.create({
+      data: {
+        userId: user.id,
+        title: setup.publicSynopsis.title,
+        publicSynopsis: setup.publicSynopsis,
+        secretEngine: setup.secretEngine,
+      },
+    }),
+  ]);
+
+  const result = await createCampaignFromModuleForUser({
+    moduleId: module.id,
+    templateId: createdTemplate.id,
   });
 
-  const campaign = await prisma.campaign.create({
-    data: {
-      userId: user.id,
-      templateId: createdTemplate.id,
-      title: setup.publicSynopsis.title,
-      premise: blueprint.premise,
-      tone: blueprint.tone,
-      setting: blueprint.setting,
-      blueprint,
-      stateJson: state,
-      characterInstance: {
-        create: {
-          templateId: createdTemplate.id,
-          health: character.health,
-          gold: character.gold,
-          inventory: character.inventory,
-        },
-      },
-      sessions: {
-        create: {
-          title: "Session 1",
-          status: "active",
-          messages: {
-            create: {
-              role: "assistant",
-              kind: "narration",
-              content: state.sceneState.summary,
-            },
-          },
-        },
-      },
-      quests: {
-        createMany: {
-          data: quests.map((quest) => ({
-            id: quest.id,
-            title: quest.title,
-            summary: quest.summary,
-            stage: quest.stage,
-            maxStage: quest.maxStage,
-            status: quest.status,
-            rewardGold: quest.rewardGold,
-            rewardItem: quest.rewardItem,
-            discoveredAtTurn: quest.discoveredAtTurn,
-          })),
-        },
-      },
-      arcs: {
-        createMany: {
-          data: arcs.map((arc) => ({
-            id: arc.id,
-            title: arc.title,
-            summary: arc.summary,
-            status: arc.status,
-            expectedTurns: arc.expectedTurns,
-            currentTurn: arc.currentTurn,
-            orderIndex: arc.orderIndex,
-          })),
-        },
-      },
-      npcs: {
-        createMany: {
-          data: npcs.map((npc) => ({
-            id: npc.id,
-            name: npc.name,
-            role: npc.role,
-            status: npc.status,
-            isCompanion: npc.isCompanion,
-            approval: npc.approval,
-            personalHook: npc.personalHook,
-            notes: npc.notes,
-            discoveredAtTurn: npc.discoveredAtTurn,
-          })),
-        },
-      },
-      clues: {
-        createMany: {
-          data: clues.map((clue) => ({
-            id: clue.id,
-            linkedRevealId: clue.linkedRevealId,
-            text: clue.text,
-            source: clue.source,
-            status: clue.status,
-            discoveredAtTurn: clue.discoveredAtTurn,
-          })),
-        },
-      },
-    },
-    include: {
-      sessions: {
-        orderBy: { createdAt: "desc" },
-        take: 1,
-      },
-    },
-  });
+  if ("error" in result) {
+    throw new Error("Failed to initialize the generated adventure.");
+  }
 
-  return getCampaignSnapshot(campaign.id);
+  return getCampaignSnapshot(result.campaignId);
 }
 function companionInterjection(snapshot: CampaignSnapshot, proposedDelta: ProposedStateDelta) {
   const companion = snapshot.npcs.find((npc) => npc.isCompanion && npc.discoveredAtTurn !== null);

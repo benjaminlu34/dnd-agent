@@ -92,6 +92,7 @@ export function buildDungeonMasterSystemPrompt() {
     "Suggested actions should be short, concrete, and phrased like natural next moves in the fiction.",
     "Suggested actions must reflect the immediate current moment, not the opening scene or stale earlier options.",
     "Replace stale suggested actions as the story moves. Do not repeat the same suggestions turn after turn unless the situation is truly unchanged.",
+    "Use healthDelta (negative for damage, positive for healing) to reflect physical consequences.",
   ].join("\n");
 }
 
@@ -160,6 +161,7 @@ Do not over-explain what the player has learned.
 End on a concrete image, line of dialogue, or new pressure.
 Return 2-4 suggested actions that fit this exact moment and would feel different if the scene has progressed.
 If a hidden NPC is encountered or a hidden quest is logged, record that in proposedDelta using the exact entity IDs.
+Use healthDelta (negative for damage, positive for healing) to reflect physical consequences.
 `;
 }
 
@@ -215,6 +217,7 @@ Do not explain the scene's meaning after narrating it.
 End on the sharpest new opening, risk, or image.
 Return 2-4 suggested actions that follow from this exact resolved outcome, not from the earlier opening scene.
 If a hidden NPC is encountered or a hidden quest is logged in this outcome, record that in proposedDelta using the exact entity IDs.
+Use healthDelta (negative for damage, positive for healing) to reflect physical consequences.
 `;
 }
 
@@ -250,6 +253,9 @@ export const triageTool = {
       proposedDelta: {
         type: "object",
         properties: {
+          healthDelta: {
+            type: "integer",
+          },
           npcDiscoveries: {
             type: "array",
             items: { type: "string" },
@@ -280,6 +286,9 @@ export const resolutionTool = {
       proposedDelta: {
         type: "object",
         properties: {
+          healthDelta: {
+            type: "integer",
+          },
           npcDiscoveries: {
             type: "array",
             items: { type: "string" },

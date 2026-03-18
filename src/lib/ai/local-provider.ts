@@ -879,6 +879,29 @@ function buildMemorySummary(input: {
   )}. ${consequence}`;
 }
 
+function buildHealthDelta(input: {
+  intent: ActionIntent;
+  outcome?: CheckOutcome;
+}) {
+  if (input.intent.kind === "rest" && !input.outcome) {
+    return 1;
+  }
+
+  if (!["force", "travel", "stealth"].includes(input.intent.kind)) {
+    return 0;
+  }
+
+  if (input.outcome === "failure") {
+    return -2;
+  }
+
+  if (input.outcome === "partial") {
+    return -1;
+  }
+
+  return 0;
+}
+
 function buildNoCheckNarration(input: {
   promptContext: PromptContext;
   playerAction: string;
@@ -1447,6 +1470,7 @@ export class LocalDungeonMaster {
       suggestedActions,
       proposedDelta: {
         sceneSummary: narration,
+        healthDelta: buildHealthDelta({ intent }),
         sceneAtmosphere:
           intent.kind === "rest"
             ? "briefly steadier, but not safe"
@@ -1542,6 +1566,10 @@ export class LocalDungeonMaster {
       suggestedActions,
       proposedDelta: {
         sceneSummary: narration,
+        healthDelta: buildHealthDelta({
+          intent,
+          outcome: input.checkResult.outcome,
+        }),
         sceneAtmosphere:
           input.checkResult.outcome === "success"
             ? "charged and briefly in your favor"

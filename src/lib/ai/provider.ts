@@ -474,6 +474,11 @@ function normalizeDiscoveryDelta(value: Record<string, unknown>) {
     normalized.questDiscoveries = toStringArray(value.questDiscoveries ?? value.quest_discoveries);
   }
 
+  if ("healthDelta" in value || "health_delta" in value) {
+    const raw = Number(value.healthDelta ?? value.health_delta);
+    normalized.healthDelta = Number.isFinite(raw) ? Math.trunc(raw) : undefined;
+  }
+
   return normalized;
 }
 

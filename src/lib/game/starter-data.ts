@@ -5,6 +5,7 @@ import type {
   CampaignState,
   CharacterTemplate,
   Clue,
+  GeneratedCampaignSetup,
   Hook,
   NpcRecord,
   QuestRecord,
@@ -78,6 +79,127 @@ export function createDefaultCharacterTemplate(): CharacterTemplate {
     maxHealth: 12,
     backstory:
       "A road-worn wanderer who carries old maps, half-finished vows, and the habit of showing up where the dark is thickest.",
+  };
+}
+
+export function createDefaultAdventureModuleSetup(): GeneratedCampaignSetup {
+  return {
+    publicSynopsis: {
+      title: "Ashen Bell of Briar Glen",
+      premise:
+        "A pilgrim-town built around a shattered observatory is sliding toward an eclipse cult uprising.",
+      tone: "Gothic adventure with hopeful heroism",
+      setting: "The lantern-streaked valley of Briar Glen",
+      openingScene: {
+        title: "Ash Market at Dusk",
+        location: "Briar Glen",
+        overview:
+          "The market square is clearing under a blood-red eclipse notice while old bells shake in the wind and the town's fear starts to show.",
+      },
+    },
+    secretEngine: {
+      openingScene: {
+        title: "Ash Market at Dusk",
+        summary:
+          "Wind rattles brass prayer bells while the market square clears around a blood-red eclipse notice nailed to the fountain.",
+        location: "Briar Glen",
+        atmosphere: "Uneasy, crowded, and one spark away from panic",
+        activeThreat: "Cult lantern-bearers are searching the old quarter.",
+        suggestedActions: [
+          "Inspect the eclipse notice",
+          "Question the bell-warden",
+          "Follow the fresh soot trail toward the smithy",
+        ],
+      },
+      villain: {
+        name: "Abbess Veyra",
+        motive: "Awaken the eclipse saint buried under the observatory",
+        progressClock: 10,
+      },
+      hooks: [
+        {
+          text: "Find the stolen Silver Bell before the eclipse feast.",
+        },
+        {
+          text: "Learn why the town blacksmith vanished after sealing the crypt gates.",
+        },
+      ],
+      arcs: [
+        {
+          title: "The Bell Below",
+          summary: "Track the stolen relic through catacombs and cult safehouses.",
+          expectedTurns: 8,
+        },
+        {
+          title: "Ash Before Dawn",
+          summary: "Disrupt the eclipse rite before the valley becomes a shrine of hunger.",
+          expectedTurns: 10,
+        },
+      ],
+      reveals: [
+        {
+          title: "The Missing Blacksmith",
+          truth:
+            "The blacksmith hides beneath the observatory forge, forced to craft the eclipse saint's chains.",
+          requiredClueTitles: [
+            "Hammer marks on the market fountain match the blacksmith's sigil.",
+            "Fresh cinders under locked forge doors prove someone works below ground at night.",
+            "A folded prayer strip mentions chains forged for a saint beneath the observatory.",
+          ],
+          requiredArcTitles: ["The Bell Below"],
+        },
+      ],
+      subplotSeeds: [
+        {
+          title: "Lark's Vow",
+          hook: "Your companion Lark seeks the name of the saint who destroyed her family chapel.",
+        },
+      ],
+      quests: [
+        {
+          title: "Recover the Silver Bell",
+          summary: "Trace the thieves and return the relic before the eclipse feast.",
+          maxStage: 2,
+          rewardGold: 25,
+          rewardItem: "moon-salt charm",
+        },
+      ],
+      npcs: [
+        {
+          name: "Lark",
+          role: "Companion",
+          notes: "A quick-eyed scout who masks fear with dry humor.",
+          isCompanion: true,
+          approval: 1,
+          personalHook: "Identify the saint tied to her ruined chapel.",
+          status: "watchful",
+        },
+        {
+          name: "Mother Ysilde",
+          role: "Bell-warden",
+          notes: "Caretaker of the Silver Bell and guardian of the square.",
+          status: "harried",
+        },
+      ],
+      clues: [
+        {
+          text: "Hammer marks on the market fountain match the blacksmith's sigil.",
+          source: "Ash Market fountain",
+          linkedRevealTitle: "The Missing Blacksmith",
+        },
+        {
+          text: "Fresh cinders under locked forge doors prove someone works below ground at night.",
+          source: "Old Smithy",
+          linkedRevealTitle: "The Missing Blacksmith",
+        },
+        {
+          text: "A folded prayer strip mentions chains forged for a saint beneath the observatory.",
+          source: "Lantern Catacombs",
+          linkedRevealTitle: "The Missing Blacksmith",
+        },
+      ],
+      locations: ["Ash Market", "Old Smithy", "Lantern Catacombs"],
+    },
   };
 }
 

@@ -172,6 +172,17 @@ export type GeneratedCampaignSetup = {
   };
 };
 
+export type AdventureModuleSummary = {
+  id: string;
+  title: string;
+  premise: string;
+  tone: string;
+  setting: string;
+  openingScene: GeneratedCampaignSetup["publicSynopsis"]["openingScene"];
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type SceneState = {
   id: string;
   title: string;
@@ -345,6 +356,7 @@ export type ProposedStateDelta = {
   sceneAtmosphere?: string;
   activeArcId?: string;
   suggestedActions?: string[];
+  healthDelta?: number;
   goldChange?: number;
   rewardQuestId?: string | null;
   inventoryChanges?: {
@@ -379,6 +391,7 @@ export type ProposedStateDelta = {
 export type ValidatedDelta = {
   nextState: CampaignState;
   nextCharacter: Pick<CampaignCharacter, "health" | "gold" | "inventory">;
+  healthDelta?: number;
   warnings: string[];
   acceptedQuestAdvancements: ProposedStateDelta["questAdvancements"];
   acceptedQuestDiscoveries: string[];

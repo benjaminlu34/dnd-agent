@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { dmClient } from "@/lib/ai/provider";
 import { toCampaignSeedCharacter } from "@/lib/game/characters";
 import { campaignDraftRequestSchema } from "@/lib/game/session-zero";
+import { createDefaultCharacterTemplate } from "@/lib/game/starter-data";
 
 export const runtime = "nodejs";
 
@@ -20,7 +21,7 @@ export async function POST(request: Request) {
 
   try {
     const draft = await dmClient.generateCampaignSetup(
-      toCampaignSeedCharacter(payload.data.character),
+      toCampaignSeedCharacter(payload.data.character ?? createDefaultCharacterTemplate()),
       {
         basePrompt: payload.data.basePrompt,
         prompt: payload.data.prompt,

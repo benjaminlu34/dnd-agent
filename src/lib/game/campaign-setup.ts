@@ -110,8 +110,8 @@ export function buildCampaignBlueprintFromSetup(
 
 export function buildCampaignStateFromSetup(
   setup: GeneratedCampaignSetup,
-  blueprint: CampaignBlueprint,
 ): CampaignState {
+  const blueprint = buildCampaignBlueprintFromSetup(setup);
   const openingScene = setup.secretEngine.openingScene;
 
   return createStarterState(blueprint, {

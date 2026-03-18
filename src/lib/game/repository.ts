@@ -1,6 +1,8 @@
 import type {
+  AdventureModule as PrismaAdventureModule,
   Arc,
   CharacterInstance as PrismaCharacterInstance,
+  Prisma,
   CharacterTemplate as PrismaCharacterTemplate,
   Clue as PrismaClue,
   MemoryEntry,
@@ -13,7 +15,16 @@ import {
   toCampaignCharacter,
   toCharacterStats,
 } from "@/lib/game/characters";
+import {
+  buildArcRecordsFromBlueprint,
+  buildCampaignBlueprintFromSetup,
+  buildCampaignStateFromSetup,
+  buildClueRecordsFromSetup,
+  buildNpcRecordsFromSetup,
+  buildQuestRecordsFromSetup,
+} from "@/lib/game/campaign-setup";
 import type {
+  AdventureModuleSummary,
   CampaignCharacter,
   CampaignListItem,
   CampaignSnapshot,
@@ -23,6 +34,7 @@ import type {
   CharacterTemplateSummary,
   Clue,
   ClueStatus,
+  GeneratedCampaignSetup,
   MemoryRecord,
   NpcRecord,
   PlayerCampaignSnapshot,
@@ -33,9 +45,15 @@ import type {
   QuestStatus,
   StoryMessage,
 } from "@/lib/game/types";
-import { parseBlueprint, parseCampaignState } from "@/lib/game/serialization";
+import {
+  parseCampaignState,
+  parseGeneratedCampaignSetup,
+} from "@/lib/game/serialization";
 import { getStaleClues } from "@/lib/game/reveals";
-import { createDefaultCharacterTemplate } from "@/lib/game/starter-data";
+import {
+  createDefaultAdventureModuleSetup,
+  createDefaultCharacterTemplate,
+} from "@/lib/game/starter-data";
 import { prisma } from "@/lib/prisma";
 
 export async function ensureLocalUser() {
@@ -89,6 +107,171 @@ function toCharacter(
   return toCampaignCharacter(toTemplateRecord(template), toInstanceRecord(instance));
 }
 
+type ModuleWithSetup = Pick<
+  PrismaAdventureModule,
+  "id" | "userId" | "title" | "publicSynopsis" | "secretEngine" | "createdAt" | "updatedAt"
+>;
+
+function toGeneratedCampaignSetup(module: Pick<
+  PrismaAdventureModule,
+  "publicSynopsis" | "secretEngine"
+>): GeneratedCampaignSetup {
+  return parseGeneratedCampaignSetup(module.publicSynopsis, module.secretEngine);
+}
+
+function toAdventureModuleSummary(module: ModuleWithSetup): AdventureModuleSummary {
+  const setup = toGeneratedCampaignSetup(module);
+
+  return {
+    id: module.id,
+    title: setup.publicSynopsis.title,
+    premise: setup.publicSynopsis.premise,
+    tone: setup.publicSynopsis.tone,
+    setting: setup.publicSynopsis.setting,
+    openingScene: setup.publicSynopsis.openingScene,
+    createdAt: module.createdAt.toISOString(),
+    updatedAt: module.updatedAt.toISOString(),
+  };
+}
+
+function buildCampaignCreationData(input: {
+  module: ModuleWithSetup;
+  template: CharacterTemplate;
+}) {
+  const setup = toGeneratedCampaignSetup(input.module);
+  const blueprint = buildCampaignBlueprintFromSetup(setup);
+  const state = buildCampaignStateFromSetup(setup);
+  const quests = buildQuestRecordsFromSetup(setup);
+  const arcs = buildArcRecordsFromBlueprint(blueprint);
+  const npcs = buildNpcRecordsFromSetup(setup);
+  const clues = buildClueRecordsFromSetup(setup, blueprint);
+
+  return {
+    setup,
+    blueprint,
+    state,
+    quests,
+    arcs,
+    npcs,
+    clues,
+    openingScene: setup.secretEngine.openingScene,
+    template: input.template,
+  };
+}
+
+async function createCampaignInTx(
+  tx: Prisma.TransactionClient,
+  input: {
+    userId: string;
+    module: ModuleWithSetup;
+    template: CharacterTemplate;
+  },
+) {
+  const { state, quests, arcs, npcs, clues, openingScene, template } = buildCampaignCreationData(input);
+
+  return tx.campaign.create({
+    data: {
+      userId: input.userId,
+      moduleId: input.module.id,
+      templateId: template.id,
+      stateJson: state,
+      characterInstance: {
+        create: {
+          templateId: template.id,
+          health: template.maxHealth,
+          gold: 0,
+          inventory: [],
+        },
+      },
+      sessions: {
+        create: {
+          title: "Session 1",
+          status: "active",
+          messages: {
+            create: {
+              role: "assistant",
+              kind: "narration",
+              content: openingScene.summary,
+            },
+          },
+        },
+      },
+      ...(quests.length
+        ? {
+            quests: {
+              createMany: {
+                data: quests.map((quest) => ({
+                  id: quest.id,
+                  title: quest.title,
+                  summary: quest.summary,
+                  stage: quest.stage,
+                  maxStage: quest.maxStage,
+                  status: quest.status,
+                  rewardGold: quest.rewardGold,
+                  rewardItem: quest.rewardItem,
+                  discoveredAtTurn: quest.discoveredAtTurn,
+                })),
+              },
+            },
+          }
+        : {}),
+      ...(arcs.length
+        ? {
+            arcs: {
+              createMany: {
+                data: arcs.map((arc) => ({
+                  id: arc.id,
+                  title: arc.title,
+                  summary: arc.summary,
+                  status: arc.status,
+                  expectedTurns: arc.expectedTurns,
+                  currentTurn: arc.currentTurn,
+                  orderIndex: arc.orderIndex,
+                })),
+              },
+            },
+          }
+        : {}),
+      ...(npcs.length
+        ? {
+            npcs: {
+              createMany: {
+                data: npcs.map((npc) => ({
+                  id: npc.id,
+                  name: npc.name,
+                  role: npc.role,
+                  status: npc.status,
+                  isCompanion: npc.isCompanion,
+                  approval: npc.approval,
+                  personalHook: npc.personalHook,
+                  notes: npc.notes,
+                  discoveredAtTurn: npc.discoveredAtTurn,
+                })),
+              },
+            },
+          }
+        : {}),
+      ...(clues.length
+        ? {
+            clues: {
+              createMany: {
+                data: clues.map((clue) => ({
+                  id: clue.id,
+                  linkedRevealId: clue.linkedRevealId,
+                  text: clue.text,
+                  source: clue.source,
+                  status: clue.status,
+                  discoveredAtTurn: clue.discoveredAtTurn,
+                })),
+              },
+            },
+          }
+        : {}),
+    },
+    select: { id: true },
+  });
+}
+
 export async function ensureDefaultCharacterTemplate() {
   const user = await ensureLocalUser();
   const defaultTemplate = createDefaultCharacterTemplate();
@@ -121,6 +304,31 @@ export async function ensureDefaultCharacterTemplate() {
   });
 }
 
+export async function ensureDefaultAdventureModule() {
+  const user = await ensureLocalUser();
+  const defaultModule = createDefaultAdventureModuleSetup();
+  const existing = await prisma.adventureModule.findFirst({
+    where: {
+      userId: user.id,
+      title: defaultModule.publicSynopsis.title,
+    },
+    orderBy: { createdAt: "asc" },
+  });
+
+  if (existing) {
+    return existing;
+  }
+
+  return prisma.adventureModule.create({
+    data: {
+      userId: user.id,
+      title: defaultModule.publicSynopsis.title,
+      publicSynopsis: defaultModule.publicSynopsis,
+      secretEngine: defaultModule.secretEngine,
+    },
+  });
+}
+
 export async function listCharacterTemplates(): Promise<CharacterTemplateSummary[]> {
   const user = await ensureLocalUser();
   const templates = await prisma.characterTemplate.findMany({
@@ -129,6 +337,54 @@ export async function listCharacterTemplates(): Promise<CharacterTemplateSummary
   });
 
   return templates.map(toTemplateSummary);
+}
+
+export async function listAdventureModules(): Promise<AdventureModuleSummary[]> {
+  const user = await ensureLocalUser();
+  const modules = await prisma.adventureModule.findMany({
+    where: { userId: user.id },
+    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+  });
+
+  return modules.map(toAdventureModuleSummary);
+}
+
+export async function getAdventureModuleForUser(moduleId: string) {
+  const user = await ensureLocalUser();
+  const adventureModule = await prisma.adventureModule.findFirst({
+    where: {
+      id: moduleId,
+      userId: user.id,
+    },
+  });
+
+  if (!adventureModule) {
+    return null;
+  }
+
+  return {
+    id: adventureModule.id,
+    userId: adventureModule.userId,
+    title: adventureModule.title,
+    setup: toGeneratedCampaignSetup(adventureModule),
+    createdAt: adventureModule.createdAt.toISOString(),
+    updatedAt: adventureModule.updatedAt.toISOString(),
+  };
+}
+
+export async function createAdventureModule(input: GeneratedCampaignSetup) {
+  const user = await ensureLocalUser();
+
+  const adventureModule = await prisma.adventureModule.create({
+    data: {
+      userId: user.id,
+      title: input.publicSynopsis.title,
+      publicSynopsis: input.publicSynopsis,
+      secretEngine: input.secretEngine,
+    },
+  });
+
+  return toAdventureModuleSummary(adventureModule);
 }
 
 export async function getCharacterTemplateForUser(templateId: string) {
@@ -141,6 +397,47 @@ export async function getCharacterTemplateForUser(templateId: string) {
   });
 
   return template ? toTemplateRecord(template) : null;
+}
+
+export async function createCampaignFromModuleForUser(input: {
+  moduleId: string;
+  templateId: string;
+}) {
+  const user = await ensureLocalUser();
+  const result = await prisma.$transaction(async (tx) => {
+    const [module, template] = await Promise.all([
+      tx.adventureModule.findFirst({
+        where: {
+          id: input.moduleId,
+          userId: user.id,
+        },
+      }),
+      tx.characterTemplate.findFirst({
+        where: {
+          id: input.templateId,
+          userId: user.id,
+        },
+      }),
+    ]);
+
+    if (!module) {
+      return { error: "module_not_found" as const };
+    }
+
+    if (!template) {
+      return { error: "template_not_found" as const };
+    }
+
+    const campaign = await createCampaignInTx(tx, {
+      userId: user.id,
+      module,
+      template: toTemplateRecord(template),
+    });
+
+    return { campaignId: campaign.id };
+  });
+
+  return result;
 }
 
 export async function createCharacterTemplate(input: CharacterTemplateDraft) {
@@ -230,6 +527,7 @@ export async function getCampaignAggregate(campaignId: string) {
   return prisma.campaign.findUnique({
     where: { id: campaignId },
     include: {
+      module: true,
       template: true,
       characterInstance: true,
       sessions: {
@@ -260,6 +558,7 @@ export async function listCampaigns(): Promise<CampaignListItem[]> {
   const campaigns = await prisma.campaign.findMany({
     orderBy: { updatedAt: "desc" },
     include: {
+      module: true,
       template: true,
       sessions: {
         orderBy: { createdAt: "desc" },
@@ -268,19 +567,23 @@ export async function listCampaigns(): Promise<CampaignListItem[]> {
     },
   });
 
-  return campaigns.map((campaign) => ({
-    id: campaign.id,
-    title: campaign.title,
-    premise: campaign.premise,
-    setting: campaign.setting,
-    tone: campaign.tone,
-    characterName: campaign.template.name,
-    characterArchetype: campaign.template.archetype,
-    sessionTitle: campaign.sessions[0]?.title ?? null,
-    turnCount: campaign.sessions[0]?.turnCount ?? 0,
-    updatedAt: campaign.updatedAt.toISOString(),
-    createdAt: campaign.createdAt.toISOString(),
-  }));
+  return campaigns.map((campaign) => {
+    const moduleSummary = toAdventureModuleSummary(campaign.module);
+
+    return {
+      id: campaign.id,
+      title: moduleSummary.title,
+      premise: moduleSummary.premise,
+      setting: moduleSummary.setting,
+      tone: moduleSummary.tone,
+      characterName: campaign.template.name,
+      characterArchetype: campaign.template.archetype,
+      sessionTitle: campaign.sessions[0]?.title ?? null,
+      turnCount: campaign.sessions[0]?.turnCount ?? 0,
+      updatedAt: campaign.updatedAt.toISOString(),
+      createdAt: campaign.createdAt.toISOString(),
+    };
+  });
 }
 
 function toQuest(quest: Quest): QuestRecord {
@@ -525,6 +828,8 @@ export async function getCampaignSnapshot(
 
   const session = campaign.sessions[0];
   const recentMessages = session ? await getRecentMessages(session.id) : [];
+  const setup = toGeneratedCampaignSetup(campaign.module);
+  const blueprint = buildCampaignBlueprintFromSetup(setup);
   const latestResolvedTurn = session
     ? await prisma.turn.findFirst({
         where: {
@@ -539,11 +844,11 @@ export async function getCampaignSnapshot(
   return {
     campaignId: campaign.id,
     sessionId: session?.id ?? "",
-    title: campaign.title,
-    premise: campaign.premise,
-    tone: campaign.tone,
-    setting: campaign.setting,
-    blueprint: parseBlueprint(campaign.blueprint),
+    title: setup.publicSynopsis.title,
+    premise: setup.publicSynopsis.premise,
+    tone: setup.publicSynopsis.tone,
+    setting: setup.publicSynopsis.setting,
+    blueprint,
     state: parseCampaignState(campaign.stateJson),
     character: toCharacter(campaign.template, campaign.characterInstance),
     quests: campaign.quests.map(toQuest),

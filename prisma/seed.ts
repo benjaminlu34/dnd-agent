@@ -1,5 +1,8 @@
 import { PrismaClient } from "@prisma/client";
-import { createDefaultCharacterTemplate } from "../src/lib/game/starter-data";
+import {
+  createDefaultAdventureModuleSetup,
+  createDefaultCharacterTemplate,
+} from "../src/lib/game/starter-data";
 
 const prisma = new PrismaClient();
 
@@ -35,6 +38,25 @@ async function main() {
         vitality: defaultCharacter.vitality,
         maxHealth: defaultCharacter.maxHealth,
         backstory: defaultCharacter.backstory ?? null,
+      },
+    });
+  }
+
+  const defaultModule = createDefaultAdventureModuleSetup();
+  const existingModule = await prisma.adventureModule.findFirst({
+    where: {
+      userId: user.id,
+      title: defaultModule.publicSynopsis.title,
+    },
+  });
+
+  if (!existingModule) {
+    await prisma.adventureModule.create({
+      data: {
+        userId: user.id,
+        title: defaultModule.publicSynopsis.title,
+        publicSynopsis: defaultModule.publicSynopsis,
+        secretEngine: defaultModule.secretEngine,
       },
     });
   }

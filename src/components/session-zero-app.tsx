@@ -2,7 +2,11 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import type { CharacterTemplateSummary, GeneratedCampaignSetup } from "@/lib/game/types";
+import type {
+  AdventureModuleSummary,
+  CharacterTemplateSummary,
+  GeneratedCampaignSetup,
+} from "@/lib/game/types";
 
 function FieldShell({
   label,
@@ -81,60 +85,127 @@ function CharacterCard({
   );
 }
 
+function ModuleCard({
+  module,
+  selected,
+  onSelect,
+}: {
+  module: AdventureModuleSummary;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={[
+        "rounded-3xl border p-5 text-left transition-colors",
+        selected
+          ? "border-zinc-600 bg-black"
+          : "border-zinc-800 bg-black hover:border-zinc-700",
+      ].join(" ")}
+    >
+      <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Adventure Module</p>
+      <h2 className="mt-3 text-xl font-semibold text-white">{module.title}</h2>
+      <p className="mt-2 line-clamp-3 text-sm leading-7 text-zinc-400">{module.premise}</p>
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        <div>
+          <p className="text-[0.68rem] uppercase tracking-[0.18em] text-zinc-500">Setting</p>
+          <p className="mt-2 text-sm text-zinc-300">{module.setting}</p>
+        </div>
+        <div>
+          <p className="text-[0.68rem] uppercase tracking-[0.18em] text-zinc-500">Tone</p>
+          <p className="mt-2 text-sm text-zinc-300">{module.tone}</p>
+        </div>
+      </div>
+      <div className="mt-4 rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+        <p className="text-[0.68rem] uppercase tracking-[0.18em] text-zinc-500">Opening Scene</p>
+        <h3 className="mt-2 text-base font-semibold text-white">{module.openingScene.title}</h3>
+        <p className="mt-1 text-sm text-zinc-500">{module.openingScene.location}</p>
+        <p className="mt-3 text-sm leading-6 text-zinc-300">{module.openingScene.overview}</p>
+      </div>
+    </button>
+  );
+}
+
 export function SessionZeroApp() {
   const router = useRouter();
   const [prompt, setPrompt] = useState("");
   const [followUpPrompt, setFollowUpPrompt] = useState("");
+  const [modules, setModules] = useState<AdventureModuleSummary[]>([]);
+  const [modulesLoading, setModulesLoading] = useState(true);
   const [characters, setCharacters] = useState<CharacterTemplateSummary[]>([]);
   const [charactersLoading, setCharactersLoading] = useState(true);
   const [deletingTemplateId, setDeletingTemplateId] = useState<string | null>(null);
+  const [selectedModuleId, setSelectedModuleId] = useState<string | null>(null);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
   const [draft, setDraft] = useState<GeneratedCampaignSetup | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [drafting, setDrafting] = useState(false);
+  const [savingModule, setSavingModule] = useState(false);
+  const [launching, setLaunching] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const selectedModule = modules.find((module) => module.id === selectedModuleId) ?? null;
   const selectedCharacter =
     characters.find((character) => character.id === selectedTemplateId) ?? null;
 
   useEffect(() => {
     let active = true;
 
-    async function loadCharacters() {
+    async function loadLibrary() {
+      setModulesLoading(true);
       setCharactersLoading(true);
 
       try {
-        const response = await fetch("/api/characters");
-        const data = (await response.json()) as {
+        const [modulesResponse, charactersResponse] = await Promise.all([
+          fetch("/api/modules"),
+          fetch("/api/characters"),
+        ]);
+        const modulesData = (await modulesResponse.json()) as {
+          modules?: AdventureModuleSummary[];
+          error?: string;
+        };
+        const charactersData = (await charactersResponse.json()) as {
           characters?: CharacterTemplateSummary[];
           error?: string;
         };
 
-        if (!response.ok) {
-          throw new Error(data.error ?? "Failed to load characters.");
+        if (!modulesResponse.ok) {
+          throw new Error(modulesData.error ?? "Failed to load adventure modules.");
+        }
+
+        if (!charactersResponse.ok) {
+          throw new Error(charactersData.error ?? "Failed to load characters.");
         }
 
         if (!active) {
           return;
         }
 
-        const nextCharacters = data.characters ?? [];
+        const nextModules = modulesData.modules ?? [];
+        const nextCharacters = charactersData.characters ?? [];
+        setModules(nextModules);
         setCharacters(nextCharacters);
+        setSelectedModuleId((current) => current ?? nextModules[0]?.id ?? null);
         setSelectedTemplateId((current) => current ?? nextCharacters[0]?.id ?? null);
       } catch (loadError) {
         if (!active) {
           return;
         }
 
-        setError(loadError instanceof Error ? loadError.message : "Failed to load characters.");
+        setError(
+          loadError instanceof Error ? loadError.message : "Failed to load campaign launcher data.",
+        );
       } finally {
         if (active) {
+          setModulesLoading(false);
           setCharactersLoading(false);
         }
       }
     }
 
-    void loadCharacters();
+    void loadLibrary();
 
     return () => {
       active = false;
@@ -164,7 +235,6 @@ export function SessionZeroApp() {
 
       const data = (await response.json()) as {
         templateId?: string;
-        campaignCount?: number;
         error?: string;
       };
 
@@ -174,13 +244,9 @@ export function SessionZeroApp() {
 
       setCharacters((current) => {
         const next = current.filter((entry) => entry.id !== template.id);
-        const deletedSelected = selectedTemplateId === template.id;
 
-        if (deletedSelected) {
+        if (selectedTemplateId === template.id) {
           setSelectedTemplateId(next[0]?.id ?? null);
-          setDraft(null);
-          setShowAdvanced(false);
-          setFollowUpPrompt("");
         }
 
         return next;
@@ -215,7 +281,9 @@ export function SessionZeroApp() {
             ? {
                 ...arc,
                 [field]:
-                  field === "expectedTurns" ? Math.max(1, Number.parseInt(value || "1", 10) || 1) : value,
+                  field === "expectedTurns"
+                    ? Math.max(1, Number.parseInt(value || "1", 10) || 1)
+                    : value,
               }
             : arc,
         ),
@@ -247,7 +315,11 @@ export function SessionZeroApp() {
     }));
   }
 
-  function updateNpc(index: number, field: "name" | "role" | "notes" | "personalHook" | "status", value: string) {
+  function updateNpc(
+    index: number,
+    field: "name" | "role" | "notes" | "personalHook" | "status",
+    value: string,
+  ) {
     updateDraft((current) => ({
       ...current,
       secretEngine: {
@@ -264,7 +336,11 @@ export function SessionZeroApp() {
     }));
   }
 
-  function updateClue(index: number, field: "text" | "source" | "linkedRevealTitle", value: string) {
+  function updateClue(
+    index: number,
+    field: "text" | "source" | "linkedRevealTitle",
+    value: string,
+  ) {
     updateDraft((current) => ({
       ...current,
       secretEngine: {
@@ -289,12 +365,7 @@ export function SessionZeroApp() {
   }
 
   async function generateDraft(nextPrompt: string, previousDraft?: GeneratedCampaignSetup) {
-    if (!selectedCharacter) {
-      setError("Choose a character before drafting a campaign.");
-      return;
-    }
-
-    setLoading(true);
+    setDrafting(true);
     setError(null);
 
     try {
@@ -306,7 +377,6 @@ export function SessionZeroApp() {
         body: JSON.stringify({
           basePrompt: previousDraft ? prompt : undefined,
           prompt: nextPrompt,
-          character: selectedCharacter,
           previousDraft,
         }),
       });
@@ -317,25 +387,68 @@ export function SessionZeroApp() {
       };
 
       if (!response.ok || !data.draft) {
-        throw new Error(data.error ?? "Failed to generate a campaign draft.");
+        throw new Error(data.error ?? "Failed to generate an adventure module draft.");
       }
 
       setDraft(data.draft);
       setShowAdvanced(false);
       setFollowUpPrompt("");
     } catch (draftError) {
-      setError(draftError instanceof Error ? draftError.message : "Failed to generate campaign draft.");
+      setError(
+        draftError instanceof Error ? draftError.message : "Failed to generate module draft.",
+      );
     } finally {
-      setLoading(false);
+      setDrafting(false);
     }
   }
 
-  async function confirmDraft() {
-    if (!draft || !selectedCharacter || saving) {
+  async function saveDraftAsModule() {
+    if (!draft || savingModule) {
       return;
     }
 
-    setSaving(true);
+    setSavingModule(true);
+    setError(null);
+
+    try {
+      const response = await fetch("/api/modules/create", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          draft,
+        }),
+      });
+
+      const data = (await response.json()) as {
+        moduleId?: string;
+        module?: AdventureModuleSummary;
+        error?: string;
+      };
+
+      if (!response.ok || !data.moduleId || !data.module) {
+        throw new Error(data.error ?? "Failed to save adventure module.");
+      }
+
+      setModules((current) => [data.module!, ...current.filter((entry) => entry.id !== data.moduleId)]);
+      setSelectedModuleId(data.moduleId);
+      setDraft(null);
+      setShowAdvanced(false);
+      setFollowUpPrompt("");
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Failed to save module.");
+    } finally {
+      setSavingModule(false);
+    }
+  }
+
+  async function launchCampaign() {
+    if (!selectedModule || !selectedCharacter || launching) {
+      return;
+    }
+
+    setLaunching(true);
     setError(null);
 
     try {
@@ -345,8 +458,8 @@ export function SessionZeroApp() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
+          moduleId: selectedModule.id,
           templateId: selectedCharacter.id,
-          draft,
         }),
       });
 
@@ -357,118 +470,360 @@ export function SessionZeroApp() {
       }
 
       router.push(`/play/${data.campaignId}`);
-    } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : "Failed to create campaign.");
+    } catch (launchError) {
+      setError(launchError instanceof Error ? launchError.message : "Failed to launch campaign.");
     } finally {
-      setSaving(false);
+      setLaunching(false);
     }
   }
 
-  if (!draft) {
+  if (draft) {
+    const { publicSynopsis, secretEngine } = draft;
+
     return (
-      <main className="min-h-screen bg-black text-zinc-50">
-        <div className="mx-auto flex min-h-screen max-w-5xl items-center px-6 py-16">
-          <section className="mx-auto w-full max-w-4xl rounded-[2rem] border border-zinc-800 bg-zinc-950 p-8 shadow-[0_0_0_1px_rgba(24,24,27,0.4)]">
-            <p className="text-[0.68rem] uppercase tracking-[0.28em] text-zinc-500">Session Zero</p>
-            <h1 className="mt-4 text-4xl font-semibold tracking-tight text-white">Shape the next adventure.</h1>
-            <p className="mt-4 text-sm leading-7 text-zinc-400">
-              Choose the character entering this campaign, then describe the world, tone, or rule constraints you want.
-              The first pass stays spoiler-safe. You can reveal the deeper machinery only if you want to tune it.
-            </p>
-
-            <div className="mt-8">
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-[0.68rem] uppercase tracking-[0.24em] text-zinc-500">Step 1: Choose Character</p>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    className="button-press rounded-full border border-zinc-800 px-4 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-200 hover:bg-black"
-                    onClick={() => router.push("/")}
-                  >
-                    Home
-                  </button>
-                  <button
-                    type="button"
-                    className="button-press rounded-full border border-zinc-800 px-4 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-200 hover:bg-black"
-                    onClick={() => router.push("/characters")}
-                  >
-                    Character Library
-                  </button>
-                </div>
+      <main className="min-h-screen bg-black pb-40 text-zinc-50">
+        <div className="mx-auto w-full max-w-5xl px-6 py-12">
+          <header className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-8">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-[0.68rem] uppercase tracking-[0.28em] text-zinc-500">Draft Module</p>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  className="button-press rounded-full border border-zinc-800 px-4 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-200 hover:bg-black"
+                  onClick={() => router.push("/")}
+                >
+                  Home
+                </button>
+                <button
+                  type="button"
+                  className="button-press rounded-full border border-zinc-800 px-4 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-200 hover:bg-black"
+                  onClick={() => router.push("/characters")}
+                >
+                  Character Library
+                </button>
               </div>
-
-              {charactersLoading ? (
-                <div className="mt-4 rounded-3xl border border-zinc-800 bg-black p-6 text-sm text-zinc-400">
-                  Loading saved characters...
-                </div>
-              ) : characters.length ? (
-                <div className="mt-4 grid gap-4 md:grid-cols-2">
-                  {characters.map((character) => (
-                    <CharacterCard
-                      key={character.id}
-                      character={character}
-                      selected={character.id === selectedTemplateId}
-                      onSelect={() => setSelectedTemplateId(character.id)}
-                      onDelete={() => void deleteCharacter(character)}
-                      deleting={deletingTemplateId === character.id}
-                    />
-                  ))}
-                </div>
-              ) : (
-                <div className="mt-4 rounded-3xl border border-zinc-800 bg-black p-6">
-                  <p className="text-sm leading-7 text-zinc-400">
-                    You need at least one saved character before Session Zero can generate a campaign.
-                  </p>
-                  <button
-                    type="button"
-                    className="button-press mt-4 rounded-full bg-white px-5 py-3 text-sm font-semibold text-black hover:bg-zinc-200"
-                    onClick={() => router.push("/characters")}
-                  >
-                    Build Your First Character
-                  </button>
-                </div>
-              )}
             </div>
+            <h1 className="mt-4 text-4xl font-semibold tracking-tight text-white">{publicSynopsis.title}</h1>
+            <p className="mt-3 max-w-3xl text-sm leading-7 text-zinc-300">{publicSynopsis.premise}</p>
+            <div className="mt-8 grid gap-4 md:grid-cols-2">
+              <section className="rounded-3xl border border-zinc-800 bg-black p-5">
+                <h2 className="text-sm uppercase tracking-[0.22em] text-zinc-500">Setting</h2>
+                <p className="mt-3 text-sm leading-7 text-zinc-200">{publicSynopsis.setting}</p>
+              </section>
+              <section className="rounded-3xl border border-zinc-800 bg-black p-5">
+                <h2 className="text-sm uppercase tracking-[0.22em] text-zinc-500">Tone</h2>
+                <p className="mt-3 text-sm leading-7 text-zinc-200">{publicSynopsis.tone}</p>
+              </section>
+            </div>
+            <section className="mt-6 rounded-3xl border border-zinc-800 bg-black p-5">
+              <h2 className="text-sm uppercase tracking-[0.22em] text-zinc-500">Opening Scene</h2>
+              <h3 className="mt-3 text-xl font-semibold text-white">{publicSynopsis.openingScene.title}</h3>
+              <p className="mt-2 text-sm text-zinc-500">{publicSynopsis.openingScene.location}</p>
+              <p className="mt-4 text-sm leading-7 text-zinc-200">{publicSynopsis.openingScene.overview}</p>
+            </section>
+            <button
+              className="mt-6 text-sm text-zinc-400 underline decoration-zinc-700 underline-offset-4 transition-colors hover:text-zinc-200"
+              onClick={() => setShowAdvanced((current) => !current)}
+              type="button"
+            >
+              {showAdvanced ? "Hide Advanced Options" : "Show Advanced Options (Warning: Contains Spoilers)"}
+            </button>
+          </header>
 
-            {selectedCharacter ? (
-              <div className="mt-8 rounded-3xl border border-zinc-800 bg-black p-5">
-                <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Selected Hero</p>
-                <h2 className="mt-3 text-2xl font-semibold text-white">{selectedCharacter.name}</h2>
-                <p className="mt-1 text-sm text-zinc-400">{selectedCharacter.archetype}</p>
+          {showAdvanced ? (
+            <section className="mt-8 rounded-[2rem] border border-zinc-800 bg-zinc-950 p-8">
+              <p className="text-[0.68rem] uppercase tracking-[0.28em] text-zinc-500">The DM Screen</p>
+
+              <div className="mt-6 rounded-3xl border border-zinc-800 bg-black p-5">
+                <h2 className="text-lg font-semibold text-white">Opening Details</h2>
+                <p className="mt-3 text-sm text-zinc-500">{secretEngine.openingScene.location}</p>
+                <p className="mt-4 text-sm leading-7 text-zinc-200">{secretEngine.openingScene.summary}</p>
+                <p className="mt-4 text-sm leading-7 text-zinc-400">{secretEngine.openingScene.atmosphere}</p>
+                <div className="mt-5 rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                  <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Starting Hook</p>
+                  <p className="mt-2 text-sm leading-7 text-zinc-200">{secretEngine.openingScene.activeThreat}</p>
+                  <p className="mt-4 text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Suggested Actions</p>
+                  <p className="mt-2 text-sm leading-7 text-zinc-400">
+                    {secretEngine.openingScene.suggestedActions.join(" • ")}
+                  </p>
+                </div>
               </div>
-            ) : null}
 
-            <FieldShell label="Campaign Premise">
-              <textarea
-                className={`${inputClassName(true)} mt-6 min-h-48`}
-                value={prompt}
-                onChange={(event) => setPrompt(event.target.value)}
-                placeholder="Describe the world, tone, or rule constraints..."
+              <div className="mt-6 rounded-3xl border border-zinc-800 bg-black p-5">
+                <h2 className="text-lg font-semibold text-white">Villain</h2>
+                <div className="mt-4 grid gap-4 md:grid-cols-2">
+                  <FieldShell label="Name">
+                    <input
+                      className={inputClassName()}
+                      value={secretEngine.villain.name}
+                      onChange={(event) => updateVillain("name", event.target.value)}
+                    />
+                  </FieldShell>
+                  <FieldShell label="Progress Clock">
+                    <input
+                      className={inputClassName()}
+                      value={String(secretEngine.villain.progressClock)}
+                      onChange={(event) =>
+                        updateVillain(
+                          "progressClock",
+                          Number.parseInt(event.target.value || "0", 10) || 0,
+                        )
+                      }
+                      inputMode="numeric"
+                    />
+                  </FieldShell>
+                </div>
+                <FieldShell label="Motive">
+                  <textarea
+                    className={`${inputClassName(true)} mt-4`}
+                    value={secretEngine.villain.motive}
+                    onChange={(event) => updateVillain("motive", event.target.value)}
+                  />
+                </FieldShell>
+              </div>
+
+              <section className="mt-6 space-y-4">
+                <h2 className="text-lg font-semibold text-white">Arcs</h2>
+                {secretEngine.arcs.map((arc, index) => (
+                  <article
+                    key={`arc-${index}-${arc.title}`}
+                    className="rounded-3xl border border-zinc-800 bg-black p-5"
+                  >
+                    <FieldShell label={`Arc ${index + 1} Title`}>
+                      <input
+                        className={inputClassName()}
+                        value={arc.title}
+                        onChange={(event) => updateArc(index, "title", event.target.value)}
+                      />
+                    </FieldShell>
+                    <FieldShell label="Summary">
+                      <textarea
+                        className={`${inputClassName(true)} mt-4`}
+                        value={arc.summary}
+                        onChange={(event) => updateArc(index, "summary", event.target.value)}
+                      />
+                    </FieldShell>
+                  </article>
+                ))}
+              </section>
+
+              <section className="mt-6 space-y-4">
+                <h2 className="text-lg font-semibold text-white">Reveals</h2>
+                {secretEngine.reveals.map((reveal, index) => (
+                  <article
+                    key={`reveal-${index}-${reveal.title}`}
+                    className="rounded-3xl border border-zinc-800 bg-black p-5"
+                  >
+                    <FieldShell label={`Reveal ${index + 1} Title`}>
+                      <input
+                        className={inputClassName()}
+                        value={reveal.title}
+                        onChange={(event) => updateReveal(index, "title", event.target.value)}
+                      />
+                    </FieldShell>
+                    <FieldShell label="Truth">
+                      <textarea
+                        className={`${inputClassName(true)} mt-4`}
+                        value={reveal.truth}
+                        onChange={(event) => updateReveal(index, "truth", event.target.value)}
+                      />
+                    </FieldShell>
+                    <p className="mt-4 text-xs leading-6 text-zinc-500">
+                      Required clues: {reveal.requiredClueTitles.join(", ") || "None"}
+                    </p>
+                    <p className="mt-2 text-xs leading-6 text-zinc-500">
+                      Required arcs: {reveal.requiredArcTitles.join(", ") || "None"}
+                    </p>
+                  </article>
+                ))}
+              </section>
+
+              <section className="mt-6 space-y-4">
+                <h2 className="text-lg font-semibold text-white">Quests</h2>
+                {secretEngine.quests.map((quest, index) => (
+                  <article
+                    key={`quest-${index}-${quest.title}`}
+                    className="rounded-3xl border border-zinc-800 bg-black p-5"
+                  >
+                    <FieldShell label={`Quest ${index + 1} Title`}>
+                      <input
+                        className={inputClassName()}
+                        value={quest.title}
+                        onChange={(event) => updateQuest(index, "title", event.target.value)}
+                      />
+                    </FieldShell>
+                    <FieldShell label="Summary">
+                      <textarea
+                        className={`${inputClassName(true)} mt-4`}
+                        value={quest.summary}
+                        onChange={(event) => updateQuest(index, "summary", event.target.value)}
+                      />
+                    </FieldShell>
+                  </article>
+                ))}
+              </section>
+
+              <section className="mt-6 space-y-4">
+                <h2 className="text-lg font-semibold text-white">NPCs</h2>
+                {secretEngine.npcs.map((npc, index) => (
+                  <article
+                    key={`npc-${index}-${npc.name}`}
+                    className="rounded-3xl border border-zinc-800 bg-black p-5"
+                  >
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <FieldShell label="Name">
+                        <input
+                          className={inputClassName()}
+                          value={npc.name}
+                          onChange={(event) => updateNpc(index, "name", event.target.value)}
+                        />
+                      </FieldShell>
+                      <FieldShell label="Role">
+                        <input
+                          className={inputClassName()}
+                          value={npc.role}
+                          onChange={(event) => updateNpc(index, "role", event.target.value)}
+                        />
+                      </FieldShell>
+                    </div>
+                    <FieldShell label="Notes">
+                      <textarea
+                        className={`${inputClassName(true)} mt-4`}
+                        value={npc.notes}
+                        onChange={(event) => updateNpc(index, "notes", event.target.value)}
+                      />
+                    </FieldShell>
+                    <div className="mt-4 grid gap-4 md:grid-cols-2">
+                      <FieldShell label="Personal Hook">
+                        <input
+                          className={inputClassName()}
+                          value={npc.personalHook ?? ""}
+                          onChange={(event) => updateNpc(index, "personalHook", event.target.value)}
+                        />
+                      </FieldShell>
+                      <FieldShell label="Status">
+                        <input
+                          className={inputClassName()}
+                          value={npc.status ?? ""}
+                          onChange={(event) => updateNpc(index, "status", event.target.value)}
+                        />
+                      </FieldShell>
+                    </div>
+                  </article>
+                ))}
+              </section>
+
+              <section className="mt-6 space-y-4">
+                <h2 className="text-lg font-semibold text-white">Clues</h2>
+                {secretEngine.clues.map((clue, index) => (
+                  <article
+                    key={`clue-${index}-${clue.text}`}
+                    className="rounded-3xl border border-zinc-800 bg-black p-5"
+                  >
+                    <FieldShell label="Clue Text">
+                      <textarea
+                        className={inputClassName(true)}
+                        value={clue.text}
+                        onChange={(event) => updateClue(index, "text", event.target.value)}
+                      />
+                    </FieldShell>
+                    <div className="mt-4 grid gap-4 md:grid-cols-2">
+                      <FieldShell label="Source">
+                        <input
+                          className={inputClassName()}
+                          value={clue.source}
+                          onChange={(event) => updateClue(index, "source", event.target.value)}
+                        />
+                      </FieldShell>
+                      <FieldShell label="Linked Reveal Title">
+                        <input
+                          className={inputClassName()}
+                          value={clue.linkedRevealTitle}
+                          onChange={(event) =>
+                            updateClue(index, "linkedRevealTitle", event.target.value)
+                          }
+                        />
+                      </FieldShell>
+                    </div>
+                  </article>
+                ))}
+              </section>
+
+              <section className="mt-6 space-y-4">
+                <h2 className="text-lg font-semibold text-white">Locations</h2>
+                {secretEngine.locations.map((location, index) => (
+                  <FieldShell key={`location-${index}-${location}`} label={`Location ${index + 1}`}>
+                    <input
+                      className={inputClassName()}
+                      value={location}
+                      onChange={(event) => updateLocation(index, event.target.value)}
+                    />
+                  </FieldShell>
+                ))}
+              </section>
+            </section>
+          ) : null}
+        </div>
+
+        <div className="fixed inset-x-0 bottom-0 border-t border-zinc-800 bg-black/95 backdrop-blur">
+          <div className="mx-auto flex max-w-5xl flex-col gap-4 px-6 py-4 md:flex-row md:items-end">
+            <FieldShell label="Refine This Draft">
+              <input
+                className={inputClassName()}
+                value={followUpPrompt}
+                onChange={(event) => setFollowUpPrompt(event.target.value)}
+                placeholder="Tweak this module..."
               />
             </FieldShell>
-
-            <button
-              className="button-press mt-6 rounded-full bg-white px-6 py-3 text-sm font-semibold tracking-wide text-black hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
-              onClick={() => void generateDraft(prompt)}
-              disabled={loading || !prompt.trim() || !selectedCharacter || charactersLoading}
-            >
-              {loading ? "Drafting Campaign..." : "Draft Campaign"}
-            </button>
-
-            {error ? <p className="mt-4 text-sm text-red-400">{error}</p> : null}
-          </section>
+            <div className="flex shrink-0 gap-3">
+              <button
+                className="button-press rounded-full border border-zinc-700 px-5 py-3 text-sm font-semibold text-zinc-100 hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={() => void generateDraft(followUpPrompt, draft)}
+                disabled={drafting || savingModule || !followUpPrompt.trim()}
+              >
+                {drafting ? "Updating..." : "Update"}
+              </button>
+              <button
+                className="button-press rounded-full border border-zinc-700 px-5 py-3 text-sm font-semibold text-zinc-100 hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={() => {
+                  setDraft(null);
+                  setShowAdvanced(false);
+                  setFollowUpPrompt("");
+                }}
+                disabled={drafting || savingModule}
+              >
+                Back to Library
+              </button>
+              <button
+                className="button-press rounded-full bg-white px-5 py-3 text-sm font-semibold text-black hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={() => void saveDraftAsModule()}
+                disabled={drafting || savingModule}
+              >
+                {savingModule ? "Saving Module..." : "Save Module"}
+              </button>
+            </div>
+          </div>
+          {error ? <p className="mx-auto max-w-5xl px-6 pb-4 text-sm text-red-400">{error}</p> : null}
         </div>
       </main>
     );
   }
 
-  const { publicSynopsis, secretEngine } = draft;
   return (
-    <main className="min-h-screen bg-black pb-40 text-zinc-50">
-      <div className="mx-auto w-full max-w-5xl px-6 py-12">
-        <header className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-8">
+    <main className="min-h-screen bg-black text-zinc-50">
+      <div className="mx-auto max-w-6xl px-6 py-16">
+        <section className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-8 shadow-[0_0_0_1px_rgba(24,24,27,0.4)]">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <p className="text-[0.68rem] uppercase tracking-[0.28em] text-zinc-500">The Pitch</p>
+            <div>
+              <p className="text-[0.68rem] uppercase tracking-[0.28em] text-zinc-500">Session Zero</p>
+              <h1 className="mt-4 text-4xl font-semibold tracking-tight text-white">
+                Launch the next adventure.
+              </h1>
+              <p className="mt-4 max-w-3xl text-sm leading-7 text-zinc-400">
+                Save a reusable world module first, choose the hero stepping into it next, then
+                start a fresh campaign from that combination.
+              </p>
+            </div>
             <div className="flex gap-2">
               <button
                 type="button"
@@ -486,274 +841,157 @@ export function SessionZeroApp() {
               </button>
             </div>
           </div>
-          <h1 className="mt-4 text-4xl font-semibold tracking-tight text-white">{publicSynopsis.title}</h1>
-          <p className="mt-3 max-w-3xl text-sm leading-7 text-zinc-300">{publicSynopsis.premise}</p>
-          <div className="mt-8 grid gap-4 md:grid-cols-2">
-            <section className="rounded-3xl border border-zinc-800 bg-black p-5">
-              <h2 className="text-sm uppercase tracking-[0.22em] text-zinc-500">Setting</h2>
-              <p className="mt-3 text-sm leading-7 text-zinc-200">{publicSynopsis.setting}</p>
-            </section>
-            <section className="rounded-3xl border border-zinc-800 bg-black p-5">
-              <h2 className="text-sm uppercase tracking-[0.22em] text-zinc-500">Tone</h2>
-              <p className="mt-3 text-sm leading-7 text-zinc-200">{publicSynopsis.tone}</p>
-            </section>
-          </div>
-          <section className="mt-6 rounded-3xl border border-zinc-800 bg-black p-5">
-            <h2 className="text-sm uppercase tracking-[0.22em] text-zinc-500">Opening Scene</h2>
-            <h3 className="mt-3 text-xl font-semibold text-white">{publicSynopsis.openingScene.title}</h3>
-            <p className="mt-2 text-sm text-zinc-500">{publicSynopsis.openingScene.location}</p>
-            <p className="mt-4 text-sm leading-7 text-zinc-200">{publicSynopsis.openingScene.overview}</p>
-          </section>
-          <button
-            className="mt-6 text-sm text-zinc-400 underline decoration-zinc-700 underline-offset-4 transition-colors hover:text-zinc-200"
-            onClick={() => setShowAdvanced((current) => !current)}
-            type="button"
-          >
-            {showAdvanced ? "Hide Advanced Options" : "Show Advanced Options (Warning: Contains Spoilers)"}
-          </button>
-        </header>
 
-        {showAdvanced ? (
-          <section className="mt-8 rounded-[2rem] border border-zinc-800 bg-zinc-950 p-8">
-            <p className="text-[0.68rem] uppercase tracking-[0.28em] text-zinc-500">The DM Screen</p>
-
-            <div className="mt-6 rounded-3xl border border-zinc-800 bg-black p-5">
-              <h2 className="text-lg font-semibold text-white">Opening Details</h2>
-              <p className="mt-3 text-sm text-zinc-500">{secretEngine.openingScene.location}</p>
-              <p className="mt-4 text-sm leading-7 text-zinc-200">{secretEngine.openingScene.summary}</p>
-              <p className="mt-4 text-sm leading-7 text-zinc-400">{secretEngine.openingScene.atmosphere}</p>
-              <div className="mt-5 rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
-                <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Starting Hook</p>
-                <p className="mt-2 text-sm leading-7 text-zinc-200">{secretEngine.openingScene.activeThreat}</p>
-                <p className="mt-4 text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Suggested Actions</p>
-                <p className="mt-2 text-sm leading-7 text-zinc-400">
-                  {secretEngine.openingScene.suggestedActions.join(" • ")}
+          <section className="mt-10">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-[0.68rem] uppercase tracking-[0.24em] text-zinc-500">
+                  Step 1: Choose or Draft Module
+                </p>
+                <p className="mt-2 text-sm text-zinc-400">
+                  Saved modules are replay-only in v1. Draft a new one if you want to revise the world.
                 </p>
               </div>
             </div>
 
-            <div className="mt-6 rounded-3xl border border-zinc-800 bg-black p-5">
-              <h2 className="text-lg font-semibold text-white">Villain</h2>
-              <div className="mt-4 grid gap-4 md:grid-cols-2">
-                <FieldShell label="Name">
-                  <input
-                    className={inputClassName()}
-                    value={secretEngine.villain.name}
-                    onChange={(event) => updateVillain("name", event.target.value)}
-                  />
-                </FieldShell>
-                <FieldShell label="Progress Clock">
-                  <input
-                    className={inputClassName()}
-                    value={String(secretEngine.villain.progressClock)}
-                    onChange={(event) => updateVillain("progressClock", Number.parseInt(event.target.value || "0", 10) || 0)}
-                    inputMode="numeric"
-                  />
-                </FieldShell>
+            <div className="mt-6 grid gap-6 lg:grid-cols-[1.35fr,0.95fr]">
+              <div>
+                {modulesLoading ? (
+                  <div className="rounded-3xl border border-zinc-800 bg-black p-6 text-sm text-zinc-400">
+                    Loading saved modules...
+                  </div>
+                ) : modules.length ? (
+                  <div className="grid gap-4">
+                    {modules.map((module) => (
+                      <ModuleCard
+                        key={module.id}
+                        module={module}
+                        selected={module.id === selectedModuleId}
+                        onSelect={() => setSelectedModuleId(module.id)}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="rounded-3xl border border-zinc-800 bg-black p-6 text-sm leading-7 text-zinc-400">
+                    No reusable modules yet. Draft one below to seed your library.
+                  </div>
+                )}
               </div>
-              <FieldShell label="Motive">
-                <textarea
-                  className={`${inputClassName(true)} mt-4`}
-                  value={secretEngine.villain.motive}
-                  onChange={(event) => updateVillain("motive", event.target.value)}
-                />
-              </FieldShell>
+
+              <div className="rounded-3xl border border-zinc-800 bg-black p-6">
+                <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Draft New Module</p>
+                <p className="mt-3 text-sm leading-7 text-zinc-400">
+                  Describe the world, tone, or rule constraints you want. The first pass stays
+                  spoiler-safe, then you can open the DM screen and save the result into your module library.
+                </p>
+                <FieldShell label="Module Brief">
+                  <textarea
+                    className={`${inputClassName(true)} mt-6 min-h-48`}
+                    value={prompt}
+                    onChange={(event) => setPrompt(event.target.value)}
+                    placeholder="Describe the world, tone, or special constraints..."
+                  />
+                </FieldShell>
+                <button
+                  className="button-press mt-6 rounded-full bg-white px-6 py-3 text-sm font-semibold tracking-wide text-black hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
+                  onClick={() => void generateDraft(prompt)}
+                  disabled={drafting || !prompt.trim()}
+                >
+                  {drafting ? "Drafting Module..." : "Draft Module"}
+                </button>
+                {selectedModule ? (
+                  <div className="mt-6 rounded-3xl border border-zinc-800 bg-zinc-950 p-5">
+                    <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Selected Module</p>
+                    <h2 className="mt-3 text-2xl font-semibold text-white">{selectedModule.title}</h2>
+                    <p className="mt-3 text-sm leading-7 text-zinc-300">{selectedModule.premise}</p>
+                    <p className="mt-4 text-sm text-zinc-500">{selectedModule.openingScene.location}</p>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          </section>
+
+          <section className="mt-10">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-[0.68rem] uppercase tracking-[0.24em] text-zinc-500">
+                  Step 2: Choose Character
+                </p>
+                <p className="mt-2 text-sm text-zinc-400">
+                  Pick the template that will enter the selected module.
+                </p>
+              </div>
             </div>
 
-            <section className="mt-6 space-y-4">
-              <h2 className="text-lg font-semibold text-white">Arcs</h2>
-              {secretEngine.arcs.map((arc, index) => (
-                <article key={`arc-${index}-${arc.title}`} className="rounded-3xl border border-zinc-800 bg-black p-5">
-                  <FieldShell label={`Arc ${index + 1} Title`}>
-                    <input
-                      className={inputClassName()}
-                      value={arc.title}
-                      onChange={(event) => updateArc(index, "title", event.target.value)}
-                    />
-                  </FieldShell>
-                  <FieldShell label="Summary">
-                    <textarea
-                      className={`${inputClassName(true)} mt-4`}
-                      value={arc.summary}
-                      onChange={(event) => updateArc(index, "summary", event.target.value)}
-                    />
-                  </FieldShell>
-                </article>
-              ))}
-            </section>
-
-            <section className="mt-6 space-y-4">
-              <h2 className="text-lg font-semibold text-white">Reveals</h2>
-              {secretEngine.reveals.map((reveal, index) => (
-                <article key={`reveal-${index}-${reveal.title}`} className="rounded-3xl border border-zinc-800 bg-black p-5">
-                  <FieldShell label={`Reveal ${index + 1} Title`}>
-                    <input
-                      className={inputClassName()}
-                      value={reveal.title}
-                      onChange={(event) => updateReveal(index, "title", event.target.value)}
-                    />
-                  </FieldShell>
-                  <FieldShell label="Truth">
-                    <textarea
-                      className={`${inputClassName(true)} mt-4`}
-                      value={reveal.truth}
-                      onChange={(event) => updateReveal(index, "truth", event.target.value)}
-                    />
-                  </FieldShell>
-                  <p className="mt-4 text-xs leading-6 text-zinc-500">
-                    Required clues: {reveal.requiredClueTitles.join(", ") || "None"}
-                  </p>
-                  <p className="mt-2 text-xs leading-6 text-zinc-500">
-                    Required arcs: {reveal.requiredArcTitles.join(", ") || "None"}
-                  </p>
-                </article>
-              ))}
-            </section>
-
-            <section className="mt-6 space-y-4">
-              <h2 className="text-lg font-semibold text-white">Quests</h2>
-              {secretEngine.quests.map((quest, index) => (
-                <article key={`quest-${index}-${quest.title}`} className="rounded-3xl border border-zinc-800 bg-black p-5">
-                  <FieldShell label={`Quest ${index + 1} Title`}>
-                    <input
-                      className={inputClassName()}
-                      value={quest.title}
-                      onChange={(event) => updateQuest(index, "title", event.target.value)}
-                    />
-                  </FieldShell>
-                  <FieldShell label="Summary">
-                    <textarea
-                      className={`${inputClassName(true)} mt-4`}
-                      value={quest.summary}
-                      onChange={(event) => updateQuest(index, "summary", event.target.value)}
-                    />
-                  </FieldShell>
-                </article>
-              ))}
-            </section>
-
-            <section className="mt-6 space-y-4">
-              <h2 className="text-lg font-semibold text-white">NPCs</h2>
-              {secretEngine.npcs.map((npc, index) => (
-                <article key={`npc-${index}-${npc.name}`} className="rounded-3xl border border-zinc-800 bg-black p-5">
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <FieldShell label="Name">
-                      <input
-                        className={inputClassName()}
-                        value={npc.name}
-                        onChange={(event) => updateNpc(index, "name", event.target.value)}
-                      />
-                    </FieldShell>
-                    <FieldShell label="Role">
-                      <input
-                        className={inputClassName()}
-                        value={npc.role}
-                        onChange={(event) => updateNpc(index, "role", event.target.value)}
-                      />
-                    </FieldShell>
-                  </div>
-                  <FieldShell label="Notes">
-                    <textarea
-                      className={`${inputClassName(true)} mt-4`}
-                      value={npc.notes}
-                      onChange={(event) => updateNpc(index, "notes", event.target.value)}
-                    />
-                  </FieldShell>
-                  <div className="mt-4 grid gap-4 md:grid-cols-2">
-                    <FieldShell label="Personal Hook">
-                      <input
-                        className={inputClassName()}
-                        value={npc.personalHook ?? ""}
-                        onChange={(event) => updateNpc(index, "personalHook", event.target.value)}
-                      />
-                    </FieldShell>
-                    <FieldShell label="Status">
-                      <input
-                        className={inputClassName()}
-                        value={npc.status ?? ""}
-                        onChange={(event) => updateNpc(index, "status", event.target.value)}
-                      />
-                    </FieldShell>
-                  </div>
-                </article>
-              ))}
-            </section>
-
-            <section className="mt-6 space-y-4">
-              <h2 className="text-lg font-semibold text-white">Clues</h2>
-              {secretEngine.clues.map((clue, index) => (
-                <article key={`clue-${index}-${clue.text}`} className="rounded-3xl border border-zinc-800 bg-black p-5">
-                  <FieldShell label="Clue Text">
-                    <textarea
-                      className={inputClassName(true)}
-                      value={clue.text}
-                      onChange={(event) => updateClue(index, "text", event.target.value)}
-                    />
-                  </FieldShell>
-                  <div className="mt-4 grid gap-4 md:grid-cols-2">
-                    <FieldShell label="Source">
-                      <input
-                        className={inputClassName()}
-                        value={clue.source}
-                        onChange={(event) => updateClue(index, "source", event.target.value)}
-                      />
-                    </FieldShell>
-                    <FieldShell label="Linked Reveal Title">
-                      <input
-                        className={inputClassName()}
-                        value={clue.linkedRevealTitle}
-                        onChange={(event) => updateClue(index, "linkedRevealTitle", event.target.value)}
-                      />
-                    </FieldShell>
-                  </div>
-                </article>
-              ))}
-            </section>
-
-            <section className="mt-6 space-y-4">
-              <h2 className="text-lg font-semibold text-white">Locations</h2>
-              {secretEngine.locations.map((location, index) => (
-                <FieldShell key={`location-${index}-${location}`} label={`Location ${index + 1}`}>
-                  <input
-                    className={inputClassName()}
-                    value={location}
-                    onChange={(event) => updateLocation(index, event.target.value)}
+            {charactersLoading ? (
+              <div className="mt-6 rounded-3xl border border-zinc-800 bg-black p-6 text-sm text-zinc-400">
+                Loading saved characters...
+              </div>
+            ) : characters.length ? (
+              <div className="mt-6 grid gap-4 md:grid-cols-2">
+                {characters.map((character) => (
+                  <CharacterCard
+                    key={character.id}
+                    character={character}
+                    selected={character.id === selectedTemplateId}
+                    onSelect={() => setSelectedTemplateId(character.id)}
+                    onDelete={() => void deleteCharacter(character)}
+                    deleting={deletingTemplateId === character.id}
                   />
-                </FieldShell>
-              ))}
-            </section>
+                ))}
+              </div>
+            ) : (
+              <div className="mt-6 rounded-3xl border border-zinc-800 bg-black p-6">
+                <p className="text-sm leading-7 text-zinc-400">
+                  You can draft modules without a hero, but you need at least one saved character before you can launch.
+                </p>
+                <button
+                  type="button"
+                  className="button-press mt-4 rounded-full bg-white px-5 py-3 text-sm font-semibold text-black hover:bg-zinc-200"
+                  onClick={() => router.push("/characters")}
+                >
+                  Build Your First Character
+                </button>
+              </div>
+            )}
           </section>
-        ) : null}
-      </div>
 
-      <div className="fixed inset-x-0 bottom-0 border-t border-zinc-800 bg-black/95 backdrop-blur">
-        <div className="mx-auto flex max-w-5xl flex-col gap-4 px-6 py-4 md:flex-row md:items-end">
-          <FieldShell label="Refine This Draft">
-            <input
-              className={inputClassName()}
-              value={followUpPrompt}
-              onChange={(event) => setFollowUpPrompt(event.target.value)}
-              placeholder="Tweak this draft..."
-            />
-          </FieldShell>
-          <div className="flex shrink-0 gap-3">
+          <section className="mt-10 rounded-3xl border border-zinc-800 bg-black p-6">
+            <p className="text-[0.68rem] uppercase tracking-[0.24em] text-zinc-500">Step 3: Launch</p>
+            <div className="mt-5 grid gap-4 md:grid-cols-2">
+              <div className="rounded-3xl border border-zinc-800 bg-zinc-950 p-5">
+                <p className="text-[0.68rem] uppercase tracking-[0.18em] text-zinc-500">Module</p>
+                <h2 className="mt-3 text-xl font-semibold text-white">
+                  {selectedModule?.title ?? "Choose a module"}
+                </h2>
+                <p className="mt-3 text-sm leading-7 text-zinc-400">
+                  {selectedModule?.premise ??
+                    "Pick a saved module or draft a new one before launching the campaign."}
+                </p>
+              </div>
+              <div className="rounded-3xl border border-zinc-800 bg-zinc-950 p-5">
+                <p className="text-[0.68rem] uppercase tracking-[0.18em] text-zinc-500">Character</p>
+                <h2 className="mt-3 text-xl font-semibold text-white">
+                  {selectedCharacter?.name ?? "Choose a character"}
+                </h2>
+                <p className="mt-3 text-sm leading-7 text-zinc-400">
+                  {selectedCharacter
+                    ? `${selectedCharacter.archetype} with ${selectedCharacter.maxHealth} max health.`
+                    : "Select the character template that should enter this module."}
+                </p>
+              </div>
+            </div>
             <button
-              className="button-press rounded-full border border-zinc-700 px-5 py-3 text-sm font-semibold text-zinc-100 hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-60"
-              onClick={() => void generateDraft(followUpPrompt, draft)}
-              disabled={loading || saving || !followUpPrompt.trim()}
+              className="button-press mt-6 rounded-full bg-white px-6 py-3 text-sm font-semibold tracking-wide text-black hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
+              onClick={() => void launchCampaign()}
+              disabled={launching || !selectedModule || !selectedCharacter}
             >
-              {loading ? "Updating..." : "Update"}
+              {launching ? "Launching Adventure..." : "Launch Adventure"}
             </button>
-            <button
-              className="button-press rounded-full bg-white px-5 py-3 text-sm font-semibold text-black hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
-              onClick={() => void confirmDraft()}
-              disabled={loading || saving}
-            >
-              {saving ? "Starting Adventure..." : "Confirm & Start Adventure"}
-            </button>
-          </div>
-        </div>
-        {error ? <p className="mx-auto max-w-5xl px-6 pb-4 text-sm text-red-400">{error}</p> : null}
+          </section>
+
+          {error ? <p className="mt-6 text-sm text-red-400">{error}</p> : null}
+        </section>
       </div>
     </main>
   );
