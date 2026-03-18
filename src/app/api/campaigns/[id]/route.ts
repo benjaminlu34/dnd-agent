@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
-import { getCampaignSnapshot, toPlayerCampaignSnapshot } from "@/lib/game/repository";
+import {
+  backfillLegacyDiscoveries,
+  getCampaignSnapshot,
+  toPlayerCampaignSnapshot,
+} from "@/lib/game/repository";
 import { maybeGeneratePreviouslyOn } from "@/lib/game/engine";
 
 export const runtime = "nodejs";
@@ -10,6 +14,7 @@ type Context = {
 
 export async function GET(_: Request, context: Context) {
   const { id } = await context.params;
+  await backfillLegacyDiscoveries(id);
   const snapshot = await getCampaignSnapshot(id);
 
   if (!snapshot) {

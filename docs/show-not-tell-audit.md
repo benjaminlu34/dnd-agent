@@ -65,6 +65,7 @@ Player-visible content passes this audit only if it meets all of the following:
 ## Implemented Fixes In This Pass
 - Added a player-safe snapshot contract and serializer for campaign and turn APIs.
 - Removed hidden-state data from browser payloads by default.
+- Suppressed opening-turn suggested actions in player payloads so DM-seeded action hints do not leak unrevealed scene details at campaign start.
 - Restricted `People`, `Quests`, and `Clues` to sanitized server-provided records.
 - Removed sidebar threat leakage and kept the player journal focused on scene-visible state.
 - Hardened recap prompts and `Previously on` clue selection.

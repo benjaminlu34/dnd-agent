@@ -34,6 +34,7 @@ type TurnRollbackData = {
     id: string;
     stage: number;
     status: string;
+    discoveredAtTurn: number | null;
   }[];
   arcs: {
     id: string;
@@ -43,6 +44,7 @@ type TurnRollbackData = {
   npcs: {
     id: string;
     approval: number;
+    discoveredAtTurn: number | null;
   }[];
   clues: {
     id: string;
@@ -251,6 +253,7 @@ export async function createAdventure() {
             status: quest.status,
             rewardGold: quest.rewardGold,
             rewardItem: quest.rewardItem,
+            discoveredAtTurn: quest.discoveredAtTurn,
           })),
         },
       },
@@ -278,6 +281,7 @@ export async function createAdventure() {
             approval: npc.approval,
             personalHook: npc.personalHook,
             notes: npc.notes,
+            discoveredAtTurn: npc.discoveredAtTurn,
           })),
         },
       },
@@ -305,7 +309,7 @@ export async function createAdventure() {
   return getCampaignSnapshot(campaign.id);
 }
 function companionInterjection(snapshot: CampaignSnapshot, proposedDelta: ProposedStateDelta) {
-  const companion = snapshot.npcs.find((npc) => npc.isCompanion);
+  const companion = snapshot.npcs.find((npc) => npc.isCompanion && npc.discoveredAtTurn !== null);
 
   if (!companion) {
     return null;
@@ -353,6 +357,7 @@ async function commitValidatedTurn(input: {
         id: quest.id,
         stage: quest.stage,
         status: quest.status,
+        discoveredAtTurn: quest.discoveredAtTurn,
       })),
       arcs: snapshot.arcs.map((arc) => ({
         id: arc.id,
@@ -362,6 +367,7 @@ async function commitValidatedTurn(input: {
       npcs: snapshot.npcs.map((npc) => ({
         id: npc.id,
         approval: npc.approval,
+        discoveredAtTurn: npc.discoveredAtTurn,
       })),
       clues: snapshot.clues.map((clue) => ({
         id: clue.id,
@@ -398,6 +404,18 @@ async function commitValidatedTurn(input: {
       });
     }
 
+    for (const questId of validated.acceptedQuestDiscoveries) {
+      await tx.quest.updateMany({
+        where: {
+          id: questId,
+          discoveredAtTurn: null,
+        },
+        data: {
+          discoveredAtTurn: validated.nextState.turnCount,
+        },
+      });
+    }
+
     for (const clueId of validated.acceptedClueDiscoveries) {
       await tx.clue.update({
         where: { id: clueId },
@@ -429,6 +447,18 @@ async function commitValidatedTurn(input: {
         where: { id: npcChange.npcId },
         data: {
           approval: npc.approval + npcChange.approvalDelta,
+        },
+      });
+    }
+
+    for (const npcId of validated.acceptedNpcDiscoveries) {
+      await tx.nPC.updateMany({
+        where: {
+          id: npcId,
+          discoveredAtTurn: null,
+        },
+        data: {
+          discoveredAtTurn: validated.nextState.turnCount,
         },
       });
     }
@@ -623,6 +653,7 @@ export async function retryLastTurn(turnId: string) {
         data: {
           stage: quest.stage,
           status: quest.status,
+          discoveredAtTurn: quest.discoveredAtTurn,
         },
       });
     }
@@ -642,6 +673,7 @@ export async function retryLastTurn(turnId: string) {
         where: { id: npc.id },
         data: {
           approval: npc.approval,
+          discoveredAtTurn: npc.discoveredAtTurn,
         },
       });
     }

@@ -1148,7 +1148,9 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
                       <h3 className="text-lg font-semibold text-zinc-50">{quest.title}</h3>
                       {quest.summary ? (
                         <p className="mt-2 text-sm leading-7 text-zinc-400">{quest.summary}</p>
-                      ) : null}
+                      ) : (
+                        <p className="mt-2 text-sm leading-7 text-zinc-500">The objective is still taking shape in the journal.</p>
+                      )}
                       <p className="mt-3 text-xs uppercase tracking-[0.2em] text-zinc-500">
                         {quest.status === "completed"
                           ? "Finished"
@@ -1165,12 +1167,12 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
                 knownPeople.length ? (
                   knownPeople.map((npc) => (
                     <div key={npc.id} className="rounded-2xl border border-zinc-800 bg-black px-4 py-4">
-                      {npc.role ? <p className="story-kicker">{npc.role}</p> : null}
+                      <p className="story-kicker">{npc.role ?? "Identity Unknown"}</p>
                       <h3 className="text-lg font-semibold text-zinc-50">{npc.name}</h3>
                       {npc.notes ? (
                         <p className="mt-2 text-sm leading-7 text-zinc-400">{npc.notes}</p>
                       ) : (
-                        <p className="mt-2 text-sm leading-7 text-zinc-500">Mentioned in the story.</p>
+                        <p className="mt-2 text-sm leading-7 text-zinc-500">This figure has entered the story, but their place in it is still unclear.</p>
                       )}
                     </div>
                   ))

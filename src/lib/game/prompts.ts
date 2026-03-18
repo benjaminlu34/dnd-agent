@@ -2,6 +2,7 @@ import type {
   CampaignBlueprint,
   CheckResult,
   Clue,
+  NpcRecord,
   PromptContext,
   QuestRecord,
   ResolveDecision,
@@ -39,6 +40,24 @@ function formatQuestState(quests: QuestRecord[]) {
     .join("\n");
 }
 
+function formatHiddenQuestState(quests: QuestRecord[]) {
+  if (quests.length === 0) {
+    return "None";
+  }
+
+  return quests.map((quest) => `- ${quest.id}: ${quest.title} - ${quest.summary}`).join("\n");
+}
+
+function formatHiddenNpcState(npcs: NpcRecord[]) {
+  if (npcs.length === 0) {
+    return "None";
+  }
+
+  return npcs
+    .map((npc) => `- ${npc.id}: ${npc.name} (${npc.role}) - ${npc.notes}`)
+    .join("\n");
+}
+
 function formatRecentCanon(entries: string[]) {
   if (entries.length === 0) {
     return "None";
@@ -60,6 +79,9 @@ export function buildDungeonMasterSystemPrompt() {
     "Show consequences through concrete details, dialogue, behavior, and sensory observation.",
     "Do not expose hidden motives, secret identities, unrevealed chapter structure, or backstage quest scaffolding before the fiction earns it.",
     "When introducing a person, faction, or lead for the first time, show them through action, dialogue, or visible detail instead of dossier-style explanation.",
+    "When a hidden NPC is clearly encountered or introduced in the narration, include their ID in proposedDelta.npcDiscoveries.",
+    "When a hidden quest becomes explicitly logged as a player-facing objective, include its ID in proposedDelta.questDiscoveries.",
+    "Do not mark NPCs or quests discovered before the narration actually earns that knowledge.",
     "Let clues surface naturally. Do not make every clue perfectly convenient or fully explained on arrival.",
     "Preserve some ambiguity when appropriate.",
     "Avoid markdown styling such as bold, italics, bullet lists, or headers in narration unless the player is literally reading a sign, inscription, or document.",
@@ -102,6 +124,9 @@ ${promptContext.activeArc ? `${promptContext.activeArc.title}: ${promptContext.a
 ACTIVE QUESTS
 ${formatQuestState(promptContext.activeQuests)}
 
+HIDDEN QUESTS AVAILABLE TO DISCOVER
+${formatHiddenQuestState(promptContext.hiddenQuests)}
+
 UNRESOLVED HOOKS
 ${formatList(promptContext.unresolvedHooks.map((hook) => hook.text))}
 
@@ -117,6 +142,9 @@ ${formatList(promptContext.eligibleRevealTexts)}
 COMPANION
 ${promptContext.companion ? `${promptContext.companion.name}: approval ${promptContext.companion.approval}, ${promptContext.companion.notes}` : "None"}
 
+HIDDEN NPCS AVAILABLE TO DISCOVER
+${formatHiddenNpcState(promptContext.hiddenNpcs)}
+
 PACING
 Villain progress: ${promptContext.villainClock}/${blueprint.villain.progressClock}
 Current tension: ${promptContext.tensionScore}/100
@@ -131,6 +159,7 @@ Do not restage the whole scene.
 Do not over-explain what the player has learned.
 End on a concrete image, line of dialogue, or new pressure.
 Return 2-4 suggested actions that fit this exact moment and would feel different if the scene has progressed.
+If a hidden NPC is encountered or a hidden quest is logged, record that in proposedDelta using the exact entity IDs.
 `;
 }
 
@@ -157,8 +186,14 @@ ${formatRecentCanon(promptContext.recentCanon)}
 ACTIVE QUESTS
 ${formatQuestState(promptContext.activeQuests)}
 
+HIDDEN QUESTS AVAILABLE TO DISCOVER
+${formatHiddenQuestState(promptContext.hiddenQuests)}
+
 ELIGIBLE REVEALS
 ${formatList(promptContext.eligibleRevealTexts)}
+
+HIDDEN NPCS AVAILABLE TO DISCOVER
+${formatHiddenNpcState(promptContext.hiddenNpcs)}
 
 PLAYER ACTION
 ${playerAction}
@@ -179,6 +214,7 @@ Do not rewrite earlier scene details unless the new outcome genuinely reveals so
 Do not explain the scene's meaning after narrating it.
 End on the sharpest new opening, risk, or image.
 Return 2-4 suggested actions that follow from this exact resolved outcome, not from the earlier opening scene.
+If a hidden NPC is encountered or a hidden quest is logged in this outcome, record that in proposedDelta using the exact entity IDs.
 `;
 }
 
@@ -213,6 +249,16 @@ export const triageTool = {
       },
       proposedDelta: {
         type: "object",
+        properties: {
+          npcDiscoveries: {
+            type: "array",
+            items: { type: "string" },
+          },
+          questDiscoveries: {
+            type: "array",
+            items: { type: "string" },
+          },
+        },
         additionalProperties: true,
       },
     },
@@ -233,6 +279,16 @@ export const resolutionTool = {
       },
       proposedDelta: {
         type: "object",
+        properties: {
+          npcDiscoveries: {
+            type: "array",
+            items: { type: "string" },
+          },
+          questDiscoveries: {
+            type: "array",
+            items: { type: "string" },
+          },
+        },
         additionalProperties: true,
       },
     },

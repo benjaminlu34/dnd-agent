@@ -127,6 +127,7 @@ model Quest {
   status      String
   rewardGold  Int       @default(0)
   rewardItem  String?
+  discoveredAtTurn Int?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   campaign    Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
@@ -156,6 +157,7 @@ model NPC {
   approval     Int       @default(0)
   personalHook String?
   notes        String
+  discoveredAtTurn Int?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
   campaign     Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)

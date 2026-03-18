@@ -53,7 +53,8 @@ function buildPromptContext(): PromptContext {
   return {
     scene: state.sceneState,
     activeArc: arcs[0],
-    activeQuests: createStarterQuests(),
+    activeQuests: [],
+    hiddenQuests: createStarterQuests(),
     unresolvedHooks: state.hooks,
     recentCanon: [
       "DM: Wind rattles brass prayer bells while the market square clears around a blood-red notice.",
@@ -63,7 +64,8 @@ function buildPromptContext(): PromptContext {
     staleClues: getStaleClues(clues, state.turnCount),
     eligibleRevealIds: [],
     eligibleRevealTexts: [],
-    companion: createStarterNpcs().find((npc) => npc.isCompanion) ?? null,
+    companion: null,
+    hiddenNpcs: createStarterNpcs(),
     villainClock: state.villainClock,
     tensionScore: state.tensionScore,
     arcPacingHint: null,

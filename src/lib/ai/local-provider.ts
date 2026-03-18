@@ -675,6 +675,44 @@ function chooseReveal(promptContext: PromptContext, intent: ActionIntent, checkO
   return null;
 }
 
+function chooseNpcDiscovery(promptContext: PromptContext, intent: ActionIntent) {
+  const hiddenNpcs = promptContext.hiddenNpcs;
+
+  if (!hiddenNpcs.length) {
+    return null;
+  }
+
+  if (["social", "support", "travel", "inspect"].includes(intent.kind)) {
+    return hiddenNpcs[0] ?? null;
+  }
+
+  return null;
+}
+
+function chooseQuestDiscovery(promptContext: PromptContext, options: {
+  intent: ActionIntent;
+  discoveredClue: boolean;
+  revealTriggered: boolean;
+  outcome?: CheckOutcome;
+}) {
+  const hiddenQuests = promptContext.hiddenQuests.filter((quest) => quest.status === "active");
+
+  if (!hiddenQuests.length) {
+    return null;
+  }
+
+  if (
+    options.discoveredClue ||
+    options.revealTriggered ||
+    options.outcome === "success" ||
+    ["inspect", "social", "travel", "ritual"].includes(options.intent.kind)
+  ) {
+    return hiddenQuests[0] ?? null;
+  }
+
+  return null;
+}
+
 function buildQuestProgress(
   activeQuests: QuestRecord[],
   options: {
@@ -846,17 +884,25 @@ function buildNoCheckNarration(input: {
   playerAction: string;
   discoveredClueText?: string | null;
   revealText?: string | null;
+  discoveredNpcName?: string | null;
+  discoveredQuestTitle?: string | null;
 }) {
   const scene = input.promptContext.scene;
   const lead = `In ${scene.title}, ${lowerFirst(input.playerAction.replace(/[.?!]+$/, ""))}.`;
+  const npcBeat = input.discoveredNpcName
+    ? `${input.discoveredNpcName} steps fully into the moment instead of remaining part of the background.`
+    : "";
   const clueBeat = input.discoveredClueText
     ? `That draws a concrete detail into the open: ${input.discoveredClueText}.`
     : `The move changes the rhythm of the scene before anyone can settle back into it.`;
+  const questBeat = input.discoveredQuestTitle
+    ? `The trouble finally takes a shape you can name: ${input.discoveredQuestTitle}.`
+    : "";
   const revealBeat = input.revealText
     ? `The implication lands hard: ${input.revealText}.`
     : `The air in ${scene.location} stays ${lowerFirst(scene.atmosphere)}, but now it has a direction.`;
 
-  return [lead, clueBeat, revealBeat].join(" ");
+  return [lead, npcBeat, clueBeat, questBeat, revealBeat].filter(Boolean).join(" ");
 }
 
 function buildResolutionNarration(input: {
@@ -865,17 +911,27 @@ function buildResolutionNarration(input: {
   outcome: CheckOutcome;
   discoveredClueText?: string | null;
   revealText?: string | null;
+  discoveredNpcName?: string | null;
+  discoveredQuestTitle?: string | null;
 }) {
   const companionBeat = input.promptContext.companion
     ? `${input.promptContext.companion.name} clocks it instantly and adjusts with you.`
+    : "";
+  const npcBeat = input.discoveredNpcName
+    ? `${input.discoveredNpcName} is no longer just another face in the scene.`
+    : "";
+  const questBeat = input.discoveredQuestTitle
+    ? `The mess resolves into a real objective: ${input.discoveredQuestTitle}.`
     : "";
 
   if (input.outcome === "success") {
     return [
       `You follow through on ${lowerFirst(input.playerAction.replace(/[.?!]+$/, ""))}, and the moment breaks your way.`,
+      npcBeat,
       input.discoveredClueText
         ? `The payoff is immediate: ${input.discoveredClueText}.`
         : `The pressure in ${input.promptContext.scene.location} shifts before the opposition can recover.`,
+      questBeat,
       input.revealText ? `The larger truth snaps into focus: ${input.revealText}.` : companionBeat,
     ]
       .filter(Boolean)
@@ -885,9 +941,11 @@ function buildResolutionNarration(input: {
   if (input.outcome === "partial") {
     return [
       `You make ${lowerFirst(input.playerAction.replace(/[.?!]+$/, ""))} work, but not cleanly.`,
+      npcBeat,
       input.discoveredClueText
         ? `You still pull something useful out of the mess: ${input.discoveredClueText}.`
         : `The scene gives ground, then bites back.`,
+      questBeat,
       input.revealText
         ? `Even through the mess, one truth shows itself: ${input.revealText}.`
         : companionBeat || "Someone nearby now knows how close you came.",
@@ -899,8 +957,12 @@ function buildResolutionNarration(input: {
   return [
     `You commit to ${lowerFirst(input.playerAction.replace(/[.?!]+$/, ""))}, and the scene turns against you.`,
     `The opening narrows, the pressure spikes, and ${input.promptContext.scene.location} suddenly feels smaller than it did a breath ago.`,
+    npcBeat,
+    questBeat,
     companionBeat || "Whoever was waiting for a mistake has one now.",
-  ].join(" ");
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 function emitNarration(callbacks: StreamCallbacks | undefined, narration: string) {
@@ -1218,7 +1280,7 @@ function buildCampaignSetup(
   const publicOpeningOverview = wantsQuietOpening
     ? `The adventure begins in ${openingSceneLocation}, where a familiar routine starts to feel subtly wrong and a small secret hints at larger trouble moving through the city.`
     : `The adventure begins in ${openingSceneLocation}, where rising pressure around a dangerous prize signals that the city's hidden struggle is about to break into the open.`;
-  const secretEngine = openingFocusedRevision
+  const secretEngine = openingFocusedRevision && previous
     ? {
         ...previous.secretEngine,
         openingScene: {
@@ -1341,19 +1403,34 @@ export class LocalDungeonMaster {
 
     const clue = chooseHiddenClue(input.promptContext, intent);
     const revealId = chooseReveal(input.promptContext, intent);
-    const revealText = revealId
-      ? input.blueprint.hiddenReveals.find((reveal) => reveal.id === revealId)?.truth ?? null
-      : null;
-    const questProgress = buildQuestProgress(input.promptContext.activeQuests, {
+    const npcDiscovery = chooseNpcDiscovery(input.promptContext, intent);
+    const questDiscovery = chooseQuestDiscovery(input.promptContext, {
+      intent,
       discoveredClue: Boolean(clue),
       revealTriggered: Boolean(revealId),
     });
+    const revealText = revealId
+      ? input.blueprint.hiddenReveals.find((reveal) => reveal.id === revealId)?.truth ?? null
+      : null;
+    const questProgress = buildQuestProgress(
+      input.promptContext.activeQuests.length
+        ? input.promptContext.activeQuests
+        : questDiscovery
+          ? [questDiscovery]
+          : [],
+      {
+      discoveredClue: Boolean(clue),
+      revealTriggered: Boolean(revealId),
+      },
+    );
     const arcProgress = buildArcProgress(input.blueprint, input.promptContext, 1);
     const narration = buildNoCheckNarration({
       promptContext: input.promptContext,
       playerAction: input.playerAction,
       discoveredClueText: clue?.text ?? null,
       revealText,
+      discoveredNpcName: npcDiscovery?.name ?? null,
+      discoveredQuestTitle: questDiscovery?.title ?? null,
     });
     const suggestedActions = buildSuggestedActions({
       promptContext: input.promptContext,
@@ -1375,6 +1452,7 @@ export class LocalDungeonMaster {
             ? "briefly steadier, but not safe"
             : input.promptContext.scene.atmosphere,
         clueDiscoveries: clue ? [clue.id] : [],
+        questDiscoveries: questDiscovery ? [questDiscovery.id] : [],
         revealTriggers: revealId ? [revealId] : [],
         villainClockDelta: intent.kind === "rest" ? 1 : revealId ? 0 : 1,
         tensionDelta: intent.kind === "rest" ? -2 : clue ? 2 : 3,
@@ -1383,6 +1461,7 @@ export class LocalDungeonMaster {
         arcAdvancements: arcProgress.arcAdvancements,
         activeArcId: arcProgress.activeArcId,
         suggestedActions,
+        npcDiscoveries: npcDiscovery ? [npcDiscovery.id] : [],
         npcApprovalChanges:
           input.promptContext.companion && intent.kind === "support"
             ? [
@@ -1411,14 +1490,29 @@ export class LocalDungeonMaster {
     const clue =
       input.checkResult.outcome === "failure" ? null : chooseHiddenClue(input.promptContext, intent);
     const revealId = chooseReveal(input.promptContext, intent, input.checkResult.outcome);
-    const revealText = revealId
-      ? input.blueprint.hiddenReveals.find((reveal) => reveal.id === revealId)?.truth ?? null
-      : null;
-    const questProgress = buildQuestProgress(input.promptContext.activeQuests, {
+    const npcDiscovery =
+      input.checkResult.outcome === "failure" ? null : chooseNpcDiscovery(input.promptContext, intent);
+    const questDiscovery = chooseQuestDiscovery(input.promptContext, {
+      intent,
       discoveredClue: Boolean(clue),
       revealTriggered: Boolean(revealId),
       outcome: input.checkResult.outcome,
     });
+    const revealText = revealId
+      ? input.blueprint.hiddenReveals.find((reveal) => reveal.id === revealId)?.truth ?? null
+      : null;
+    const questProgress = buildQuestProgress(
+      input.promptContext.activeQuests.length
+        ? input.promptContext.activeQuests
+        : questDiscovery
+          ? [questDiscovery]
+          : [],
+      {
+      discoveredClue: Boolean(clue),
+      revealTriggered: Boolean(revealId),
+      outcome: input.checkResult.outcome,
+      },
+    );
     const arcProgress = buildArcProgress(
       input.blueprint,
       input.promptContext,
@@ -1430,6 +1524,8 @@ export class LocalDungeonMaster {
       outcome: input.checkResult.outcome,
       discoveredClueText: clue?.text ?? null,
       revealText,
+      discoveredNpcName: npcDiscovery?.name ?? null,
+      discoveredQuestTitle: questDiscovery?.title ?? null,
     });
     const suggestedActions = buildSuggestedActions({
       promptContext: input.promptContext,
@@ -1453,6 +1549,7 @@ export class LocalDungeonMaster {
               ? "shifting and unstable"
               : "tight with threat and attention",
         clueDiscoveries: clue ? [clue.id] : [],
+        questDiscoveries: questDiscovery ? [questDiscovery.id] : [],
         revealTriggers: revealId ? [revealId] : [],
         villainClockDelta:
           input.checkResult.outcome === "failure"
@@ -1471,6 +1568,7 @@ export class LocalDungeonMaster {
         arcAdvancements: arcProgress.arcAdvancements,
         activeArcId: arcProgress.activeArcId,
         suggestedActions,
+        npcDiscoveries: npcDiscovery ? [npcDiscovery.id] : [],
         npcApprovalChanges:
           input.promptContext.companion && input.checkResult.outcome !== "failure"
             ? [

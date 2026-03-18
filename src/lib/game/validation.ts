@@ -56,15 +56,19 @@ export function validateDelta({
 
   let awardedGold = 0;
   const acceptedQuestAdvancements: NonNullable<ValidatedDelta["acceptedQuestAdvancements"]> = [];
+  const acceptedQuestDiscoveries: string[] = [];
   const acceptedClueDiscoveries: string[] = [];
   const acceptedRevealTriggers: string[] = [];
   const acceptedArcAdvancements: NonNullable<ValidatedDelta["acceptedArcAdvancements"]> = [];
   const acceptedNpcChanges: NonNullable<ValidatedDelta["acceptedNpcChanges"]> = [];
+  const acceptedNpcDiscoveries: string[] = [];
   const acceptedInventoryChanges = {
     add: [] as string[],
     remove: [] as string[],
   };
   const arcIds = new Set(arcs.map((arc) => arc.id));
+  const seenQuestDiscoveries = new Set<string>();
+  const seenNpcDiscoveries = new Set<string>();
 
   if (proposedDelta.activeArcId && !arcIds.has(proposedDelta.activeArcId)) {
     warnings.push(`Rejected active arc update for unknown arc ${proposedDelta.activeArcId}.`);
@@ -92,6 +96,26 @@ export function validateDelta({
         acceptedInventoryChanges.add.push(quest.rewardItem);
       }
     }
+  }
+
+  for (const questId of proposedDelta.questDiscoveries ?? []) {
+    if (seenQuestDiscoveries.has(questId)) {
+      continue;
+    }
+    seenQuestDiscoveries.add(questId);
+
+    const quest = quests.find((entry) => entry.id === questId);
+
+    if (!quest) {
+      warnings.push(`Rejected unknown quest discovery ${questId}.`);
+      continue;
+    }
+
+    if (quest.discoveredAtTurn !== null) {
+      continue;
+    }
+
+    acceptedQuestDiscoveries.push(questId);
   }
 
   if ((proposedDelta.goldChange ?? 0) > 0 && !proposedDelta.rewardQuestId) {
@@ -161,6 +185,25 @@ export function validateDelta({
     acceptedNpcChanges.push(npcChange);
   }
 
+  for (const npcId of proposedDelta.npcDiscoveries ?? []) {
+    if (seenNpcDiscoveries.has(npcId)) {
+      continue;
+    }
+    seenNpcDiscoveries.add(npcId);
+
+    if (!npcIds.has(npcId)) {
+      warnings.push(`Rejected unknown NPC discovery ${npcId}.`);
+      continue;
+    }
+
+    const npc = npcs.find((entry) => entry.id === npcId);
+    if (!npc || npc.discoveredAtTurn !== null) {
+      continue;
+    }
+
+    acceptedNpcDiscoveries.push(npcId);
+  }
+
   nextState.activeRevealIds = Array.from(
     new Set([...state.activeRevealIds, ...acceptedRevealTriggers]),
   );
@@ -174,10 +217,12 @@ export function validateDelta({
     },
     warnings,
     acceptedQuestAdvancements,
+    acceptedQuestDiscoveries,
     acceptedClueDiscoveries,
     acceptedRevealTriggers,
     acceptedArcAdvancements,
     acceptedNpcChanges,
+    acceptedNpcDiscoveries,
     awardedGold,
     acceptedInventoryChanges,
     memorySummary: proposedDelta.memorySummary,

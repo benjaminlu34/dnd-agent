@@ -138,6 +138,7 @@ export function buildQuestRecordsFromSetup(setup: GeneratedCampaignSetup): Quest
     status: "active",
     rewardGold: Math.max(0, quest.rewardGold),
     rewardItem: quest.rewardItem ?? null,
+    discoveredAtTurn: null,
   }));
 }
 
@@ -168,6 +169,7 @@ export function buildNpcRecordsFromSetup(setup: GeneratedCampaignSetup): NpcReco
     approval: npc.approval ?? 0,
     personalHook: npc.personalHook ?? null,
     notes: npc.notes,
+    discoveredAtTurn: null,
   }));
 }
 

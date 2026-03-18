@@ -222,6 +222,7 @@ export function createStarterQuests(): QuestRecord[] {
       status: "active",
       rewardGold: 25,
       rewardItem: "moon-salt charm",
+      discoveredAtTurn: null,
     },
   ];
 }
@@ -260,6 +261,7 @@ export function createStarterNpcs(): NpcRecord[] {
       approval: 1,
       personalHook: "Identify the saint tied to her ruined chapel.",
       notes: "A quick-eyed scout who masks fear with dry humor.",
+      discoveredAtTurn: null,
     },
     {
       id: "npc_bellwarden",
@@ -270,6 +272,7 @@ export function createStarterNpcs(): NpcRecord[] {
       approval: 0,
       personalHook: null,
       notes: "Caretaker of the Silver Bell and guardian of the square.",
+      discoveredAtTurn: null,
     },
   ];
 }

@@ -293,6 +293,7 @@ function toQuest(quest: Quest): QuestRecord {
     status: quest.status as QuestStatus,
     rewardGold: quest.rewardGold,
     rewardItem: quest.rewardItem,
+    discoveredAtTurn: quest.discoveredAtTurn,
   };
 }
 
@@ -318,6 +319,7 @@ function toNpc(npc: NPC): NpcRecord {
     approval: npc.approval,
     personalHook: npc.personalHook,
     notes: npc.notes,
+    discoveredAtTurn: npc.discoveredAtTurn,
   };
 }
 
@@ -369,7 +371,7 @@ function buildPlayerKnowledgeText(snapshot: CampaignSnapshot, previouslyOn?: str
     .toLowerCase();
 }
 
-function isNamedInKnowledgeText(knowledgeText: string, value: string) {
+function isExactPhraseInKnowledgeText(knowledgeText: string, value: string) {
   const trimmed = value.trim().toLowerCase();
 
   if (!trimmed) {
@@ -379,11 +381,38 @@ function isNamedInKnowledgeText(knowledgeText: string, value: string) {
   return new RegExp(`\\b${escapeRegExp(trimmed)}\\b`, "i").test(knowledgeText);
 }
 
+function isLegacyNameInKnowledgeText(knowledgeText: string, value: string) {
+  if (isExactPhraseInKnowledgeText(knowledgeText, value)) {
+    return true;
+  }
+
+  const stopwords = new Set([
+    "the",
+    "a",
+    "an",
+    "of",
+    "and",
+    "lord",
+    "lady",
+    "sir",
+    "master",
+    "mistress",
+    "high",
+  ]);
+  const tokens = value
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 4 && !stopwords.has(token));
+
+  return tokens.some((token) => new RegExp(`\\b${escapeRegExp(token)}\\b`, "i").test(knowledgeText));
+}
+
 function toPlayerQuest(quest: QuestRecord): PlayerVisibleQuestRecord {
   return {
     id: quest.id,
     title: quest.title,
-    summary: null,
+    summary: quest.summary,
     stage: quest.stage,
     maxStage: quest.maxStage,
     status: quest.status,
@@ -394,7 +423,7 @@ function toPlayerNpc(npc: NpcRecord, knowledgeText: string): PlayerVisibleNpcRec
   return {
     id: npc.id,
     name: npc.name,
-    role: isNamedInKnowledgeText(knowledgeText, npc.role) ? npc.role : null,
+    role: isExactPhraseInKnowledgeText(knowledgeText, npc.role) ? npc.role : null,
     notes: null,
     isCompanion: npc.isCompanion,
   };
@@ -418,6 +447,66 @@ export async function getRecentMessages(sessionId: string) {
   });
 
   return messages.map(toMessage);
+}
+
+export async function backfillLegacyDiscoveries(campaignId: string) {
+  const snapshot = await getCampaignSnapshot(campaignId);
+
+  if (!snapshot) {
+    return false;
+  }
+
+  const hasProgressBeyondFreshStart =
+    snapshot.state.turnCount > 0 || snapshot.memories.length > 0 || snapshot.recentMessages.length > 1;
+
+  if (!hasProgressBeyondFreshStart) {
+    return false;
+  }
+
+  const knowledgeText = buildPlayerKnowledgeText(snapshot);
+  const questIdsToDiscover = snapshot.quests
+    .filter(
+      (quest) =>
+        quest.discoveredAtTurn === null && isExactPhraseInKnowledgeText(knowledgeText, quest.title),
+    )
+    .map((quest) => quest.id);
+  const npcIdsToDiscover = snapshot.npcs
+    .filter(
+      (npc) =>
+        npc.discoveredAtTurn === null && isLegacyNameInKnowledgeText(knowledgeText, npc.name),
+    )
+    .map((npc) => npc.id);
+
+  if (!questIdsToDiscover.length && !npcIdsToDiscover.length) {
+    return false;
+  }
+
+  await prisma.$transaction([
+    ...questIdsToDiscover.map((questId) =>
+      prisma.quest.updateMany({
+        where: {
+          id: questId,
+          discoveredAtTurn: null,
+        },
+        data: {
+          discoveredAtTurn: 0,
+        },
+      }),
+    ),
+    ...npcIdsToDiscover.map((npcId) =>
+      prisma.nPC.updateMany({
+        where: {
+          id: npcId,
+          discoveredAtTurn: null,
+        },
+        data: {
+          discoveredAtTurn: 0,
+        },
+      }),
+    ),
+  ]);
+
+  return true;
 }
 
 export async function getCampaignSnapshot(
@@ -480,11 +569,13 @@ export function toPlayerCampaignSnapshot(
   previouslyOn: string | null = snapshot.previouslyOn,
 ): PlayerCampaignSnapshot {
   const knowledgeText = buildPlayerKnowledgeText(snapshot, previouslyOn);
+  const suggestedActions =
+    snapshot.state.turnCount === 0 ? [] : snapshot.state.sceneState.suggestedActions;
   const visibleQuests = snapshot.quests
-    .filter((quest) => isNamedInKnowledgeText(knowledgeText, quest.title))
+    .filter((quest) => quest.discoveredAtTurn !== null)
     .map(toPlayerQuest);
   const visibleNpcs = snapshot.npcs
-    .filter((npc) => isNamedInKnowledgeText(knowledgeText, npc.name))
+    .filter((npc) => npc.discoveredAtTurn !== null)
     .map((npc) => toPlayerNpc(npc, knowledgeText));
   const visibleClues = snapshot.clues
     .filter((clue) => clue.status === "discovered")
@@ -499,7 +590,10 @@ export function toPlayerCampaignSnapshot(
     setting: snapshot.setting,
     state: {
       turnCount: snapshot.state.turnCount,
-      sceneState: snapshot.state.sceneState,
+      sceneState: {
+        ...snapshot.state.sceneState,
+        suggestedActions,
+      },
     },
     character: snapshot.character,
     quests: visibleQuests,
@@ -514,7 +608,6 @@ export function toPlayerCampaignSnapshot(
 }
 
 export function getPromptContext(snapshot: CampaignSnapshot) {
-  const playerKnowledgeText = buildPlayerKnowledgeText(snapshot);
   const activeArc = snapshot.arcs.find((arc) => arc.id === snapshot.state.activeArcId);
   const unresolvedHooks = snapshot.state.hooks.filter((hook) => hook.status === "open");
   const recentCanon = snapshot.recentMessages
@@ -538,7 +631,7 @@ export function getPromptContext(snapshot: CampaignSnapshot) {
   const staleClues = getStaleClues(snapshot.clues, snapshot.state.turnCount);
   const companion =
     snapshot.npcs.find(
-      (npc) => npc.isCompanion && isNamedInKnowledgeText(playerKnowledgeText, npc.name),
+      (npc) => npc.isCompanion && npc.discoveredAtTurn !== null,
     ) ?? null;
   const eligibleRevealIds = snapshot.blueprint.hiddenReveals
     .filter((reveal) => {
@@ -566,7 +659,10 @@ export function getPromptContext(snapshot: CampaignSnapshot) {
   return {
     scene: snapshot.state.sceneState,
     activeArc,
-    activeQuests: snapshot.quests.filter((quest) => quest.status === "active"),
+    activeQuests: snapshot.quests.filter(
+      (quest) => quest.status === "active" && quest.discoveredAtTurn !== null,
+    ),
+    hiddenQuests: snapshot.quests.filter((quest) => quest.discoveredAtTurn === null),
     unresolvedHooks,
     recentCanon,
     relevantClues: clueWindow,
@@ -574,6 +670,7 @@ export function getPromptContext(snapshot: CampaignSnapshot) {
     eligibleRevealIds,
     eligibleRevealTexts,
     companion,
+    hiddenNpcs: snapshot.npcs.filter((npc) => npc.discoveredAtTurn === null),
     villainClock: snapshot.state.villainClock,
     tensionScore: snapshot.state.tensionScore,
     arcPacingHint,

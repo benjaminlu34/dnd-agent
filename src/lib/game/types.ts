@@ -206,6 +206,7 @@ export type QuestRecord = {
   status: QuestStatus;
   rewardGold: number;
   rewardItem: string | null;
+  discoveredAtTurn: number | null;
 };
 
 export type ArcRecord = {
@@ -227,6 +228,7 @@ export type NpcRecord = {
   approval: number;
   personalHook: string | null;
   notes: string;
+  discoveredAtTurn: number | null;
 };
 
 export type MemoryRecord = {
@@ -354,6 +356,7 @@ export type ProposedStateDelta = {
     nextStage: number;
     status?: QuestStatus;
   }[];
+  questDiscoveries?: string[];
   clueDiscoveries?: string[];
   revealTriggers?: string[];
   villainClockDelta?: number;
@@ -368,6 +371,7 @@ export type ProposedStateDelta = {
     approvalDelta: number;
     reason: string;
   }[];
+  npcDiscoveries?: string[];
   memorySummary?: string;
   actionIntents?: StructuredActionIntent[];
 };
@@ -377,10 +381,12 @@ export type ValidatedDelta = {
   nextCharacter: Pick<CampaignCharacter, "health" | "gold" | "inventory">;
   warnings: string[];
   acceptedQuestAdvancements: ProposedStateDelta["questAdvancements"];
+  acceptedQuestDiscoveries: string[];
   acceptedClueDiscoveries: string[];
   acceptedRevealTriggers: string[];
   acceptedArcAdvancements: ProposedStateDelta["arcAdvancements"];
   acceptedNpcChanges: ProposedStateDelta["npcApprovalChanges"];
+  acceptedNpcDiscoveries: string[];
   awardedGold: number;
   acceptedInventoryChanges: NonNullable<ProposedStateDelta["inventoryChanges"]>;
   memorySummary?: string;
@@ -417,6 +423,7 @@ export type PromptContext = {
   scene: SceneState;
   activeArc: ArcRecord | undefined;
   activeQuests: QuestRecord[];
+  hiddenQuests: QuestRecord[];
   unresolvedHooks: Hook[];
   recentCanon: string[];
   relevantClues: Clue[];
@@ -424,6 +431,7 @@ export type PromptContext = {
   eligibleRevealIds: string[];
   eligibleRevealTexts: string[];
   companion: NpcRecord | null;
+  hiddenNpcs: NpcRecord[];
   villainClock: number;
   tensionScore: number;
   arcPacingHint: string | null;

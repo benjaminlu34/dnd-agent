@@ -461,6 +461,22 @@ function sanitizeNarration(text: string) {
   return cleaned;
 }
 
+function normalizeDiscoveryDelta(value: Record<string, unknown>) {
+  const normalized = {
+    ...value,
+  } as ProposedStateDelta;
+
+  if ("npcDiscoveries" in value || "npc_discoveries" in value) {
+    normalized.npcDiscoveries = toStringArray(value.npcDiscoveries ?? value.npc_discoveries);
+  }
+
+  if ("questDiscoveries" in value || "quest_discoveries" in value) {
+    normalized.questDiscoveries = toStringArray(value.questDiscoveries ?? value.quest_discoveries);
+  }
+
+  return normalized;
+}
+
 function normalizeTriageDecision(
   raw: unknown,
   input: TurnAIPayload,
@@ -473,8 +489,9 @@ function normalizeTriageDecision(
       payload?.actions ??
       payload?.nextMoves,
   ).slice(0, 4);
-  const proposedDelta =
-    toObject(payload?.proposedDelta ?? payload?.proposed_delta ?? payload?.delta) ?? {};
+  const proposedDelta = normalizeDiscoveryDelta(
+    toObject(payload?.proposedDelta ?? payload?.proposed_delta ?? payload?.delta) ?? {},
+  );
   const proposedDeltaWithActions =
     suggestedActions.length > 0 && !Array.isArray(proposedDelta.suggestedActions)
       ? {
@@ -543,8 +560,9 @@ function normalizeResolveDecision(raw: unknown, text: string): ResolveDecision {
       payload?.actions ??
       payload?.nextMoves,
   ).slice(0, 4);
-  const proposedDelta =
-    toObject(payload?.proposedDelta ?? payload?.proposed_delta ?? payload?.delta) ?? {};
+  const proposedDelta = normalizeDiscoveryDelta(
+    toObject(payload?.proposedDelta ?? payload?.proposed_delta ?? payload?.delta) ?? {},
+  );
   const proposedDeltaWithActions =
     suggestedActions.length > 0 && !Array.isArray(proposedDelta.suggestedActions)
       ? {
