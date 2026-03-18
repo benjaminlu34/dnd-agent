@@ -1,3 +1,4 @@
+import "./load-env";
 import {
   auditNarration,
   auditRenderedNarration,
@@ -39,7 +40,7 @@ function buildPromptContext(): PromptContext {
     activeQuests: [],
     hiddenQuests: quests,
     recentTurnLedger: [
-      '[Turn 2] Action: "I vanish up the wall and prepare an ambush from the roofline." | Roll: agility success (13) | HP: 0 | Discoveries: none | SceneChanged: yes',
+      '[Turn 2] Action: "I vanish up the wall and prepare an ambush from the roofline." | Roll: dexterity success (13) | HP: 0 | Discoveries: none | SceneChanged: yes',
     ],
     relevantClues: clues,
     staleClues: getStaleClues(clues, state.turnCount),
@@ -113,7 +114,7 @@ async function runProviderChecks(name: string, provider: HarnessProvider, failur
   const observationAction =
     "While he pauses at the junction, I study the enforcer's footing and look for the easier opening.";
   const checkResult: CheckResult = {
-    stat: "intellect",
+    stat: "wisdom",
     mode: "normal",
     reason: "Sizing up the target",
     rolls: [12, 12],

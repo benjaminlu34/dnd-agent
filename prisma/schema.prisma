@@ -37,10 +37,11 @@ model CharacterTemplate {
   name       String
   archetype  String
   strength   Int
-  agility    Int
-  intellect  Int
+  dexterity  Int
+  constitution Int
+  intelligence Int
+  wisdom     Int
   charisma   Int
-  vitality   Int
   maxHealth  Int
   backstory  String?
   createdAt  DateTime            @default(now())

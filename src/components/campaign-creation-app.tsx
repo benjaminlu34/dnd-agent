@@ -350,12 +350,13 @@ export function CampaignCreationApp({
                 <p className="text-[0.68rem] uppercase tracking-[0.18em] text-zinc-500">Character</p>
                 <h2 className="mt-3 text-2xl font-semibold text-white">{character.name}</h2>
                 <p className="mt-2 text-sm text-zinc-400">{character.archetype}</p>
-                <div className="mt-4 grid grid-cols-3 gap-2 text-xs text-zinc-300">
+                <div className="mt-4 grid grid-cols-4 gap-2 text-xs text-zinc-300">
                   <span>STR {character.strength}</span>
-                  <span>AGI {character.agility}</span>
-                  <span>INT {character.intellect}</span>
+                  <span>DEX {character.dexterity}</span>
+                  <span>CON {character.constitution}</span>
+                  <span>INT {character.intelligence}</span>
+                  <span>WIS {character.wisdom}</span>
                   <span>CHA {character.charisma}</span>
-                  <span>VIT {character.vitality}</span>
                   <span>HP {character.maxHealth}</span>
                 </div>
                 {character.backstory ? (

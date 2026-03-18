@@ -69,12 +69,13 @@ function CharacterCard({
         </button>
       </div>
       <button type="button" onClick={onSelect} className="mt-4 block w-full text-left">
-        <div className="grid grid-cols-3 gap-2 text-xs text-zinc-300">
+        <div className="grid grid-cols-4 gap-2 text-xs text-zinc-300">
           <span>STR {character.strength}</span>
-          <span>AGI {character.agility}</span>
-          <span>INT {character.intellect}</span>
+          <span>DEX {character.dexterity}</span>
+          <span>CON {character.constitution}</span>
+          <span>INT {character.intelligence}</span>
+          <span>WIS {character.wisdom}</span>
           <span>CHA {character.charisma}</span>
-          <span>VIT {character.vitality}</span>
           <span>HP {character.maxHealth}</span>
         </div>
         {character.backstory ? (

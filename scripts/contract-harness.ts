@@ -1,3 +1,4 @@
+import "./load-env";
 import { dmClient } from "../src/lib/ai/provider";
 import {
   createStarterArcs,
@@ -18,16 +19,18 @@ const character: CampaignCharacter = {
   name: "Harness Hero",
   archetype: "Test Pilgrim",
   strength: 1,
-  agility: 1,
-  intellect: 1,
+  dexterity: 1,
+  constitution: 1,
+  intelligence: 1,
+  wisdom: 1,
   charisma: 0,
-  vitality: 1,
   stats: {
     strength: 1,
-    agility: 1,
-    intellect: 1,
+    dexterity: 1,
+    constitution: 1,
+    intelligence: 1,
+    wisdom: 1,
     charisma: 0,
-    vitality: 1,
   },
   health: 12,
   maxHealth: 12,

@@ -23,10 +23,11 @@ export const characterTemplateDraftSchema = z.object({
   name: z.string().trim().min(1, "Name is required."),
   archetype: z.string().trim().min(1, "Archetype is required."),
   strength: statSchema,
-  agility: statSchema,
-  intellect: statSchema,
+  dexterity: statSchema,
+  constitution: statSchema,
+  intelligence: statSchema,
+  wisdom: statSchema,
   charisma: statSchema,
-  vitality: statSchema,
   maxHealth: z.coerce.number().int().min(1).max(99),
   backstory: nullableTrimmedString,
 });
@@ -45,14 +46,15 @@ export function normalizeInventory(value: unknown): string[] {
 
 export function toCharacterStats(character: Pick<
   CharacterTemplateDraft,
-  "strength" | "agility" | "intellect" | "charisma" | "vitality"
+  "strength" | "dexterity" | "constitution" | "intelligence" | "wisdom" | "charisma"
 >) {
   return {
     strength: character.strength,
-    agility: character.agility,
-    intellect: character.intellect,
+    dexterity: character.dexterity,
+    constitution: character.constitution,
+    intelligence: character.intelligence,
+    wisdom: character.wisdom,
     charisma: character.charisma,
-    vitality: character.vitality,
   };
 }
 

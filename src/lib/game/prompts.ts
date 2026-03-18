@@ -1,3 +1,4 @@
+import { STATS } from "@/lib/game/types";
 import type {
   CampaignBlueprint,
   CheckResult,
@@ -6,6 +7,8 @@ import type {
   ResolveDecision,
   TriageDecision,
 } from "@/lib/game/types";
+
+const STAT_ENUM = [...STATS];
 
 function formatList(items: string[]) {
   if (items.length === 0) {
@@ -96,6 +99,8 @@ export function buildDungeonMasterSystemPrompt() {
     "Avoid markdown styling such as bold, italics, bullet lists, or headers in narration unless the player is literally reading a sign, inscription, or document.",
     "Even when showing written text in the world, keep it short and plain.",
     "If a roll is required, output no narration and only request the check in the tool payload.",
+    "Checks use the six classic abilities: strength, dexterity, constitution, intelligence, wisdom, and charisma.",
+    "Use wisdom for perception, insight, intuition, reading the room, and spotting danger. Use intelligence for deduction, recall, analysis, and investigation.",
     "If no roll is required, narrate immediately and include that exact prose in the tool payload field narration.",
     "If the player declares a concrete action, either resolve it immediately in the narration or request a check. Do not turn the declared action back into setup.",
     "After resolving an action, suggested actions must follow from the new state and must not reopen abandoned menu options from the previous beat.",
@@ -494,7 +499,7 @@ export const triagePlannerTool = {
         properties: {
           stat: {
             type: "string",
-            enum: ["strength", "agility", "intellect", "charisma", "vitality"],
+            enum: STAT_ENUM,
           },
           mode: {
             type: "string",
@@ -680,7 +685,7 @@ export const triageTool = {
         properties: {
           stat: {
             type: "string",
-            enum: ["strength", "agility", "intellect", "charisma", "vitality"],
+            enum: STAT_ENUM,
           },
           mode: {
             type: "string",

@@ -1,3 +1,5 @@
+import { isStat } from "@/lib/game/types";
+
 const SENSORY_FEEL_PATTERN =
   /\byou feel (?:the |a |an )?(?:cold|heat|pain|sting|weight|impact|pressure|texture|roughness|slickness|damp|wet|dryness|smell|odor|vibration|thrum|ache|wind|rain|stone|fabric|cloth|coat|blood|bruise|water|mud|splinters?|grit|dust|salt)\b/i;
 
@@ -349,18 +351,13 @@ function detectInvalidCheck(check: BeatValidationInput["check"]) {
     });
   }
 
-  if (
-    check.stat !== "strength" &&
-    check.stat !== "agility" &&
-    check.stat !== "intellect" &&
-    check.stat !== "charisma" &&
-    check.stat !== "vitality"
-  ) {
+  if (!isStat(check.stat)) {
     return issue({
       code: "invalid_check",
       severity: "block",
       message: "Planner returned an invalid check stat.",
-      directive: "Use one of strength, agility, intellect, charisma, or vitality for the check stat.",
+      directive:
+        "Use one of strength, dexterity, constitution, intelligence, wisdom, or charisma for the check stat.",
       evidence: String(check.stat ?? ""),
     });
   }

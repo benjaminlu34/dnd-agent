@@ -1,12 +1,34 @@
 export const STATS = [
   "strength",
-  "agility",
-  "intellect",
+  "dexterity",
+  "constitution",
+  "intelligence",
+  "wisdom",
   "charisma",
-  "vitality",
 ] as const;
 
 export type Stat = (typeof STATS)[number];
+export const STAT_LABELS: Record<Stat, string> = {
+  strength: "Strength",
+  dexterity: "Dexterity",
+  constitution: "Constitution",
+  intelligence: "Intelligence",
+  wisdom: "Wisdom",
+  charisma: "Charisma",
+};
+export const STAT_ABBREVIATIONS: Record<Stat, string> = {
+  strength: "STR",
+  dexterity: "DEX",
+  constitution: "CON",
+  intelligence: "INT",
+  wisdom: "WIS",
+  charisma: "CHA",
+};
+
+export function isStat(value: unknown): value is Stat {
+  return typeof value === "string" && STATS.includes(value as Stat);
+}
+
 export type CheckMode = "normal" | "advantage" | "disadvantage";
 export type CheckOutcome = "success" | "partial" | "failure";
 export type QuestStatus = "active" | "completed" | "failed";
@@ -17,10 +39,11 @@ export type CharacterTemplateDraft = {
   name: string;
   archetype: string;
   strength: number;
-  agility: number;
-  intellect: number;
+  dexterity: number;
+  constitution: number;
+  intelligence: number;
+  wisdom: number;
   charisma: number;
-  vitality: number;
   maxHealth: number;
   backstory: string | null;
 };

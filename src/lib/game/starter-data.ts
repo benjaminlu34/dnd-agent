@@ -19,10 +19,11 @@ const archetypes = [
     name: "Mira Thorne",
     stats: {
       strength: 0,
-      agility: 2,
-      intellect: 1,
+      dexterity: 2,
+      constitution: 0,
+      intelligence: 1,
+      wisdom: 1,
       charisma: 0,
-      vitality: 1,
     },
   },
   {
@@ -30,10 +31,11 @@ const archetypes = [
     name: "Corin Vale",
     stats: {
       strength: 2,
-      agility: 0,
-      intellect: 0,
+      dexterity: 0,
+      constitution: 2,
+      intelligence: 0,
+      wisdom: 0,
       charisma: 1,
-      vitality: 1,
     },
   },
   {
@@ -41,20 +43,22 @@ const archetypes = [
     name: "Seren Hollow",
     stats: {
       strength: -1,
-      agility: 0,
-      intellect: 2,
+      dexterity: 0,
+      constitution: 0,
+      intelligence: 2,
+      wisdom: 1,
       charisma: 1,
-      vitality: 1,
     },
   },
 ] as const;
 
 const seededCharacterStats = {
   strength: 1,
-  agility: 1,
-  intellect: 1,
+  dexterity: 1,
+  constitution: 1,
+  intelligence: 1,
+  wisdom: 1,
   charisma: 1,
-  vitality: 1,
 } as const;
 
 type StarterStateOverrides = {
@@ -73,10 +77,11 @@ export function createDefaultCharacterTemplate(): CharacterTemplate {
     name: "Rowan Vale",
     archetype: "Waymarked Wanderer",
     strength: seededCharacterStats.strength,
-    agility: seededCharacterStats.agility,
-    intellect: seededCharacterStats.intellect,
+    dexterity: seededCharacterStats.dexterity,
+    constitution: seededCharacterStats.constitution,
+    intelligence: seededCharacterStats.intelligence,
+    wisdom: seededCharacterStats.wisdom,
     charisma: seededCharacterStats.charisma,
-    vitality: seededCharacterStats.vitality,
     maxHealth: 12,
     backstory:
       "A road-worn wanderer who carries old maps, half-finished vows, and the habit of showing up where the dark is thickest.",
@@ -194,10 +199,11 @@ export function createStarterCharacter(): CampaignCharacter {
     name: choice.name,
     archetype: choice.archetype,
     strength: choice.stats.strength,
-    agility: choice.stats.agility,
-    intellect: choice.stats.intellect,
+    dexterity: choice.stats.dexterity,
+    constitution: choice.stats.constitution,
+    intelligence: choice.stats.intelligence,
+    wisdom: choice.stats.wisdom,
     charisma: choice.stats.charisma,
-    vitality: choice.stats.vitality,
     stats: choice.stats,
     maxHealth: 12,
     health: 12,

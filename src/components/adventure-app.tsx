@@ -3,11 +3,13 @@
 import clsx from "clsx";
 import { useRouter } from "next/navigation";
 import { startTransition, useEffect, useEffectEvent, useRef, useState } from "react";
+import { STAT_ABBREVIATIONS, STAT_LABELS } from "@/lib/game/types";
 import type {
   CampaignListItem,
   CheckResult,
   PendingCheck,
   PlayerCampaignSnapshot,
+  Stat,
   StoryMessage,
 } from "@/lib/game/types";
 
@@ -921,9 +923,12 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
               <h2 className="text-xl font-semibold text-zinc-50">{snapshot.character.name}</h2>
               <p className="mt-1 text-sm text-zinc-400">{snapshot.character.archetype}</p>
               <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
-                {Object.entries(snapshot.character.stats).map(([stat, value]) => (
+                {(Object.entries(snapshot.character.stats) as Array<[Stat, number]>).map(([stat, value]) => (
                   <div key={stat} className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-3">
-                    <p className="text-[0.65rem] uppercase tracking-[0.18em] text-zinc-400">{stat}</p>
+                    <p className="text-[0.65rem] uppercase tracking-[0.18em] text-zinc-400">
+                      {STAT_ABBREVIATIONS[stat]}
+                    </p>
+                    <p className="mt-1 text-xs text-zinc-500">{STAT_LABELS[stat]}</p>
                     <p className="mt-1 text-lg font-medium text-zinc-100">{value >= 0 ? `+${value}` : value}</p>
                   </div>
                 ))}

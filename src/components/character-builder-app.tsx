@@ -9,10 +9,11 @@ type CharacterFormValues = {
   name: string;
   archetype: string;
   strength: number;
-  agility: number;
-  intellect: number;
+  dexterity: number;
+  constitution: number;
+  intelligence: number;
+  wisdom: number;
   charisma: number;
-  vitality: number;
   maxHealth: number;
   backstory: string;
 };
@@ -28,10 +29,11 @@ const defaultValues: CharacterFormValues = {
   name: "",
   archetype: "",
   strength: 1,
-  agility: 1,
-  intellect: 1,
+  dexterity: 1,
+  constitution: 1,
+  intelligence: 1,
+  wisdom: 1,
   charisma: 1,
-  vitality: 1,
   maxHealth: 12,
   backstory: "",
 };
@@ -96,10 +98,11 @@ export function CharacterBuilderApp({
       name: initialCharacter.name,
       archetype: initialCharacter.archetype,
       strength: initialCharacter.strength,
-      agility: initialCharacter.agility,
-      intellect: initialCharacter.intellect,
+      dexterity: initialCharacter.dexterity,
+      constitution: initialCharacter.constitution,
+      intelligence: initialCharacter.intelligence,
+      wisdom: initialCharacter.wisdom,
       charisma: initialCharacter.charisma,
-      vitality: initialCharacter.vitality,
       maxHealth: initialCharacter.maxHealth,
       backstory: initialCharacter.backstory ?? "",
     });
@@ -109,7 +112,13 @@ export function CharacterBuilderApp({
 
   function adjustNumberField(field: keyof Pick<
     CharacterFormValues,
-    "strength" | "agility" | "intellect" | "charisma" | "vitality" | "maxHealth"
+    | "strength"
+    | "dexterity"
+    | "constitution"
+    | "intelligence"
+    | "wisdom"
+    | "charisma"
+    | "maxHealth"
   >, delta: number) {
     const current = Number(values[field] ?? 0);
     const nextValue =
@@ -196,15 +205,22 @@ export function CharacterBuilderApp({
   const numericFields: Array<{
     name: keyof Pick<
       CharacterFormValues,
-      "strength" | "agility" | "intellect" | "charisma" | "vitality" | "maxHealth"
+      | "strength"
+      | "dexterity"
+      | "constitution"
+      | "intelligence"
+      | "wisdom"
+      | "charisma"
+      | "maxHealth"
     >;
     label: string;
   }> = [
     { name: "strength", label: "Strength" },
-    { name: "agility", label: "Agility" },
-    { name: "intellect", label: "Intellect" },
+    { name: "dexterity", label: "Dexterity" },
+    { name: "constitution", label: "Constitution" },
+    { name: "intelligence", label: "Intelligence" },
+    { name: "wisdom", label: "Wisdom" },
     { name: "charisma", label: "Charisma" },
-    { name: "vitality", label: "Vitality" },
     { name: "maxHealth", label: "Max Health" },
   ];
 

@@ -1,3 +1,4 @@
+import "./load-env";
 import {
   buildOutcomeUserPrompt,
   buildTriageUserPrompt,
@@ -28,7 +29,7 @@ function buildPromptContext(): PromptContext {
     activeQuests: [],
     hiddenQuests: quests,
     recentTurnLedger: [
-      '[Turn 5] Action: "I inspect the notice post for tampering." | Roll: intellect success (13) | HP: 0 | Discoveries: clue_red_notice | SceneChanged: yes',
+      '[Turn 5] Action: "I inspect the notice post for tampering." | Roll: intelligence success (13) | HP: 0 | Discoveries: clue_red_notice | SceneChanged: yes',
       '[Turn 6] Action: "I circle the boarded smithy and listen at the rear door." | Roll: none | HP: 0 | Discoveries: none | SceneChanged: no',
     ],
     relevantClues: clues,
@@ -76,7 +77,7 @@ async function main() {
     promptContext,
     playerAction: "I inspect the smithy's rear door for signs of forced entry.",
     checkResult: {
-      stat: "intellect",
+      stat: "intelligence",
       mode: "normal",
       reason: "Inspecting the rear door",
       rolls: [12, 12],

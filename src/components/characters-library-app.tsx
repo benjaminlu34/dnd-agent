@@ -41,13 +41,14 @@ function LibraryCharacterCard({
         <p className="mt-1 text-xs uppercase tracking-widest text-zinc-500 italic">{character.archetype}</p>
       </div>
 
-      <div className="my-3 grid grid-cols-5 gap-1 border-y border-zinc-800/50 py-3">
+      <div className="my-3 grid grid-cols-6 gap-1 border-y border-zinc-800/50 py-3">
         {[
           ["STR", character.strength],
-          ["AGI", character.agility],
-          ["INT", character.intellect],
+          ["DEX", character.dexterity],
+          ["CON", character.constitution],
+          ["INT", character.intelligence],
+          ["WIS", character.wisdom],
           ["CHA", character.charisma],
-          ["VIT", character.vitality],
         ].map(([label, value]) => (
           <div key={String(label)} className="flex flex-col items-center">
             <span className="text-[10px] text-zinc-600">{label}</span>

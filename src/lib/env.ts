@@ -29,6 +29,7 @@ export const env = {
   databaseUrl: readEnv("DATABASE_URL") ?? "",
   directUrl: readEnv("DIRECT_URL") ?? "",
   openRouterApiKey: readEnv("OPENROUTER_API_KEY") ?? "",
+  openRouterApiKey2: readEnv("OPENROUTER_API_KEY_2") ?? "",
   openRouterModel: readEnv("OPENROUTER_MODEL") ?? "anthropic/claude-3.5-sonnet",
   openRouterPlannerModel: readEnv("OPENROUTER_PLANNER_MODEL") ?? "",
   openRouterBackupRendererModel: readEnv("OPENROUTER_BACKUP_RENDERER_MODEL") ?? "",

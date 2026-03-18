@@ -80,7 +80,7 @@ test("buildRecentTurnLedger preserves stored turn facts and legacy check fallbac
       playerAction: "I inspect the eclipse notice for hidden marks.",
       resultJson: {
         checkResult: {
-          stat: "intellect",
+          stat: "intelligence",
           mode: "normal",
           reason: "Inspecting the notice",
           rolls: [12, 12],
@@ -93,7 +93,7 @@ test("buildRecentTurnLedger preserves stored turn facts and legacy check fallbac
   ];
 
   assert.deepEqual(buildRecentTurnLedger(6, recentResolvedTurns), [
-    '[Turn 5] Action: "I inspect the eclipse notice for hidden marks." | Roll: intellect success (13) | HP: 0 | Discoveries: none | SceneChanged: no',
+    '[Turn 5] Action: "I inspect the eclipse notice for hidden marks." | Roll: intelligence success (13) | HP: 0 | Discoveries: none | SceneChanged: no',
     '[Turn 6] Action: "I slip behind the boarded smithy and listen at the rear door." | Roll: none | HP: 0 | Discoveries: clue_warm_cinders | SceneChanged: no',
   ]);
 });
@@ -121,7 +121,7 @@ test("getPromptContext classifies snapshot data without extra turn queries", asy
         rollback: {},
         turnFacts: {
           action: "I study the fountain for the blacksmith's mark.",
-          roll: "intellect success (13)",
+          roll: "intelligence success (13)",
           healthDelta: 0,
           discoveries: ["clue_hammer_marks"],
           sceneChanged: true,

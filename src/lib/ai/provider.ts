@@ -34,6 +34,7 @@ import {
   generatedCampaignOpeningSchema,
   generatedCampaignSetupSchema,
 } from "@/lib/game/session-zero";
+import { isStat } from "@/lib/game/types";
 import type {
   CampaignBlueprint,
   CharacterTemplate,
@@ -164,10 +165,11 @@ function normalizeGeneratedCharacterDraft(value: unknown): CharacterTemplateDraf
     name: typeof raw.name === "string" ? raw.name.trim() : "",
     archetype: typeof raw.archetype === "string" ? raw.archetype.trim() : "",
     strength: toStatModifier(Number(raw.strength ?? 0)),
-    agility: toStatModifier(Number(raw.agility ?? 0)),
-    intellect: toStatModifier(Number(raw.intellect ?? 0)),
+    dexterity: toStatModifier(Number(raw.dexterity ?? 0)),
+    constitution: toStatModifier(Number(raw.constitution ?? 0)),
+    intelligence: toStatModifier(Number(raw.intelligence ?? 0)),
+    wisdom: toStatModifier(Number(raw.wisdom ?? 0)),
     charisma: toStatModifier(Number(raw.charisma ?? 0)),
-    vitality: toStatModifier(Number(raw.vitality ?? 0)),
     maxHealth: Math.max(
       1,
       Math.min(
@@ -377,10 +379,11 @@ const generateCharacterTool = {
       name: { type: "string" },
       archetype: { type: "string" },
       strength: { type: "number", minimum: -5, maximum: 4 },
-      agility: { type: "number", minimum: -5, maximum: 4 },
-      intellect: { type: "number", minimum: -5, maximum: 4 },
+      dexterity: { type: "number", minimum: -5, maximum: 4 },
+      constitution: { type: "number", minimum: -5, maximum: 4 },
+      intelligence: { type: "number", minimum: -5, maximum: 4 },
+      wisdom: { type: "number", minimum: -5, maximum: 4 },
       charisma: { type: "number", minimum: -5, maximum: 4 },
-      vitality: { type: "number", minimum: -5, maximum: 4 },
       maxHealth: { type: "number", minimum: 8, maximum: 18 },
       backstory: { type: "string" },
     },
@@ -388,10 +391,11 @@ const generateCharacterTool = {
       "name",
       "archetype",
       "strength",
-      "agility",
-      "intellect",
+      "dexterity",
+      "constitution",
+      "intelligence",
+      "wisdom",
       "charisma",
-      "vitality",
       "maxHealth",
       "backstory",
     ],
@@ -539,9 +543,10 @@ function inferCheckStat(playerAction: string): Stat {
   const action = playerAction.toLowerCase();
 
   if (/(convince|persuade|bargain|charm|plead|bluff)/.test(action)) return "charisma";
-  if (/(sneak|dart|dodge|slip|pick|steal|catch|reach|balance)/.test(action)) return "agility";
-  if (/(study|recall|analyze|inspect|decipher|investigate|search|read)/.test(action)) return "intellect";
-  if (/(endure|withstand|brace|push through|march|survive)/.test(action)) return "vitality";
+  if (/(notice|spot|watch|listen|hear|sense|insight|read (?:him|her|them|their|the room|the crowd|the mood)|scan|survey|track|follow|perceive|intuition|judge)/.test(action)) return "wisdom";
+  if (/(sneak|dart|dodge|slip|pick|steal|catch|reach|balance|tumble|vault|flip|aim|fire|shoot)/.test(action)) return "dexterity";
+  if (/(study|recall|analyze|inspect|decipher|investigate|research|read|calculate|deduce|identify|translate)/.test(action)) return "intelligence";
+  if (/(endure|withstand|brace|push through|march|survive|resist|shrug off)/.test(action)) return "constitution";
   return "strength";
 }
 
@@ -552,7 +557,7 @@ function inferRequiresCheck(playerAction: string) {
 }
 
 function inferInvestigativeAction(playerAction: string) {
-  return /(inspect|investigate|search|study|observe|watch|listen|track|follow|question|interrogate|ask|read|examine|loot|check|decipher)/i.test(
+  return /(inspect|investigate|search|study|observe|watch|listen|notice|spot|scan|survey|track|follow|question|interrogate|ask|read|examine|loot|check|decipher|insight|judge|sense)/i.test(
     playerAction,
   );
 }
@@ -737,13 +742,7 @@ function normalizeTriagePlannerDecision(
       checkPayload
         ? {
             stat:
-              checkPayload.stat === "strength" ||
-              checkPayload.stat === "agility" ||
-              checkPayload.stat === "intellect" ||
-              checkPayload.stat === "charisma" ||
-              checkPayload.stat === "vitality"
-                ? checkPayload.stat
-                : inferCheckStat(input.playerAction),
+              isStat(checkPayload.stat) ? checkPayload.stat : inferCheckStat(input.playerAction),
             mode:
               checkPayload.mode === "advantage" || checkPayload.mode === "disadvantage"
                 ? checkPayload.mode
@@ -1012,13 +1011,7 @@ function normalizeTriageDecision(
       isInvestigative,
       check: {
         stat:
-          checkPayload?.stat === "strength" ||
-          checkPayload?.stat === "agility" ||
-          checkPayload?.stat === "intellect" ||
-          checkPayload?.stat === "charisma" ||
-          checkPayload?.stat === "vitality"
-            ? checkPayload.stat
-            : inferCheckStat(input.playerAction),
+          isStat(checkPayload?.stat) ? checkPayload.stat : inferCheckStat(input.playerAction),
         mode:
           checkPayload?.mode === "advantage" || checkPayload?.mode === "disadvantage"
             ? checkPayload.mode
@@ -1247,19 +1240,74 @@ function truncateForLog(value: string, limit = 1200) {
 }
 
 class OpenRouterDungeonMaster {
-  private client = new OpenAI({
-    apiKey: env.openRouterApiKey,
-    baseURL: "https://openrouter.ai/api/v1",
-    defaultHeaders: {
-      "HTTP-Referer": env.appUrl,
-      "X-Title": env.openRouterSiteName,
-    },
-  });
+  private clients = [
+    env.openRouterApiKey
+      ? new OpenAI({
+          apiKey: env.openRouterApiKey,
+          baseURL: "https://openrouter.ai/api/v1",
+          defaultHeaders: {
+            "HTTP-Referer": env.appUrl,
+            "X-Title": env.openRouterSiteName,
+          },
+        })
+      : null,
+    env.openRouterApiKey2
+      ? new OpenAI({
+          apiKey: env.openRouterApiKey2,
+          baseURL: "https://openrouter.ai/api/v1",
+          defaultHeaders: {
+            "HTTP-Referer": env.appUrl,
+            "X-Title": env.openRouterSiteName,
+          },
+        })
+      : null,
+  ].filter((client): client is OpenAI => Boolean(client));
 
   private ensureConfigured() {
-    if (!env.openRouterApiKey) {
-      throw new Error("OPENROUTER_API_KEY is required for AI generation.");
+    if (this.clients.length === 0) {
+      throw new Error("OPENROUTER_API_KEY or OPENROUTER_API_KEY_2 is required for AI generation.");
     }
+  }
+
+  private isRateLimitError(error: unknown) {
+    if (!error || typeof error !== "object") {
+      return false;
+    }
+
+    const maybeError = error as { status?: unknown; message?: unknown; error?: { message?: unknown } };
+    const message =
+      typeof maybeError.message === "string"
+        ? maybeError.message
+        : typeof maybeError.error?.message === "string"
+          ? maybeError.error.message
+          : "";
+
+    return maybeError.status === 429 || /rate limit exceeded/i.test(message);
+  }
+
+  private async withClientFailover<T>(run: (client: OpenAI, clientIndex: number) => Promise<T>) {
+    this.ensureConfigured();
+
+    let lastError: unknown = null;
+
+    for (let index = 0; index < this.clients.length; index += 1) {
+      const client = this.clients[index];
+
+      try {
+        return await run(client, index);
+      } catch (error) {
+        lastError = error;
+
+        const canRetryWithNextClient =
+          index < this.clients.length - 1 && this.isRateLimitError(error);
+
+        if (!canRetryWithNextClient) {
+          throw error;
+        }
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error("OpenRouter request failed.");
   }
 
   private toolModel(
@@ -1296,22 +1344,24 @@ class OpenRouterDungeonMaster {
   }): Promise<OpenRouterToolResult> {
     this.ensureConfigured();
     const model = input.modelOverride || this.toolModel(input.tool);
-    const response = await this.client.chat.completions.create({
-      model,
-      messages: [
-        {
-          role: "system",
-          content: input.systemPrompt,
-        },
-        {
-          role: "user",
-          content: input.prompt,
-        },
-      ],
-      tools: [toFunctionTool(input.tool)],
-      tool_choice: "auto",
-      temperature: input.temperature ?? 0.4,
-    });
+    const response = await this.withClientFailover((client) =>
+      client.chat.completions.create({
+        model,
+        messages: [
+          {
+            role: "system",
+            content: input.systemPrompt,
+          },
+          {
+            role: "user",
+            content: input.prompt,
+          },
+        ],
+        tools: [toFunctionTool(input.tool)],
+        tool_choice: "auto",
+        temperature: input.temperature ?? 0.4,
+      }),
+    );
 
     const message = response.choices[0]?.message;
     const toolCall = message?.tool_calls?.[0];
@@ -1332,23 +1382,25 @@ class OpenRouterDungeonMaster {
     tool: typeof triageTool | typeof resolutionTool;
     onNarration?: (chunk: string) => void;
   }): Promise<OpenRouterToolResult> {
-    const stream = await this.client.chat.completions.create({
-      model: env.openRouterModel,
-      messages: [
-        {
-          role: "system",
-          content: buildDungeonMasterSystemPrompt(),
-        },
-        {
-          role: "user",
-          content: input.prompt,
-        },
-      ],
-      tools: [toFunctionTool(input.tool)],
-      tool_choice: "auto",
-      stream: true,
-      temperature: 0.65,
-    });
+    const stream = await this.withClientFailover((client) =>
+      client.chat.completions.create({
+        model: env.openRouterModel,
+        messages: [
+          {
+            role: "system",
+            content: buildDungeonMasterSystemPrompt(),
+          },
+          {
+            role: "user",
+            content: input.prompt,
+          },
+        ],
+        tools: [toFunctionTool(input.tool)],
+        tool_choice: "auto",
+        stream: true,
+        temperature: 0.65,
+      }),
+    );
 
     let text = "";
     let toolArguments = "";
@@ -1379,26 +1431,28 @@ class OpenRouterDungeonMaster {
     prompt: string;
     tool: typeof triageTool | typeof resolutionTool;
   }): Promise<OpenRouterToolResult> {
-    const response = await this.client.chat.completions.create({
-      model: env.openRouterModel,
-      messages: [
-        {
-          role: "system",
-          content: [
-            buildDungeonMasterSystemPrompt(),
-            "Return the narration inside the tool payload field narration.",
-            "Do not rely on assistant text outside the tool call.",
-          ].join("\n"),
-        },
-        {
-          role: "user",
-          content: input.prompt,
-        },
-      ],
-      tools: [toFunctionTool(input.tool)],
-      tool_choice: "auto",
-      temperature: 0.65,
-    });
+    const response = await this.withClientFailover((client) =>
+      client.chat.completions.create({
+        model: env.openRouterModel,
+        messages: [
+          {
+            role: "system",
+            content: [
+              buildDungeonMasterSystemPrompt(),
+              "Return the narration inside the tool payload field narration.",
+              "Do not rely on assistant text outside the tool call.",
+            ].join("\n"),
+          },
+          {
+            role: "user",
+            content: input.prompt,
+          },
+        ],
+        tools: [toFunctionTool(input.tool)],
+        tool_choice: "auto",
+        temperature: 0.65,
+      }),
+    );
 
     const message = response.choices[0]?.message;
     const toolCall = message?.tool_calls?.[0];
@@ -1506,42 +1560,44 @@ class OpenRouterDungeonMaster {
     input: CampaignOpeningInput,
     issues: NarrationAuditIssue[],
   ): Promise<GeneratedCampaignOpening | null> {
-    const response = await this.client.chat.completions.create({
-      model: env.openRouterModel,
-      messages: [
-        {
-          role: "system",
-          content: [
-            "Write the opening narration for a new solo RPG campaign.",
-            "Start in the immediate present external scene with a playable problem.",
-            "Do not open with backstory recap, internal monologue, or thematic framing.",
-            "Do not narrate the player's feelings, confidence, certainty, or private thoughts unless they explicitly stated them.",
-            "Do not close with an editorial or thematic statement.",
-            "Return structured output with narration, activeThreat, and scene details.",
-            "scene.summary must be a short present-tense snapshot of the current tactical situation, not a recap of the whole setup.",
-          ].join("\n"),
-        },
-        {
-          role: "user",
-          content: [
-            `Character: ${input.character.name}, ${input.character.archetype}.`,
-            `Backstory: ${input.character.backstory ?? "None provided."}`,
-            `Public synopsis: ${JSON.stringify(input.setup.publicSynopsis)}`,
-            `Secret engine: ${JSON.stringify(input.setup.secretEngine)}`,
-            "Rewrite the opening from scratch and return the full updated structured opening.",
-            "Fix these specific issues:",
-            buildNarrationRetryInstructions(issues),
-            input.previousDraft ? `Previous draft: ${JSON.stringify(input.previousDraft)}` : "",
-            input.prompt?.trim() ? `Additional direction: ${input.prompt.trim()}` : "",
-          ]
-            .filter(Boolean)
-            .join("\n"),
-        },
-      ],
-      tools: [toFunctionTool(campaignOpeningTool)],
-      tool_choice: "auto",
-      temperature: 0.65,
-    });
+    const response = await this.withClientFailover((client) =>
+      client.chat.completions.create({
+        model: env.openRouterModel,
+        messages: [
+          {
+            role: "system",
+            content: [
+              "Write the opening narration for a new solo RPG campaign.",
+              "Start in the immediate present external scene with a playable problem.",
+              "Do not open with backstory recap, internal monologue, or thematic framing.",
+              "Do not narrate the player's feelings, confidence, certainty, or private thoughts unless they explicitly stated them.",
+              "Do not close with an editorial or thematic statement.",
+              "Return structured output with narration, activeThreat, and scene details.",
+              "scene.summary must be a short present-tense snapshot of the current tactical situation, not a recap of the whole setup.",
+            ].join("\n"),
+          },
+          {
+            role: "user",
+            content: [
+              `Character: ${input.character.name}, ${input.character.archetype}.`,
+              `Backstory: ${input.character.backstory ?? "None provided."}`,
+              `Public synopsis: ${JSON.stringify(input.setup.publicSynopsis)}`,
+              `Secret engine: ${JSON.stringify(input.setup.secretEngine)}`,
+              "Rewrite the opening from scratch and return the full updated structured opening.",
+              "Fix these specific issues:",
+              buildNarrationRetryInstructions(issues),
+              input.previousDraft ? `Previous draft: ${JSON.stringify(input.previousDraft)}` : "",
+              input.prompt?.trim() ? `Additional direction: ${input.prompt.trim()}` : "",
+            ]
+              .filter(Boolean)
+              .join("\n"),
+          },
+        ],
+        tools: [toFunctionTool(campaignOpeningTool)],
+        tool_choice: "auto",
+        temperature: 0.65,
+      }),
+    );
 
     const toolCall = response.choices[0]?.message?.tool_calls?.[0];
     const args =
@@ -1704,28 +1760,30 @@ class OpenRouterDungeonMaster {
 
     try {
       const compressionModel = env.openRouterCompressionModel || env.openRouterModel;
-      const response = await this.client.chat.completions.create({
-        model: compressionModel,
-        messages: [
-          {
-            role: "system",
-            content: [
-              "Compress a scene summary into a factual tactical snapshot.",
-              "Return only 1-2 short sentences.",
-              "Keep only what is explicitly present in the input.",
-              "Do not invent enemies, cover, objects, motives, or opportunities that are not stated.",
-              "Do not use metaphors, thematic lines, emotional language, recap framing, or atmospheric flourish.",
-              "Focus on who or what is physically present, the current pressure, and the immediate opening or threat.",
-            ].join("\n"),
-          },
-          {
-            role: "user",
-            content: normalized,
-          },
-        ],
-        temperature: 0,
-        top_p: 1,
-      });
+      const response = await this.withClientFailover((client) =>
+        client.chat.completions.create({
+          model: compressionModel,
+          messages: [
+            {
+              role: "system",
+              content: [
+                "Compress a scene summary into a factual tactical snapshot.",
+                "Return only 1-2 short sentences.",
+                "Keep only what is explicitly present in the input.",
+                "Do not invent enemies, cover, objects, motives, or opportunities that are not stated.",
+                "Do not use metaphors, thematic lines, emotional language, recap framing, or atmospheric flourish.",
+                "Focus on who or what is physically present, the current pressure, and the immediate opening or threat.",
+              ].join("\n"),
+            },
+            {
+              role: "user",
+              content: normalized,
+            },
+          ],
+          temperature: 0,
+          top_p: 1,
+        }),
+      );
 
       const compressed = extractMessageText(response.choices[0]?.message?.content)
         .replace(/\s+/g, " ")
@@ -1793,13 +1851,15 @@ class OpenRouterDungeonMaster {
     ];
 
     try {
-      const response = await this.client.chat.completions.create({
-        model: env.openRouterModel,
-        messages: baseMessages,
-        tools: [toFunctionTool(campaignSetupTool)],
-        tool_choice: "auto",
-        temperature: 0.75,
-      });
+      const response = await this.withClientFailover((client) =>
+        client.chat.completions.create({
+          model: env.openRouterModel,
+          messages: baseMessages,
+          tools: [toFunctionTool(campaignSetupTool)],
+          tool_choice: "auto",
+          temperature: 0.75,
+        }),
+      );
 
       const toolCall = response.choices[0]?.message?.tool_calls?.[0];
       const args =
@@ -1816,21 +1876,23 @@ class OpenRouterDungeonMaster {
     }
 
     try {
-      const fallbackResponse = await this.client.chat.completions.create({
-        model: env.openRouterModel,
-        messages: [
-          ...baseMessages,
-          {
-            role: "system",
-            content: [
-              "Return only a valid JSON object.",
-              "Do not include markdown, explanations, or code fences.",
-              `JSON schema: ${JSON.stringify(campaignSetupTool.input_schema)}`,
-            ].join("\n"),
-          },
-        ],
-        temperature: 0.75,
-      });
+      const fallbackResponse = await this.withClientFailover((client) =>
+        client.chat.completions.create({
+          model: env.openRouterModel,
+          messages: [
+            ...baseMessages,
+            {
+              role: "system",
+              content: [
+                "Return only a valid JSON object.",
+                "Do not include markdown, explanations, or code fences.",
+                `JSON schema: ${JSON.stringify(campaignSetupTool.input_schema)}`,
+              ].join("\n"),
+            },
+          ],
+          temperature: 0.75,
+        }),
+      );
 
       const parsed = safeParseJson(
         extractMessageText(fallbackResponse.choices[0]?.message?.content),
@@ -1852,30 +1914,34 @@ class OpenRouterDungeonMaster {
     let fallbackWarning: string | undefined;
 
     try {
-      const response = await this.client.chat.completions.create({
-        model: env.openRouterModel,
-        messages: [
-          {
-            role: "system",
-            content: [
-              "You create grounded but vivid solo fantasy RPG protagonists.",
-              "Return one playable character template.",
-              "If the user provides an exact name, archetype, or backstory, preserve those values exactly.",
-              "IMPORTANT: stats are small modifiers, not D20 ability scores. Use integers in the range -2 to +3.",
-              "IMPORTANT: maxHealth should usually be between 8 and 18.",
-              "Keep stats plausible, varied, and coherent with the concept.",
-              "Backstory should be concise, specific, and campaign-friendly.",
-            ].join("\n"),
-          },
-          {
-            role: "user",
-            content: `Create a character from this prompt: ${trimmedPrompt}`,
-          },
-        ],
-        tools: [toFunctionTool(generateCharacterTool)],
-        tool_choice: "auto",
-        temperature: 0.8,
-      });
+      const response = await this.withClientFailover((client) =>
+        client.chat.completions.create({
+          model: env.openRouterModel,
+          messages: [
+            {
+              role: "system",
+              content: [
+                "You create grounded but vivid solo fantasy RPG protagonists.",
+                "Return one playable character template.",
+                "If the user provides an exact name, archetype, or backstory, preserve those values exactly.",
+                "Use the six classic D&D abilities: strength, dexterity, constitution, intelligence, wisdom, and charisma.",
+                "IMPORTANT: stats are small modifiers, not raw D20 ability scores. Use integers in the range -2 to +3.",
+                "Wisdom covers perception, insight, intuition, and willpower. Intelligence covers reasoning, recall, and deduction.",
+                "IMPORTANT: maxHealth should usually be between 8 and 18.",
+                "Keep stats plausible, varied, and coherent with the concept.",
+                "Backstory should be concise, specific, and campaign-friendly.",
+              ].join("\n"),
+            },
+            {
+              role: "user",
+              content: `Create a character from this prompt: ${trimmedPrompt}`,
+            },
+          ],
+          tools: [toFunctionTool(generateCharacterTool)],
+          tool_choice: "auto",
+          temperature: 0.8,
+        }),
+      );
 
       const toolCall = response.choices[0]?.message?.tool_calls?.[0];
       const args =
@@ -1902,24 +1968,26 @@ class OpenRouterDungeonMaster {
     }
 
     try {
-      const fallbackResponse = await this.client.chat.completions.create({
-        model: env.openRouterModel,
-        messages: [
-          {
-            role: "system",
-            content: [
-              "Return only a valid JSON object.",
-              "Do not include markdown, explanations, or code fences.",
-              `JSON schema: ${JSON.stringify(generateCharacterTool.input_schema)}`,
-            ].join("\n"),
-          },
-          {
-            role: "user",
-            content: `Create a character from this prompt: ${trimmedPrompt}`,
-          },
-        ],
-        temperature: 0.8,
-      });
+      const fallbackResponse = await this.withClientFailover((client) =>
+        client.chat.completions.create({
+          model: env.openRouterModel,
+          messages: [
+            {
+              role: "system",
+              content: [
+                "Return only a valid JSON object.",
+                "Do not include markdown, explanations, or code fences.",
+                `JSON schema: ${JSON.stringify(generateCharacterTool.input_schema)}`,
+              ].join("\n"),
+            },
+            {
+              role: "user",
+              content: `Create a character from this prompt: ${trimmedPrompt}`,
+            },
+          ],
+          temperature: 0.8,
+        }),
+      );
 
       const parsed = safeParseJson(
         extractMessageText(fallbackResponse.choices[0]?.message?.content),
@@ -1952,52 +2020,54 @@ class OpenRouterDungeonMaster {
     const hasPreviousDraft = Boolean(input.previousDraft);
 
     try {
-      const response = await this.client.chat.completions.create({
-        model: env.openRouterModel,
-        messages: [
-          {
-            role: "system",
-            content: [
-              "Write the opening narration for a new solo RPG campaign.",
-              "The world/module is already defined. Your job is to frame this specific hero's entrance into it.",
-              "Be character-specific, but do not rewrite module facts, secret truths, or core campaign pressure.",
-              "Different heroes should plausibly enter the same module from very different angles.",
-              "Generate the first actual playable scene for this hero.",
-              "Keep it vivid, specific, player-facing, and grounded in present external action.",
-              "Start in the immediate scene pressure, not with recap or internal monologue.",
-              "Do not narrate the player's feelings, confidence, certainty, or private thoughts unless they explicitly stated them.",
-              "Do not close with a thematic or editorial statement.",
-              "Do not expose hidden motives, unrevealed truths, or backstage structure.",
-              "Return structured output with narration, activeThreat, and scene details.",
-              "scene.summary must be a short present-tense snapshot of the current tactical situation, not a recap of the whole setup.",
-              "scene.suggestedActions must contain 2-4 concrete immediate actions the player could plausibly take.",
-            ].join("\n"),
-          },
-          {
-            role: "user",
-            content: [
-              `Character: ${input.character.name}, ${input.character.archetype}.`,
-              `Backstory: ${input.character.backstory ?? "None provided."}`,
-              `Public synopsis: ${JSON.stringify(input.setup.publicSynopsis)}`,
-              `Secret engine: ${JSON.stringify(input.setup.secretEngine)}`,
-              revisionPrompt
-                ? hasPreviousDraft
-                  ? [
-                      `Revision request: ${revisionPrompt}`,
-                      "Revise the previous opening draft for this same hero and module.",
-                      "Preserve good material unless the revision conflicts with it.",
-                      "Return the full updated structured opening draft, not a partial patch.",
-                      `Previous draft: ${JSON.stringify(input.previousDraft)}`,
-                    ].join("\n")
-                  : `Create this hero's first entrance into the module as a concrete starting scene. Additional direction: ${revisionPrompt}`
-                : "Create this hero's first entrance into the module as a concrete starting scene.",
-            ].join("\n"),
-          },
-        ],
-        tools: [toFunctionTool(campaignOpeningTool)],
-        tool_choice: "auto",
-        temperature: 0.9,
-      });
+      const response = await this.withClientFailover((client) =>
+        client.chat.completions.create({
+          model: env.openRouterModel,
+          messages: [
+            {
+              role: "system",
+              content: [
+                "Write the opening narration for a new solo RPG campaign.",
+                "The world/module is already defined. Your job is to frame this specific hero's entrance into it.",
+                "Be character-specific, but do not rewrite module facts, secret truths, or core campaign pressure.",
+                "Different heroes should plausibly enter the same module from very different angles.",
+                "Generate the first actual playable scene for this hero.",
+                "Keep it vivid, specific, player-facing, and grounded in present external action.",
+                "Start in the immediate scene pressure, not with recap or internal monologue.",
+                "Do not narrate the player's feelings, confidence, certainty, or private thoughts unless they explicitly stated them.",
+                "Do not close with a thematic or editorial statement.",
+                "Do not expose hidden motives, unrevealed truths, or backstage structure.",
+                "Return structured output with narration, activeThreat, and scene details.",
+                "scene.summary must be a short present-tense snapshot of the current tactical situation, not a recap of the whole setup.",
+                "scene.suggestedActions must contain 2-4 concrete immediate actions the player could plausibly take.",
+              ].join("\n"),
+            },
+            {
+              role: "user",
+              content: [
+                `Character: ${input.character.name}, ${input.character.archetype}.`,
+                `Backstory: ${input.character.backstory ?? "None provided."}`,
+                `Public synopsis: ${JSON.stringify(input.setup.publicSynopsis)}`,
+                `Secret engine: ${JSON.stringify(input.setup.secretEngine)}`,
+                revisionPrompt
+                  ? hasPreviousDraft
+                    ? [
+                        `Revision request: ${revisionPrompt}`,
+                        "Revise the previous opening draft for this same hero and module.",
+                        "Preserve good material unless the revision conflicts with it.",
+                        "Return the full updated structured opening draft, not a partial patch.",
+                        `Previous draft: ${JSON.stringify(input.previousDraft)}`,
+                      ].join("\n")
+                    : `Create this hero's first entrance into the module as a concrete starting scene. Additional direction: ${revisionPrompt}`
+                  : "Create this hero's first entrance into the module as a concrete starting scene.",
+              ].join("\n"),
+            },
+          ],
+          tools: [toFunctionTool(campaignOpeningTool)],
+          tool_choice: "auto",
+          temperature: 0.9,
+        }),
+      );
 
       const toolCall = response.choices[0]?.message?.tool_calls?.[0];
       const args =
@@ -2050,43 +2120,45 @@ class OpenRouterDungeonMaster {
     }
 
     try {
-      const fallbackResponse = await this.client.chat.completions.create({
-        model: env.openRouterModel,
-        messages: [
-          {
-            role: "system",
-            content: [
-              "Generate the first actual playable scene for a hero entering a reusable solo RPG module.",
-              "Return only a valid JSON object.",
-              "Do not include markdown, explanations, or code fences.",
-              "Start in the immediate external scene with a playable problem, not recap.",
-              "Do not narrate the player's feelings, confidence, certainty, or private thoughts unless they explicitly stated them.",
-              "Do not end with a thematic or editorial line.",
-              "scene.summary must be a short present-tense snapshot, not a recap paragraph.",
-              `JSON schema: ${JSON.stringify(campaignOpeningTool.input_schema)}`,
-            ].join("\n"),
-          },
-          {
-            role: "user",
-            content: [
-              `Character: ${input.character.name}, ${input.character.archetype}.`,
-              `Backstory: ${input.character.backstory ?? "None provided."}`,
-              `Public synopsis: ${JSON.stringify(input.setup.publicSynopsis)}`,
-              `Secret engine: ${JSON.stringify(input.setup.secretEngine)}`,
-              revisionPrompt
-                ? hasPreviousDraft
-                  ? [
-                      `Revision request: ${revisionPrompt}`,
-                      "Revise the previous opening draft for this same hero and module.",
-                      `Previous draft: ${JSON.stringify(input.previousDraft)}`,
-                    ].join("\n")
-                  : `Additional direction: ${revisionPrompt}`
-                : "",
-            ].join("\n"),
-          },
-        ],
-        temperature: 0.9,
-      });
+      const fallbackResponse = await this.withClientFailover((client) =>
+        client.chat.completions.create({
+          model: env.openRouterModel,
+          messages: [
+            {
+              role: "system",
+              content: [
+                "Generate the first actual playable scene for a hero entering a reusable solo RPG module.",
+                "Return only a valid JSON object.",
+                "Do not include markdown, explanations, or code fences.",
+                "Start in the immediate external scene with a playable problem, not recap.",
+                "Do not narrate the player's feelings, confidence, certainty, or private thoughts unless they explicitly stated them.",
+                "Do not end with a thematic or editorial line.",
+                "scene.summary must be a short present-tense snapshot, not a recap paragraph.",
+                `JSON schema: ${JSON.stringify(campaignOpeningTool.input_schema)}`,
+              ].join("\n"),
+            },
+            {
+              role: "user",
+              content: [
+                `Character: ${input.character.name}, ${input.character.archetype}.`,
+                `Backstory: ${input.character.backstory ?? "None provided."}`,
+                `Public synopsis: ${JSON.stringify(input.setup.publicSynopsis)}`,
+                `Secret engine: ${JSON.stringify(input.setup.secretEngine)}`,
+                revisionPrompt
+                  ? hasPreviousDraft
+                    ? [
+                        `Revision request: ${revisionPrompt}`,
+                        "Revise the previous opening draft for this same hero and module.",
+                        `Previous draft: ${JSON.stringify(input.previousDraft)}`,
+                      ].join("\n")
+                    : `Additional direction: ${revisionPrompt}`
+                  : "",
+              ].join("\n"),
+            },
+          ],
+          temperature: 0.9,
+        }),
+      );
 
       const parsed = safeParseJson(
         extractMessageText(fallbackResponse.choices[0]?.message?.content),
@@ -2167,7 +2239,7 @@ class OpenRouterDungeonMaster {
         requiresCheck: normalizedPlanner.requiresCheck,
         check: normalizedPlanner.check,
       };
-      let plannerValidation = validateBeatPlan(plannerValidationInput);
+      const plannerValidation = validateBeatPlan(plannerValidationInput);
       let selectedPlanner = normalizedPlanner;
       let selectedPlannerIssues = plannerValidation.issues;
       let selectedPlannerSeverity = plannerValidation.highestSeverity;
@@ -2315,13 +2387,13 @@ class OpenRouterDungeonMaster {
         suggestedActionGoals: selectedPlanner.suggestedActionGoals,
       });
       let renderDecision = initialRender.normalized ?? { narration: "", suggestedActions: [] };
-      let structuralRenderAudit = auditRenderedNarrationStructure({
+      const structuralRenderAudit = auditRenderedNarrationStructure({
         narration: renderDecision.narration,
         suggestedActions: renderDecision.suggestedActions,
       });
       let selectedRendererIssues = structuralRenderAudit.issues;
       let selectedRendererSeverity = structuralRenderAudit.highestSeverity;
-      let legacyRenderAudit = auditRenderedNarration({
+      const legacyRenderAudit = auditRenderedNarration({
         mode: "triage",
         narration: renderDecision.narration,
         playerAction: input.playerAction,
@@ -2453,7 +2525,7 @@ class OpenRouterDungeonMaster {
         );
       }
 
-      let aiAuditResult = await this.auditTurnRender({
+      const aiAuditResult = await this.auditTurnRender({
         mode: "triage",
         playerAction: input.playerAction,
         promptContext: input.promptContext,
@@ -2851,13 +2923,13 @@ class OpenRouterDungeonMaster {
         suggestedActionGoals: selectedPlanner.suggestedActionGoals,
       });
       let renderDecision = initialRender.normalized ?? { narration: "", suggestedActions: [] };
-      let structuralRenderAudit = auditRenderedNarrationStructure({
+      const structuralRenderAudit = auditRenderedNarrationStructure({
         narration: renderDecision.narration,
         suggestedActions: renderDecision.suggestedActions,
       });
       let selectedRendererIssues = structuralRenderAudit.issues;
       let selectedRendererSeverity = structuralRenderAudit.highestSeverity;
-      let legacyRenderAudit = auditRenderedNarration({
+      const legacyRenderAudit = auditRenderedNarration({
         mode: "resolution",
         narration: renderDecision.narration,
         playerAction: input.playerAction,
@@ -2963,7 +3035,7 @@ class OpenRouterDungeonMaster {
         );
       }
 
-      let aiAuditResult = await this.auditTurnRender({
+      const aiAuditResult = await this.auditTurnRender({
         mode: "resolution",
         playerAction: input.playerAction,
         promptContext: input.promptContext,
@@ -3227,24 +3299,26 @@ class OpenRouterDungeonMaster {
   async summarizeSession(messages: string[]) {
     this.ensureConfigured();
     try {
-      const response = await this.client.chat.completions.create({
-        model: env.openRouterModel,
-        messages: [
-          {
-            role: "system",
-            content: [
-              "Write a short player-facing session recap for a solo RPG journal.",
-              "Use only facts explicitly present in the transcript.",
-              "Do not infer hidden motives, secret identities, unrevealed clues, or backstage plot structure.",
-              "Keep it concrete, show-not-tell, and limited to 2-3 sentences.",
-            ].join("\n"),
-          },
-          {
-            role: "user",
-            content: `Summarize this session in 2-3 sentences for future prompt context:\n${messages.join("\n")}`,
-          },
-        ],
-      });
+      const response = await this.withClientFailover((client) =>
+        client.chat.completions.create({
+          model: env.openRouterModel,
+          messages: [
+            {
+              role: "system",
+              content: [
+                "Write a short player-facing session recap for a solo RPG journal.",
+                "Use only facts explicitly present in the transcript.",
+                "Do not infer hidden motives, secret identities, unrevealed clues, or backstage plot structure.",
+                "Keep it concrete, show-not-tell, and limited to 2-3 sentences.",
+              ].join("\n"),
+            },
+            {
+              role: "user",
+              content: `Summarize this session in 2-3 sentences for future prompt context:\n${messages.join("\n")}`,
+            },
+          ],
+        }),
+      );
 
       return response.choices[0]?.message?.content ?? "";
     } catch {
@@ -3255,24 +3329,26 @@ class OpenRouterDungeonMaster {
   async generatePreviouslyOn(summary: string, scene: string, clueText: string[]) {
     this.ensureConfigured();
     try {
-      const response = await this.client.chat.completions.create({
-        model: env.openRouterModel,
-        messages: [
-          {
-            role: "system",
-            content: [
-              "Write a player-facing 'Previously on...' recap for a solo RPG.",
-              "Use only facts already established in play.",
-              "Do not infer hidden motives, secret roles, unseen clues, or unrevealed structure.",
-              "Keep it to two sentences, concrete, and atmospheric rather than explanatory.",
-            ].join("\n"),
-          },
-          {
-            role: "user",
-            content: `Previous session summary: ${summary}\nCurrent scene: ${scene}\nDiscovered clues still hanging in the air: ${clueText.join(", ") || "none"}\n\nWrite a dramatic two-sentence "Previously on..." recap.`,
-          },
-        ],
-      });
+      const response = await this.withClientFailover((client) =>
+        client.chat.completions.create({
+          model: env.openRouterModel,
+          messages: [
+            {
+              role: "system",
+              content: [
+                "Write a player-facing 'Previously on...' recap for a solo RPG.",
+                "Use only facts already established in play.",
+                "Do not infer hidden motives, secret roles, unseen clues, or unrevealed structure.",
+                "Keep it to two sentences, concrete, and atmospheric rather than explanatory.",
+              ].join("\n"),
+            },
+            {
+              role: "user",
+              content: `Previous session summary: ${summary}\nCurrent scene: ${scene}\nDiscovered clues still hanging in the air: ${clueText.join(", ") || "none"}\n\nWrite a dramatic two-sentence "Previously on..." recap.`,
+            },
+          ],
+        }),
+      );
 
       return response.choices[0]?.message?.content ?? "";
     } catch {
