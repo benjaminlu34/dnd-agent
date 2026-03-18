@@ -47,6 +47,7 @@ import type {
   PlayerVisibleQuestRecord,
   QuestRecord,
   QuestStatus,
+  RecentResolvedTurn,
   StoryMessage,
   TurnFacts,
 } from "@/lib/game/types";
@@ -801,6 +802,15 @@ function formatCheckRoll(result: CheckResult) {
   return `${result.stat} ${result.outcome} (${result.total})`;
 }
 
+function hasRollbackData(resultJson: unknown) {
+  return Boolean(
+    resultJson &&
+      typeof resultJson === "object" &&
+      !Array.isArray(resultJson) &&
+      "rollback" in (resultJson as Record<string, unknown>),
+  );
+}
+
 function extractTurnFacts(resultJson: unknown, playerAction: string): TurnFacts {
   if (resultJson && typeof resultJson === "object" && !Array.isArray(resultJson)) {
     const record = resultJson as Record<string, unknown>;
@@ -836,6 +846,17 @@ function formatTurnLedgerEntry(turnNumber: number, facts: TurnFacts) {
   const discoveries = facts.discoveries.length ? facts.discoveries.join(", ") : "none";
 
   return `[Turn ${turnNumber}] Action: "${facts.action}" | Roll: ${roll} | HP: ${facts.healthDelta} | Discoveries: ${discoveries} | SceneChanged: ${facts.sceneChanged ? "yes" : "no"}`;
+}
+
+export function buildRecentTurnLedger(turnCount: number, recentResolvedTurns: RecentResolvedTurn[]) {
+  const orderedTurns = [...recentResolvedTurns].reverse();
+
+  return orderedTurns.map((turn, index) =>
+    formatTurnLedgerEntry(
+      Math.max(turnCount - orderedTurns.length + index + 1, 1),
+      extractTurnFacts(turn.resultJson, turn.playerAction),
+    ),
+  );
 }
 
 async function sanitizePromptSceneSummary(summary: string) {
@@ -925,6 +946,28 @@ export async function getRecentMessages(sessionId: string) {
   });
 
   return messages.map(toMessage);
+}
+
+async function getRecentResolvedTurns(sessionId: string, take = 4): Promise<RecentResolvedTurn[]> {
+  const turns = await prisma.turn.findMany({
+    where: {
+      sessionId,
+      status: "resolved",
+    },
+    orderBy: { updatedAt: "desc" },
+    take,
+    select: {
+      id: true,
+      playerAction: true,
+      resultJson: true,
+    },
+  });
+
+  return turns.map((turn) => ({
+    id: turn.id,
+    playerAction: turn.playerAction,
+    resultJson: turn.resultJson,
+  }));
 }
 
 export async function backfillLegacyDiscoveries(campaignId: string) {
@@ -1043,19 +1086,15 @@ export async function getCampaignSnapshot(
   }
 
   const session = campaign.sessions[0];
-  const recentMessages = session ? await getRecentMessages(session.id) : [];
+  const [recentMessages, recentResolvedTurns] = session
+    ? await Promise.all([
+        getRecentMessages(session.id),
+        getRecentResolvedTurns(session.id),
+      ])
+    : [[], []];
   const setup = toGeneratedCampaignSetup(campaign.module);
   const blueprint = buildCampaignBlueprintFromSetup(setup);
-  const latestResolvedTurn = session
-    ? await prisma.turn.findFirst({
-        where: {
-          sessionId: session.id,
-          status: "resolved",
-        },
-        orderBy: { updatedAt: "desc" },
-        select: { id: true, resultJson: true },
-      })
-    : null;
+  const latestResolvedTurn = recentResolvedTurns[0] ?? null;
 
   return {
     campaignId: campaign.id,
@@ -1073,15 +1112,10 @@ export async function getCampaignSnapshot(
     clues: campaign.clues.map(toClue),
     memories: campaign.memories.map(toMemory),
     recentMessages,
+    recentResolvedTurns,
     previouslyOn,
     latestResolvedTurnId: latestResolvedTurn?.id ?? null,
-    canRetryLatestTurn:
-      Boolean(
-        latestResolvedTurn &&
-          latestResolvedTurn.resultJson &&
-          typeof latestResolvedTurn.resultJson === "object" &&
-          "rollback" in (latestResolvedTurn.resultJson as Record<string, unknown>),
-      ),
+    canRetryLatestTurn: hasRollbackData(latestResolvedTurn?.resultJson),
   };
 }
 
@@ -1130,50 +1164,80 @@ export function toPlayerCampaignSnapshot(
 
 export async function getPromptContext(snapshot: CampaignSnapshot): Promise<PromptContext> {
   const activeArc = snapshot.arcs.find((arc) => arc.id === snapshot.state.activeArcId);
-  const clueWindow = snapshot.clues.filter(
-    (clue) => clue.status === "hidden" || clue.status === "discovered",
-  );
   const staleClues = getStaleClues(snapshot.clues, snapshot.state.turnCount);
-  const discoveredClues = snapshot.clues.filter((clue) => clue.status === "discovered");
-  const companion =
-    snapshot.npcs.find(
-      (npc) => npc.isCompanion && npc.discoveredAtTurn !== null,
-    ) ?? null;
+  const promptSceneSummary = await sanitizePromptSceneSummary(snapshot.state.sceneState.summary);
+  const activeQuests: QuestRecord[] = [];
+  const hiddenQuests: QuestRecord[] = [];
+  const hiddenNpcs: NpcRecord[] = [];
+  const discoveredClues: Clue[] = [];
+  const clueWindow: Clue[] = [];
+  const discoveryCandidates = {
+    quests: [] as PromptContext["discoveryCandidates"]["quests"],
+    npcs: [] as PromptContext["discoveryCandidates"]["npcs"],
+  };
+  const discoveredClueIds = new Set<string>();
+  let companion: NpcRecord | null = null;
+
+  for (const quest of snapshot.quests) {
+    if (quest.discoveredAtTurn === null) {
+      hiddenQuests.push(quest);
+      if (quest.status === "active") {
+        discoveryCandidates.quests.push({
+          id: quest.id,
+          title: quest.title,
+        });
+      }
+      continue;
+    }
+
+    if (quest.status === "active") {
+      activeQuests.push(quest);
+    }
+  }
+
+  for (const npc of snapshot.npcs) {
+    if (npc.discoveredAtTurn === null) {
+      hiddenNpcs.push(npc);
+      discoveryCandidates.npcs.push({
+        id: npc.id,
+        name: npc.name,
+        role: npc.role,
+      });
+      continue;
+    }
+
+    if (!companion && npc.isCompanion) {
+      companion = npc;
+    }
+  }
+
+  for (const clue of snapshot.clues) {
+    if (clue.status === "hidden" || clue.status === "discovered") {
+      clueWindow.push(clue);
+    }
+
+    if (clue.status === "discovered") {
+      discoveredClues.push(clue);
+      discoveredClueIds.add(clue.id);
+    }
+  }
+
+  const activeRevealIds = new Set(snapshot.state.activeRevealIds);
+  const readyArcIds = new Set(
+    snapshot.arcs.filter((arc) => arc.status !== "locked").map((arc) => arc.id),
+  );
   const eligibleRevealIds = snapshot.blueprint.hiddenReveals
     .filter((reveal) => {
-      const allCluesFound = reveal.requiredClues.every((clueId) =>
-        snapshot.clues.some((clue) => clue.id === clueId && clue.status === "discovered"),
-      );
-      const arcReady = reveal.requiredArcIds.every((arcId) =>
-        snapshot.arcs.some((arc) => arc.id === arcId && arc.status !== "locked"),
-      );
+      const allCluesFound = reveal.requiredClues.every((clueId) => discoveredClueIds.has(clueId));
+      const arcReady = reveal.requiredArcIds.every((arcId) => readyArcIds.has(arcId));
 
-      return allCluesFound && arcReady && !snapshot.state.activeRevealIds.includes(reveal.id);
+      return allCluesFound && arcReady && !activeRevealIds.has(reveal.id);
     })
     .map((reveal) => reveal.id);
-  const promptSceneSummary = await sanitizePromptSceneSummary(snapshot.state.sceneState.summary);
-  const recentTurns = snapshot.sessionId
-    ? await prisma.turn.findMany({
-        where: {
-          sessionId: snapshot.sessionId,
-          status: "resolved",
-        },
-        orderBy: { updatedAt: "desc" },
-        take: 4,
-        select: {
-          playerAction: true,
-          resultJson: true,
-        },
-      })
-    : [];
-  const recentTurnLedger = recentTurns
-    .reverse()
-    .map((turn, index) =>
-      formatTurnLedgerEntry(
-        Math.max(snapshot.state.turnCount - recentTurns.length + index + 1, 1),
-        extractTurnFacts(turn.resultJson, turn.playerAction),
-      ),
-    );
+  const recentTurnLedger = buildRecentTurnLedger(
+    snapshot.state.turnCount,
+    snapshot.recentResolvedTurns,
+  );
 
   const arcPacingHint = activeArc
     ? activeArc.currentTurn / activeArc.expectedTurns >= 0.8
@@ -1185,32 +1249,16 @@ export async function getPromptContext(snapshot: CampaignSnapshot): Promise<Prom
     scene: snapshot.state.sceneState,
     promptSceneSummary,
     activeArc,
-    activeQuests: snapshot.quests.filter(
-      (quest) => quest.status === "active" && quest.discoveredAtTurn !== null,
-    ),
-    hiddenQuests: snapshot.quests.filter((quest) => quest.discoveredAtTurn === null),
+    activeQuests,
+    hiddenQuests,
     recentTurnLedger,
     relevantClues: clueWindow,
     staleClues,
     eligibleRevealIds,
     discoveredClues,
     companion,
-    hiddenNpcs: snapshot.npcs.filter((npc) => npc.discoveredAtTurn === null),
-    discoveryCandidates: {
-      quests: snapshot.quests
-        .filter((quest) => quest.discoveredAtTurn === null && quest.status === "active")
-        .map((quest) => ({
-          id: quest.id,
-          title: quest.title,
-        })),
-      npcs: snapshot.npcs
-        .filter((npc) => npc.discoveredAtTurn === null)
-        .map((npc) => ({
-          id: npc.id,
-          name: npc.name,
-          role: npc.role,
-        })),
-    },
+    hiddenNpcs,
+    discoveryCandidates,
     villainClock: snapshot.state.villainClock,
     tensionScore: snapshot.state.tensionScore,
     arcPacingHint,

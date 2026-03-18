@@ -52,6 +52,19 @@ type TurnRollbackData = {
   memoryEntryId: string | null;
 };
 
+const KEYWORD_STOPWORDS = new Set([
+  "with",
+  "from",
+  "that",
+  "this",
+  "into",
+  "your",
+  "their",
+  "about",
+  "before",
+  "after",
+]);
+
 function normalizeActionOptions(actions: string[]) {
   return Array.from(
     new Set(actions.map((action) => action.trim()).filter(Boolean)),
@@ -59,25 +72,12 @@ function normalizeActionOptions(actions: string[]) {
 }
 
 function keywordSet(value: string) {
-  const stopwords = new Set([
-    "with",
-    "from",
-    "that",
-    "this",
-    "into",
-    "your",
-    "their",
-    "about",
-    "before",
-    "after",
-  ]);
-
   return new Set(
     value
       .toLowerCase()
       .split(/[^a-z0-9]+/)
       .map((token) => token.trim())
-      .filter((token) => token.length >= 4 && !stopwords.has(token)),
+      .filter((token) => token.length >= 4 && !KEYWORD_STOPWORDS.has(token)),
   );
 }
 

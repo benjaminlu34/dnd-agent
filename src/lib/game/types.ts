@@ -248,6 +248,12 @@ export type MemoryRecord = {
   createdAt: string;
 };
 
+export type RecentResolvedTurn = {
+  id: string;
+  playerAction: string;
+  resultJson: unknown;
+};
+
 export type CampaignSnapshot = {
   campaignId: string;
   sessionId: string;
@@ -264,6 +270,7 @@ export type CampaignSnapshot = {
   clues: Clue[];
   memories: MemoryRecord[];
   recentMessages: StoryMessage[];
+  recentResolvedTurns: RecentResolvedTurn[];
   previouslyOn: string | null;
   latestResolvedTurnId: string | null;
   canRetryLatestTurn: boolean;

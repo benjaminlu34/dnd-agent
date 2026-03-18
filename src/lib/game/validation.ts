@@ -69,7 +69,15 @@ export function validateDelta({
     add: [] as string[],
     remove: [] as string[],
   };
-  const arcIds = new Set(arcs.map((arc) => arc.id));
+  const questById = new Map(quests.map((quest) => [quest.id, quest]));
+  const arcById = new Map(arcs.map((arc) => [arc.id, arc]));
+  const npcById = new Map(npcs.map((npc) => [npc.id, npc]));
+  const revealById = new Map(blueprint.hiddenReveals.map((reveal) => [reveal.id, reveal]));
+  const arcIds = new Set(arcById.keys());
+  const clueIds = new Set(clues.map((clue) => clue.id));
+  const unlockedArcIds = new Set(
+    arcs.filter((arc) => arc.status !== "locked").map((arc) => arc.id),
+  );
   const seenQuestDiscoveries = new Set<string>();
   const seenNpcDiscoveries = new Set<string>();
 
@@ -79,7 +87,7 @@ export function validateDelta({
   }
 
   for (const update of proposedDelta.questAdvancements ?? []) {
-    const quest = quests.find((entry) => entry.id === update.questId);
+    const quest = questById.get(update.questId);
 
     if (!quest) {
       warnings.push(`Rejected quest advancement for unknown quest ${update.questId}.`);
@@ -107,7 +115,7 @@ export function validateDelta({
     }
     seenQuestDiscoveries.add(questId);
 
-    const quest = quests.find((entry) => entry.id === questId);
+    const quest = questById.get(questId);
 
     if (!quest) {
       warnings.push(`Rejected unknown quest discovery ${questId}.`);
@@ -129,7 +137,6 @@ export function validateDelta({
     warnings.push("Rejected direct inventory mutation. Inventory remains engine-controlled in v1.");
   }
 
-  const clueIds = new Set(clues.map((clue) => clue.id));
   for (const clueId of proposedDelta.clueDiscoveries ?? []) {
     if (!clueIds.has(clueId)) {
       warnings.push(`Rejected unknown clue discovery ${clueId}.`);
@@ -147,7 +154,7 @@ export function validateDelta({
   );
 
   for (const revealId of proposedDelta.revealTriggers ?? []) {
-    const reveal = blueprint.hiddenReveals.find((entry) => entry.id === revealId);
+    const reveal = revealById.get(revealId);
 
     if (!reveal) {
       warnings.push(`Rejected unknown reveal ${revealId}.`);
@@ -155,9 +162,7 @@ export function validateDelta({
     }
 
     const allCluesFound = reveal.requiredClues.every((id) => discoveredClues.has(id));
-    const arcsReady = reveal.requiredArcIds.every((arcId) =>
-      arcs.some((arc) => arc.id === arcId && arc.status !== "locked"),
-    );
+    const arcsReady = reveal.requiredArcIds.every((arcId) => unlockedArcIds.has(arcId));
 
     if (!allCluesFound || !arcsReady) {
       warnings.push(`Rejected premature reveal ${reveal.title}.`);
@@ -168,7 +173,7 @@ export function validateDelta({
   }
 
   for (const arcUpdate of proposedDelta.arcAdvancements ?? []) {
-    const arc = arcs.find((entry) => entry.id === arcUpdate.arcId);
+    const arc = arcById.get(arcUpdate.arcId);
 
     if (!arc) {
       warnings.push(`Rejected arc update for unknown arc ${arcUpdate.arcId}.`);
@@ -178,7 +183,7 @@ export function validateDelta({
     acceptedArcAdvancements.push(arcUpdate);
   }
 
-  const npcIds = new Set(npcs.map((npc) => npc.id));
+  const npcIds = new Set(npcById.keys());
   for (const npcChange of proposedDelta.npcApprovalChanges ?? []) {
     if (!npcIds.has(npcChange.npcId)) {
       warnings.push(`Rejected NPC approval change for ${npcChange.npcId}.`);
@@ -199,7 +204,7 @@ export function validateDelta({
       continue;
     }
 
-    const npc = npcs.find((entry) => entry.id === npcId);
+    const npc = npcById.get(npcId);
     if (!npc || npc.discoveredAtTurn !== null) {
       continue;
     }
