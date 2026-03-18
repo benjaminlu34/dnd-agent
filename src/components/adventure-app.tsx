@@ -357,21 +357,6 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
     setActiveNarrationId(null);
   }
 
-  function removeLatestLocalUserAction() {
-    setMessages((current) => {
-      const next = [...current];
-
-      for (let index = next.length - 1; index >= 0; index -= 1) {
-        if (next[index]?.role === "user" && next[index]?.kind === "action") {
-          next.splice(index, 1);
-          break;
-        }
-      }
-
-      return next;
-    });
-  }
-
   useEffect(() => {
     const campaignId = initialCampaignId ?? window.localStorage.getItem(STORAGE_KEY);
     setLastCampaignId(campaignId);
@@ -671,30 +656,35 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
     setNotice(null);
 
     const editedAction = pendingActionDraft.trim();
-    let handedOffToResubmission = false;
 
     try {
-      const response = await fetch(`/api/turns/${pendingCheck.turnId}/cancel`, {
+      const response = await fetch(`/api/turns/${pendingCheck.turnId}/edit`, {
         method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          action: editedAction,
+        }),
       });
 
       if (!response.ok) {
-        throw new Error("Could not reopen that action.");
+        throw new Error("Could not update that check.");
       }
 
-      removeLatestLocalUserAction();
-      setPendingCheck(null);
-      setLastCheckResult(null);
+      const data = (await response.json()) as { check: PendingCheck };
+      setPendingCheck({
+        ...data.check,
+        turnId: pendingCheck.turnId,
+      });
+      setPendingActionDraft(toPendingCheckDraft(data.check));
       setEditingPendingCheck(false);
-      handedOffToResubmission = true;
-      await runActionSubmission(editedAction);
+      setNotice("Check updated.");
     } catch (cancelError) {
-      setError(cancelError instanceof Error ? cancelError.message : "Could not reopen action.");
+      setError(cancelError instanceof Error ? cancelError.message : "Could not update check.");
     } finally {
       setEditingPendingCheck(false);
-      if (!handedOffToResubmission) {
-        setStatus("idle");
-      }
+      setStatus("idle");
     }
   }
 

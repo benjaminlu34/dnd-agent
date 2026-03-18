@@ -584,6 +584,46 @@ export async function cancelPendingTurn(turnId: string) {
   ]);
 }
 
+export async function revisePendingTurn(input: {
+  turnId: string;
+  playerAction: string;
+}) {
+  const turn = await prisma.turn.findUnique({
+    where: { id: input.turnId },
+    select: {
+      id: true,
+      status: true,
+      pendingCheckJson: true,
+    },
+  });
+
+  if (!turn || turn.status !== "pending_check" || !turn.pendingCheckJson) {
+    throw new Error("Pending turn not found.");
+  }
+
+  const pendingCheck = turn.pendingCheckJson as PendingCheck;
+  const revisedReason = input.playerAction.trim();
+
+  if (!revisedReason) {
+    throw new Error("Edited check text cannot be empty.");
+  }
+
+  const revisedCheck: PendingCheck = {
+    ...pendingCheck,
+    reason: revisedReason,
+  };
+
+  await prisma.turn.update({
+    where: { id: input.turnId },
+    data: {
+      playerAction: revisedReason,
+      pendingCheckJson: revisedCheck,
+    },
+  });
+
+  return revisedCheck;
+}
+
 export async function retryLastTurn(turnId: string) {
   const turn = await prisma.turn.findUnique({
     where: { id: turnId },
