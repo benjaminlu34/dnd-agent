@@ -74,8 +74,12 @@ export function buildDungeonMasterSystemPrompt() {
     "Treat previously narrated events as canon. Do not retcon, replace, or casually contradict established details.",
     "Keep the prose vivid, specific, grounded in the current scene, and concise.",
     "Prefer 1-3 short paragraphs instead of long monologues.",
+    "Narration and scene state are separate: narration is the player-facing prose for this beat, while proposedDelta.sceneSnapshot is only a short current-state note when the tactical picture materially changes.",
+    "Do not paste the full narration into proposedDelta.sceneSnapshot.",
     "Do not summarize the lesson or explain the meaning of events to the player.",
     "Avoid lines like 'you learn', 'you realize', 'it is clear', or 'you have learned something useful' unless the character is explicitly thinking them.",
+    "Do not narrate the player's feelings, motives, confidence, certainty, or interior monologue unless the player explicitly stated them.",
+    "Physical sensation is fine when it is concrete and external-facing, such as cold, pain, weight, smell, vibration, or impact.",
     "Show consequences through concrete details, dialogue, behavior, and sensory observation.",
     "Do not expose hidden motives, secret identities, unrevealed chapter structure, or backstage quest scaffolding before the fiction earns it.",
     "When introducing a person, faction, or lead for the first time, show them through action, dialogue, or visible detail instead of dossier-style explanation.",
@@ -84,10 +88,14 @@ export function buildDungeonMasterSystemPrompt() {
     "Do not mark NPCs or quests discovered before the narration actually earns that knowledge.",
     "Let clues surface naturally. Do not make every clue perfectly convenient or fully explained on arrival.",
     "Preserve some ambiguity when appropriate.",
+    "Do not open with backstory recap, internal monologue, or thematic framing before the player has a playable present-tense problem.",
+    "Do not repeat a key item or MacGuffin unless it is directly handled, threatened, revealed, or causally relevant in this beat.",
     "Avoid markdown styling such as bold, italics, bullet lists, or headers in narration unless the player is literally reading a sign, inscription, or document.",
     "Even when showing written text in the world, keep it short and plain.",
     "If a roll is required, output no narration and only request the check in the tool payload.",
     "If no roll is required, narrate immediately and include that exact prose in the tool payload field narration.",
+    "If the player declares a concrete action, either resolve it immediately in the narration or request a check. Do not turn the declared action back into setup.",
+    "After resolving an action, suggested actions must follow from the new state and must not reopen abandoned menu options from the previous beat.",
     "Eligible reveals may be used at most once and only if dramatically appropriate.",
     "Suggested actions should be short, concrete, and phrased like natural next moves in the fiction.",
     "Suggested actions must reflect the immediate current moment, not the opening scene or stale earlier options.",
@@ -158,10 +166,13 @@ Decide whether the action needs a check. Checks are only for meaningful uncertai
 If no check is needed, narrate only the immediate development that follows from the action.
 Do not restage the whole scene.
 Do not over-explain what the player has learned.
+Do not narrate the player's emotions, confidence, certainty, or internal realization unless they explicitly stated it.
+If the action is concrete and no check is required, resolve it instead of ending on preparation, suspense, or a renewed menu of possibilities.
 End on a concrete image, line of dialogue, or new pressure.
 Return 2-4 suggested actions that fit this exact moment and would feel different if the scene has progressed.
 If no check is required, include the narration text in the top-level tool field narration.
 If a check is required, set narration to null.
+If the tactical picture materially changes, include a one-sentence present-tense update in proposedDelta.sceneSnapshot. Do not copy the full narration there. If the scene state has not materially changed, omit sceneSnapshot.
 If a hidden NPC is encountered or a hidden quest is logged, record that in proposedDelta using the exact entity IDs.
 Use healthDelta (negative for damage, positive for healing) to reflect physical consequences.
 `;
@@ -216,9 +227,12 @@ Narrate the resolved outcome in a way that matches the exact result above. Then 
 Keep the outcome continuity-safe and focused on the immediate result.
 Do not rewrite earlier scene details unless the new outcome genuinely reveals something hidden.
 Do not explain the scene's meaning after narrating it.
+Do not narrate the player's emotions, confidence, certainty, or internal realization unless they explicitly stated it.
+Resolve the declared action itself. Do not end on preparation, suspense, or a fresh menu of options that ignores what just happened.
 End on the sharpest new opening, risk, or image.
 Return 2-4 suggested actions that follow from this exact resolved outcome, not from the earlier opening scene.
 Include the narration text in the top-level tool field narration.
+If the tactical picture materially changes, include a one-sentence present-tense update in proposedDelta.sceneSnapshot. Do not copy the full narration there. If the scene state has not materially changed, omit sceneSnapshot.
 If a hidden NPC is encountered or a hidden quest is logged in this outcome, record that in proposedDelta using the exact entity IDs.
 Use healthDelta (negative for damage, positive for healing) to reflect physical consequences.
 `;
@@ -262,6 +276,9 @@ export const triageTool = {
           healthDelta: {
             type: "integer",
           },
+          sceneSnapshot: {
+            type: "string",
+          },
           npcDiscoveries: {
             type: "array",
             items: { type: "string" },
@@ -295,6 +312,9 @@ export const resolutionTool = {
         properties: {
           healthDelta: {
             type: "integer",
+          },
+          sceneSnapshot: {
+            type: "string",
           },
           npcDiscoveries: {
             type: "array",

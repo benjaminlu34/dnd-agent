@@ -57,6 +57,53 @@ function normalizeActionOptions(actions: string[]) {
   ).slice(0, 4);
 }
 
+function keywordSet(value: string) {
+  const stopwords = new Set([
+    "with",
+    "from",
+    "that",
+    "this",
+    "into",
+    "your",
+    "their",
+    "about",
+    "before",
+    "after",
+  ]);
+
+  return new Set(
+    value
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 4 && !stopwords.has(token)),
+  );
+}
+
+function hasStrongKeywordOverlap(left: string, right: string) {
+  const a = keywordSet(left);
+  const b = keywordSet(right);
+
+  if (!a.size || !b.size) {
+    return false;
+  }
+
+  let overlap = 0;
+  for (const token of a) {
+    if (b.has(token)) {
+      overlap += 1;
+    }
+  }
+
+  return overlap >= Math.min(2, Math.min(a.size, b.size));
+}
+
+function isGenericAction(action: string) {
+  return /^(press forward before the moment closes|search for the hidden angle here|shift position and see what changes|press this lead before it goes cold|change your approach and test the room)$/i.test(
+    action.trim(),
+  );
+}
+
 function overlapRatio(a: string[], b: string[]) {
   if (!a.length || !b.length) {
     return 0;
@@ -133,23 +180,26 @@ function buildFallbackSuggestedActions(input: {
     }
 
     return [
-      "Press this lead before it goes cold",
-      "Pause and study the scene more carefully",
+      "Exploit the opening before the pressure settles",
+      "Test the weakest point in the opposition",
       companionAction,
-      "Change your approach and test the room",
+      "Reposition and force a clearer angle",
     ];
   })();
 
   const normalized = normalizeActionOptions(options).filter(
-    (action) => action.toLowerCase() !== input.playerAction.trim().toLowerCase(),
+    (action) =>
+      action.toLowerCase() !== input.playerAction.trim().toLowerCase() &&
+      !hasStrongKeywordOverlap(action, input.playerAction) &&
+      !isGenericAction(action),
   );
 
   if (overlapRatio(normalized, input.currentActions) >= 0.75) {
     return normalizeActionOptions([
-      "Press forward before the moment closes",
+      "Exploit the opening before it closes",
       companionAction,
-      "Search for the hidden angle here",
-      "Shift position and see what changes",
+      "Force a reaction from the nearest pressure point",
+      "Shift to a stronger position before they recover",
     ]);
   }
 
@@ -164,7 +214,10 @@ function chooseSuggestedActions(input: {
   companionName?: string | null;
 }) {
   const candidateActions = normalizeActionOptions(input.candidateActions).filter(
-    (action) => action.toLowerCase() !== input.playerAction.trim().toLowerCase(),
+    (action) =>
+      action.toLowerCase() !== input.playerAction.trim().toLowerCase() &&
+      !hasStrongKeywordOverlap(action, input.playerAction) &&
+      !isGenericAction(action),
   );
 
   if (candidateActions.length >= 2 && overlapRatio(candidateActions, input.currentActions) < 0.75) {
@@ -668,7 +721,7 @@ export async function triageTurn(input: {
     },
   );
 
-  const narration = streamedNarration.trim() || decision.proposedDelta.sceneSummary?.trim() || "";
+  const narration = streamedNarration.trim() || decision.narration?.trim() || "";
   const narrationForActions = narration || snapshot.state.sceneState.summary;
   const suggestedActions = chooseSuggestedActions({
     currentActions: snapshot.state.sceneState.suggestedActions,
@@ -786,7 +839,7 @@ export async function resolvePendingCheck(input: {
     },
   );
 
-  const narration = streamedNarration.trim() || decision.proposedDelta.sceneSummary?.trim() || "";
+  const narration = streamedNarration.trim() || decision.narration.trim() || "";
   const narrationForActions = narration || snapshot.state.sceneState.summary;
   const suggestedActions = chooseSuggestedActions({
     currentActions: snapshot.state.sceneState.suggestedActions,

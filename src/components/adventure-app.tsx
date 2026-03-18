@@ -327,6 +327,7 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
   const [status, setStatus] = useState<"idle" | "loading" | "streaming">("idle");
   const [campaignsLoading, setCampaignsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [loadingCampaignId, setLoadingCampaignId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [journalTab, setJournalTab] = useState<JournalTab>("journal");
@@ -336,6 +337,7 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
   const [activeNarrationId, setActiveNarrationId] = useState<string | null>(null);
   const [lastCampaignId, setLastCampaignId] = useState<string | null>(null);
   const [pendingActionDraft, setPendingActionDraft] = useState("");
+  const [editingPendingCheck, setEditingPendingCheck] = useState(false);
   const refreshCampaignsEvent = useEffectEvent(() => {
     void refreshCampaigns();
   });
@@ -425,6 +427,7 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
 
     setStatus("loading");
     setError(null);
+    setNotice(null);
     setLoadingCampaignId(campaignId);
 
     try {
@@ -534,14 +537,16 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
     });
   }
 
-  async function submitAction(action: string) {
-    if (!snapshot || !action.trim() || pendingCheck) {
+  async function runActionSubmission(action: string) {
+    if (!snapshot || !action.trim()) {
       return;
     }
 
     setStatus("streaming");
     setError(null);
+    setNotice(null);
     setLastCheckResult(null);
+    setNotice(null);
     setPendingActionDraft(action.trim());
     setMessages((current) => [
       ...current,
@@ -579,6 +584,14 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
     }
   }
 
+  async function submitAction(action: string) {
+    if (pendingCheck) {
+      return;
+    }
+
+    await runActionSubmission(action);
+  }
+
   async function resolveCheck() {
     if (!pendingCheck) {
       return;
@@ -586,6 +599,7 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
 
     setStatus("streaming");
     setError(null);
+    setNotice(null);
 
     try {
       const response = await fetch(`/api/turns/${pendingCheck.turnId}/check`, {
@@ -609,6 +623,7 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
     }
 
     setError(null);
+    setNotice(null);
 
     try {
       const response = await fetch(`/api/sessions/${snapshot.sessionId}/summarize`, {
@@ -637,12 +652,26 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
   }
 
   async function editPendingAction() {
-    if (!pendingCheck) {
+    if (!pendingCheck || status !== "idle") {
+      return;
+    }
+
+    setError(null);
+    setNotice(null);
+    setEditingPendingCheck(true);
+  }
+
+  async function savePendingActionEdit() {
+    if (!pendingCheck || !pendingActionDraft.trim()) {
       return;
     }
 
     setStatus("loading");
     setError(null);
+    setNotice(null);
+
+    const editedAction = pendingActionDraft.trim();
+    let handedOffToResubmission = false;
 
     try {
       const response = await fetch(`/api/turns/${pendingCheck.turnId}/cancel`, {
@@ -654,13 +683,18 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
       }
 
       removeLatestLocalUserAction();
-      setInputValue(pendingActionDraft);
       setPendingCheck(null);
       setLastCheckResult(null);
+      setEditingPendingCheck(false);
+      handedOffToResubmission = true;
+      await runActionSubmission(editedAction);
     } catch (cancelError) {
       setError(cancelError instanceof Error ? cancelError.message : "Could not reopen action.");
     } finally {
-      setStatus("idle");
+      setEditingPendingCheck(false);
+      if (!handedOffToResubmission) {
+        setStatus("idle");
+      }
     }
   }
 
@@ -671,6 +705,7 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
 
     setStatus("loading");
     setError(null);
+    setNotice(null);
 
     try {
       const response = await fetch(`/api/turns/${snapshot.latestResolvedTurnId}/retry`, {
@@ -684,6 +719,13 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
       const data = (await response.json()) as { snapshot: PlayerCampaignSnapshot };
       setLastCheckResult(null);
       applySnapshot(data.snapshot);
+      setNotice("Rewound 1 turn.");
+      window.requestAnimationFrame(() => {
+        feedRef.current?.scrollTo({
+          top: feedRef.current.scrollHeight,
+          behavior: "auto",
+        });
+      });
     } catch (retryError) {
       setError(retryError instanceof Error ? retryError.message : "Could not retry latest turn.");
     } finally {
@@ -698,6 +740,8 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
 
     removeStreamingNarration();
     setPendingCheck(null);
+    setEditingPendingCheck(false);
+    setNotice(null);
     setSidebarOpen(false);
     setActiveNarrationId(null);
     setView("home");
@@ -969,6 +1013,12 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
                 </div>
               ) : null}
 
+              {notice ? (
+                <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
+                  {notice}
+                </div>
+              ) : null}
+
               {pendingCheck ? (
                 <section className="flex flex-col gap-4 rounded-xl border border-zinc-800 border-l-2 border-l-white bg-zinc-950/80 p-6">
                   <div className="flex items-start justify-between gap-4">
@@ -979,26 +1029,60 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
                       {pendingCheck.mode} check
                     </span>
                   </div>
-                  <p className="max-w-lg text-sm leading-relaxed text-zinc-400">
-                    {pendingCheck.reason}
-                  </p>
-                  <div className="flex justify-between gap-3">
-                    <button
-                      className="button-press inline-flex items-center rounded-md border border-zinc-700 px-4 py-2.5 text-sm font-medium text-zinc-200 hover:bg-zinc-900"
-                      onClick={editPendingAction}
-                      disabled={status !== "idle"}
-                    >
-                      Edit Action
-                    </button>
-                    <button
-                      className="button-press inline-flex items-center gap-2 rounded-md bg-white px-6 py-2.5 text-sm font-medium text-black shadow-sm transition-colors hover:bg-zinc-200"
-                      onClick={resolveCheck}
-                      disabled={status !== "idle"}
-                    >
-                      <DiceIcon />
-                      <span>Roll Dice</span>
-                    </button>
-                  </div>
+                  {editingPendingCheck ? (
+                    <>
+                      <textarea
+                        value={pendingActionDraft}
+                        onChange={(event) => setPendingActionDraft(event.target.value)}
+                        rows={3}
+                        className="min-h-24 w-full resize-y rounded-2xl border border-zinc-800 bg-black px-4 py-4 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-zinc-600"
+                        placeholder="Adjust the action behind this check"
+                        disabled={status !== "idle"}
+                      />
+                      <div className="flex justify-between gap-3">
+                        <button
+                          className="button-press inline-flex items-center rounded-md border border-zinc-700 px-4 py-2.5 text-sm font-medium text-zinc-200 hover:bg-zinc-900"
+                          onClick={() => {
+                            setEditingPendingCheck(false);
+                            setPendingActionDraft(toPendingCheckDraft(pendingCheck));
+                          }}
+                          disabled={status !== "idle"}
+                        >
+                          Keep Original
+                        </button>
+                        <button
+                          className="button-press inline-flex items-center rounded-md bg-white px-6 py-2.5 text-sm font-medium text-black shadow-sm transition-colors hover:bg-zinc-200"
+                          onClick={savePendingActionEdit}
+                          disabled={status !== "idle" || !pendingActionDraft.trim()}
+                        >
+                          Update Check
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <p className="max-w-lg text-sm leading-relaxed text-zinc-400">
+                        {pendingCheck.reason}
+                      </p>
+                      <div className="flex justify-between gap-3">
+                        <button
+                          className="button-press inline-flex items-center rounded-md border border-zinc-700 px-4 py-2.5 text-sm font-medium text-zinc-200 hover:bg-zinc-900"
+                          onClick={editPendingAction}
+                          disabled={status !== "idle"}
+                        >
+                          Edit Action
+                        </button>
+                        <button
+                          className="button-press inline-flex items-center gap-2 rounded-md bg-white px-6 py-2.5 text-sm font-medium text-black shadow-sm transition-colors hover:bg-zinc-200"
+                          onClick={resolveCheck}
+                          disabled={status !== "idle"}
+                        >
+                          <DiceIcon />
+                          <span>Roll Dice</span>
+                        </button>
+                      </div>
+                    </>
+                  )}
                 </section>
               ) : null}
 

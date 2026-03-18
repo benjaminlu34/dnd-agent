@@ -40,7 +40,7 @@ export function validateDelta({
     ...state,
     sceneState: {
       ...state.sceneState,
-      summary: proposedDelta.sceneSummary ?? state.sceneState.summary,
+      summary: proposedDelta.sceneSnapshot ?? state.sceneState.summary,
       title: proposedDelta.sceneTitle ?? state.sceneState.title,
       atmosphere: proposedDelta.sceneAtmosphere ?? state.sceneState.atmosphere,
       suggestedActions:

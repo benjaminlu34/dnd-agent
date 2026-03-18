@@ -9,6 +9,26 @@ Player-visible content passes this audit only if it meets all of the following:
 - Agency discipline: player-facing setup can invite action, but it must not preload consequences or present DM-side branching logic as summary copy.
 - Recap discipline: `Previously on`, journal summaries, and memory entries must restate established fiction only.
 
+## DM Narration Rubric
+Turn-by-turn DM prose should also meet these narration-specific rules:
+
+- No player interiority: do not tell the player what they feel, believe, realize, or intend unless they explicitly said it.
+- Physical sensation is allowed: lines like "you feel the cold through your coat" are acceptable because they describe concrete sensory contact, not psychology.
+- No opening recap blocks: openings should begin in immediate external scene pressure, not backstory summary or thematic framing.
+- No MacGuffin fixation: do not keep reintroducing the key item unless the current beat directly handles, threatens, or reveals it.
+- No editorial closers: end on a concrete image, threat, dialogue beat, or new opening, not a thematic slogan.
+- Resolve declared actions cleanly: if the player commits to an action, either resolve it or request a check instead of turning it back into suspense setup.
+
+## DM Narration Examples
+- Fail, player interiority: "You feel confident knowing you've handled worse."
+- Pass, physical sensation: "You feel the cold through your coat when the harbor wind cuts across the roofline."
+- Fail, opening recap: "You've been running for three days now, ever since the ledger changed everything."
+- Pass, immediate opening: "A customs whistle cuts across the quay just as two enforcers shoulder through the fog toward your bridge."
+- Fail, editorial closer: "The night is always watching."
+- Pass, concrete closer: "Below you, one of the enforcers stops at the blood on the tiles and calls for backup."
+- Fail, action deferral: "You shadow the guard and wait for the perfect moment."
+- Pass, action resolution: "You shadow the guard through the blind corner, catch his collar, and drive him into the stacked crates before he can shout."
+
 ## Surface Inventory
 | Surface | Audience | Upstream source | Audit expectation |
 | --- | --- | --- | --- |

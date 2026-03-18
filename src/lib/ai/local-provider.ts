@@ -800,16 +800,16 @@ function buildSuggestedActions(input: {
   outcome?: CheckOutcome;
 }) {
   const companionAction = input.promptContext.companion
-    ? `Ask ${input.promptContext.companion.name} what they make of it`
-    : "Question the nearest witness";
+    ? `Pull ${input.promptContext.companion.name} into the next move`
+    : "Pressure the nearest witness before they shut down";
   const sceneLead =
-    input.promptContext.scene.suggestedActions[0] ?? "Press the nearest lead before it cools";
+    input.promptContext.scene.suggestedActions[0] ?? "Exploit the nearest opening before it closes";
   const clueAction = input.discoveredClueText
     ? `Follow up on ${lowerFirst(input.discoveredClueText)}`
-    : "Search for the missing angle in the scene";
+    : "Search for the loose detail the scene just exposed";
   const revealAction = input.revealText
-    ? "Act before the newly exposed truth can spread"
-    : "Test the pressure point you just found";
+    ? "Act before the newly exposed truth reshapes the room"
+    : "Test the pressure point you just created";
 
   const options = [
     clueAction,
@@ -823,16 +823,16 @@ function buildSuggestedActions(input: {
 
   if (input.outcome === "failure") {
     return [
-      "Regain your footing before the opposition presses harder",
+      "Recover before the opposition can press the mistake",
       companionAction,
-      "Look for a safer route through the scene",
+      "Cut toward a safer angle without giving up the lead",
       clueAction,
     ];
   }
 
   if (input.intent.kind === "social") {
     return [
-      "Press the conversation before the witness shuts down",
+      "Press the conversation before the witness regains control",
       clueAction,
       companionAction,
       revealAction,
@@ -840,6 +840,10 @@ function buildSuggestedActions(input: {
   }
 
   return options.slice(0, 4);
+}
+
+function cleanedAction(input: string) {
+  return lowerFirst(input.replace(/[.?!]+$/, ""));
 }
 
 function buildMemorySummary(input: {
@@ -896,19 +900,19 @@ function buildNoCheckNarration(input: {
   discoveredQuestTitle?: string | null;
 }) {
   const scene = input.promptContext.scene;
-  const lead = `In ${scene.title}, ${lowerFirst(input.playerAction.replace(/[.?!]+$/, ""))}.`;
+  const lead = `You ${cleanedAction(input.playerAction)}, and the scene answers immediately.`;
   const npcBeat = input.discoveredNpcName
-    ? `${input.discoveredNpcName} steps fully into the moment instead of remaining part of the background.`
+    ? `${input.discoveredNpcName} steps out of the blur of the crowd and into the line of consequence.`
     : "";
   const clueBeat = input.discoveredClueText
-    ? `That draws a concrete detail into the open: ${input.discoveredClueText}.`
-    : `The move changes the rhythm of the scene before anyone can settle back into it.`;
+    ? `The move pulls a usable detail into the open: ${input.discoveredClueText}.`
+    : `The move changes the rhythm in ${scene.location} before anyone can settle back into it.`;
   const questBeat = input.discoveredQuestTitle
-    ? `The trouble finally takes a shape you can name: ${input.discoveredQuestTitle}.`
+    ? `The trouble finally takes a name people can act around: ${input.discoveredQuestTitle}.`
     : "";
   const revealBeat = input.revealText
-    ? `The implication lands hard: ${input.revealText}.`
-    : `The air in ${scene.location} stays ${lowerFirst(scene.atmosphere)}, but now it has a direction.`;
+    ? `The room shifts around one hard truth: ${input.revealText}.`
+    : `By the time it lands, the pressure in ${scene.location} is pointed somewhere concrete.`;
 
   return [lead, npcBeat, clueBeat, questBeat, revealBeat].filter(Boolean).join(" ");
 }
@@ -934,13 +938,13 @@ function buildResolutionNarration(input: {
 
   if (input.outcome === "success") {
     return [
-      `You follow through on ${lowerFirst(input.playerAction.replace(/[.?!]+$/, ""))}, and the moment breaks your way.`,
+      `You ${cleanedAction(input.playerAction)}, and the opening breaks your way.`,
       npcBeat,
       input.discoveredClueText
-        ? `The payoff is immediate: ${input.discoveredClueText}.`
+        ? `The payoff is immediate and usable: ${input.discoveredClueText}.`
         : `The pressure in ${input.promptContext.scene.location} shifts before the opposition can recover.`,
       questBeat,
-      input.revealText ? `The larger truth snaps into focus: ${input.revealText}.` : companionBeat,
+      input.revealText ? `A larger truth breaks cleanly into view: ${input.revealText}.` : companionBeat,
     ]
       .filter(Boolean)
       .join(" ");
@@ -948,10 +952,10 @@ function buildResolutionNarration(input: {
 
   if (input.outcome === "partial") {
     return [
-      `You make ${lowerFirst(input.playerAction.replace(/[.?!]+$/, ""))} work, but not cleanly.`,
+      `You ${cleanedAction(input.playerAction)}, but the opening comes with teeth.`,
       npcBeat,
       input.discoveredClueText
-        ? `You still pull something useful out of the mess: ${input.discoveredClueText}.`
+        ? `Even through the mess, you still pull something usable free: ${input.discoveredClueText}.`
         : `The scene gives ground, then bites back.`,
       questBeat,
       input.revealText
@@ -963,14 +967,41 @@ function buildResolutionNarration(input: {
   }
 
   return [
-    `You commit to ${lowerFirst(input.playerAction.replace(/[.?!]+$/, ""))}, and the scene turns against you.`,
-    `The opening narrows, the pressure spikes, and ${input.promptContext.scene.location} suddenly feels smaller than it did a breath ago.`,
+    `You ${cleanedAction(input.playerAction)}, and the move goes against you.`,
+    `The opening slams shut, the pressure spikes, and everyone nearby now knows where to look.`,
     npcBeat,
     questBeat,
     companionBeat || "Whoever was waiting for a mistake has one now.",
   ]
     .filter(Boolean)
     .join(" ");
+}
+
+function buildSceneSnapshot(input: {
+  promptContext: PromptContext;
+  playerAction: string;
+  discoveredClueText?: string | null;
+  revealText?: string | null;
+  discoveredQuestTitle?: string | null;
+  outcome?: CheckOutcome;
+}) {
+  const pressure =
+    input.outcome === "failure"
+      ? "the opposition has the edge"
+      : input.outcome === "partial"
+        ? "the scene is unstable and reacting"
+        : "the opening is briefly yours";
+  const detail = input.revealText
+    ? lowerFirst(input.revealText)
+    : input.discoveredClueText
+      ? lowerFirst(input.discoveredClueText)
+      : input.discoveredQuestTitle
+        ? lowerFirst(input.discoveredQuestTitle)
+        : cleanedAction(input.playerAction);
+
+  return `${input.promptContext.scene.location} is ${pressure} after ${cleanedAction(
+    input.playerAction,
+  )}, with ${detail} now shaping the next move.`;
 }
 
 function emitNarration(callbacks: StreamCallbacks | undefined, narration: string) {
@@ -986,7 +1017,6 @@ function pickRandom<T>(items: T[]) {
 function buildCampaignOpening(input: CampaignOpeningInput): GeneratedCampaignOpening {
   const prompt = cleanPrompt(input.prompt);
   const previous = input.previousDraft;
-  const backstory = input.character.backstory?.trim();
   const archetype = input.character.archetype.toLowerCase();
   const locations =
     input.setup.secretEngine.locations.length > 0
@@ -1022,46 +1052,34 @@ function buildCampaignOpening(input: CampaignOpeningInput): GeneratedCampaignOpe
       : `Someone in ${location} is about to force the next move.`,
   ]);
   const activeThreat = previous?.activeThreat ?? generatedThreat;
-  const relation =
+  const approachBeat =
     /\b(lord|lady|captain|magistrate|regent|commander|overlord)\b/i.test(archetype)
       ? pickRandom([
-          `${input.character.name} arrives used to being noticed, and ${location} notices back.`,
-          `People make room for ${input.character.name} on instinct, even here in ${location}.`,
+          `${input.character.name} steps into ${location} and the nearest arguments hitch around the edges.`,
+          `By the time ${input.character.name} reaches ${location}, too many eyes have already started measuring the entrance.`,
         ])
       : /\b(peasant|farmer|laborer|urchin|servant|villager)\b/i.test(archetype)
         ? pickRandom([
-            `${input.character.name} knows what it means when a place like ${location} goes tight and watchful all at once.`,
-            `${input.character.name} reads the ordinary strain under the scene before the louder danger shows itself.`,
+            `${input.character.name} reaches ${location} just as the ordinary strain there starts to split open.`,
+            `${input.character.name} catches the tight silence in ${location} a breath before it turns into open trouble.`,
           ])
         : /\b(rogue|scout|wanderer|ranger|traveler|smuggler|thief)\b/i.test(archetype)
           ? pickRandom([
-              `${input.character.name} comes into ${location} as an outsider with good instincts and no reason to trust the surface of things.`,
-              `${input.character.name} reaches ${location} already reading exits, blind corners, and the places where trouble likes to wait.`,
+              `${input.character.name} slips into ${location} with the exits still visible and the pressure already moving.`,
+              `${input.character.name} reaches ${location} just as the wrong people start paying attention to the same corner.`,
             ])
           : pickRandom([
-              `${input.character.name} steps into ${location} just as its nerves start to show.`,
-              `${input.character.name} enters ${location} at the exact moment its ordinary rhythm begins to fail.`,
+              `${input.character.name} steps into ${location} just as its surface calm gives way.`,
+              `${input.character.name} arrives in ${location} at the moment its ordinary rhythm fails.`,
             ]);
-
-  const personalAngle = backstory
-    ? pickRandom([
-        `Old habits rise with the pressure. ${backstory}`,
-        `Something in the scene catches against ${input.character.name}'s past before the first decision is even made.`,
-      ])
-    : pickRandom([
-        `${input.character.name} has only a breath to take in the place before the opening pressure tightens.`,
-        `There is barely time to get oriented before the first thread of danger pulls tight.`,
-      ]);
   const summary =
     previous?.scene.summary && !prompt
       ? previous.scene.summary
       : [
-          `${input.setup.publicSynopsis.premise}`,
-          companion
-            ? `${companion.name}${companion.personalHook ? `, ${companion.personalHook.toLowerCase()},` : ""} is close enough to matter if ${input.character.name} chooses to engage.`
-            : null,
-          activeThreat,
-          prompt ? `Lean the situation toward this direction: ${prompt}.` : null,
+          `${location} is under visible strain.`,
+          quest ? `${quest.title} is the pressure point nearest to breaking.` : activeThreat,
+          companion ? `${companion.name} is close enough to matter if the scene turns sharp.` : null,
+          prompt ? `The immediate pressure should lean toward ${lowerFirst(prompt)}.` : null,
         ]
           .filter(Boolean)
           .join(" ");
@@ -1083,7 +1101,16 @@ function buildCampaignOpening(input: CampaignOpeningInput): GeneratedCampaignOpe
   const narration =
     previous?.narration && !prompt
       ? previous.narration
-      : `${relation}\n\n${personalAngle}\n\n${summary}`;
+      : [
+          approachBeat,
+          activeThreat,
+          authorityFigure
+            ? `${authorityFigure.name} is already in motion nearby, and the people around them are pretending not to notice.`
+            : `Someone nearby is already moving like they know what is about to break.`,
+          companion
+            ? `${companion.name} is within earshot when the first visible problem cuts across the scene.`
+            : `A nearby witness flinches toward the first sign of trouble.`,
+        ].join(" ");
 
   return {
     narration,
@@ -1434,6 +1461,7 @@ export class LocalDungeonMaster {
     if (intent.requiresCheck) {
       return {
         requiresCheck: true,
+        narration: null,
         check: {
           stat: intent.stat,
           mode: intent.mode,
@@ -1491,9 +1519,16 @@ export class LocalDungeonMaster {
 
     return {
       requiresCheck: false,
+      narration,
       suggestedActions,
       proposedDelta: {
-        sceneSummary: narration,
+        sceneSnapshot: buildSceneSnapshot({
+          promptContext: input.promptContext,
+          playerAction: input.playerAction,
+          discoveredClueText: clue?.text ?? null,
+          revealText,
+          discoveredQuestTitle: questDiscovery?.title ?? null,
+        }),
         healthDelta: buildHealthDelta({ intent }),
         sceneAtmosphere:
           intent.kind === "rest"
@@ -1587,9 +1622,17 @@ export class LocalDungeonMaster {
     emitNarration(callbacks, narration);
 
     return {
+      narration,
       suggestedActions,
       proposedDelta: {
-        sceneSummary: narration,
+        sceneSnapshot: buildSceneSnapshot({
+          promptContext: input.promptContext,
+          playerAction: input.playerAction,
+          discoveredClueText: clue?.text ?? null,
+          revealText,
+          discoveredQuestTitle: questDiscovery?.title ?? null,
+          outcome: input.checkResult.outcome,
+        }),
         healthDelta: buildHealthDelta({
           intent,
           outcome: input.checkResult.outcome,

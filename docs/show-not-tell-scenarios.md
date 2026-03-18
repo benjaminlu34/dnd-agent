@@ -5,6 +5,7 @@
 | --- | --- | --- |
 | Fresh campaign, before first action | Session Zero preview, opening narration, campaign API payload, play screen tabs | Only opening fiction and player-safe pitch details are visible |
 | First 1-3 turns, no clue discovery | Narration, suggested actions, `People`/`Quests`/`Clues`, turn payloads | No hidden dossiers, quest scaffolds, or unrevealed clue text appear |
+| First 1-3 turns, committed action | Narration, suggested actions, turn payloads | Declared actions resolve or request checks; narration does not reset the scene into setup |
 | First explicit NPC or clue discovery | Narration, updated payload, journal tabs | Only the discovered NPC/clue becomes visible |
 | First quest-signaling moment | Narration, journal state, recap state | Quest entry appears only if the fiction has named or logged it |
 | First reveal-eligible turn | Narration and recap outputs | Hidden reveal truth remains concealed until dramatically surfaced in fiction |
@@ -21,6 +22,8 @@ Use this ledger when auditing a scenario:
 - Which objectives have been explicitly named in play
 - Which recap statements are grounded in prior messages
 - Which UI controls are present only for usability, not lore delivery
+- Whether the DM narrated any player psychology rather than external action or concrete sensation
+- Whether the scene ended on a concrete pressure point instead of a thematic slogan
 
 If a payload field or UI element falls outside that ledger, treat it as a likely violation.
 

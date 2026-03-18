@@ -1,4 +1,9 @@
 import OpenAI from "openai";
+import {
+  auditNarration,
+  buildNarrationRetryInstructions,
+  type NarrationAuditIssue,
+} from "@/lib/ai/narration-audit";
 import { LocalDungeonMaster } from "@/lib/ai/local-provider";
 import { env } from "@/lib/env";
 import { characterTemplateDraftSchema } from "@/lib/game/characters";
@@ -476,11 +481,12 @@ function extractNarrationValue(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
-function hasFreshNarration(proposedDelta: ProposedStateDelta, text: string) {
-  return Boolean(
-    sanitizeNarration(text) ||
-      (typeof proposedDelta.sceneSummary === "string" && proposedDelta.sceneSummary.trim()),
-  );
+function extractSceneSnapshotValue(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+function hasFreshNarration(narration: string | null | undefined, text: string) {
+  return Boolean(sanitizeNarration(text) || (typeof narration === "string" && narration.trim()));
 }
 
 function normalizeDiscoveryDelta(value: Record<string, unknown>) {
@@ -501,6 +507,16 @@ function normalizeDiscoveryDelta(value: Record<string, unknown>) {
     normalized.healthDelta = Number.isFinite(raw) ? Math.trunc(raw) : undefined;
   }
 
+  const sceneSnapshot = extractSceneSnapshotValue(
+    value.sceneSnapshot ?? value.scene_snapshot ?? value.sceneSummary ?? value.scene_summary,
+  );
+  if (sceneSnapshot) {
+    normalized.sceneSnapshot = sceneSnapshot;
+  }
+
+  delete (normalized as Record<string, unknown>).sceneSummary;
+  delete (normalized as Record<string, unknown>).scene_summary;
+
   return normalized;
 }
 
@@ -510,7 +526,9 @@ function normalizeTriageDecision(
   text: string,
 ): TriageDecision {
   const payload = toObject(unwrapStructuredPayload(raw));
-  const payloadNarration = extractNarrationValue(payload?.narration ?? payload?.sceneSummary);
+  const payloadNarration = extractNarrationValue(
+    payload?.narration ?? payload?.sceneSnapshot ?? payload?.sceneSummary,
+  );
   const suggestedActions = toStringArray(
     payload?.suggestedActions ??
       payload?.suggested_actions ??
@@ -543,6 +561,7 @@ function normalizeTriageDecision(
 
     return {
       requiresCheck: true,
+      narration: null,
       check: {
         stat:
           checkPayload?.stat === "strength" ||
@@ -571,19 +590,17 @@ function normalizeTriageDecision(
 
   return {
     requiresCheck: false,
+    narration: normalizedNarration || null,
     suggestedActions,
-    proposedDelta: {
-      ...(proposedDeltaWithActions as ProposedStateDelta),
-      ...(normalizedNarration && !(proposedDeltaWithActions as ProposedStateDelta).sceneSummary
-        ? { sceneSummary: normalizedNarration }
-        : {}),
-    },
+    proposedDelta: proposedDeltaWithActions as ProposedStateDelta,
   };
 }
 
 function normalizeResolveDecision(raw: unknown, text: string): ResolveDecision {
   const payload = toObject(unwrapStructuredPayload(raw));
-  const payloadNarration = extractNarrationValue(payload?.narration ?? payload?.sceneSummary);
+  const payloadNarration = extractNarrationValue(
+    payload?.narration ?? payload?.sceneSnapshot ?? payload?.sceneSummary,
+  );
   const suggestedActions = toStringArray(
     payload?.suggestedActions ??
       payload?.suggested_actions ??
@@ -604,14 +621,66 @@ function normalizeResolveDecision(raw: unknown, text: string): ResolveDecision {
   const normalizedNarration = payloadNarration || narration;
 
   return {
+    narration: normalizedNarration,
     suggestedActions,
-    proposedDelta: {
-      ...(proposedDeltaWithActions as ProposedStateDelta),
-      ...(normalizedNarration && !(proposedDeltaWithActions as ProposedStateDelta).sceneSummary
-        ? { sceneSummary: normalizedNarration }
-        : {}),
-    },
+    proposedDelta: proposedDeltaWithActions as ProposedStateDelta,
   };
+}
+
+function buildTurnRetryPrompt(basePrompt: string, issues: NarrationAuditIssue[]) {
+  return [
+    basePrompt,
+    "",
+    "QUALITY CORRECTION",
+    "Rewrite the narration and return a full replacement tool payload.",
+    "Fix these specific issues:",
+    buildNarrationRetryInstructions(issues),
+  ].join("\n");
+}
+
+function chooseCleanerNarration<T extends { narration: string | null }>(
+  original: { value: T; issues: NarrationAuditIssue[] },
+  retried: { value: T; issues: NarrationAuditIssue[] },
+) {
+  if (retried.issues.length < original.issues.length) {
+    return retried;
+  }
+
+  if (retried.issues.length > original.issues.length) {
+    return original;
+  }
+
+  const originalLength = original.value.narration?.trim().length ?? 0;
+  const retriedLength = retried.value.narration?.trim().length ?? 0;
+
+  if (retriedLength > 0 && originalLength === 0) {
+    return retried;
+  }
+
+  if (retriedLength > 0 && retriedLength <= originalLength * 1.35) {
+    return retried;
+  }
+
+  return original;
+}
+
+function chooseCleanerOpening(
+  original: { value: GeneratedCampaignOpening; issues: NarrationAuditIssue[] },
+  retried: { value: GeneratedCampaignOpening; issues: NarrationAuditIssue[] },
+) {
+  if (retried.issues.length < original.issues.length) {
+    return retried;
+  }
+
+  if (retried.issues.length > original.issues.length) {
+    return original;
+  }
+
+  if (retried.value.narration.trim() && retried.value.narration.length <= original.value.narration.length * 1.35) {
+    return retried;
+  }
+
+  return original;
 }
 
 const localDungeonMaster = new LocalDungeonMaster();
@@ -709,6 +778,57 @@ class OpenRouterDungeonMaster {
       text,
       toolInput: toolArguments ? safeParseJson(toolArguments) : safeParseJson(text),
     };
+  }
+
+  private async retryCampaignOpening(
+    input: CampaignOpeningInput,
+    issues: NarrationAuditIssue[],
+  ): Promise<GeneratedCampaignOpening | null> {
+    const response = await this.client.chat.completions.create({
+      model: env.openRouterModel,
+      messages: [
+        {
+          role: "system",
+          content: [
+            "Write the opening narration for a new solo RPG campaign.",
+            "Start in the immediate present external scene with a playable problem.",
+            "Do not open with backstory recap, internal monologue, or thematic framing.",
+            "Do not narrate the player's feelings, confidence, certainty, or private thoughts unless they explicitly stated them.",
+            "Do not close with an editorial or thematic statement.",
+            "Return structured output with narration, activeThreat, and scene details.",
+            "scene.summary must be a short present-tense snapshot of the current tactical situation, not a recap of the whole setup.",
+          ].join("\n"),
+        },
+        {
+          role: "user",
+          content: [
+            `Character: ${input.character.name}, ${input.character.archetype}.`,
+            `Backstory: ${input.character.backstory ?? "None provided."}`,
+            `Public synopsis: ${JSON.stringify(input.setup.publicSynopsis)}`,
+            `Secret engine: ${JSON.stringify(input.setup.secretEngine)}`,
+            "Rewrite the opening from scratch and return the full updated structured opening.",
+            "Fix these specific issues:",
+            buildNarrationRetryInstructions(issues),
+            input.previousDraft ? `Previous draft: ${JSON.stringify(input.previousDraft)}` : "",
+            input.prompt?.trim() ? `Additional direction: ${input.prompt.trim()}` : "",
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        },
+      ],
+      tools: [toFunctionTool(campaignOpeningTool)],
+      tool_choice: "auto",
+      temperature: 0.65,
+    });
+
+    const toolCall = response.choices[0]?.message?.tool_calls?.[0];
+    const args =
+      toolCall && toolCall.type === "function" ? toolCall.function.arguments ?? "" : "";
+    const parsed = args
+      ? safeParseJson(args)
+      : safeParseJson(extractMessageText(response.choices[0]?.message?.content));
+
+    return isGeneratedCampaignOpening(parsed) ? parsed : null;
   }
 
   async generateCampaignSetup(
@@ -939,9 +1059,13 @@ class OpenRouterDungeonMaster {
               "Be character-specific, but do not rewrite module facts, secret truths, or core campaign pressure.",
               "Different heroes should plausibly enter the same module from very different angles.",
               "Generate the first actual playable scene for this hero.",
-              "Keep it vivid, specific, and player-facing.",
+              "Keep it vivid, specific, player-facing, and grounded in present external action.",
+              "Start in the immediate scene pressure, not with recap or internal monologue.",
+              "Do not narrate the player's feelings, confidence, certainty, or private thoughts unless they explicitly stated them.",
+              "Do not close with a thematic or editorial statement.",
               "Do not expose hidden motives, unrevealed truths, or backstage structure.",
               "Return structured output with narration, activeThreat, and scene details.",
+              "scene.summary must be a short present-tense snapshot of the current tactical situation, not a recap of the whole setup.",
               "scene.suggestedActions must contain 2-4 concrete immediate actions the player could plausibly take.",
             ].join("\n"),
           },
@@ -979,7 +1103,39 @@ class OpenRouterDungeonMaster {
         : safeParseJson(extractMessageText(response.choices[0]?.message?.content));
 
       if (isGeneratedCampaignOpening(parsed)) {
-        return parsed;
+        const openingAudit = auditNarration({
+          mode: "opening",
+          narration: parsed.narration,
+        });
+        if (!openingAudit.shouldRetry) {
+          return parsed;
+        }
+
+        console.warn(
+          `[dm.opening] Opening draft triggered narration audit: ${openingAudit.issues.map((issue) => issue.code).join(", ")}.`,
+        );
+        const retried = await this.retryCampaignOpening(input, openingAudit.issues);
+        if (retried) {
+          const retriedAudit = auditNarration({
+            mode: "opening",
+            narration: retried.narration,
+          });
+          const chosen = chooseCleanerOpening(
+            { value: parsed, issues: openingAudit.issues },
+            { value: retried, issues: retriedAudit.issues },
+          );
+          if (chosen.issues.length === 0) {
+            return chosen.value;
+          }
+
+          console.warn(
+            `[dm.opening] OpenRouter opening still failed narration audit after retry: ${chosen.issues.map((issue) => issue.code).join(", ")}. Falling back to local opening.`,
+          );
+          return this.fallback.generateCampaignOpening(input);
+        }
+
+        console.warn("[dm.opening] Retry did not return a valid opening. Falling back to local opening.");
+        return this.fallback.generateCampaignOpening(input);
       }
     } catch {
       // Fall through to raw-JSON generation or local fallback below.
@@ -995,6 +1151,10 @@ class OpenRouterDungeonMaster {
               "Generate the first actual playable scene for a hero entering a reusable solo RPG module.",
               "Return only a valid JSON object.",
               "Do not include markdown, explanations, or code fences.",
+              "Start in the immediate external scene with a playable problem, not recap.",
+              "Do not narrate the player's feelings, confidence, certainty, or private thoughts unless they explicitly stated them.",
+              "Do not end with a thematic or editorial line.",
+              "scene.summary must be a short present-tense snapshot, not a recap paragraph.",
               `JSON schema: ${JSON.stringify(campaignOpeningTool.input_schema)}`,
             ].join("\n"),
           },
@@ -1025,7 +1185,39 @@ class OpenRouterDungeonMaster {
       );
 
       if (isGeneratedCampaignOpening(parsed)) {
-        return parsed;
+        const openingAudit = auditNarration({
+          mode: "opening",
+          narration: parsed.narration,
+        });
+        if (!openingAudit.shouldRetry) {
+          return parsed;
+        }
+
+        console.warn(
+          `[dm.opening] Raw JSON opening triggered narration audit: ${openingAudit.issues.map((issue) => issue.code).join(", ")}.`,
+        );
+        const retried = await this.retryCampaignOpening(input, openingAudit.issues);
+        if (retried) {
+          const retriedAudit = auditNarration({
+            mode: "opening",
+            narration: retried.narration,
+          });
+          const chosen = chooseCleanerOpening(
+            { value: parsed, issues: openingAudit.issues },
+            { value: retried, issues: retriedAudit.issues },
+          );
+          if (chosen.issues.length === 0) {
+            return chosen.value;
+          }
+
+          console.warn(
+            `[dm.opening] Raw JSON opening still failed narration audit after retry: ${chosen.issues.map((issue) => issue.code).join(", ")}. Falling back to local opening.`,
+          );
+          return this.fallback.generateCampaignOpening(input);
+        }
+
+        console.warn("[dm.opening] Retry did not return a valid opening. Falling back to local opening.");
+        return this.fallback.generateCampaignOpening(input);
       }
     } catch {
       // Fall back to the local provider below.
@@ -1036,39 +1228,85 @@ class OpenRouterDungeonMaster {
 
   async triageTurn(input: TurnAIPayload, callbacks?: StreamCallbacks): Promise<TriageDecision> {
     try {
+      const basePrompt = buildTriageUserPrompt(input);
       const result = await this.runStream({
-        prompt: buildTriageUserPrompt(input),
+        prompt: basePrompt,
         tool: triageTool,
-        onNarration: callbacks?.onNarration,
       });
 
       const normalized = normalizeTriageDecision(result.toolInput, input, result.text);
       if (isTriageDecision(normalized)) {
-        if (!sanitizeNarration(result.text)) {
-          const payloadNarration = normalized.proposedDelta.sceneSummary?.trim();
-          if (payloadNarration) {
-            callbacks?.onNarration?.(payloadNarration);
-          }
-        }
-        if (!normalized.requiresCheck && !hasFreshNarration(normalized.proposedDelta, result.text)) {
+        if (!normalized.requiresCheck && !hasFreshNarration(normalized.narration, result.text)) {
           console.warn("[dm.triage] Streaming tool output had no narration. Retrying with required tool payload.");
           const retryResult = await this.runToolRetry({
-            prompt: buildTriageUserPrompt(input),
+            prompt: basePrompt,
             tool: triageTool,
           });
           const retried = normalizeTriageDecision(retryResult.toolInput, input, retryResult.text);
-          if (
-            isTriageDecision(retried) &&
-            (retried.requiresCheck || hasFreshNarration(retried.proposedDelta, retryResult.text))
-          ) {
-            const finalNarration = retried.proposedDelta.sceneSummary?.trim();
-            if (finalNarration) {
-              callbacks?.onNarration?.(finalNarration);
+          if (isTriageDecision(retried) && (retried.requiresCheck || hasFreshNarration(retried.narration, retryResult.text))) {
+            if (retried.narration?.trim()) {
+              callbacks?.onNarration?.(retried.narration.trim());
             }
             return retried;
           }
 
           throw new Error("OpenRouter triage returned no fresh narration for a no-check turn.");
+        }
+
+        if (!normalized.requiresCheck && normalized.narration) {
+          const audit = auditNarration({
+            mode: "triage",
+            narration: normalized.narration,
+            playerAction: input.playerAction,
+            recentCanon: input.promptContext.recentCanon,
+          });
+
+          if (audit.shouldRetry) {
+            console.warn(
+              `[dm.triage] Narration audit triggered retry: ${audit.issues.map((issue) => issue.code).join(", ")}.`,
+            );
+            const retryResult = await this.runToolRetry({
+              prompt: buildTurnRetryPrompt(basePrompt, audit.issues),
+              tool: triageTool,
+            });
+            const retried = normalizeTriageDecision(retryResult.toolInput, input, retryResult.text);
+
+            if (isTriageDecision(retried) && !retried.requiresCheck && retried.narration) {
+              const retriedAudit = auditNarration({
+                mode: "triage",
+                narration: retried.narration,
+                playerAction: input.playerAction,
+                recentCanon: input.promptContext.recentCanon,
+              });
+              const chosen = chooseCleanerNarration(
+                { value: normalized, issues: audit.issues },
+                { value: retried, issues: retriedAudit.issues },
+              );
+
+              if (retriedAudit.issues.length > 0 && chosen.value === normalized) {
+                console.warn(
+                  `[dm.triage] Retry still triggered narration audit: ${retriedAudit.issues.map((issue) => issue.code).join(", ")}.`,
+                );
+              }
+
+              const chosenIssues = chosen.value === normalized ? audit.issues : retriedAudit.issues;
+              if (chosenIssues.length > 0) {
+                console.warn(
+                  `[dm.triage] OpenRouter narration still failed audit after retry: ${chosenIssues.map((issue) => issue.code).join(", ")}. Falling back to local turn narration.`,
+                );
+                return this.fallback.triageTurn(input, callbacks);
+              }
+
+              if (chosen.value.narration?.trim()) {
+                callbacks?.onNarration?.(chosen.value.narration.trim());
+              }
+              return chosen.value;
+            }
+          }
+        }
+
+        if (normalized.narration?.trim()) {
+          callbacks?.onNarration?.(normalized.narration.trim());
         }
         return normalized;
       }
@@ -1084,36 +1322,83 @@ class OpenRouterDungeonMaster {
     callbacks?: StreamCallbacks,
   ): Promise<ResolveDecision> {
     try {
+      const basePrompt = buildOutcomeUserPrompt(input);
       const result = await this.runStream({
-        prompt: buildOutcomeUserPrompt(input),
+        prompt: basePrompt,
         tool: resolutionTool,
-        onNarration: callbacks?.onNarration,
       });
 
       const normalized = normalizeResolveDecision(result.toolInput, result.text);
       if (isResolveDecision(normalized)) {
-        if (!sanitizeNarration(result.text)) {
-          const payloadNarration = normalized.proposedDelta.sceneSummary?.trim();
-          if (payloadNarration) {
-            callbacks?.onNarration?.(payloadNarration);
-          }
-        }
-        if (!hasFreshNarration(normalized.proposedDelta, result.text)) {
+        if (!hasFreshNarration(normalized.narration, result.text)) {
           console.warn("[dm.resolve] Streaming tool output had no narration. Retrying with required tool payload.");
           const retryResult = await this.runToolRetry({
-            prompt: buildOutcomeUserPrompt(input),
+            prompt: basePrompt,
             tool: resolutionTool,
           });
           const retried = normalizeResolveDecision(retryResult.toolInput, retryResult.text);
-          if (isResolveDecision(retried) && hasFreshNarration(retried.proposedDelta, retryResult.text)) {
-            const finalNarration = retried.proposedDelta.sceneSummary?.trim();
-            if (finalNarration) {
-              callbacks?.onNarration?.(finalNarration);
+          if (isResolveDecision(retried) && hasFreshNarration(retried.narration, retryResult.text)) {
+            if (retried.narration?.trim()) {
+              callbacks?.onNarration?.(retried.narration.trim());
             }
             return retried;
           }
 
           throw new Error("OpenRouter resolution returned no fresh narration.");
+        }
+
+        const audit = auditNarration({
+          mode: "resolution",
+          narration: normalized.narration,
+          playerAction: input.playerAction,
+          recentCanon: input.promptContext.recentCanon,
+        });
+
+        if (audit.shouldRetry) {
+          console.warn(
+            `[dm.resolve] Narration audit triggered retry: ${audit.issues.map((issue) => issue.code).join(", ")}.`,
+          );
+          const retryResult = await this.runToolRetry({
+            prompt: buildTurnRetryPrompt(basePrompt, audit.issues),
+            tool: resolutionTool,
+          });
+          const retried = normalizeResolveDecision(retryResult.toolInput, retryResult.text);
+
+          if (isResolveDecision(retried) && retried.narration) {
+            const retriedAudit = auditNarration({
+              mode: "resolution",
+              narration: retried.narration,
+              playerAction: input.playerAction,
+              recentCanon: input.promptContext.recentCanon,
+            });
+            const chosen = chooseCleanerNarration(
+              { value: normalized, issues: audit.issues },
+              { value: retried, issues: retriedAudit.issues },
+            );
+
+            if (retriedAudit.issues.length > 0 && chosen.value === normalized) {
+              console.warn(
+                `[dm.resolve] Retry still triggered narration audit: ${retriedAudit.issues.map((issue) => issue.code).join(", ")}.`,
+              );
+            }
+
+            const chosenIssues = chosen.value === normalized ? audit.issues : retriedAudit.issues;
+            if (chosenIssues.length > 0) {
+              console.warn(
+                `[dm.resolve] OpenRouter narration still failed audit after retry: ${chosenIssues.map((issue) => issue.code).join(", ")}. Falling back to local turn narration.`,
+              );
+              return this.fallback.resolveTurn(input, callbacks);
+            }
+
+            if (chosen.value.narration?.trim()) {
+              callbacks?.onNarration?.(chosen.value.narration.trim());
+            }
+            return chosen.value;
+          }
+        }
+
+        if (normalized.narration.trim()) {
+          callbacks?.onNarration?.(normalized.narration.trim());
         }
         return normalized;
       }

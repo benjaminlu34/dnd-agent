@@ -350,7 +350,7 @@ export type StructuredActionIntent =
   | { type: "adjust_companion"; npcId: string; approvalDelta: number; reason: string };
 
 export type ProposedStateDelta = {
-  sceneSummary?: string;
+  sceneSnapshot?: string;
   sceneTitle?: string;
   sceneAtmosphere?: string;
   activeArcId?: string;
@@ -417,6 +417,7 @@ export type CheckResult = {
 
 export type TriageDecision = {
   requiresCheck: boolean;
+  narration: string | null;
   check?: {
     stat: Stat;
     mode: CheckMode;
@@ -427,6 +428,7 @@ export type TriageDecision = {
 };
 
 export type ResolveDecision = {
+  narration: string;
   suggestedActions: string[];
   proposedDelta: ProposedStateDelta;
 };
