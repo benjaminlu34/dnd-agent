@@ -109,21 +109,8 @@ export type GeneratedCampaignSetup = {
     premise: string;
     tone: string;
     setting: string;
-    openingScene: {
-      title: string;
-      location: string;
-      overview: string;
-    };
   };
   secretEngine: {
-    openingScene: {
-      title: string;
-      summary: string;
-      location: string;
-      atmosphere: string;
-      activeThreat: string;
-      suggestedActions: string[];
-    };
     villain: {
       name: string;
       motive: string;
@@ -172,13 +159,25 @@ export type GeneratedCampaignSetup = {
   };
 };
 
+export type GeneratedCampaignOpening = {
+  narration: string;
+  activeThreat: string;
+  scene: {
+    title: string;
+    summary: string;
+    location: string;
+    atmosphere: string;
+    suggestedActions: string[];
+  };
+};
+
 export type AdventureModuleSummary = {
   id: string;
   title: string;
   premise: string;
   tone: string;
   setting: string;
-  openingScene: GeneratedCampaignSetup["publicSynopsis"]["openingScene"];
+  campaignCount: number;
   createdAt: string;
   updatedAt: string;
 };

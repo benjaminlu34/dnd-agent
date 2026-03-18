@@ -90,27 +90,8 @@ export function createDefaultAdventureModuleSetup(): GeneratedCampaignSetup {
         "A pilgrim-town built around a shattered observatory is sliding toward an eclipse cult uprising.",
       tone: "Gothic adventure with hopeful heroism",
       setting: "The lantern-streaked valley of Briar Glen",
-      openingScene: {
-        title: "Ash Market at Dusk",
-        location: "Briar Glen",
-        overview:
-          "The market square is clearing under a blood-red eclipse notice while old bells shake in the wind and the town's fear starts to show.",
-      },
     },
     secretEngine: {
-      openingScene: {
-        title: "Ash Market at Dusk",
-        summary:
-          "Wind rattles brass prayer bells while the market square clears around a blood-red eclipse notice nailed to the fountain.",
-        location: "Briar Glen",
-        atmosphere: "Uneasy, crowded, and one spark away from panic",
-        activeThreat: "Cult lantern-bearers are searching the old quarter.",
-        suggestedActions: [
-          "Inspect the eclipse notice",
-          "Question the bell-warden",
-          "Follow the fresh soot trail toward the smithy",
-        ],
-      },
       villain: {
         name: "Abbess Veyra",
         motive: "Awaken the eclipse saint buried under the observatory",

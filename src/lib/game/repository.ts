@@ -34,6 +34,7 @@ import type {
   CharacterTemplateSummary,
   Clue,
   ClueStatus,
+  GeneratedCampaignOpening,
   GeneratedCampaignSetup,
   MemoryRecord,
   NpcRecord,
@@ -111,7 +112,11 @@ function toCharacter(
 type ModuleWithSetup = Pick<
   PrismaAdventureModule,
   "id" | "userId" | "title" | "publicSynopsis" | "secretEngine" | "createdAt" | "updatedAt"
->;
+> & {
+  _count?: {
+    campaigns: number;
+  };
+};
 
 function toGeneratedCampaignSetup(module: Pick<
   PrismaAdventureModule,
@@ -129,7 +134,7 @@ function toAdventureModuleSummary(module: ModuleWithSetup): AdventureModuleSumma
     premise: setup.publicSynopsis.premise,
     tone: setup.publicSynopsis.tone,
     setting: setup.publicSynopsis.setting,
-    openingScene: setup.publicSynopsis.openingScene,
+    campaignCount: module._count?.campaigns ?? 0,
     createdAt: module.createdAt.toISOString(),
     updatedAt: module.updatedAt.toISOString(),
   };
@@ -138,10 +143,11 @@ function toAdventureModuleSummary(module: ModuleWithSetup): AdventureModuleSumma
 function buildCampaignCreationData(input: {
   module: ModuleWithSetup;
   template: CharacterTemplate;
+  opening: GeneratedCampaignOpening;
 }) {
   const setup = toGeneratedCampaignSetup(input.module);
   const blueprint = buildCampaignBlueprintFromSetup(setup);
-  const state = buildCampaignStateFromSetup(setup);
+  const state = buildCampaignStateFromSetup(setup, input.opening);
   const quests = buildQuestRecordsFromSetup(setup);
   const arcs = buildArcRecordsFromBlueprint(blueprint);
   const npcs = buildNpcRecordsFromSetup(setup);
@@ -155,7 +161,6 @@ function buildCampaignCreationData(input: {
     arcs,
     npcs,
     clues,
-    openingScene: setup.secretEngine.openingScene,
     template: input.template,
   };
 }
@@ -166,7 +171,7 @@ async function createCampaignInTx(
     userId: string;
     module: ModuleWithSetup;
     template: CharacterTemplate;
-    openingNarration: string;
+    opening: GeneratedCampaignOpening;
   },
 ) {
   const { state, quests, arcs, npcs, clues, template } = buildCampaignCreationData(input);
@@ -193,7 +198,7 @@ async function createCampaignInTx(
             create: {
               role: "assistant",
               kind: "narration",
-              content: input.openingNarration,
+              content: input.opening.narration,
             },
           },
         },
@@ -345,6 +350,13 @@ export async function listAdventureModules(): Promise<AdventureModuleSummary[]> 
   const user = await ensureLocalUser();
   const modules = await prisma.adventureModule.findMany({
     where: { userId: user.id },
+    include: {
+      _count: {
+        select: {
+          campaigns: true,
+        },
+      },
+    },
     orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
   });
 
@@ -389,6 +401,36 @@ export async function createAdventureModule(input: GeneratedCampaignSetup) {
   return toAdventureModuleSummary(adventureModule);
 }
 
+export async function deleteAdventureModuleForUser(moduleId: string) {
+  const user = await ensureLocalUser();
+  const adventureModule = await prisma.adventureModule.findFirst({
+    where: {
+      id: moduleId,
+      userId: user.id,
+    },
+    include: {
+      _count: {
+        select: {
+          campaigns: true,
+        },
+      },
+    },
+  });
+
+  if (!adventureModule) {
+    return null;
+  }
+
+  await prisma.adventureModule.delete({
+    where: { id: adventureModule.id },
+  });
+
+  return {
+    moduleId: adventureModule.id,
+    campaignCount: adventureModule._count.campaigns,
+  };
+}
+
 export async function getCharacterTemplateForUser(templateId: string) {
   const user = await ensureLocalUser();
   const template = await prisma.characterTemplate.findFirst({
@@ -431,7 +473,7 @@ export async function createCampaignFromModuleForUser(input: {
 
   const templateRecord = toTemplateRecord(template);
   const setup = toGeneratedCampaignSetup(module);
-  const openingNarration = await dmClient.generateCampaignOpening({
+  const opening = await dmClient.generateCampaignOpening({
     setup,
     character: templateRecord,
   });
@@ -441,7 +483,7 @@ export async function createCampaignFromModuleForUser(input: {
       userId: user.id,
       module,
       template: templateRecord,
-      openingNarration,
+      opening,
     }),
   );
 

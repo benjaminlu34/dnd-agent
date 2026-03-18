@@ -11,12 +11,16 @@ import {
   resolutionTool,
   triageTool,
 } from "@/lib/game/prompts";
-import { generatedCampaignSetupSchema } from "@/lib/game/session-zero";
+import {
+  generatedCampaignOpeningSchema,
+  generatedCampaignSetupSchema,
+} from "@/lib/game/session-zero";
 import type {
   CampaignBlueprint,
   CharacterTemplate,
   CharacterTemplateDraft,
   CheckResult,
+  GeneratedCampaignOpening,
   GeneratedCampaignSetup,
   PromptContext,
   ProposedStateDelta,
@@ -113,46 +117,13 @@ const campaignSetupTool = {
           premise: { type: "string" },
           tone: { type: "string" },
           setting: { type: "string" },
-          openingScene: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              title: { type: "string" },
-              location: { type: "string" },
-              overview: { type: "string" },
-            },
-            required: ["title", "location", "overview"],
-          },
         },
-        required: ["title", "premise", "tone", "setting", "openingScene"],
+        required: ["title", "premise", "tone", "setting"],
       },
       secretEngine: {
         type: "object",
         additionalProperties: false,
         properties: {
-          openingScene: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              title: { type: "string" },
-              summary: { type: "string" },
-              location: { type: "string" },
-              atmosphere: { type: "string" },
-              activeThreat: { type: "string" },
-              suggestedActions: {
-                type: "array",
-                items: { type: "string" },
-              },
-            },
-            required: [
-              "title",
-              "summary",
-              "location",
-              "atmosphere",
-              "activeThreat",
-              "suggestedActions",
-            ],
-          },
           villain: {
             type: "object",
             additionalProperties: false,
@@ -278,6 +249,35 @@ const campaignSetupTool = {
   },
 };
 
+const campaignOpeningTool = {
+  name: "generate_campaign_opening",
+  description: "Create the runtime opening for a specific hero entering a reusable adventure module.",
+  input_schema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      narration: { type: "string" },
+      activeThreat: { type: "string" },
+      scene: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          title: { type: "string" },
+          summary: { type: "string" },
+          location: { type: "string" },
+          atmosphere: { type: "string" },
+          suggestedActions: {
+            type: "array",
+            items: { type: "string" },
+          },
+        },
+        required: ["title", "summary", "location", "atmosphere", "suggestedActions"],
+      },
+    },
+    required: ["narration", "activeThreat", "scene"],
+  },
+};
+
 const generateCharacterTool = {
   name: "generate_character_template",
   description: "Create a playable fantasy RPG character template from a loose prompt.",
@@ -314,6 +314,7 @@ function toFunctionTool(
     | typeof triageTool
     | typeof resolutionTool
     | typeof campaignSetupTool
+    | typeof campaignOpeningTool
     | typeof generateCharacterTool,
 ) {
   return {
@@ -328,6 +329,10 @@ function toFunctionTool(
 
 function isGeneratedCampaignSetup(value: unknown): value is GeneratedCampaignSetup {
   return generatedCampaignSetupSchema.safeParse(value).success;
+}
+
+function isGeneratedCampaignOpening(value: unknown): value is GeneratedCampaignOpening {
+  return generatedCampaignOpeningSchema.safeParse(value).success;
 }
 
 function stripCodeFences(value: string) {
@@ -664,20 +669,20 @@ class OpenRouterDungeonMaster {
         content: [
           "You are generating a fresh reusable adventure module for a solo fantasy RPG.",
           "The module must be character-agnostic by default.",
-          "Create a cohesive opening campaign with 2 arcs, 1-2 quests, 2-4 NPCs, 3-5 clues, 1-2 reveals, and 3 opening suggested actions.",
-          "Make it immediately playable.",
+          "Create a cohesive campaign framework with 2 arcs, 1-2 quests, 2-4 NPCs, 3-5 clues, and 1-2 reveals.",
+          "Make it reusable across different heroes entering from very different perspectives.",
           "Keep titles and summaries clear, concrete, and gameable.",
           "Keep all output inside publicSynopsis and secretEngine.",
           "Do not write the premise, opener, or hook around a named protagonist, class, or build.",
           "Describe a world, situation, and immediate pressure that different heroes could enter from different perspectives.",
           "publicSynopsis is spoiler-safe and must not reveal secretEngine truths, motives, or hidden reveals.",
-          "publicSynopsis.openingScene is only a high-level preview for the player-facing pitch.",
-          "publicSynopsis.openingScene.overview must stay descriptive and atmospheric, with no explicit player choices, no branching options, and no DM-style scene instructions.",
-          "Place the full playable opener, immediate pressure, and suggested actions in secretEngine.openingScene.",
+          "Do not create or describe a specific opening scene for the module.",
+          "Do not include arrival beats, starting locations, suggested opening actions, or scene framing tied to a first session.",
+          "The opening scene will be generated later at runtime when a specific character launches a campaign from this module.",
           "When revising an existing draft, treat the revision request as authoritative.",
           "If the revision conflicts with the previous draft or the original brief, the revision wins and conflicting details must be replaced, not blended.",
           "Use the previous draft as reference material to preserve what still fits, not as canon that must survive unchanged.",
-          "Keep the JSON schema and item counts stable, but rewrite titles, summaries, hooks, clues, threats, and opening beats as needed to satisfy the revised brief cleanly.",
+          "Keep the JSON schema and item counts stable, but rewrite titles, summaries, hooks, clues, factions, and threats as needed to satisfy the revised brief cleanly.",
           "Ensure clue-to-reveal and reveal-to-arc references line up as closely as possible by title.",
           "Do not reuse Briar Glen, Abbess Veyra, the Silver Bell, or other starter campaign names.",
         ].join("\n"),
@@ -695,7 +700,7 @@ class OpenRouterDungeonMaster {
                   "Build a fresh full draft that satisfies the revised brief.",
                   "Do not compromise between conflicting directions. The revision request overrides older assumptions, pacing, scene beats, and threat timing.",
                   "Use the previous draft only to keep strong material that still fits the revised brief.",
-                  "If the revised brief changes pacing or tone, rewrite the opening scene, active threat, hooks, quests, clues, and related summaries so they all point in the new direction.",
+                  "If the revised brief changes pacing or tone, rewrite the world pressure, hooks, quests, clues, and related summaries so they all point in the new direction.",
                   "Return the full updated JSON, not a partial patch.",
                   "Reference draft JSON:",
                   JSON.stringify(input.previousDraft),
@@ -874,13 +879,13 @@ class OpenRouterDungeonMaster {
             content: [
               "Write the opening narration for a new solo RPG campaign.",
               "The world/module is already defined. Your job is to frame this specific hero's entrance into it.",
-              "Be character-specific, but do not rewrite module facts, secret truths, or the core opening pressure.",
+              "Be character-specific, but do not rewrite module facts, secret truths, or core campaign pressure.",
               "Different heroes should plausibly enter the same module from very different angles.",
-              "Use 2-3 short paragraphs.",
+              "Generate the first actual playable scene for this hero.",
               "Keep it vivid, specific, and player-facing.",
               "Do not expose hidden motives, unrevealed truths, or backstage structure.",
-              "End with immediate pressure or a concrete choice point.",
-              "Return only the narration text.",
+              "Return structured output with narration, activeThreat, and scene details.",
+              "scene.suggestedActions must contain 2-4 concrete immediate actions the player could plausibly take.",
             ].join("\n"),
           },
           {
@@ -889,17 +894,62 @@ class OpenRouterDungeonMaster {
               `Character: ${input.character.name}, ${input.character.archetype}.`,
               `Backstory: ${input.character.backstory ?? "None provided."}`,
               `Public synopsis: ${JSON.stringify(input.setup.publicSynopsis)}`,
-              `Playable opener: ${JSON.stringify(input.setup.secretEngine.openingScene)}`,
-              "Write this hero's first entrance into the module.",
+              `Secret engine: ${JSON.stringify(input.setup.secretEngine)}`,
+              "Create this hero's first entrance into the module as a concrete starting scene.",
+            ].join("\n"),
+          },
+        ],
+        tools: [toFunctionTool(campaignOpeningTool)],
+        tool_choice: "auto",
+        temperature: 0.9,
+      });
+
+      const toolCall = response.choices[0]?.message?.tool_calls?.[0];
+      const args =
+        toolCall && toolCall.type === "function" ? toolCall.function.arguments ?? "" : "";
+      const parsed = args
+        ? safeParseJson(args)
+        : safeParseJson(extractMessageText(response.choices[0]?.message?.content));
+
+      if (isGeneratedCampaignOpening(parsed)) {
+        return parsed;
+      }
+    } catch {
+      // Fall through to raw-JSON generation or local fallback below.
+    }
+
+    try {
+      const fallbackResponse = await this.client.chat.completions.create({
+        model: env.openRouterModel,
+        messages: [
+          {
+            role: "system",
+            content: [
+              "Generate the first actual playable scene for a hero entering a reusable solo RPG module.",
+              "Return only a valid JSON object.",
+              "Do not include markdown, explanations, or code fences.",
+              `JSON schema: ${JSON.stringify(campaignOpeningTool.input_schema)}`,
+            ].join("\n"),
+          },
+          {
+            role: "user",
+            content: [
+              `Character: ${input.character.name}, ${input.character.archetype}.`,
+              `Backstory: ${input.character.backstory ?? "None provided."}`,
+              `Public synopsis: ${JSON.stringify(input.setup.publicSynopsis)}`,
+              `Secret engine: ${JSON.stringify(input.setup.secretEngine)}`,
             ].join("\n"),
           },
         ],
         temperature: 0.9,
       });
 
-      const text = extractMessageText(response.choices[0]?.message?.content).trim();
-      if (text) {
-        return text;
+      const parsed = safeParseJson(
+        extractMessageText(fallbackResponse.choices[0]?.message?.content),
+      );
+
+      if (isGeneratedCampaignOpening(parsed)) {
+        return parsed;
       }
     } catch {
       // Fall back to the local provider below.

@@ -89,15 +89,17 @@ function ModuleCard({
   module,
   selected,
   onSelect,
+  onDelete,
+  deleting,
 }: {
   module: AdventureModuleSummary;
   selected: boolean;
   onSelect: () => void;
+  onDelete: () => void;
+  deleting: boolean;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onSelect}
+    <div
       className={[
         "rounded-3xl border p-5 text-left transition-colors",
         selected
@@ -105,26 +107,40 @@ function ModuleCard({
           : "border-zinc-800 bg-black hover:border-zinc-700",
       ].join(" ")}
     >
-      <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Adventure Module</p>
-      <h2 className="mt-3 text-xl font-semibold text-white">{module.title}</h2>
-      <p className="mt-2 line-clamp-3 text-sm leading-7 text-zinc-400">{module.premise}</p>
-      <div className="mt-4 grid gap-3 md:grid-cols-2">
-        <div>
-          <p className="text-[0.68rem] uppercase tracking-[0.18em] text-zinc-500">Setting</p>
-          <p className="mt-2 text-sm text-zinc-300">{module.setting}</p>
-        </div>
-        <div>
-          <p className="text-[0.68rem] uppercase tracking-[0.18em] text-zinc-500">Tone</p>
-          <p className="mt-2 text-sm text-zinc-300">{module.tone}</p>
-        </div>
+      <div className="flex items-start justify-between gap-3">
+        <button type="button" onClick={onSelect} className="min-w-0 flex-1 text-left">
+          <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Adventure Module</p>
+          <h2 className="mt-3 text-xl font-semibold text-white">{module.title}</h2>
+        </button>
+        <button
+          type="button"
+          onClick={onDelete}
+          disabled={deleting}
+          className="button-press shrink-0 rounded-full border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-red-200 hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {deleting ? "Deleting..." : "Delete"}
+        </button>
       </div>
-      <div className="mt-4 rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
-        <p className="text-[0.68rem] uppercase tracking-[0.18em] text-zinc-500">Opening Scene</p>
-        <h3 className="mt-2 text-base font-semibold text-white">{module.openingScene.title}</h3>
-        <p className="mt-1 text-sm text-zinc-500">{module.openingScene.location}</p>
-        <p className="mt-3 text-sm leading-6 text-zinc-300">{module.openingScene.overview}</p>
-      </div>
-    </button>
+      <button type="button" onClick={onSelect} className="mt-2 block w-full text-left">
+        <p className="line-clamp-3 text-sm leading-7 text-zinc-400">{module.premise}</p>
+        <div className="mt-4 grid gap-3 md:grid-cols-2">
+          <div>
+            <p className="text-[0.68rem] uppercase tracking-[0.18em] text-zinc-500">Setting</p>
+            <p className="mt-2 text-sm text-zinc-300">{module.setting}</p>
+          </div>
+          <div>
+            <p className="text-[0.68rem] uppercase tracking-[0.18em] text-zinc-500">Tone</p>
+            <p className="mt-2 text-sm text-zinc-300">{module.tone}</p>
+          </div>
+        </div>
+        <p className="mt-4 text-sm leading-6 text-zinc-500">
+          The opening scene is generated at launch based on the character entering this module.
+        </p>
+        <p className="mt-4 text-xs leading-6 text-zinc-500">
+          Active campaigns linked: {module.campaignCount}
+        </p>
+      </button>
+    </div>
   );
 }
 
@@ -136,6 +152,7 @@ export function SessionZeroApp() {
   const [modulesLoading, setModulesLoading] = useState(true);
   const [characters, setCharacters] = useState<CharacterTemplateSummary[]>([]);
   const [charactersLoading, setCharactersLoading] = useState(true);
+  const [deletingModuleId, setDeletingModuleId] = useState<string | null>(null);
   const [deletingTemplateId, setDeletingTemplateId] = useState<string | null>(null);
   const [selectedModuleId, setSelectedModuleId] = useState<string | null>(null);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
@@ -214,6 +231,51 @@ export function SessionZeroApp() {
 
   function updateDraft(updater: (current: GeneratedCampaignSetup) => GeneratedCampaignSetup) {
     setDraft((current) => (current ? updater(current) : current));
+  }
+
+  async function deleteModule(module: AdventureModuleSummary) {
+    const confirmed = window.confirm(
+      `Delete ${module.title}? Deleting this module will also delete ${module.campaignCount} active campaign${module.campaignCount === 1 ? "" : "s"}.`,
+    );
+
+    if (!confirmed || deletingModuleId) {
+      return;
+    }
+
+    setDeletingModuleId(module.id);
+    setError(null);
+
+    try {
+      const response = await fetch(`/api/modules/${module.id}`, {
+        method: "DELETE",
+      });
+
+      const data = (await response.json()) as {
+        moduleId?: string;
+        campaignCount?: number;
+        error?: string;
+      };
+
+      if (!response.ok || !data.moduleId) {
+        throw new Error(data.error ?? "Failed to delete adventure module.");
+      }
+
+      setModules((current) => {
+        const next = current.filter((entry) => entry.id !== module.id);
+
+        if (selectedModuleId === module.id) {
+          setSelectedModuleId(next[0]?.id ?? null);
+        }
+
+        return next;
+      });
+    } catch (deleteError) {
+      setError(
+        deleteError instanceof Error ? deleteError.message : "Failed to delete adventure module.",
+      );
+    } finally {
+      setDeletingModuleId(null);
+    }
   }
 
   async function deleteCharacter(template: CharacterTemplateSummary) {
@@ -515,12 +577,10 @@ export function SessionZeroApp() {
                 <p className="mt-3 text-sm leading-7 text-zinc-200">{publicSynopsis.tone}</p>
               </section>
             </div>
-            <section className="mt-6 rounded-3xl border border-zinc-800 bg-black p-5">
-              <h2 className="text-sm uppercase tracking-[0.22em] text-zinc-500">Opening Scene</h2>
-              <h3 className="mt-3 text-xl font-semibold text-white">{publicSynopsis.openingScene.title}</h3>
-              <p className="mt-2 text-sm text-zinc-500">{publicSynopsis.openingScene.location}</p>
-              <p className="mt-4 text-sm leading-7 text-zinc-200">{publicSynopsis.openingScene.overview}</p>
-            </section>
+            <p className="mt-6 text-sm leading-7 text-zinc-500">
+              Opening scenes are generated when a specific character launches a campaign from this
+              module.
+            </p>
             <button
               className="mt-6 text-sm text-zinc-400 underline decoration-zinc-700 underline-offset-4 transition-colors hover:text-zinc-200"
               onClick={() => setShowAdvanced((current) => !current)}
@@ -533,21 +593,6 @@ export function SessionZeroApp() {
           {showAdvanced ? (
             <section className="mt-8 rounded-[2rem] border border-zinc-800 bg-zinc-950 p-8">
               <p className="text-[0.68rem] uppercase tracking-[0.28em] text-zinc-500">The DM Screen</p>
-
-              <div className="mt-6 rounded-3xl border border-zinc-800 bg-black p-5">
-                <h2 className="text-lg font-semibold text-white">Opening Details</h2>
-                <p className="mt-3 text-sm text-zinc-500">{secretEngine.openingScene.location}</p>
-                <p className="mt-4 text-sm leading-7 text-zinc-200">{secretEngine.openingScene.summary}</p>
-                <p className="mt-4 text-sm leading-7 text-zinc-400">{secretEngine.openingScene.atmosphere}</p>
-                <div className="mt-5 rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
-                  <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Starting Hook</p>
-                  <p className="mt-2 text-sm leading-7 text-zinc-200">{secretEngine.openingScene.activeThreat}</p>
-                  <p className="mt-4 text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Suggested Actions</p>
-                  <p className="mt-2 text-sm leading-7 text-zinc-400">
-                    {secretEngine.openingScene.suggestedActions.join(" • ")}
-                  </p>
-                </div>
-              </div>
 
               <div className="mt-6 rounded-3xl border border-zinc-800 bg-black p-5">
                 <h2 className="text-lg font-semibold text-white">Villain</h2>
@@ -870,6 +915,8 @@ export function SessionZeroApp() {
                         module={module}
                         selected={module.id === selectedModuleId}
                         onSelect={() => setSelectedModuleId(module.id)}
+                        onDelete={() => void deleteModule(module)}
+                        deleting={deletingModuleId === module.id}
                       />
                     ))}
                   </div>
@@ -910,7 +957,10 @@ export function SessionZeroApp() {
                     <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Selected Module</p>
                     <h2 className="mt-3 text-2xl font-semibold text-white">{selectedModule.title}</h2>
                     <p className="mt-3 text-sm leading-7 text-zinc-300">{selectedModule.premise}</p>
-                    <p className="mt-4 text-sm text-zinc-500">{selectedModule.openingScene.location}</p>
+                    <div className="mt-4 grid gap-3 text-sm text-zinc-400 md:grid-cols-2">
+                      <p>{selectedModule.setting}</p>
+                      <p>{selectedModule.tone}</p>
+                    </div>
                   </div>
                 ) : null}
               </div>

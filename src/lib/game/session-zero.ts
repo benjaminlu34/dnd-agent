@@ -1,30 +1,13 @@
 import { z } from "zod";
 
-export const openingSceneSchema = z.object({
-  title: z.string().trim().min(1),
-  location: z.string().trim().min(1),
-  overview: z.string().trim().min(1),
-});
-
-export const openingSceneDetailsSchema = z.object({
-  title: z.string().trim().min(1),
-  summary: z.string().trim().min(1),
-  location: z.string().trim().min(1),
-  atmosphere: z.string().trim().min(1),
-  activeThreat: z.string().trim().min(1),
-  suggestedActions: z.array(z.string().trim().min(1)).min(1).max(4),
-});
-
 export const generatedCampaignSetupSchema = z.object({
   publicSynopsis: z.object({
     title: z.string().trim().min(1),
     premise: z.string().trim().min(1),
     tone: z.string().trim().min(1),
     setting: z.string().trim().min(1),
-    openingScene: openingSceneSchema,
   }),
   secretEngine: z.object({
-    openingScene: openingSceneDetailsSchema,
     villain: z.object({
       name: z.string().trim().min(1),
       motive: z.string().trim().min(1),
@@ -84,6 +67,18 @@ export const generatedCampaignSetupSchema = z.object({
       }),
     ),
     locations: z.array(z.string().trim().min(1)),
+  }),
+});
+
+export const generatedCampaignOpeningSchema = z.object({
+  narration: z.string().trim().min(1),
+  activeThreat: z.string().trim().min(1),
+  scene: z.object({
+    title: z.string().trim().min(1),
+    summary: z.string().trim().min(1),
+    location: z.string().trim().min(1),
+    atmosphere: z.string().trim().min(1),
+    suggestedActions: z.array(z.string().trim().min(1)).min(1).max(4),
   }),
 });
 

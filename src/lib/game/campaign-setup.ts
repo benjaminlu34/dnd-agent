@@ -1,6 +1,7 @@
 import {
   type ArcRecord,
   type CampaignBlueprint,
+  type GeneratedCampaignOpening,
   type CampaignState,
   type Clue,
   type GeneratedCampaignSetup,
@@ -110,20 +111,20 @@ export function buildCampaignBlueprintFromSetup(
 
 export function buildCampaignStateFromSetup(
   setup: GeneratedCampaignSetup,
+  opening: GeneratedCampaignOpening,
 ): CampaignState {
   const blueprint = buildCampaignBlueprintFromSetup(setup);
-  const openingScene = setup.secretEngine.openingScene;
 
   return createStarterState(blueprint, {
     openingScene: {
-      id: makeId("scene", openingScene.title, "opening"),
-      title: openingScene.title,
-      summary: openingScene.summary,
-      location: openingScene.location,
-      atmosphere: openingScene.atmosphere,
-      suggestedActions: openingScene.suggestedActions.slice(0, 4),
+      id: makeId("scene", opening.scene.title, "opening"),
+      title: opening.scene.title,
+      summary: opening.scene.summary,
+      location: opening.scene.location,
+      atmosphere: opening.scene.atmosphere,
+      suggestedActions: opening.scene.suggestedActions.slice(0, 4),
     },
-    activeThreat: openingScene.activeThreat,
+    activeThreat: opening.activeThreat,
     locations: setup.secretEngine.locations,
   });
 }
