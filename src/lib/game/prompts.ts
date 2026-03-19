@@ -99,6 +99,16 @@ function formatRecentSceneTrail(locations: PromptContext["recentSceneTrail"]) {
   return locations.map((location) => `- ${location}`).join("\n");
 }
 
+function formatInventory(items: PromptContext["inventory"]) {
+  if (items.length === 0) {
+    return "None";
+  }
+
+  return items
+    .map((item) => `- ${item.name}${item.description ? `: ${item.description}` : ""}`)
+    .join("\n");
+}
+
 export function buildDungeonMasterSystemPrompt() {
   return [
     "You are a strict DM for a deterministic solo fantasy RPG.",
@@ -201,6 +211,9 @@ Key Anchor: ${promptContext.scene.keyLocationName ?? "None"}
 Summary: ${promptContext.promptSceneSummary}
 Atmosphere: ${promptContext.scene.atmosphere}
 
+INVENTORY
+${formatInventory(promptContext.inventory)}
+
 KEY ANCHORS
 ${formatKeyLocations(promptContext.keyLocations)}
 
@@ -248,6 +261,9 @@ Location: ${promptContext.scene.location}
 Key Anchor: ${promptContext.scene.keyLocationName ?? "None"}
 Summary: ${promptContext.promptSceneSummary}
 Atmosphere: ${promptContext.scene.atmosphere}
+
+INVENTORY
+${formatInventory(promptContext.inventory)}
 
 KEY ANCHORS
 ${formatKeyLocations(promptContext.keyLocations)}
@@ -366,6 +382,9 @@ Location: ${promptContext.scene.location}
 Key Anchor: ${promptContext.scene.keyLocationName ?? "None"}
 Summary: ${promptContext.promptSceneSummary}
 Atmosphere: ${promptContext.scene.atmosphere}
+
+INVENTORY
+${formatInventory(promptContext.inventory)}
 
 KEY ANCHORS
 ${formatKeyLocations(promptContext.keyLocations)}

@@ -120,6 +120,22 @@ type TurnRenderAuditDecision = {
   repairInstructions: string[];
 };
 
+function normalizeKnownItemNames(promptContext: PromptContext) {
+  return Array.from(
+    new Set(
+      promptContext.inventory
+        .map((item) =>
+          item.name
+            .toLowerCase()
+            .replace(/[^a-z0-9\s]/g, " ")
+            .replace(/\s+/g, " ")
+            .trim(),
+        )
+        .filter(Boolean),
+    ),
+  );
+}
+
 type TurnQualityMetadata = {
   acceptedSeverity: "clean" | "warn" | "block";
   plannerIssues: string[];
@@ -2255,6 +2271,7 @@ class OpenRouterDungeonMaster {
 
   async triageTurn(input: TurnAIPayload, callbacks?: StreamCallbacks): Promise<TriageDecision> {
     const plannerPrompt = buildTriagePlannerUserPrompt(input);
+    const knownItemNames = normalizeKnownItemNames(input.promptContext);
 
     try {
       const plannerResult = await this.runToolCall({
@@ -2282,7 +2299,7 @@ class OpenRouterDungeonMaster {
         requiresCheck: normalizedPlanner.requiresCheck,
         check: normalizedPlanner.check,
       };
-      const plannerValidation = validateBeatPlan(plannerValidationInput);
+      const plannerValidation = validateBeatPlan(plannerValidationInput, knownItemNames);
       let selectedPlanner = normalizedPlanner;
       let selectedPlannerIssues = plannerValidation.issues;
       let selectedPlannerSeverity = plannerValidation.highestSeverity;
@@ -2307,14 +2324,17 @@ class OpenRouterDungeonMaster {
 
         if (repairedPlanner) {
           usedPlannerRepair = true;
-          const repairedValidation = validateBeatPlan({
-            mode: "triage",
-            playerAction: input.playerAction,
-            actionResolution: repairedPlanner.actionResolution,
-            suggestedActionGoals: repairedPlanner.suggestedActionGoals,
-            requiresCheck: repairedPlanner.requiresCheck,
-            check: repairedPlanner.check,
-          });
+          const repairedValidation = validateBeatPlan(
+            {
+              mode: "triage",
+              playerAction: input.playerAction,
+              actionResolution: repairedPlanner.actionResolution,
+              suggestedActionGoals: repairedPlanner.suggestedActionGoals,
+              requiresCheck: repairedPlanner.requiresCheck,
+              check: repairedPlanner.check,
+            },
+            knownItemNames,
+          );
           const chosenPlanner = choosePreferredAttempt(
             {
               value: normalizedPlanner,
@@ -2436,14 +2456,17 @@ class OpenRouterDungeonMaster {
       });
       let selectedRendererIssues = structuralRenderAudit.issues;
       let selectedRendererSeverity = structuralRenderAudit.highestSeverity;
-      const legacyRenderAudit = auditRenderedNarration({
-        mode: "triage",
-        narration: renderDecision.narration,
-        playerAction: input.playerAction,
-        actionResolution: selectedPlanner.actionResolution,
-        directlyHandledItems,
-        suggestedActions: renderDecision.suggestedActions,
-      });
+      const legacyRenderAudit = auditRenderedNarration(
+        {
+          mode: "triage",
+          narration: renderDecision.narration,
+          playerAction: input.playerAction,
+          actionResolution: selectedPlanner.actionResolution,
+          directlyHandledItems,
+          suggestedActions: renderDecision.suggestedActions,
+        },
+        knownItemNames,
+      );
       let selectedLegacyRendererIssues = legacyRenderAudit.issues;
       let usedRendererRepair = false;
       let usedBackupRenderer = false;
@@ -2487,14 +2510,17 @@ class OpenRouterDungeonMaster {
           narration: repairedDecision.narration,
           suggestedActions: repairedDecision.suggestedActions,
         });
-        const repairedLegacyAudit = auditRenderedNarration({
-          mode: "triage",
-          narration: repairedDecision.narration,
-          playerAction: input.playerAction,
-          actionResolution: selectedPlanner.actionResolution,
-          directlyHandledItems,
-          suggestedActions: repairedDecision.suggestedActions,
-        });
+        const repairedLegacyAudit = auditRenderedNarration(
+          {
+            mode: "triage",
+            narration: repairedDecision.narration,
+            playerAction: input.playerAction,
+            actionResolution: selectedPlanner.actionResolution,
+            directlyHandledItems,
+            suggestedActions: repairedDecision.suggestedActions,
+          },
+          knownItemNames,
+        );
         const chosenRenderer = choosePreferredAttempt(
           {
             value: renderDecision,
@@ -2618,14 +2644,17 @@ class OpenRouterDungeonMaster {
           narration: repairedDecision.narration,
           suggestedActions: repairedDecision.suggestedActions,
         });
-        const repairedLegacyAudit = auditRenderedNarration({
-          mode: "triage",
-          narration: repairedDecision.narration,
-          playerAction: input.playerAction,
-          actionResolution: selectedPlanner.actionResolution,
-          directlyHandledItems,
-          suggestedActions: repairedDecision.suggestedActions,
-        });
+        const repairedLegacyAudit = auditRenderedNarration(
+          {
+            mode: "triage",
+            narration: repairedDecision.narration,
+            playerAction: input.playerAction,
+            actionResolution: selectedPlanner.actionResolution,
+            directlyHandledItems,
+            suggestedActions: repairedDecision.suggestedActions,
+          },
+          knownItemNames,
+        );
 
         if (repairedStructuralAudit.highestSeverity !== "block") {
           const repairedAiAuditResult = await this.auditTurnRender({
@@ -2713,14 +2742,17 @@ class OpenRouterDungeonMaster {
             narration: backupDecision.narration,
             suggestedActions: backupDecision.suggestedActions,
           });
-          const backupLegacyAudit = auditRenderedNarration({
-            mode: "triage",
-            narration: backupDecision.narration,
-            playerAction: input.playerAction,
-            actionResolution: selectedPlanner.actionResolution,
-            directlyHandledItems,
-            suggestedActions: backupDecision.suggestedActions,
-          });
+          const backupLegacyAudit = auditRenderedNarration(
+            {
+              mode: "triage",
+              narration: backupDecision.narration,
+              playerAction: input.playerAction,
+              actionResolution: selectedPlanner.actionResolution,
+              directlyHandledItems,
+              suggestedActions: backupDecision.suggestedActions,
+            },
+            knownItemNames,
+          );
 
           if (backupStructuralAudit.highestSeverity !== "block") {
             const backupAiAuditResult = await this.auditTurnRender({
@@ -2884,6 +2916,7 @@ class OpenRouterDungeonMaster {
   ): Promise<ResolveDecision> {
     this.ensureConfigured();
     const plannerPrompt = buildResolutionPlannerUserPrompt(input);
+    const knownItemNames = normalizeKnownItemNames(input.promptContext);
 
     try {
       const plannerResult = await this.runToolCall({
@@ -2903,12 +2936,15 @@ class OpenRouterDungeonMaster {
         throw new Error("OpenRouter resolution planner returned an invalid payload.");
       }
 
-      const plannerValidation = validateBeatPlan({
-        mode: "resolution",
-        playerAction: input.playerAction,
-        actionResolution: normalizedPlanner.actionResolution,
-        suggestedActionGoals: normalizedPlanner.suggestedActionGoals,
-      });
+      const plannerValidation = validateBeatPlan(
+        {
+          mode: "resolution",
+          playerAction: input.playerAction,
+          actionResolution: normalizedPlanner.actionResolution,
+          suggestedActionGoals: normalizedPlanner.suggestedActionGoals,
+        },
+        knownItemNames,
+      );
       let selectedPlanner = normalizedPlanner;
       let selectedPlannerIssues = plannerValidation.issues;
       let selectedPlannerSeverity = plannerValidation.highestSeverity;
@@ -2923,12 +2959,15 @@ class OpenRouterDungeonMaster {
 
         if (repairedPlanner) {
           usedPlannerRepair = true;
-          const repairedValidation = validateBeatPlan({
-            mode: "resolution",
-            playerAction: input.playerAction,
-            actionResolution: repairedPlanner.actionResolution,
-            suggestedActionGoals: repairedPlanner.suggestedActionGoals,
-          });
+          const repairedValidation = validateBeatPlan(
+            {
+              mode: "resolution",
+              playerAction: input.playerAction,
+              actionResolution: repairedPlanner.actionResolution,
+              suggestedActionGoals: repairedPlanner.suggestedActionGoals,
+            },
+            knownItemNames,
+          );
           const chosenPlanner = choosePreferredAttempt(
             {
               value: normalizedPlanner,
@@ -2972,14 +3011,17 @@ class OpenRouterDungeonMaster {
       });
       let selectedRendererIssues = structuralRenderAudit.issues;
       let selectedRendererSeverity = structuralRenderAudit.highestSeverity;
-      const legacyRenderAudit = auditRenderedNarration({
-        mode: "resolution",
-        narration: renderDecision.narration,
-        playerAction: input.playerAction,
-        actionResolution: selectedPlanner.actionResolution,
-        directlyHandledItems,
-        suggestedActions: renderDecision.suggestedActions,
-      });
+      const legacyRenderAudit = auditRenderedNarration(
+        {
+          mode: "resolution",
+          narration: renderDecision.narration,
+          playerAction: input.playerAction,
+          actionResolution: selectedPlanner.actionResolution,
+          directlyHandledItems,
+          suggestedActions: renderDecision.suggestedActions,
+        },
+        knownItemNames,
+      );
       let selectedLegacyRendererIssues = legacyRenderAudit.issues;
       let usedRendererRepair = false;
       let usedBackupRenderer = false;
@@ -3023,14 +3065,17 @@ class OpenRouterDungeonMaster {
           narration: repairedDecision.narration,
           suggestedActions: repairedDecision.suggestedActions,
         });
-        const repairedLegacyAudit = auditRenderedNarration({
-          mode: "resolution",
-          narration: repairedDecision.narration,
-          playerAction: input.playerAction,
-          actionResolution: selectedPlanner.actionResolution,
-          directlyHandledItems,
-          suggestedActions: repairedDecision.suggestedActions,
-        });
+        const repairedLegacyAudit = auditRenderedNarration(
+          {
+            mode: "resolution",
+            narration: repairedDecision.narration,
+            playerAction: input.playerAction,
+            actionResolution: selectedPlanner.actionResolution,
+            directlyHandledItems,
+            suggestedActions: repairedDecision.suggestedActions,
+          },
+          knownItemNames,
+        );
         const chosenRenderer = choosePreferredAttempt(
           {
             value: renderDecision,
@@ -3128,14 +3173,17 @@ class OpenRouterDungeonMaster {
           narration: repairedDecision.narration,
           suggestedActions: repairedDecision.suggestedActions,
         });
-        const repairedLegacyAudit = auditRenderedNarration({
-          mode: "resolution",
-          narration: repairedDecision.narration,
-          playerAction: input.playerAction,
-          actionResolution: selectedPlanner.actionResolution,
-          directlyHandledItems,
-          suggestedActions: repairedDecision.suggestedActions,
-        });
+        const repairedLegacyAudit = auditRenderedNarration(
+          {
+            mode: "resolution",
+            narration: repairedDecision.narration,
+            playerAction: input.playerAction,
+            actionResolution: selectedPlanner.actionResolution,
+            directlyHandledItems,
+            suggestedActions: repairedDecision.suggestedActions,
+          },
+          knownItemNames,
+        );
 
         if (repairedStructuralAudit.highestSeverity !== "block") {
           const repairedAiAuditResult = await this.auditTurnRender({
@@ -3223,14 +3271,17 @@ class OpenRouterDungeonMaster {
             narration: backupDecision.narration,
             suggestedActions: backupDecision.suggestedActions,
           });
-          const backupLegacyAudit = auditRenderedNarration({
-            mode: "resolution",
-            narration: backupDecision.narration,
-            playerAction: input.playerAction,
-            actionResolution: selectedPlanner.actionResolution,
-            directlyHandledItems,
-            suggestedActions: backupDecision.suggestedActions,
-          });
+          const backupLegacyAudit = auditRenderedNarration(
+            {
+              mode: "resolution",
+              narration: backupDecision.narration,
+              playerAction: input.playerAction,
+              actionResolution: selectedPlanner.actionResolution,
+              directlyHandledItems,
+              suggestedActions: backupDecision.suggestedActions,
+            },
+            knownItemNames,
+          );
 
           if (backupStructuralAudit.highestSeverity !== "block") {
             const backupAiAuditResult = await this.auditTurnRender({

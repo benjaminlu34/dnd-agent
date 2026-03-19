@@ -23,6 +23,12 @@ function buildPromptContext(): PromptContext {
 
   return {
     scene: state.sceneState,
+    inventory: [
+      {
+        name: "moon-salt charm",
+        description: "A pale charm that still holds a trace of sanctified salt.",
+      },
+    ],
     keyLocations: blueprint.keyLocations,
     discoveredKeyLocations: blueprint.keyLocations.filter((location) =>
       state.discoveredKeyLocationNames.includes(location.name),
@@ -122,6 +128,11 @@ async function main() {
     failures,
   );
   assertCase(
+    triagePrompt.includes("INVENTORY") && triagePrompt.includes("moon-salt charm"),
+    "Triage prompt is missing the compact inventory block.",
+    failures,
+  );
+  assertCase(
     resolvePrompt.includes("DISCOVERY CANDIDATES") &&
       !resolvePrompt.includes("ELIGIBLE REVEALS") &&
       !resolvePrompt.includes("HIDDEN QUESTS AVAILABLE TO DISCOVER"),
@@ -131,6 +142,11 @@ async function main() {
   assertCase(
     resolvePrompt.includes("NARRATIVE CONTEXT"),
     "Resolve prompt is missing the narrative summary block.",
+    failures,
+  );
+  assertCase(
+    resolvePrompt.includes("INVENTORY") && resolvePrompt.includes("moon-salt charm"),
+    "Resolve prompt is missing the compact inventory block.",
     failures,
   );
 

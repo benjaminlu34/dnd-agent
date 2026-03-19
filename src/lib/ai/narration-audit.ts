@@ -6,7 +6,7 @@ const SENSORY_FEEL_PATTERN =
 const PSYCHOLOGICAL_FEEL_PATTERN =
   /\byou feel (?:confident|afraid|fearful|uneasy|certain|sure|ready|relief|guilt|hope|dread|anger|calm|nervous|brave|hesitant|reckless|cornered)\b/i;
 
-const REPEATED_ITEM_WORDS = [
+const DEFAULT_REPEATED_ITEM_WORDS = [
   "relic",
   "idol",
   "amulet",
@@ -186,6 +186,34 @@ function keywordOverlap(left: string, right: string) {
   return overlap;
 }
 
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeItemName(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeItemMatchText(value: string) {
+  return normalizeItemName(normalizeWhitespace(value));
+}
+
+function candidateItemNames(knownItemNames: string[] = []) {
+  const normalized = knownItemNames
+    .map((item) => normalizeItemName(item))
+    .filter(Boolean);
+
+  if (normalized.length > 0) {
+    return Array.from(new Set(normalized));
+  }
+
+  return DEFAULT_REPEATED_ITEM_WORDS;
+}
+
 function detectOpeningRecap(narration: string) {
   const openingSlice = normalizeWhitespace(narration).slice(0, 240);
 
@@ -308,22 +336,20 @@ function detectActionDeferral(text: string, playerAction: string | undefined) {
   return null;
 }
 
-function mentionsItemWithVerb(text: string, item: string) {
-  return new RegExp(
-    `(?:${HANDLING_VERB_PATTERN.source})[^.]{0,48}\\b${item}\\b|\\b${item}\\b[^.]{0,48}(?:${HANDLING_VERB_PATTERN.source})`,
-    "i",
-  ).test(text);
-}
-
-function inferDirectlyHandledItems(playerAction: string, actionResolution: string) {
-  const lowerAction = playerAction.toLowerCase();
-  const lowerResolution = actionResolution.toLowerCase();
+function inferDirectlyHandledItems(
+  playerAction: string,
+  actionResolution: string,
+  knownItemNames: string[] = [],
+) {
+  const lowerAction = normalizeItemMatchText(playerAction);
+  const lowerResolution = normalizeItemMatchText(actionResolution);
   const directlyHandledItems: string[] = [];
   const actionHandlesPronoun = HANDLING_VERB_PATTERN.test(lowerAction) && DIRECT_OBJECT_PATTERN.test(lowerAction);
 
-  for (const word of REPEATED_ITEM_WORDS) {
-    const mentionsInAction = new RegExp(`\\b${word}\\b`, "i").test(lowerAction);
-    const mentionsInResolution = new RegExp(`\\b${word}\\b`, "i").test(lowerResolution);
+  for (const word of candidateItemNames(knownItemNames)) {
+    const escapedWord = escapeRegExp(word);
+    const mentionsInAction = new RegExp(`\\b${escapedWord}\\b`, "i").test(lowerAction);
+    const mentionsInResolution = new RegExp(`\\b${escapedWord}\\b`, "i").test(lowerResolution);
 
     if (!mentionsInResolution) {
       continue;
@@ -403,11 +429,14 @@ function detectMissingActionResolution(actionResolution: string) {
 function detectIrrelevantKeyItem(
   actionResolution: string,
   directlyHandledItems: string[],
+  knownItemNames: string[] = [],
 ) {
-  const lowerResolution = actionResolution.toLowerCase();
+  const lowerResolution = normalizeItemMatchText(actionResolution);
 
-  for (const word of REPEATED_ITEM_WORDS) {
-    if (!new RegExp(`\\b${word}\\b`, "i").test(lowerResolution)) {
+  for (const word of candidateItemNames(knownItemNames)) {
+    const escapedWord = escapeRegExp(word);
+
+    if (!new RegExp(`\\b${escapedWord}\\b`, "i").test(lowerResolution)) {
       continue;
     }
 
@@ -450,11 +479,13 @@ function detectBeatContradiction(narration: string, actionResolution: string) {
 function detectRepeatedKeyItem(
   narration: string,
   directlyHandledItems: string[],
+  knownItemNames: string[] = [],
 ) {
-  const lowerNarration = narration.toLowerCase();
+  const lowerNarration = normalizeItemMatchText(narration);
 
-  for (const word of REPEATED_ITEM_WORDS) {
-    const narrationMatches = lowerNarration.match(new RegExp(`\\b${word}\\b`, "g")) ?? [];
+  for (const word of candidateItemNames(knownItemNames)) {
+    const escapedWord = escapeRegExp(word);
+    const narrationMatches = lowerNarration.match(new RegExp(`\\b${escapedWord}\\b`, "g")) ?? [];
 
     if (narrationMatches.length >= 2) {
       return issue({
@@ -540,10 +571,17 @@ function detectSuggestedActionsLeak(narration: string) {
   });
 }
 
-export function validateBeatPlan(input: BeatValidationInput): BeatValidationResult {
+export function validateBeatPlan(
+  input: BeatValidationInput,
+  knownItemNames: string[] = [],
+): BeatValidationResult {
   const issues: NarrationAuditIssue[] = [];
   const actionResolution = normalizeWhitespace(input.actionResolution);
-  const directlyHandledItems = inferDirectlyHandledItems(input.playerAction, actionResolution);
+  const directlyHandledItems = inferDirectlyHandledItems(
+    input.playerAction,
+    actionResolution,
+    knownItemNames,
+  );
 
   const missingResolution = detectMissingActionResolution(actionResolution);
   if (missingResolution) {
@@ -564,7 +602,11 @@ export function validateBeatPlan(input: BeatValidationInput): BeatValidationResu
     }
   }
 
-  const irrelevantKeyItem = detectIrrelevantKeyItem(actionResolution, directlyHandledItems);
+  const irrelevantKeyItem = detectIrrelevantKeyItem(
+    actionResolution,
+    directlyHandledItems,
+    knownItemNames,
+  );
   if (irrelevantKeyItem) {
     issues.push(irrelevantKeyItem);
   }
@@ -587,7 +629,10 @@ export function validateBeatPlan(input: BeatValidationInput): BeatValidationResu
   };
 }
 
-export function auditRenderedNarration(input: RenderedNarrationAuditInput): NarrationAuditResult {
+export function auditRenderedNarration(
+  input: RenderedNarrationAuditInput,
+  knownItemNames: string[] = [],
+): NarrationAuditResult {
   const issues: NarrationAuditIssue[] = [];
   const narration = normalizeWhitespace(input.narration);
 
@@ -616,7 +661,11 @@ export function auditRenderedNarration(input: RenderedNarrationAuditInput): Narr
       issues.push(ending);
     }
 
-    const keyItem = detectRepeatedKeyItem(narration, input.directlyHandledItems);
+    const keyItem = detectRepeatedKeyItem(
+      narration,
+      input.directlyHandledItems,
+      knownItemNames,
+    );
     if (keyItem) {
       issues.push(keyItem);
     }
@@ -715,12 +764,16 @@ export function auditNarration(input: NarrationAuditInput): NarrationAuditResult
   const directlyHandledItems =
     input.mode === "opening"
       ? []
-      : REPEATED_ITEM_WORDS.filter((word) => {
-          const lowerAction = (input.playerAction ?? "").toLowerCase();
-          const mentionsInAction = new RegExp(`\\b${word}\\b`, "i").test(lowerAction);
+      : DEFAULT_REPEATED_ITEM_WORDS.filter((word) => {
+          const lowerAction = normalizeItemMatchText(input.playerAction ?? "");
+          const mentionsInAction = new RegExp(`\\b${escapeRegExp(word)}\\b`, "i").test(lowerAction);
           const actionHandlesPronoun = HANDLING_VERB_PATTERN.test(lowerAction) && DIRECT_OBJECT_PATTERN.test(lowerAction);
 
-          return mentionsInAction || (actionHandlesPronoun && new RegExp(`\\b${word}\\b`, "i").test(narration));
+          return (
+            mentionsInAction ||
+            (actionHandlesPronoun &&
+              new RegExp(`\\b${escapeRegExp(word)}\\b`, "i").test(normalizeItemMatchText(narration)))
+          );
         });
   const keyItem = detectRepeatedKeyItem(narration, directlyHandledItems);
   if (keyItem) {

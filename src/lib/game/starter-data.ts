@@ -359,7 +359,10 @@ export function createStarterQuests(): QuestRecord[] {
       maxStage: 2,
       status: "active",
       rewardGold: 25,
-      rewardItem: "moon-salt charm",
+      rewardItem: {
+        templateId: "item_template_moon_salt_charm",
+        name: "moon-salt charm",
+      },
       discoveredAtTurn: null,
     },
   ];

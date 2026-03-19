@@ -57,6 +57,7 @@ function buildPromptContext(): PromptContext {
 
   return {
     scene: state.sceneState,
+    inventory: [],
     keyLocations: blueprint.keyLocations,
     discoveredKeyLocations: blueprint.keyLocations.filter((location) =>
       state.discoveredKeyLocationNames.includes(location.name),

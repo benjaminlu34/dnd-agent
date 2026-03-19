@@ -3,8 +3,8 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
   directUrl = env("DIRECT_URL")
 }
 
@@ -32,36 +32,36 @@ model AdventureModule {
 }
 
 model CharacterTemplate {
-  id         String              @id @default(cuid())
-  userId     String
-  name       String
-  archetype  String
-  strength   Int
-  dexterity  Int
+  id           String              @id @default(cuid())
+  userId       String
+  name         String
+  archetype    String
+  strength     Int
+  dexterity    Int
   constitution Int
   intelligence Int
-  wisdom     Int
-  charisma   Int
-  maxHealth  Int
-  backstory  String?
-  createdAt  DateTime            @default(now())
-  updatedAt  DateTime            @updatedAt
-  user       User                @relation(fields: [userId], references: [id], onDelete: Cascade)
-  campaigns  Campaign[]
-  instances  CharacterInstance[]
+  wisdom       Int
+  charisma     Int
+  maxHealth    Int
+  backstory    String?
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+  user         User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  campaigns    Campaign[]
+  instances    CharacterInstance[]
 }
 
 model CharacterInstance {
-  id          String            @id @default(cuid())
-  campaignId  String            @unique
-  templateId  String
-  health      Int
-  gold        Int               @default(0)
-  inventory   Json              @default("[]")
-  createdAt   DateTime          @default(now())
-  updatedAt   DateTime          @updatedAt
-  campaign    Campaign          @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  template    CharacterTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  id         String            @id @default(cuid())
+  campaignId String            @unique
+  templateId String
+  health     Int
+  gold       Int               @default(0)
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+  campaign   Campaign          @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  template   CharacterTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  inventory  ItemInstance[]
 }
 
 model Campaign {
@@ -79,121 +79,159 @@ model Campaign {
   sessions          Session[]
   turns             Turn[]
   quests            Quest[]
+  itemTemplates     ItemTemplate[]
   arcs              Arc[]
   npcs              NPC[]
   clues             Clue[]
   memories          MemoryEntry[]
 }
 
+model ItemTemplate {
+  id            String         @id @default(cuid())
+  campaignId    String
+  name          String
+  description   String?
+  value         Int            @default(0)
+  weight        Float          @default(0)
+  rarity        String         @default("common")
+  tags          String[]
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  campaign      Campaign       @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  itemInstances ItemInstance[]
+  rewardQuests  Quest[]        @relation("QuestRewardItemTemplate")
+
+  @@index([campaignId])
+}
+
+model ItemInstance {
+  id                  String            @id @default(cuid())
+  characterInstanceId String
+  templateId          String
+  isIdentified        Boolean           @default(true)
+  charges             Int?
+  properties          Json?
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+  characterInstance   CharacterInstance @relation(fields: [characterInstanceId], references: [id], onDelete: Cascade)
+  template            ItemTemplate      @relation(fields: [templateId], references: [id], onDelete: Cascade)
+
+  @@index([characterInstanceId])
+  @@index([templateId])
+}
+
 model Session {
-  id           String        @id @default(cuid())
-  campaignId   String
-  title        String
-  status       String
-  turnCount    Int           @default(0)
-  startedAt    DateTime      @default(now())
-  endedAt      DateTime?
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
-  summary      String?
-  campaign     Campaign      @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  messages     Message[]
-  turns        Turn[]
+  id            String        @id @default(cuid())
+  campaignId    String
+  title         String
+  status        String
+  turnCount     Int           @default(0)
+  startedAt     DateTime      @default(now())
+  endedAt       DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  summary       String?
+  campaign      Campaign      @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  messages      Message[]
+  turns         Turn[]
   memoryEntries MemoryEntry[]
 }
 
 model Turn {
-  id                String    @id @default(cuid())
+  id                String   @id @default(cuid())
   campaignId        String
   sessionId         String
   playerAction      String
-  slowPathRequested Boolean   @default(false)
+  slowPathRequested Boolean  @default(false)
   status            String
   pendingCheckJson  Json?
   resultJson        Json?
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
-  campaign          Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  session           Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  campaign          Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  session           Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 }
 
 model Message {
-  id         String    @id @default(cuid())
-  sessionId  String
-  role       String
-  kind       String
-  content    String
-  payload    Json?
-  createdAt  DateTime  @default(now())
-  session    Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  id        String   @id @default(cuid())
+  sessionId String
+  role      String
+  kind      String
+  content   String
+  payload   Json?
+  createdAt DateTime @default(now())
+  session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 }
 
 model Quest {
-  id          String    @id @default(cuid())
-  campaignId  String
-  title       String
-  summary     String
-  stage       Int       @default(0)
-  maxStage    Int       @default(1)
-  status      String
-  rewardGold  Int       @default(0)
-  rewardItem  String?
-  discoveredAtTurn Int?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  campaign    Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  id                   String        @id @default(cuid())
+  campaignId           String
+  title                String
+  summary              String
+  stage                Int           @default(0)
+  maxStage             Int           @default(1)
+  status               String
+  rewardGold           Int           @default(0)
+  rewardItemTemplateId String?
+  discoveredAtTurn     Int?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+  campaign             Campaign      @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  rewardItemTemplate   ItemTemplate? @relation("QuestRewardItemTemplate", fields: [rewardItemTemplateId], references: [id], onDelete: SetNull)
+
+  @@index([rewardItemTemplateId])
 }
 
 model Arc {
-  id            String    @id @default(cuid())
+  id            String   @id @default(cuid())
   campaignId    String
   title         String
   summary       String
   status        String
   expectedTurns Int
-  currentTurn   Int       @default(0)
+  currentTurn   Int      @default(0)
   orderIndex    Int
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-  campaign      Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  campaign      Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 }
 
 model NPC {
-  id           String    @id @default(cuid())
-  campaignId   String
-  name         String
-  role         String
-  status       String
-  isCompanion  Boolean   @default(false)
-  approval     Int       @default(0)
-  personalHook String?
-  notes        String
+  id               String   @id @default(cuid())
+  campaignId       String
+  name             String
+  role             String
+  status           String
+  isCompanion      Boolean  @default(false)
+  approval         Int      @default(0)
+  personalHook     String?
+  notes            String
   discoveredAtTurn Int?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
-  campaign     Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  campaign         Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 }
 
 model Clue {
-  id               String    @id @default(cuid())
+  id               String   @id @default(cuid())
   campaignId       String
   linkedRevealId   String
   text             String
   source           String
   status           String
   discoveredAtTurn Int?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
-  campaign         Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  campaign         Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 }
 
 model MemoryEntry {
-  id         String    @id @default(cuid())
+  id         String   @id @default(cuid())
   campaignId String
   sessionId  String?
   type       String
   summary    String
-  createdAt  DateTime  @default(now())
-  campaign   Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  session    Session?  @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  createdAt  DateTime @default(now())
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  session    Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
 }

@@ -34,6 +34,12 @@ function buildPromptContext(): PromptContext {
 
   return {
     scene: state.sceneState,
+    inventory: [
+      {
+        name: "moon-salt charm",
+        description: "A pale charm that still holds a trace of sanctified salt.",
+      },
+    ],
     keyLocations: blueprint.keyLocations,
     discoveredKeyLocations: blueprint.keyLocations.filter((location) =>
       state.discoveredKeyLocationNames.includes(location.name),

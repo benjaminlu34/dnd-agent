@@ -1,17 +1,15 @@
 import type {
   AdventureModule as PrismaAdventureModule,
   Arc,
-  CharacterInstance as PrismaCharacterInstance,
   Prisma,
+  CharacterInstance as PrismaCharacterInstance,
   CharacterTemplate as PrismaCharacterTemplate,
   Clue as PrismaClue,
   MemoryEntry,
   Message,
   NPC,
-  Quest,
 } from "@prisma/client";
 import {
-  normalizeInventory,
   toCampaignCharacter,
   toCharacterStats,
 } from "@/lib/game/characters";
@@ -38,9 +36,12 @@ import type {
   ClueStatus,
   GeneratedCampaignOpening,
   GeneratedCampaignSetup,
+  ItemInstance,
+  ItemTemplate,
   MemoryRecord,
   NpcRecord,
   PromptContext,
+  PromptInventoryItem,
   PlayerCampaignSnapshot,
   PlayerVisibleKeyLocation,
   PlayerVisibleClue,
@@ -59,6 +60,18 @@ import {
 import { getStaleClues } from "@/lib/game/reveals";
 import { dmClient } from "@/lib/ai/provider";
 import { prisma } from "@/lib/prisma";
+
+type PrismaItemTemplateRecord = Prisma.ItemTemplateGetPayload<Record<string, never>>;
+type PrismaItemInstanceRecord = Prisma.ItemInstanceGetPayload<{
+  include: {
+    template: true;
+  };
+}>;
+type PrismaQuestRecord = Prisma.QuestGetPayload<{
+  include: {
+    rewardItemTemplate: true;
+  };
+}>;
 
 export async function ensureLocalUser() {
   return prisma.user.upsert({
@@ -95,19 +108,60 @@ function toTemplateSummary(template: PrismaCharacterTemplate): CharacterTemplate
   };
 }
 
-function toInstanceRecord(instance: PrismaCharacterInstance): CharacterInstance {
+function toItemTemplateRecord(template: PrismaItemTemplateRecord): ItemTemplate {
+  return {
+    id: template.id,
+    campaignId: template.campaignId,
+    name: template.name,
+    description: template.description,
+    value: template.value,
+    weight: template.weight,
+    rarity: template.rarity,
+    tags: [...template.tags],
+  };
+}
+
+function toItemInstanceRecord(instance: PrismaItemInstanceRecord): ItemInstance {
+  return {
+    id: instance.id,
+    characterInstanceId: instance.characterInstanceId,
+    templateId: instance.templateId,
+    template: toItemTemplateRecord(instance.template),
+    isIdentified: instance.isIdentified,
+    charges: instance.charges,
+    properties:
+      instance.properties && typeof instance.properties === "object" && !Array.isArray(instance.properties)
+        ? (structuredClone(instance.properties) as Record<string, unknown>)
+        : null,
+  };
+}
+
+function toPromptInventory(items: ItemInstance[]): PromptInventoryItem[] {
+  return items.map((item) => ({
+    name: item.template.name,
+    description: item.template.description,
+  }));
+}
+
+function toInstanceRecord(
+  instance: PrismaCharacterInstance & {
+    inventory: PrismaItemInstanceRecord[];
+  },
+): CharacterInstance {
   return {
     id: instance.id,
     templateId: instance.templateId,
     health: instance.health,
     gold: instance.gold,
-    inventory: normalizeInventory(instance.inventory),
+    inventory: instance.inventory.map(toItemInstanceRecord),
   };
 }
 
 function toCharacter(
   template: PrismaCharacterTemplate,
-  instance: PrismaCharacterInstance,
+  instance: PrismaCharacterInstance & {
+    inventory: PrismaItemInstanceRecord[];
+  },
 ): CampaignCharacter {
   return toCampaignCharacter(toTemplateRecord(template), toInstanceRecord(instance));
 }
@@ -151,7 +205,7 @@ function buildCampaignCreationData(input: {
   const setup = toGeneratedCampaignSetup(input.module);
   const blueprint = buildCampaignBlueprintFromSetup(setup);
   const state = buildCampaignStateFromSetup(setup, input.opening);
-  const quests = buildQuestRecordsFromSetup(setup);
+  const questSeeds = buildQuestRecordsFromSetup(setup);
   const arcs = buildArcRecordsFromBlueprint(blueprint);
   const npcs = buildNpcRecordsFromSetup(setup);
   const clues = buildClueRecordsFromSetup(setup, blueprint);
@@ -160,7 +214,7 @@ function buildCampaignCreationData(input: {
     setup,
     blueprint,
     state,
-    quests,
+    questSeeds,
     arcs,
     npcs,
     clues,
@@ -177,9 +231,9 @@ async function createCampaignInTx(
     opening: GeneratedCampaignOpening;
   },
 ) {
-  const { state, quests, arcs, npcs, clues, template } = buildCampaignCreationData(input);
+  const { state, questSeeds, arcs, npcs, clues, template } = buildCampaignCreationData(input);
 
-  return tx.campaign.create({
+  const campaign = await tx.campaign.create({
     data: {
       userId: input.userId,
       moduleId: input.module.id,
@@ -190,7 +244,6 @@ async function createCampaignInTx(
           templateId: template.id,
           health: template.maxHealth,
           gold: 0,
-          inventory: [],
         },
       },
       sessions: {
@@ -206,80 +259,89 @@ async function createCampaignInTx(
           },
         },
       },
-      ...(quests.length
-        ? {
-            quests: {
-              createMany: {
-                data: quests.map((quest) => ({
-                  id: quest.id,
-                  title: quest.title,
-                  summary: quest.summary,
-                  stage: quest.stage,
-                  maxStage: quest.maxStage,
-                  status: quest.status,
-                  rewardGold: quest.rewardGold,
-                  rewardItem: quest.rewardItem,
-                  discoveredAtTurn: quest.discoveredAtTurn,
-                })),
-              },
-            },
-          }
-        : {}),
-      ...(arcs.length
-        ? {
-            arcs: {
-              createMany: {
-                data: arcs.map((arc) => ({
-                  id: arc.id,
-                  title: arc.title,
-                  summary: arc.summary,
-                  status: arc.status,
-                  expectedTurns: arc.expectedTurns,
-                  currentTurn: arc.currentTurn,
-                  orderIndex: arc.orderIndex,
-                })),
-              },
-            },
-          }
-        : {}),
-      ...(npcs.length
-        ? {
-            npcs: {
-              createMany: {
-                data: npcs.map((npc) => ({
-                  id: npc.id,
-                  name: npc.name,
-                  role: npc.role,
-                  status: npc.status,
-                  isCompanion: npc.isCompanion,
-                  approval: npc.approval,
-                  personalHook: npc.personalHook,
-                  notes: npc.notes,
-                  discoveredAtTurn: npc.discoveredAtTurn,
-                })),
-              },
-            },
-          }
-        : {}),
-      ...(clues.length
-        ? {
-            clues: {
-              createMany: {
-                data: clues.map((clue) => ({
-                  id: clue.id,
-                  linkedRevealId: clue.linkedRevealId,
-                  text: clue.text,
-                  source: clue.source,
-                  status: clue.status,
-                  discoveredAtTurn: clue.discoveredAtTurn,
-                })),
-              },
-            },
-          }
-        : {}),
     },
     select: { id: true },
   });
+
+  for (const quest of questSeeds) {
+    const rewardItemTemplate = quest.rewardItemName
+      ? await tx.itemTemplate.create({
+          data: {
+            campaignId: campaign.id,
+            name: quest.rewardItemName,
+            description: null,
+            value: 0,
+            weight: 0,
+            rarity: "common",
+            tags: [],
+          },
+          select: { id: true },
+        })
+      : null;
+
+    await tx.quest.create({
+      data: {
+        id: quest.id,
+        campaignId: campaign.id,
+        title: quest.title,
+        summary: quest.summary,
+        stage: quest.stage,
+        maxStage: quest.maxStage,
+        status: quest.status,
+        rewardGold: quest.rewardGold,
+        rewardItemTemplateId: rewardItemTemplate?.id ?? null,
+        discoveredAtTurn: quest.discoveredAtTurn,
+      },
+    });
+  }
+
+  if (arcs.length) {
+    await tx.arc.createMany({
+      data: arcs.map((arc) => ({
+        id: arc.id,
+        campaignId: campaign.id,
+        title: arc.title,
+        summary: arc.summary,
+        status: arc.status,
+        expectedTurns: arc.expectedTurns,
+        currentTurn: arc.currentTurn,
+        orderIndex: arc.orderIndex,
+      })),
+    });
+  }
+
+  if (npcs.length) {
+    await tx.nPC.createMany({
+      data: npcs.map((npc) => ({
+        id: npc.id,
+        campaignId: campaign.id,
+        name: npc.name,
+        role: npc.role,
+        status: npc.status,
+        isCompanion: npc.isCompanion,
+        approval: npc.approval,
+        personalHook: npc.personalHook,
+        notes: npc.notes,
+        discoveredAtTurn: npc.discoveredAtTurn,
+      })),
+    });
+  }
+
+  if (clues.length) {
+    await tx.clue.createMany({
+      data: clues.map((clue) => ({
+        id: clue.id,
+        campaignId: campaign.id,
+        linkedRevealId: clue.linkedRevealId,
+        text: clue.text,
+        source: clue.source,
+        status: clue.status,
+        discoveredAtTurn: clue.discoveredAtTurn,
+      })),
+    });
+  }
+
+  return campaign;
 }
 
 export async function listCharacterTemplates(): Promise<CharacterTemplateSummary[]> {
@@ -572,13 +634,25 @@ export async function getCampaignAggregate(campaignId: string) {
     include: {
       module: true,
       template: true,
-      characterInstance: true,
+      characterInstance: {
+        include: {
+          inventory: {
+            orderBy: { createdAt: "asc" },
+            include: {
+              template: true,
+            },
+          },
+        },
+      },
       sessions: {
         orderBy: { createdAt: "desc" },
         take: 1,
       },
       quests: {
         orderBy: { createdAt: "asc" },
+        include: {
+          rewardItemTemplate: true,
+        },
       },
       arcs: {
         orderBy: { orderIndex: "asc" },
@@ -629,7 +703,7 @@ export async function listCampaigns(): Promise<CampaignListItem[]> {
   });
 }
 
-function toQuest(quest: Quest): QuestRecord {
+function toQuest(quest: PrismaQuestRecord): QuestRecord {
   return {
     id: quest.id,
     title: quest.title,
@@ -638,7 +712,12 @@ function toQuest(quest: Quest): QuestRecord {
     maxStage: quest.maxStage,
     status: quest.status as QuestStatus,
     rewardGold: quest.rewardGold,
-    rewardItem: quest.rewardItem,
+    rewardItem: quest.rewardItemTemplate
+      ? {
+          templateId: quest.rewardItemTemplate.id,
+          name: quest.rewardItemTemplate.name,
+        }
+      : null,
     discoveredAtTurn: quest.discoveredAtTurn,
   };
 }
@@ -1246,6 +1325,7 @@ export async function getPromptContext(snapshot: CampaignSnapshot): Promise<Prom
 
   return {
     scene: snapshot.state.sceneState,
+    inventory: toPromptInventory(snapshot.character.inventory),
     keyLocations: snapshot.blueprint.keyLocations,
     discoveredKeyLocations,
     recentSceneTrail,

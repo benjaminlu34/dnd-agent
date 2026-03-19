@@ -9,6 +9,7 @@ import type {
   QuestRecord,
   ValidatedDelta,
 } from "@/lib/game/types";
+import { cloneInventory } from "@/lib/game/characters";
 import { toCanonicalKeyLocationName } from "@/lib/game/location-utils";
 import { clamp } from "@/lib/utils";
 
@@ -112,8 +113,8 @@ export function validateDelta({
   const acceptedArcAdvancements: NonNullable<ValidatedDelta["acceptedArcAdvancements"]> = [];
   const acceptedNpcChanges: NonNullable<ValidatedDelta["acceptedNpcChanges"]> = [];
   const acceptedNpcDiscoveries: string[] = [];
-  const acceptedInventoryChanges = {
-    add: [] as string[],
+  const acceptedInventoryChanges: ValidatedDelta["acceptedInventoryChanges"] = {
+    add: [],
     remove: [] as string[],
   };
   const questById = new Map(quests.map((quest) => [quest.id, quest]));
@@ -151,7 +152,9 @@ export function validateDelta({
     if ((update.status ?? quest.status) === "completed" && proposedDelta.rewardQuestId === quest.id) {
       awardedGold += quest.rewardGold;
       if (quest.rewardItem) {
-        acceptedInventoryChanges.add.push(quest.rewardItem);
+        acceptedInventoryChanges.add.push({
+          templateId: quest.rewardItem.templateId,
+        });
       }
     }
   }
@@ -180,7 +183,7 @@ export function validateDelta({
     warnings.push("Rejected gold gain without a validated quest reward source.");
   }
 
-  if (proposedDelta.inventoryChanges?.add?.length || proposedDelta.inventoryChanges?.remove?.length) {
+  if ("inventoryChanges" in proposedDelta && proposedDelta.inventoryChanges !== undefined) {
     warnings.push("Rejected direct inventory mutation. Inventory remains engine-controlled in v1.");
   }
 
@@ -268,7 +271,7 @@ export function validateDelta({
     nextCharacter: {
       health: Math.max(0, Math.min(character.health + healthDelta, character.maxHealth)),
       gold: character.gold + awardedGold,
-      inventory: [...character.inventory, ...acceptedInventoryChanges.add],
+      inventory: cloneInventory(character.inventory),
     },
     healthDelta,
     warnings,

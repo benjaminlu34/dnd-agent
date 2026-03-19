@@ -7,7 +7,7 @@ import {
   type GeneratedCampaignSetup,
   type Hook,
   type NpcRecord,
-  type QuestRecord,
+  type QuestSeedRecord,
 } from "@/lib/game/types";
 import { canonicalizeAnchorName, findKeyLocationByName } from "@/lib/game/location-utils";
 import { createStarterState } from "@/lib/game/starter-data";
@@ -171,7 +171,7 @@ export function buildCampaignStateFromSetup(
   });
 }
 
-export function buildQuestRecordsFromSetup(setup: GeneratedCampaignSetup): QuestRecord[] {
+export function buildQuestRecordsFromSetup(setup: GeneratedCampaignSetup): QuestSeedRecord[] {
   return setup.secretEngine.quests.map((quest, index) => ({
     id: makeId("quest", quest.title, `quest_${index + 1}`),
     title: quest.title,
@@ -180,7 +180,7 @@ export function buildQuestRecordsFromSetup(setup: GeneratedCampaignSetup): Quest
     maxStage: Math.max(1, quest.maxStage),
     status: "active",
     rewardGold: Math.max(0, quest.rewardGold),
-    rewardItem: quest.rewardItem ?? null,
+    rewardItemName: quest.rewardItem ?? null,
     discoveredAtTurn: null,
   }));
 }

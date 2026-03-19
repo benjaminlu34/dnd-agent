@@ -317,39 +317,6 @@ model CharacterInstance {
 - Full economic system functions (buying, selling, haggling)
 - All structured intents for item actions work correctly
 
----
-
-## Timeline Estimate
-
-**Phase 1 (Basic Structured Inventory):** 2-3 weeks
-- Data modeling: 3 days
-- Schema migration: 2 days
-- Quest/engine updates: 4 days
-- Validation updates: 3 days
-- API/serialization: 3 days
-- Testing & bug fixes: 3 days
-
-**Phase 2 (Expanded Acquisition):** 3-4 weeks
-- Loot system: 4 days
-- Shopping system: 5 days
-- Finding/searching: 3 days
-- Structured intents: 2 days
-- Validation updates: 4 days
-- Engine updates: 4 days
-- Testing: 4 days
-
-**Phase 3 (Full Inventory):** 6-8 weeks
-- Equipment system: 5 days
-- Crafting system: 6 days
-- Item properties: 4 days
-- Advanced economy: 5 days
-- Container system: 4 days
-- Magic items: 4 days
-- Structured intents: 3 days
-- Validation/engine updates: 5 days
-- Testing & polishing: 5 days
-
-**Total Estimated Time:** 11-15 weeks (approximately 3-4 months)
 
 ---
 

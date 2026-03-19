@@ -52,12 +52,47 @@ export type CharacterTemplate = CharacterTemplateDraft & {
   id: string;
 };
 
+export type ItemTemplate = {
+  id: string;
+  campaignId: string;
+  name: string;
+  description: string | null;
+  value: number;
+  weight: number;
+  rarity: string;
+  tags: string[];
+};
+
+export type ItemInstance = {
+  id: string;
+  characterInstanceId: string;
+  templateId: string;
+  template: ItemTemplate;
+  isIdentified: boolean;
+  charges: number | null;
+  properties: Record<string, unknown> | null;
+};
+
+export type RewardItemReference = {
+  templateId: string;
+  name: string;
+};
+
+export type InventoryTemplateReference = {
+  templateId: string;
+};
+
+export type PromptInventoryItem = {
+  name: string;
+  description: string | null;
+};
+
 export type CharacterInstance = {
   id: string;
   templateId: string;
   health: number;
   gold: number;
-  inventory: string[];
+  inventory: ItemInstance[];
 };
 
 export type CampaignCharacter = CharacterTemplate & {
@@ -66,7 +101,7 @@ export type CampaignCharacter = CharacterTemplate & {
   stats: Record<Stat, number>;
   health: number;
   gold: number;
-  inventory: string[];
+  inventory: ItemInstance[];
 };
 
 export type CharacterTemplateSummary = CharacterTemplate & {
@@ -248,8 +283,12 @@ export type QuestRecord = {
   maxStage: number;
   status: QuestStatus;
   rewardGold: number;
-  rewardItem: string | null;
+  rewardItem: RewardItemReference | null;
   discoveredAtTurn: number | null;
+};
+
+export type QuestSeedRecord = Omit<QuestRecord, "rewardItem"> & {
+  rewardItemName: string | null;
 };
 
 export type ArcRecord = {
@@ -458,7 +497,10 @@ export type ValidatedDelta = {
   acceptedNpcChanges: ProposedStateDelta["npcApprovalChanges"];
   acceptedNpcDiscoveries: string[];
   awardedGold: number;
-  acceptedInventoryChanges: NonNullable<ProposedStateDelta["inventoryChanges"]>;
+  acceptedInventoryChanges: {
+    add: InventoryTemplateReference[];
+    remove: string[];
+  };
   memorySummary?: string;
 };
 
@@ -494,6 +536,7 @@ export type ResolveDecision = {
 
 export type PromptContext = {
   scene: SceneState;
+  inventory: PromptInventoryItem[];
   keyLocations: KeyLocation[];
   discoveredKeyLocations: KeyLocation[];
   recentSceneTrail: string[];

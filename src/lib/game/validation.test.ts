@@ -72,10 +72,11 @@ test("validateDelta accepts valid updates with indexed lookups", () => {
   assert.equal(result.nextState.activeArcId, fixture.arcs[0].id);
   assert.equal(result.nextCharacter.health, fixture.character.health - 2);
   assert.equal(result.nextCharacter.gold, fixture.character.gold + fixture.quests[0]!.rewardGold);
-  assert.deepEqual(result.nextCharacter.inventory, [
-    ...fixture.character.inventory,
-    fixture.quests[0]!.rewardItem!,
-  ]);
+  assert.deepEqual(result.nextCharacter.inventory, fixture.character.inventory);
+  assert.deepEqual(result.acceptedInventoryChanges, {
+    add: [{ templateId: fixture.quests[0]!.rewardItem!.templateId }],
+    remove: [],
+  });
   assert.deepEqual(result.acceptedQuestAdvancements, [
     {
       questId: fixture.quests[0]!.id,

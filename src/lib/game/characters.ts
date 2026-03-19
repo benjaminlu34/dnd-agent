@@ -4,6 +4,7 @@ import type {
   CharacterInstance,
   CharacterTemplate,
   CharacterTemplateDraft,
+  ItemInstance,
 } from "@/lib/game/types";
 
 const statSchema = z.coerce.number().int().min(-5).max(10);
@@ -38,10 +39,8 @@ export const characterGenerateRequestSchema = z.object({
 
 export type CharacterTemplateDraftInput = z.infer<typeof characterTemplateDraftSchema>;
 
-export function normalizeInventory(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
-    : [];
+export function cloneInventory(items: ItemInstance[]): ItemInstance[] {
+  return structuredClone(items);
 }
 
 export function toCharacterStats(character: Pick<
@@ -69,7 +68,7 @@ export function toCampaignCharacter(
     stats: toCharacterStats(template),
     health: instance.health,
     gold: instance.gold,
-    inventory: instance.inventory,
+    inventory: cloneInventory(instance.inventory),
   };
 }
 

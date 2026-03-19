@@ -1,7 +1,8 @@
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { dmClient, getTurnQualityMeta } from "@/lib/ai/provider";
 import { rollCheck } from "@/lib/game/checks";
+import { cloneInventory } from "@/lib/game/characters";
 import {
   getCampaignSnapshot,
   getPromptContext,
@@ -45,6 +46,7 @@ type TurnRollbackData = {
     status: string;
     discoveredAtTurn: number | null;
   }[];
+  inventoryInstanceIdsAdded: string[];
   messageIds: string[];
   memoryEntryId: string | null;
 };
@@ -315,7 +317,7 @@ async function commitValidatedTurn(input: {
       previousCharacter: {
         health: snapshot.character.health,
         gold: snapshot.character.gold,
-        inventory: snapshot.character.inventory,
+        inventory: cloneInventory(snapshot.character.inventory),
       },
       previousSessionTurnCount: snapshot.state.turnCount,
       quests: snapshot.quests.map((quest) => ({
@@ -339,6 +341,7 @@ async function commitValidatedTurn(input: {
         status: clue.status,
         discoveredAtTurn: clue.discoveredAtTurn,
       })),
+      inventoryInstanceIdsAdded: [],
       messageIds: [],
       memoryEntryId: null,
     };
@@ -355,9 +358,23 @@ async function commitValidatedTurn(input: {
       data: {
         health: validated.nextCharacter.health,
         gold: validated.nextCharacter.gold,
-        inventory: validated.nextCharacter.inventory,
       },
     });
+
+    for (const rewardItem of validated.acceptedInventoryChanges.add) {
+      const itemInstance = await tx.itemInstance.create({
+        data: {
+          characterInstanceId: snapshot.character.instanceId,
+          templateId: rewardItem.templateId,
+          isIdentified: true,
+          charges: null,
+          properties: Prisma.JsonNull,
+        },
+        select: { id: true },
+      });
+
+      rollback.inventoryInstanceIdsAdded.push(itemInstance.id);
+    }
 
     for (const questUpdate of validated.acceptedQuestAdvancements ?? []) {
       await tx.quest.update({
@@ -643,9 +660,18 @@ export async function retryLastTurn(turnId: string) {
       data: {
         health: rollback.previousCharacter.health,
         gold: rollback.previousCharacter.gold,
-        inventory: rollback.previousCharacter.inventory,
       },
     });
+
+    if (rollback.inventoryInstanceIdsAdded.length) {
+      await tx.itemInstance.deleteMany({
+        where: {
+          id: {
+            in: rollback.inventoryInstanceIdsAdded,
+          },
+        },
+      });
+    }
 
     await tx.session.update({
       where: { id: turn.sessionId },

@@ -56,6 +56,27 @@ test("auditRenderedNarration warns on repeated key items in the same beat", () =
   assert.ok(result.issues.some((issue) => issue.code === "repeated_key_item"));
 });
 
+test("auditRenderedNarration uses normalized known item names when provided", () => {
+  const result = auditRenderedNarration(
+    {
+      mode: "resolution",
+      narration:
+        "The moon salt charm taps the floorboards, and the moon-salt charm catches again on the chair rung.",
+      playerAction: "I set the charm down while I listen at the door.",
+      actionResolution: "You set the moon-salt charm beside the chair and go still as the hallway creaks.",
+      directlyHandledItems: ["moon salt charm"],
+      suggestedActions: [
+        "Listen at the door more carefully",
+        "Hide the charm before anyone comes upstairs",
+      ],
+    },
+    ["Moon-Salt Charm"],
+  );
+
+  assert.equal(result.highestSeverity, "warn");
+  assert.ok(result.issues.some((issue) => issue.code === "repeated_key_item"));
+});
+
 test("auditRenderedNarration warns on contradictions with the validated beat", () => {
   const result = auditRenderedNarration({
     mode: "triage",
