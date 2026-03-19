@@ -57,11 +57,31 @@ import {
   hydrateCampaignState,
   parseGeneratedCampaignSetup,
 } from "@/lib/game/serialization";
+import { createAdHocCampaignInventoryItem } from "@/lib/game/items";
 import { getStaleClues } from "@/lib/game/reveals";
 import { dmClient } from "@/lib/ai/provider";
 import { prisma } from "@/lib/prisma";
 
 type PrismaItemTemplateRecord = Prisma.ItemTemplateGetPayload<Record<string, never>>;
+const characterTemplateSummarySelect = {
+  id: true,
+  name: true,
+  archetype: true,
+  strength: true,
+  dexterity: true,
+  constitution: true,
+  intelligence: true,
+  wisdom: true,
+  charisma: true,
+  maxHealth: true,
+  backstory: true,
+  createdAt: true,
+  updatedAt: true,
+} satisfies Prisma.CharacterTemplateSelect;
+
+type PrismaCharacterTemplateSummaryRecord = Prisma.CharacterTemplateGetPayload<{
+  select: typeof characterTemplateSummarySelect;
+}>;
 type PrismaItemInstanceRecord = Prisma.ItemInstanceGetPayload<{
   include: {
     template: true;
@@ -97,12 +117,23 @@ function toTemplateRecord(template: PrismaCharacterTemplate): CharacterTemplate 
     charisma: template.charisma,
     maxHealth: template.maxHealth,
     backstory: template.backstory,
+    starterItems: [...template.starterItems],
   };
 }
 
-function toTemplateSummary(template: PrismaCharacterTemplate): CharacterTemplateSummary {
+function toTemplateSummary(template: PrismaCharacterTemplateSummaryRecord): CharacterTemplateSummary {
   return {
-    ...toTemplateRecord(template),
+    id: template.id,
+    name: template.name,
+    archetype: template.archetype,
+    strength: template.strength,
+    dexterity: template.dexterity,
+    constitution: template.constitution,
+    intelligence: template.intelligence,
+    wisdom: template.wisdom,
+    charisma: template.charisma,
+    maxHealth: template.maxHealth,
+    backstory: template.backstory,
     createdAt: template.createdAt.toISOString(),
     updatedAt: template.updatedAt.toISOString(),
   };
@@ -260,8 +291,27 @@ async function createCampaignInTx(
         },
       },
     },
-    select: { id: true },
+    select: {
+      id: true,
+      characterInstance: {
+        select: {
+          id: true,
+        },
+      },
+    },
   });
+
+  if (!campaign.characterInstance) {
+    throw new Error("Campaign is missing its character instance.");
+  }
+
+  for (const starterItem of template.starterItems) {
+    await createAdHocCampaignInventoryItem(tx, {
+      campaignId: campaign.id,
+      characterInstanceId: campaign.characterInstance.id,
+      name: starterItem,
+    });
+  }
 
   for (const quest of questSeeds) {
     const rewardItemTemplate = quest.rewardItemName
@@ -348,6 +398,7 @@ export async function listCharacterTemplates(): Promise<CharacterTemplateSummary
   const user = await ensureLocalUser();
   const templates = await prisma.characterTemplate.findMany({
     where: { userId: user.id },
+    select: characterTemplateSummarySelect,
     orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
   });
 
@@ -559,6 +610,7 @@ export async function createCharacterTemplate(input: CharacterTemplateDraft) {
       charisma: input.charisma,
       maxHealth: input.maxHealth,
       backstory: input.backstory,
+      starterItems: input.starterItems,
     },
   });
 }
@@ -593,6 +645,7 @@ export async function updateCharacterTemplateForUser(
       charisma: input.charisma,
       maxHealth: input.maxHealth,
       backstory: input.backstory,
+      starterItems: input.starterItems,
     },
   });
 }

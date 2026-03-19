@@ -46,11 +46,14 @@ export type CharacterTemplateDraft = {
   charisma: number;
   maxHealth: number;
   backstory: string | null;
+  starterItems: string[];
 };
 
 export type CharacterTemplate = CharacterTemplateDraft & {
   id: string;
 };
+
+export type LootSource = "investigation" | "defeat";
 
 export type ItemTemplate = {
   id: string;
@@ -104,7 +107,7 @@ export type CampaignCharacter = CharacterTemplate & {
   inventory: ItemInstance[];
 };
 
-export type CharacterTemplateSummary = CharacterTemplate & {
+export type CharacterTemplateSummary = Omit<CharacterTemplate, "starterItems"> & {
   createdAt: string;
   updatedAt: string;
 };
@@ -446,6 +449,8 @@ export type ProposedStateDelta = {
   healthDelta?: number;
   goldChange?: number;
   rewardQuestId?: string | null;
+  lootDiscoveries?: string[];
+  lootSource?: LootSource;
   inventoryChanges?: {
     add?: string[];
     remove?: string[];
@@ -497,6 +502,9 @@ export type ValidatedDelta = {
   acceptedNpcChanges: ProposedStateDelta["npcApprovalChanges"];
   acceptedNpcDiscoveries: string[];
   awardedGold: number;
+  acceptedLootDiscoveries: {
+    name: string;
+  }[];
   acceptedInventoryChanges: {
     add: InventoryTemplateReference[];
     remove: string[];

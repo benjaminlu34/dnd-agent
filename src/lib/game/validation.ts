@@ -3,6 +3,7 @@ import type {
   CampaignCharacter,
   CampaignBlueprint,
   CampaignState,
+  CheckResult,
   Clue,
   NpcRecord,
   ProposedStateDelta,
@@ -10,6 +11,7 @@ import type {
   ValidatedDelta,
 } from "@/lib/game/types";
 import { cloneInventory } from "@/lib/game/characters";
+import { MAX_LOOT_DISCOVERIES, normalizeItemNameList } from "@/lib/game/item-utils";
 import { toCanonicalKeyLocationName } from "@/lib/game/location-utils";
 import { clamp } from "@/lib/utils";
 
@@ -21,6 +23,8 @@ type ValidationInput = {
   arcs: ArcRecord[];
   clues: Clue[];
   npcs: NpcRecord[];
+  isInvestigative: boolean;
+  checkResult?: CheckResult;
   proposedDelta: ProposedStateDelta;
 };
 
@@ -32,6 +36,8 @@ export function validateDelta({
   arcs,
   clues,
   npcs,
+  isInvestigative,
+  checkResult,
   proposedDelta,
 }: ValidationInput): ValidatedDelta {
   const warnings: string[] = [];
@@ -113,6 +119,7 @@ export function validateDelta({
   const acceptedArcAdvancements: NonNullable<ValidatedDelta["acceptedArcAdvancements"]> = [];
   const acceptedNpcChanges: NonNullable<ValidatedDelta["acceptedNpcChanges"]> = [];
   const acceptedNpcDiscoveries: string[] = [];
+  const acceptedLootDiscoveries: ValidatedDelta["acceptedLootDiscoveries"] = [];
   const acceptedInventoryChanges: ValidatedDelta["acceptedInventoryChanges"] = {
     add: [],
     remove: [] as string[],
@@ -185,6 +192,37 @@ export function validateDelta({
 
   if ("inventoryChanges" in proposedDelta && proposedDelta.inventoryChanges !== undefined) {
     warnings.push("Rejected direct inventory mutation. Inventory remains engine-controlled in v1.");
+  }
+
+  const normalizedLootDiscoveries = normalizeItemNameList(proposedDelta.lootDiscoveries ?? []);
+  if (normalizedLootDiscoveries.length > MAX_LOOT_DISCOVERIES) {
+    warnings.push(`Accepted only the first ${MAX_LOOT_DISCOVERIES} loot discoveries this turn.`);
+  }
+
+  if (normalizedLootDiscoveries.length > 0) {
+    if (!proposedDelta.lootSource) {
+      warnings.push("Rejected loot discoveries without a validated loot source.");
+    } else if (proposedDelta.lootSource === "investigation") {
+      if (!isInvestigative) {
+        warnings.push("Rejected investigative loot on a non-investigative turn.");
+      } else {
+        for (const name of normalizedLootDiscoveries.slice(0, MAX_LOOT_DISCOVERIES)) {
+          acceptedLootDiscoveries.push({ name });
+        }
+      }
+    } else if (proposedDelta.lootSource === "defeat") {
+      if (!checkResult) {
+        warnings.push("Rejected defeat loot without a resolved check result.");
+      } else if (checkResult.outcome !== "success") {
+        warnings.push("Rejected defeat loot because the check outcome was not a success.");
+      } else {
+        for (const name of normalizedLootDiscoveries.slice(0, MAX_LOOT_DISCOVERIES)) {
+          acceptedLootDiscoveries.push({ name });
+        }
+      }
+    } else {
+      warnings.push(`Rejected unknown loot source ${proposedDelta.lootSource}.`);
+    }
   }
 
   for (const clueId of proposedDelta.clueDiscoveries ?? []) {
@@ -283,6 +321,7 @@ export function validateDelta({
     acceptedNpcChanges,
     acceptedNpcDiscoveries,
     awardedGold,
+    acceptedLootDiscoveries,
     acceptedInventoryChanges,
     memorySummary: proposedDelta.memorySummary,
   };

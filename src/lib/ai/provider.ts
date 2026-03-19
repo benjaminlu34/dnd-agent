@@ -12,6 +12,7 @@ import {
 } from "@/lib/ai/narration-audit";
 import { env } from "@/lib/env";
 import { characterTemplateDraftSchema } from "@/lib/game/characters";
+import { MAX_STARTER_ITEMS, normalizeItemNameList } from "@/lib/game/item-utils";
 import {
   buildDungeonMasterSystemPrompt,
   buildRendererUserPrompt,
@@ -199,6 +200,12 @@ function normalizeGeneratedCharacterDraft(value: unknown): CharacterTemplateDraf
       typeof raw.backstory === "string" && raw.backstory.trim()
         ? raw.backstory.trim()
         : null,
+    starterItems: normalizeItemNameList(
+      Array.isArray(raw.starterItems)
+        ? raw.starterItems.filter((item): item is string => typeof item === "string")
+        : [],
+      { maxItems: MAX_STARTER_ITEMS },
+    ),
   };
 
   const parsed = characterTemplateDraftSchema.safeParse(normalized);
@@ -418,6 +425,11 @@ const generateCharacterTool = {
       charisma: { type: "number", minimum: -5, maximum: 4 },
       maxHealth: { type: "number", minimum: 8, maximum: 18 },
       backstory: { type: "string" },
+      starterItems: {
+        type: "array",
+        maxItems: MAX_STARTER_ITEMS,
+        items: { type: "string" },
+      },
     },
     required: [
       "name",
@@ -430,6 +442,7 @@ const generateCharacterTool = {
       "charisma",
       "maxHealth",
       "backstory",
+      "starterItems",
     ],
   },
 };
@@ -607,7 +620,7 @@ function sanitizeNarration(text: string) {
 }
 
 function containsStructuredMetaLeak(text: string) {
-  return /(?:^|\n)\s*(?:proposedDelta|sceneSnapshot|npcDiscoveries|questDiscoveries|keyLocationDiscoveries|healthDelta|itemChanges|sceneLocation|sceneKeyLocation|roll|reveals|actionResolution|suggestedActions|narration)\s*[:.]/i.test(
+  return /(?:^|\n)\s*(?:proposedDelta|sceneSnapshot|npcDiscoveries|questDiscoveries|keyLocationDiscoveries|lootDiscoveries|lootSource|healthDelta|itemChanges|sceneLocation|sceneKeyLocation|roll|reveals|actionResolution|suggestedActions|narration)\s*[:.]/i.test(
     text,
   );
 }
@@ -710,6 +723,20 @@ function normalizeDiscoveryDelta(value: Record<string, unknown>) {
     normalized.keyLocationDiscoveries = toStringArray(
       value.keyLocationDiscoveries ?? value.key_location_discoveries,
     );
+  }
+
+  if ("lootDiscoveries" in value || "loot_discoveries" in value) {
+    normalized.lootDiscoveries = toStringArray(value.lootDiscoveries ?? value.loot_discoveries);
+  }
+
+  const lootSource =
+    typeof value.lootSource === "string"
+      ? value.lootSource.trim().toLowerCase()
+      : typeof value.loot_source === "string"
+        ? value.loot_source.trim().toLowerCase()
+        : "";
+  if (lootSource === "investigation" || lootSource === "defeat") {
+    normalized.lootSource = lootSource;
   }
 
   delete (normalized as Record<string, unknown>).sceneSummary;
@@ -1985,6 +2012,8 @@ class OpenRouterDungeonMaster {
                 "IMPORTANT: maxHealth should usually be between 8 and 18.",
                 "Keep stats plausible, varied, and coherent with the concept.",
                 "Backstory should be concise, specific, and campaign-friendly.",
+                `Return starterItems as 0-${MAX_STARTER_ITEMS} grounded, archetype-appropriate item names.`,
+                "Starter gear should feel specific, mundane, and useful in early play.",
               ].join("\n"),
             },
             {

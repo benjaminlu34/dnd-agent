@@ -75,58 +75,55 @@
 
 **Goal:** Allow item acquisition through means beyond quest rewards while maintaining AI safety.
 
-### Changes Required:
+### 2a: Starter Inventory
 
-1. **Loot System:**
-   - Add loot tables to encounters/NPCs
-   - When NPC is defeated, generate loot based on table
-   - Loot goes directly to character inventory (engine-controlled)
+**Data model**
+- Add `starterItems: string[]` to `CharacterTemplate` (Prisma: `starterItems String[]`).
+- No new relation model. Names only at authoring time, same pattern as `rewardItem` strings in Phase 1.
+- Cap: maximum 4 starter items per template, enforced in the schema validator and UI.
 
-2. **Basic Shopping System:**
-   - Create shop NPCs with inventory
-   - Implement buy/sell actions through structured intents
-   - Add gold-based transactions
-   - Validate player has sufficient gold for purchases
-   - Validate shop has item in stock for sales
+**Character builder**
+- Add a repeater input to `character-builder-app.tsx`: add item name, remove item name, list of strings.
+- No template metadata at authoring time — just names.
+- Validate max 4 items before save.
 
-3. **Finding/Searching System:**
-   - Allow perception/investigation checks to find hidden items
-   - Items discovered through search go to inventory
-   - Tie to existing clue discovery mechanics
+**AI character generation**
+- Add `starterItems: string[]` (max 4) to `generateCharacterTool` input schema in `provider.ts`.
+- Update the generation system prompt to suggest contextually appropriate starting gear based on archetype.
+- Normalize and cap the returned array before saving.
 
-4. **Structured Intent Updates:**
-   - Enhance `ProposedStateDelta` with:
-     - `purchaseItems: { itemId: string, quantity: number }[]`
-     - `sellItems: { itemId: string, quantity: number }[]`
-     - `lootItems: { itemId: string, quantity: number }[]` (for AI-proposed loot)
-   - Update `ValidatedDelta` to track accepted transactions
+**Campaign creation**
+- During `createCampaignInTx`, after creating the `CharacterInstance`, iterate `template.starterItems`.
+- For each name, create a campaign-local `ItemTemplate` row (same defaults as quest reward templates: `description=null`, `value=0`, `weight=0`, `rarity="common"`, `tags=[]`).
+- Create an `ItemInstance` row linking that template to the new `CharacterInstance`.
+- No rollback concern — starter items are created once at campaign launch, not during turn commits.
 
-5. **Validation Updates:**
-   - Allow inventory changes from:
-     - Quest rewards (unchanged)
-     - Loot from encounters (engine-generated)
-     - Player purchases (gold-validated)
-     - Player sales (shop-inventory-validated)
-   - Reject direct inventory additions not tied to validated sources
-   - Validate shop inventory levels
-   - Validate player gold for purchases
+### 2b: Loot Acquisition
 
-6. **Engine Updates:**
-   - Implement shop inventory tracking
-   - Implement loot generation from tables
-   - Update gold tracking for transactions
-   - Handle item stacking (same item template)
+**Sources**
+- Items found through investigation/search checks (investigative turns).
+- Items looted from defeated enemies (combat turns with a failure-or-lower outcome).
 
-7. **Narration Audit Updates:**
-   - Track mentioned items in loot/shop contexts
-   - Prevent AI from over-promoting rare items
-   - Ensure item mentions are contextually appropriate
+**AI proposal**
+- Extend `ProposedStateDelta` with `lootDiscoveries: string[]` — item names the AI proposes adding to inventory.
+- The AI may only propose loot on investigative turns or turns where an enemy was defeated. The validation layer enforces this; the prompt instructs it.
 
-**Outcome of Phase 2:**
-- Items can be acquired through loot, shopping, and finding
-- AI can propose transactions but they're validated against game state
-- Basic economy introduced (gold has purpose)
-- Inventory remains engine-controlled but sources expanded
+**Validation**
+- `validateDelta` accepts `lootDiscoveries` only when the turn is flagged investigative or the outcome includes a defeat consequence.
+- For each accepted name, record `{ name: string }` in a new `acceptedLootDiscoveries: { name: string }[]` field on `ValidatedDelta`.
+- Cap accepted loot at 2 items per turn.
+
+**Commit**
+- `commitValidatedTurn` creates a campaign-local `ItemTemplate` and `ItemInstance` for each accepted loot discovery, inside the existing transaction.
+- Record created instance IDs in `inventoryInstanceIdsAdded` for rollback, same as quest reward items.
+
+**Prompt**
+- Add loot instruction block to `buildDungeonMasterSystemPrompt`: the AI may propose `lootDiscoveries` only when the beat resolves a search or a defeat. It must not propose loot on neutral or conversational turns.
+- Loot names should be specific and diegetic (not "sword" — "a nicked cavalry sword with a missing crossguard").
+
+**Narration audit**
+- No structural changes. Loot items will appear in `PromptContext.inventory` on subsequent turns and benefit from the existing `knownItemNames` audit path automatically.
+
 
 ---
 
@@ -303,11 +300,11 @@ model CharacterInstance {
 - No regression in core game loop
 
 **Phase 2 Complete When:**
-- Characters can acquire items through loot and shopping
-- Gold transactions work correctly
-- Shop inventory limits are respected
-- AI can propose transactions that are properly validated
-- No duplication or loss of items during transfers
+- Character templates can define up to 4 starter items
+- New campaigns materialize starter items as `ItemTemplate` and `ItemInstance` rows
+- Characters can acquire items through validated loot discoveries
+- AI can propose `lootDiscoveries` that are properly validated
+- No duplication or loss of items during starter-item or loot-item creation and rollback
 
 **Phase 3 Complete When:**
 - Equipment system provides stat bonuses

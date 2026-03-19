@@ -98,6 +98,29 @@ test("buildRecentTurnLedger preserves stored turn facts and legacy check fallbac
   ]);
 });
 
+test("buildRecentTurnLedger preserves loot discoveries in stored turn facts", () => {
+  const recentResolvedTurns: RecentResolvedTurn[] = [
+    {
+      id: "turn_7",
+      playerAction: "I search the fallen raider for anything worth keeping.",
+      resultJson: {
+        rollback: {},
+        turnFacts: {
+          action: "I search the fallen raider for anything worth keeping.",
+          roll: "strength success (10)",
+          healthDelta: 0,
+          discoveries: ["loot:scarred brigand axe"],
+          sceneChanged: false,
+        },
+      },
+    },
+  ];
+
+  assert.deepEqual(buildRecentTurnLedger(7, recentResolvedTurns), [
+    '[Turn 7] Action: "I search the fallen raider for anything worth keeping." | Roll: strength success (10) | HP: 0 | Discoveries: loot:scarred brigand axe | SceneChanged: no',
+  ]);
+});
+
 test("getPromptContext classifies snapshot data without extra turn queries", async () => {
   const recentResolvedTurns: RecentResolvedTurn[] = [
     {

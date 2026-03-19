@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { dmClient, getTurnQualityMeta } from "@/lib/ai/provider";
 import { rollCheck } from "@/lib/game/checks";
 import { cloneInventory } from "@/lib/game/characters";
+import { createAdHocCampaignInventoryItem } from "@/lib/game/items";
 import {
   getCampaignSnapshot,
   getPromptContext,
@@ -47,6 +48,7 @@ type TurnRollbackData = {
     discoveredAtTurn: number | null;
   }[];
   inventoryInstanceIdsAdded: string[];
+  itemTemplateIdsAdded: string[];
   messageIds: string[];
   memoryEntryId: string | null;
 };
@@ -269,6 +271,7 @@ function buildTurnFacts(input: {
       ...validated.acceptedClueDiscoveries,
       ...validated.acceptedRevealTriggers,
       ...validated.acceptedNpcDiscoveries,
+      ...validated.acceptedLootDiscoveries.map((loot) => `loot:${loot.name}`),
     ],
     sceneChanged:
       validated.nextState.sceneState.summary !== snapshot.state.sceneState.summary ||
@@ -342,6 +345,7 @@ async function commitValidatedTurn(input: {
         discoveredAtTurn: clue.discoveredAtTurn,
       })),
       inventoryInstanceIdsAdded: [],
+      itemTemplateIdsAdded: [],
       messageIds: [],
       memoryEntryId: null,
     };
@@ -374,6 +378,17 @@ async function commitValidatedTurn(input: {
       });
 
       rollback.inventoryInstanceIdsAdded.push(itemInstance.id);
+    }
+
+    for (const lootDiscovery of validated.acceptedLootDiscoveries) {
+      const createdItem = await createAdHocCampaignInventoryItem(tx, {
+        campaignId: snapshot.campaignId,
+        characterInstanceId: snapshot.character.instanceId,
+        name: lootDiscovery.name,
+      });
+
+      rollback.itemTemplateIdsAdded.push(createdItem.templateId);
+      rollback.inventoryInstanceIdsAdded.push(createdItem.itemInstanceId);
     }
 
     for (const questUpdate of validated.acceptedQuestAdvancements ?? []) {
@@ -647,6 +662,8 @@ export async function retryLastTurn(turnId: string) {
     throw new Error("This turn cannot be retried.");
   }
 
+  const itemTemplateIdsAdded = rollback.itemTemplateIdsAdded ?? [];
+
   await prisma.$transaction(async (tx) => {
     await tx.campaign.update({
       where: { id: turn.campaignId },
@@ -668,6 +685,16 @@ export async function retryLastTurn(turnId: string) {
         where: {
           id: {
             in: rollback.inventoryInstanceIdsAdded,
+          },
+        },
+      });
+    }
+
+    if (itemTemplateIdsAdded.length) {
+      await tx.itemTemplate.deleteMany({
+        where: {
+          id: {
+            in: itemTemplateIdsAdded,
           },
         },
       });
@@ -844,6 +871,7 @@ export async function triageTurn(input: {
     arcs: snapshot.arcs,
     clues: snapshot.clues,
     npcs: snapshot.npcs,
+    isInvestigative: decision.isInvestigative,
     proposedDelta,
   });
 
@@ -942,6 +970,8 @@ export async function resolvePendingCheck(input: {
     arcs: snapshot.arcs,
     clues: snapshot.clues,
     npcs: snapshot.npcs,
+    isInvestigative: pendingCheck.isInvestigative,
+    checkResult,
     proposedDelta,
   });
 

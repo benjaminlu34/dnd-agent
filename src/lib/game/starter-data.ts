@@ -88,6 +88,7 @@ export function createDefaultCharacterTemplate(): CharacterTemplate {
     maxHealth: 12,
     backstory:
       "A road-worn wanderer who carries old maps, half-finished vows, and the habit of showing up where the dark is thickest.",
+    starterItems: ["weathered map case", "camp knife"],
   };
 }
 
@@ -234,6 +235,7 @@ export function createStarterCharacter(): CampaignCharacter {
     gold: 0,
     inventory: [],
     backstory: `${choice.name} has spent too long following rumors that should have stayed buried.`,
+    starterItems: [],
   };
 }
 

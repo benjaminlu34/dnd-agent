@@ -44,6 +44,7 @@ model CharacterTemplate {
   charisma     Int
   maxHealth    Int
   backstory    String?
+  starterItems String[]            @default([])
   createdAt    DateTime            @default(now())
   updatedAt    DateTime            @updatedAt
   user         User                @relation(fields: [userId], references: [id], onDelete: Cascade)

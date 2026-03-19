@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MAX_STARTER_ITEMS, normalizeItemNameList } from "@/lib/game/item-utils";
 import type {
   CampaignCharacter,
   CharacterInstance,
@@ -20,6 +21,16 @@ const nullableTrimmedString = z
     return trimmed ? trimmed : null;
   });
 
+const starterItemsSchema = z
+  .array(z.string())
+  .optional()
+  .default([])
+  .transform((value) => normalizeItemNameList(value))
+  .refine(
+    (value) => value.length <= MAX_STARTER_ITEMS,
+    `No more than ${MAX_STARTER_ITEMS} starter items are allowed.`,
+  );
+
 export const characterTemplateDraftSchema = z.object({
   name: z.string().trim().min(1, "Name is required."),
   archetype: z.string().trim().min(1, "Archetype is required."),
@@ -31,6 +42,7 @@ export const characterTemplateDraftSchema = z.object({
   charisma: statSchema,
   maxHealth: z.coerce.number().int().min(1).max(99),
   backstory: nullableTrimmedString,
+  starterItems: starterItemsSchema,
 });
 
 export const characterGenerateRequestSchema = z.object({

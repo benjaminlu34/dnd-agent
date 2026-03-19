@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
+import { MAX_STARTER_ITEMS } from "@/lib/game/item-utils";
 import type { CharacterTemplate } from "@/lib/game/types";
 
 type CharacterFormValues = {
@@ -16,10 +17,11 @@ type CharacterFormValues = {
   charisma: number;
   maxHealth: number;
   backstory: string;
+  starterItems: string[];
 };
 
 type CharacterGenerationResponse = {
-  character?: CharacterFormValues & { backstory?: string | null };
+  character?: CharacterFormValues & { backstory?: string | null; starterItems?: string[] };
   source?: "openrouter";
   warning?: string;
   error?: string;
@@ -36,6 +38,7 @@ const defaultValues: CharacterFormValues = {
   charisma: 1,
   maxHealth: 12,
   backstory: "",
+  starterItems: [],
 };
 
 function fieldClassName(multiline = false) {
@@ -105,10 +108,12 @@ export function CharacterBuilderApp({
       charisma: initialCharacter.charisma,
       maxHealth: initialCharacter.maxHealth,
       backstory: initialCharacter.backstory ?? "",
+      starterItems: initialCharacter.starterItems,
     });
   }, [initialCharacter, reset]);
 
   const values = watch();
+  const starterItems = values.starterItems ?? [];
 
   function adjustNumberField(field: keyof Pick<
     CharacterFormValues,
@@ -155,6 +160,7 @@ export function CharacterBuilderApp({
       reset({
         ...data.character,
         backstory: data.character.backstory ?? "",
+        starterItems: data.character.starterItems ?? [],
       });
       setGenerationSource(data.source ?? null);
       setGenerationWarning(data.warning ?? null);
@@ -223,6 +229,28 @@ export function CharacterBuilderApp({
     { name: "charisma", label: "Charisma" },
     { name: "maxHealth", label: "Max Health" },
   ];
+
+  function addStarterItem() {
+    if (starterItems.length >= MAX_STARTER_ITEMS) {
+      return;
+    }
+
+    setValue("starterItems", [...starterItems, ""], {
+      shouldDirty: true,
+      shouldValidate: true,
+    });
+  }
+
+  function removeStarterItem(index: number) {
+    setValue(
+      "starterItems",
+      starterItems.filter((_, itemIndex) => itemIndex !== index),
+      {
+        shouldDirty: true,
+        shouldValidate: true,
+      },
+    );
+  }
 
   return (
     <main className="h-screen overflow-y-auto bg-black text-zinc-50">
@@ -314,6 +342,50 @@ export function CharacterBuilderApp({
               <textarea className={`${fieldClassName(true)} mt-4`} {...register("backstory")} />
             </BuilderField>
 
+            <div className="mt-6 rounded-3xl border border-zinc-800 bg-black p-5">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">
+                    Starter Items
+                  </p>
+                  <p className="mt-2 text-sm text-zinc-500">
+                    Add up to {MAX_STARTER_ITEMS} simple item names. They become the character&apos;s opening gear when a campaign starts.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="button-press rounded-full border border-zinc-800 px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-zinc-200 hover:bg-zinc-950 disabled:cursor-not-allowed disabled:opacity-60"
+                  onClick={addStarterItem}
+                  disabled={starterItems.length >= MAX_STARTER_ITEMS}
+                >
+                  Add Item
+                </button>
+              </div>
+
+              <div className="mt-4 space-y-3">
+                {starterItems.length ? starterItems.map((_, index) => (
+                  <div key={`starter-item-${index}`} className="flex items-center gap-3">
+                    <input
+                      className={fieldClassName()}
+                      placeholder="weathered field journal"
+                      {...register(`starterItems.${index}` as const)}
+                    />
+                    <button
+                      type="button"
+                      className="button-press rounded-full border border-zinc-800 px-3 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-300 hover:bg-zinc-950"
+                      onClick={() => removeStarterItem(index)}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                )) : (
+                  <p className="text-sm text-zinc-600">
+                    No starter items yet.
+                  </p>
+                )}
+              </div>
+            </div>
+
             <div className="mt-6 grid gap-4 md:grid-cols-2">
               {numericFields.map((field) => (
                 <div key={field.name} className="rounded-3xl border border-zinc-800 bg-black p-4">
@@ -383,6 +455,25 @@ export function CharacterBuilderApp({
               <p className="mt-3 text-sm leading-7 text-zinc-400">
                 {values.backstory || "Give them a scar, a vow, a debt, or a mystery worth chasing."}
               </p>
+            </div>
+            <div className="mt-6 rounded-3xl border border-zinc-800 bg-black p-5">
+              <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Starter Items</p>
+              {starterItems.length ? (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {starterItems.map((item, index) => (
+                    <span
+                      key={`preview-item-${index}`}
+                      className="rounded-full border border-zinc-800 px-3 py-1 text-xs text-zinc-300"
+                    >
+                      {item || "Unnamed item"}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-3 text-sm text-zinc-500">
+                  Add a few memorable bits of gear to start the campaign with.
+                </p>
+              )}
             </div>
           </aside>
         </form>

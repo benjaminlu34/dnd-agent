@@ -37,6 +37,7 @@ const character: CampaignCharacter = {
   gold: 0,
   inventory: [],
   backstory: "A contract harness protagonist built to sanity-check the DM outputs.",
+  starterItems: [],
 };
 
 const actions = [

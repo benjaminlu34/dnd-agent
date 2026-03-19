@@ -35,6 +35,7 @@ test("validateDelta accepts valid updates with indexed lookups", () => {
   const fixture = createValidationFixture();
   const result = validateDelta({
     ...fixture,
+    isInvestigative: false,
     proposedDelta: {
       activeArcId: fixture.arcs[0].id,
       healthDelta: -2,
@@ -114,6 +115,7 @@ test("validateDelta preserves rejection semantics for invalid and duplicate upda
   const fixture = createValidationFixture();
   const result = validateDelta({
     ...fixture,
+    isInvestigative: false,
     proposedDelta: {
       activeArcId: "arc_missing",
       goldChange: 10,
@@ -202,6 +204,7 @@ test("validateDelta records a newly discovered scene location once", () => {
   const fixture = createValidationFixture();
   const result = validateDelta({
     ...fixture,
+    isInvestigative: false,
     proposedDelta: {
       sceneLocation: "Old Smithy",
     },
@@ -218,6 +221,7 @@ test("validateDelta reuses established scene locations without duplicating disco
   const fixture = createValidationFixture();
   const result = validateDelta({
     ...fixture,
+    isInvestigative: false,
     proposedDelta: {
       sceneTitle: "Ash Market Under Watch",
       sceneLocation: fixture.state.discoveredSceneLocations[0],
@@ -232,6 +236,7 @@ test("validateDelta accepts normalized key-anchor matches and rewrites them to t
   const fixture = createValidationFixture();
   const result = validateDelta({
     ...fixture,
+    isInvestigative: false,
     proposedDelta: {
       sceneKeyLocation: " ash market ",
       keyLocationDiscoveries: ["old smithy "],
@@ -246,6 +251,7 @@ test("validateDelta rejects unknown key anchors", () => {
   const fixture = createValidationFixture();
   const result = validateDelta({
     ...fixture,
+    isInvestigative: false,
     proposedDelta: {
       sceneKeyLocation: "Unknown Dock",
       keyLocationDiscoveries: ["Missing Shrine"],
@@ -258,5 +264,113 @@ test("validateDelta rejects unknown key anchors", () => {
   );
   assert.ok(
     result.warnings.some((warning) => warning.includes("Rejected unknown key location discovery Missing Shrine.")),
+  );
+});
+
+test("validateDelta accepts investigative loot and caps it at two unique items", () => {
+  const fixture = createValidationFixture();
+  const result = validateDelta({
+    ...fixture,
+    isInvestigative: true,
+    proposedDelta: {
+      lootSource: "investigation",
+      lootDiscoveries: [
+        " nicked cavalry sword ",
+        "Lantern-stamped lockbox key",
+        "nicked cavalry sword",
+        "Third item that should be dropped",
+      ],
+    },
+  });
+
+  assert.deepEqual(result.acceptedLootDiscoveries, [
+    { name: "nicked cavalry sword" },
+    { name: "Lantern-stamped lockbox key" },
+  ]);
+  assert.ok(
+    result.warnings.some((warning) => warning.includes("Accepted only the first 2 loot discoveries this turn.")),
+  );
+});
+
+test("validateDelta rejects investigative loot on non-investigative turns", () => {
+  const fixture = createValidationFixture();
+  const result = validateDelta({
+    ...fixture,
+    isInvestigative: false,
+    proposedDelta: {
+      lootSource: "investigation",
+      lootDiscoveries: ["nicked cavalry sword"],
+    },
+  });
+
+  assert.deepEqual(result.acceptedLootDiscoveries, []);
+  assert.ok(
+    result.warnings.some((warning) => warning.includes("Rejected investigative loot on a non-investigative turn.")),
+  );
+});
+
+test("validateDelta accepts defeat loot only on successful checks", () => {
+  const fixture = createValidationFixture();
+  const successResult = validateDelta({
+    ...fixture,
+    isInvestigative: false,
+    checkResult: {
+      stat: "strength",
+      mode: "normal",
+      reason: "Drive the cult bruiser back.",
+      rolls: [6, 3],
+      modifier: 4,
+      total: 10,
+      outcome: "success",
+      consequences: ["Momentum shifts in your favor."],
+    },
+    proposedDelta: {
+      lootSource: "defeat",
+      lootDiscoveries: ["scarred brigand axe"],
+    },
+  });
+
+  assert.deepEqual(successResult.acceptedLootDiscoveries, [{ name: "scarred brigand axe" }]);
+
+  const failureResult = validateDelta({
+    ...fixture,
+    isInvestigative: false,
+    checkResult: {
+      stat: "strength",
+      mode: "normal",
+      reason: "Drive the cult bruiser back.",
+      rolls: [2, 1],
+      modifier: 1,
+      total: 3,
+      outcome: "failure",
+      consequences: ["The situation worsens and tension rises."],
+    },
+    proposedDelta: {
+      lootSource: "defeat",
+      lootDiscoveries: ["scarred brigand axe"],
+    },
+  });
+
+  assert.deepEqual(failureResult.acceptedLootDiscoveries, []);
+  assert.ok(
+    failureResult.warnings.some((warning) =>
+      warning.includes("Rejected defeat loot because the check outcome was not a success."),
+    ),
+  );
+
+  const noCheckResult = validateDelta({
+    ...fixture,
+    isInvestigative: false,
+    proposedDelta: {
+      lootSource: "defeat",
+      lootDiscoveries: ["scarred brigand axe"],
+    },
+  });
+
+  assert.deepEqual(noCheckResult.acceptedLootDiscoveries, []);
+  assert.ok(
+    noCheckResult.warnings.some((warning) =>
+      warning.includes("Rejected defeat loot without a resolved check result."),
+    ),
   );
 });

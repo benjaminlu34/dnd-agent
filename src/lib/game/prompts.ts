@@ -151,6 +151,11 @@ export function buildDungeonMasterSystemPrompt() {
     "proposedDelta.sceneLocation is the concrete place the player is standing right now and may be a newly introduced sub-location.",
     "If the scene is inside, adjacent to, or directly caused by a known campaign anchor, set proposedDelta.sceneKeyLocation to that anchor name.",
     "Use the exact established anchor name for proposedDelta.sceneKeyLocation, though casing and stray whitespace will be normalized by the engine.",
+    "Only propose loot through proposedDelta.lootDiscoveries with a matching proposedDelta.lootSource.",
+    "Use lootSource investigation only when the beat earns tangible loot through searching, investigation, or careful looting.",
+    "Use lootSource defeat only when a successful resolved check clearly defeats a foe and yields spoils.",
+    "Do not propose loot on neutral, conversational, failed, or non-defeat beats.",
+    "Loot names must be specific and diegetic, not generic item categories.",
   ].join("\n");
 }
 
@@ -321,6 +326,7 @@ If the scene is inside, adjacent to, or directly caused by a known campaign anch
 If the player newly identifies or gains access to a campaign anchor, add that exact anchor name to proposedDelta.keyLocationDiscoveries.
 If a hidden NPC is encountered or a hidden quest is logged, record that in proposedDelta using the exact entity IDs.
 Use healthDelta (negative for damage, positive for healing) to reflect physical consequences.
+If the beat uncovers tangible loot through searching or looting the environment, set proposedDelta.lootSource to "investigation" and proposedDelta.lootDiscoveries to up to 2 specific item names.
 `;
 }
 
@@ -358,6 +364,7 @@ If the resolved beat is inside, adjacent to, or directly caused by a known campa
 If the player newly identifies or gains access to a campaign anchor, add that exact anchor name to proposedDelta.keyLocationDiscoveries.
 If a hidden NPC is encountered or a hidden quest is logged, record it in proposedDelta using exact IDs.
 Use healthDelta (negative for damage, positive for healing) for physical consequences.
+If the resolved beat uncovers tangible loot through searching or investigation, set proposedDelta.lootSource to "investigation" and proposedDelta.lootDiscoveries to up to 2 specific item names.
 `;
 }
 
@@ -439,6 +446,8 @@ If the scene is inside, adjacent to, or directly caused by a known campaign anch
 If the player newly identifies or gains access to a campaign anchor, add that exact anchor name to proposedDelta.keyLocationDiscoveries.
 If a hidden NPC is encountered or a hidden quest is logged in this outcome, record that in proposedDelta using the exact entity IDs.
 Use healthDelta (negative for damage, positive for healing) to reflect physical consequences.
+If the resolved beat uncovers tangible loot through searching or investigation, set proposedDelta.lootSource to "investigation" and proposedDelta.lootDiscoveries to up to 2 specific item names.
+If a successful resolved check clearly defeats a foe and yields spoils, set proposedDelta.lootSource to "defeat" and proposedDelta.lootDiscoveries to up to 2 specific item names.
 `;
 }
 
@@ -481,6 +490,8 @@ If the resolved beat is inside, adjacent to, or directly caused by a known campa
 If the player newly identifies or gains access to a campaign anchor, add that exact anchor name to proposedDelta.keyLocationDiscoveries.
 If a hidden NPC is encountered or a hidden quest is logged in this outcome, record it in proposedDelta using exact IDs.
 Use healthDelta (negative for damage, positive for healing) for physical consequences.
+If the resolved beat uncovers tangible loot through searching or investigation, set proposedDelta.lootSource to "investigation" and proposedDelta.lootDiscoveries to up to 2 specific item names.
+If a successful resolved check clearly defeats a foe and yields spoils, set proposedDelta.lootSource to "defeat" and proposedDelta.lootDiscoveries to up to 2 specific item names.
 `;
 }
 
@@ -654,6 +665,14 @@ export const triagePlannerTool = {
             type: "array",
             items: { type: "string" },
           },
+          lootDiscoveries: {
+            type: "array",
+            items: { type: "string" },
+          },
+          lootSource: {
+            type: "string",
+            enum: ["investigation", "defeat"],
+          },
         },
         additionalProperties: true,
       },
@@ -720,6 +739,14 @@ export const resolutionPlannerTool = {
           questDiscoveries: {
             type: "array",
             items: { type: "string" },
+          },
+          lootDiscoveries: {
+            type: "array",
+            items: { type: "string" },
+          },
+          lootSource: {
+            type: "string",
+            enum: ["investigation", "defeat"],
           },
         },
         additionalProperties: true,
@@ -847,6 +874,14 @@ export const triageTool = {
             type: "array",
             items: { type: "string" },
           },
+          lootDiscoveries: {
+            type: "array",
+            items: { type: "string" },
+          },
+          lootSource: {
+            type: "string",
+            enum: ["investigation", "defeat"],
+          },
         },
         additionalProperties: true,
       },
@@ -899,6 +934,14 @@ export const resolutionTool = {
           questDiscoveries: {
             type: "array",
             items: { type: "string" },
+          },
+          lootDiscoveries: {
+            type: "array",
+            items: { type: "string" },
+          },
+          lootSource: {
+            type: "string",
+            enum: ["investigation", "defeat"],
           },
         },
         additionalProperties: true,
