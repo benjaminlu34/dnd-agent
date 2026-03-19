@@ -187,7 +187,7 @@ async function main() {
       label: "repeated key item within narration should fail",
       result: auditNarration({
         mode: "triage",
-        narration: "The ledger thumps against the chair leg, and the ledger's clasp clicks softly as you set it down.",
+        narration: "The compass thumps against the chair leg, and the compass's clasp clicks softly as you set it down.",
         playerAction: "I draw the guard away from the alley.",
       }),
       expectIssue: "repeated_key_item",
@@ -196,7 +196,7 @@ async function main() {
       label: "single key item mention without action relevance should fail",
       result: auditNarration({
         mode: "triage",
-        narration: "You set the ledger on the table and listen to the tavern below.",
+        narration: "You set the compass on the table and listen to the tavern below.",
         playerAction: "I bar the door and listen for footsteps on the stairs.",
       }),
       expectIssue: "repeated_key_item",
@@ -205,7 +205,7 @@ async function main() {
       label: "single key item mention with direct action relevance should pass",
       result: auditNarration({
         mode: "triage",
-        narration: "You slide the ledger beneath the mattress and pull the blanket smooth over it.",
+        narration: "You slide the compass beneath the mattress and pull the blanket smooth over it.",
         playerAction: "I hide it beneath the bed before anyone comes upstairs.",
       }),
       expectIssue: null,
@@ -214,32 +214,32 @@ async function main() {
 
   const beatCases = [
     {
-      label: "planner should block irrelevant key item surfacing",
-      result: validateBeatPlan({
-        mode: "triage",
-        playerAction: "I bar the door and listen for footsteps on the stairs.",
-        actionResolution: "You set the ledger on the table and listen for movement beyond the door.",
-        suggestedActionGoals: [
-          { goal: "fortify the room", target: null },
-          { goal: "check the stairwell", target: null },
-        ],
-        requiresCheck: false,
-      }),
+       label: "planner should block irrelevant key item surfacing",
+       result: validateBeatPlan({
+         mode: "triage",
+         playerAction: "I bar the door and listen for footsteps on the stairs.",
+         actionResolution: "You set the compass on the table and listen for movement beyond the door.",
+         suggestedActionGoals: [
+           { goal: "fortify the room", target: null },
+           { goal: "check the stairwell", target: null },
+         ],
+         requiresCheck: false,
+       }),
       expectSeverity: "block",
       expectIssue: "irrelevant_key_item",
     },
     {
-      label: "planner should accept direct handling through pronoun actions",
-      result: validateBeatPlan({
-        mode: "triage",
-        playerAction: "I hide it beneath the bed before anyone comes upstairs.",
-        actionResolution: "You slide the ledger beneath the mattress and smooth the blanket over it.",
-        suggestedActionGoals: [
-          { goal: "wait for the hallway to settle", target: null },
-          { goal: "leave before dawn", target: null },
-        ],
-        requiresCheck: false,
-      }),
+       label: "planner should accept direct handling through pronoun actions",
+       result: validateBeatPlan({
+         mode: "triage",
+         playerAction: "I hide it beneath the bed before anyone comes upstairs.",
+         actionResolution: "You slide the compass beneath the mattress and smooth the blanket over it.",
+         suggestedActionGoals: [
+           { goal: "wait for the hallway to settle", target: null },
+           { goal: "leave before dawn", target: null },
+         ],
+         requiresCheck: false,
+       }),
       expectSeverity: "clean",
       expectIssue: null,
     },

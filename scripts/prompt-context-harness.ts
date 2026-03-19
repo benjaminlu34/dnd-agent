@@ -100,7 +100,7 @@ async function main() {
     failures,
   );
   assertCase(
-    !triagePrompt.includes("DM:") && !triagePrompt.includes("The ledger weighs"),
+    !triagePrompt.includes("DM:") && !triagePrompt.includes("The amulet weighs"),
     "Triage prompt still leaks raw assistant narration.",
     failures,
   );

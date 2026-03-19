@@ -89,7 +89,7 @@ test("normalizeRendererDecision strips suggested actions footers into structured
       "",
       "Suggested actions:",
       "- Leave the safehouse",
-      "- Inspect the ledger",
+      "- Inspect the amulet",
     ].join("\n"),
   );
 
@@ -99,7 +99,7 @@ test("normalizeRendererDecision strips suggested actions footers into structured
   );
   assert.deepEqual(decision?.suggestedActions, [
     "Leave the safehouse",
-    "Inspect the ledger",
+    "Inspect the amulet",
   ]);
 });
 

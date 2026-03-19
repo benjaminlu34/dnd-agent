@@ -13,8 +13,8 @@
 | Retry/cancel turn path | Before/after payloads and journal state | No hidden state becomes visible through rollback or retry plumbing |
 | Session Zero regeneration | Public pitch vs advanced panel | Public preview stays high-level even after revisions |
 
-## Player Knowledge Ledger Template
-Use this ledger when auditing a scenario:
+## Player Knowledge Audit Template
+Use this template when auditing a scenario:
 
 - What the player has directly seen in narration
 - What the player has read in discovered clues or written documents
@@ -25,7 +25,7 @@ Use this ledger when auditing a scenario:
 - Whether the DM narrated any player psychology rather than external action or concrete sensation
 - Whether the scene ended on a concrete pressure point instead of a thematic slogan
 
-If a payload field or UI element falls outside that ledger, treat it as a likely violation.
+If a payload field or UI element falls outside that audit template, treat it as a likely violation.
 
 ## Baseline Walkthrough: Corrupt Merchant City / Slow Opening
 ### What the player should know at campaign start

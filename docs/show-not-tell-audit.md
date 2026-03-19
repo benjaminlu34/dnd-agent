@@ -22,7 +22,7 @@ Turn-by-turn DM prose should also meet these narration-specific rules:
 ## DM Narration Examples
 - Fail, player interiority: "You feel confident knowing you've handled worse."
 - Pass, physical sensation: "You feel the cold through your coat when the harbor wind cuts across the roofline."
-- Fail, opening recap: "You've been running for three days now, ever since the ledger changed everything."
+- Fail, opening recap: "You've been running for three days now, ever since the amulet changed everything."
 - Pass, immediate opening: "A customs whistle cuts across the quay just as two enforcers shoulder through the fog toward your bridge."
 - Fail, editorial closer: "The night is always watching."
 - Pass, concrete closer: "Below you, one of the enforcers stops at the blood on the tiles and calls for backup."
@@ -92,7 +92,7 @@ Turn-by-turn DM prose should also meet these narration-specific rules:
 - Removed sidebar threat leakage and kept the player journal focused on scene-visible state.
 - Hardened recap prompts and `Previously on` clue selection.
 - Prevented unseen companions from being assumed present in prompt context.
-- Replaced raw recent narration in turn prompts with a mechanical turn ledger and added runtime scene-summary sanitization for poisoned legacy saves.
+- Replaced raw recent narration in turn prompts with a mechanical turn tracker and added runtime scene-summary sanitization for poisoned legacy saves.
 
 ## Recommended Next Step
 Implement explicit discovery state for NPCs and quests. The current payload sanitization is safe, but a first-class discovery model would let the engine decide what becomes journaled, named, and summarized without relying on conservative filters.

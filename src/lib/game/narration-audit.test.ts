@@ -10,7 +10,7 @@ test("validateBeatPlan accepts direct key item handling through pronoun actions"
   const result = validateBeatPlan({
     mode: "triage",
     playerAction: "I hide it beneath the bed before anyone comes upstairs.",
-    actionResolution: "You slide the ledger beneath the mattress and pull the blanket smooth over it.",
+    actionResolution: "You slide the amulet beneath the mattress and pull the blanket smooth over it.",
     suggestedActionGoals: [
       { goal: "stay hidden until the hallway settles", target: null },
       { goal: "leave before dawn", target: null },
@@ -19,14 +19,14 @@ test("validateBeatPlan accepts direct key item handling through pronoun actions"
   });
 
   assert.equal(result.highestSeverity, "clean");
-  assert.deepEqual(result.directlyHandledItems, ["ledger"]);
+  assert.deepEqual(result.directlyHandledItems, ["amulet"]);
 });
 
 test("validateBeatPlan blocks irrelevant key item surfacing", () => {
   const result = validateBeatPlan({
     mode: "triage",
     playerAction: "I bar the door and listen for footsteps on the stairs.",
-    actionResolution: "You set the ledger on the table and listen for movement beyond the door.",
+    actionResolution: "You set the amulet on the table and listen for movement beyond the door.",
     suggestedActionGoals: [
       { goal: "check the stairs for the source of the noise", target: null },
       { goal: "fortify the room", target: null },
@@ -42,13 +42,13 @@ test("auditRenderedNarration warns on repeated key items in the same beat", () =
   const result = auditRenderedNarration({
     mode: "resolution",
     narration:
-      "The ledger thumps against the chair leg, and the ledger's clasp clicks softly as you set it down.",
-    playerAction: "I set the ledger down long enough to listen at the door.",
-    actionResolution: "You set the ledger down beside the chair and go still as the hallway creaks.",
-    directlyHandledItems: ["ledger"],
+      "The amulet thumps against the chair leg, and the amulet's clasp clicks softly as you set it down.",
+    playerAction: "I set the amulet down long enough to listen at the door.",
+    actionResolution: "You set the amulet down beside the chair and go still as the hallway creaks.",
+    directlyHandledItems: ["amulet"],
     suggestedActions: [
       "Listen at the door more carefully",
-      "Hide the ledger before anyone comes upstairs",
+      "Hide the amulet before anyone comes upstairs",
     ],
   });
 
@@ -77,13 +77,13 @@ test("auditRenderedNarration blocks suggested actions leaking into narration", (
   const result = auditRenderedNarration({
     mode: "triage",
     narration:
-      "You wake to the bell tower's clang and sit up in the safehouse room.\n\nSuggested actions:\n- Leave the safehouse\n- Inspect the ledger",
+      "You wake to the bell tower's clang and sit up in the safehouse room.\n\nSuggested actions:\n- Leave the safehouse\n- Inspect the amulet",
     playerAction: "Rest and recover your bearings",
     actionResolution: "You sleep for a few hours and recover your strength.",
     directlyHandledItems: [],
     suggestedActions: [
       "Leave the safehouse",
-      "Inspect the ledger",
+      "Inspect the amulet",
     ],
   });
 
@@ -94,7 +94,7 @@ test("auditRenderedNarration blocks suggested actions leaking into narration", (
 test("auditRenderedNarrationStructure blocks suggested actions leaking into narration", () => {
   const result = auditRenderedNarrationStructure({
     narration:
-      "You wake to the bell tower's clang and sit up in the safehouse room.\n\nSuggested actions:\n- Leave the safehouse\n- Inspect the ledger",
+      "You wake to the bell tower's clang and sit up in the safehouse room.\n\nSuggested actions:\n- Leave the safehouse\n- Inspect the amulet",
     suggestedActions: [],
   });
 

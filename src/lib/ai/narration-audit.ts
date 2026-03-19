@@ -7,7 +7,6 @@ const PSYCHOLOGICAL_FEEL_PATTERN =
   /\byou feel (?:confident|afraid|fearful|uneasy|certain|sure|ready|relief|guilt|hope|dread|anger|calm|nervous|brave|hesitant|reckless|cornered)\b/i;
 
 const REPEATED_ITEM_WORDS = [
-  "ledger",
   "relic",
   "idol",
   "amulet",

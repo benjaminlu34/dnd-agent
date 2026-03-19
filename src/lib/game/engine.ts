@@ -154,7 +154,7 @@ function buildFallbackSuggestedActions(input: {
       ];
     }
 
-    if (/(notice|letter|ledger|map|journal|inscription|seal)/.test(narration)) {
+    if (/(notice|letter|map|journal|inscription|seal)/.test(narration)) {
       return [
         "Study the writing more closely",
         "Look for whoever left it here",
