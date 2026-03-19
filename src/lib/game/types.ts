@@ -115,6 +115,7 @@ export type CampaignBlueprint = {
   premise: string;
   tone: string;
   setting: string;
+  keyLocations: KeyLocation[];
   villain: {
     name: string;
     motive: string;
@@ -124,6 +125,12 @@ export type CampaignBlueprint = {
   hiddenReveals: Reveal[];
   subplotSeeds: Subplot[];
   initialHooks: Hook[];
+};
+
+export type KeyLocation = {
+  name: string;
+  role: string;
+  isPublic: boolean;
 };
 
 export type GeneratedCampaignSetup = {
@@ -178,7 +185,7 @@ export type GeneratedCampaignSetup = {
       source: string;
       linkedRevealTitle: string;
     }[];
-    locations: string[];
+    keyLocations: KeyLocation[];
   };
 };
 
@@ -189,6 +196,7 @@ export type GeneratedCampaignOpening = {
     title: string;
     summary: string;
     location: string;
+    keyLocationName?: string | null;
     atmosphere: string;
     suggestedActions: string[];
   };
@@ -210,6 +218,7 @@ export type SceneState = {
   title: string;
   summary: string;
   location: string;
+  keyLocationName: string | null;
   atmosphere: string;
   suggestedActions: string[];
 };
@@ -222,8 +231,8 @@ export type CampaignState = {
     activeThreat: string;
   };
   sceneState: SceneState;
-  locations: string[];
-  knownLocations: string[];
+  discoveredSceneLocations: string[];
+  discoveredKeyLocationNames: string[];
   hooks: Hook[];
   villainClock: number;
   tensionScore: number;
@@ -330,6 +339,11 @@ export type PlayerVisibleClue = {
   discoveredAtTurn: number | null;
 };
 
+export type PlayerVisibleKeyLocation = {
+  name: string;
+  role: string;
+};
+
 export type PlayerCampaignSnapshot = {
   campaignId: string;
   sessionId: string;
@@ -337,7 +351,8 @@ export type PlayerCampaignSnapshot = {
   premise: string;
   tone: string;
   setting: string;
-  knownLocations: string[];
+  knownKeyLocations: PlayerVisibleKeyLocation[];
+  knownSceneLocations: string[];
   state: PlayerCampaignState;
   character: CampaignCharacter;
   quests: PlayerVisibleQuestRecord[];
@@ -385,6 +400,7 @@ export type ProposedStateDelta = {
   sceneSnapshot?: string;
   sceneTitle?: string;
   sceneLocation?: string;
+  sceneKeyLocation?: string | null;
   sceneAtmosphere?: string;
   activeArcId?: string;
   suggestedActions?: string[];
@@ -401,6 +417,7 @@ export type ProposedStateDelta = {
     status?: QuestStatus;
   }[];
   questDiscoveries?: string[];
+  keyLocationDiscoveries?: string[];
   clueDiscoveries?: string[];
   revealTriggers?: string[];
   villainClockDelta?: number;
@@ -477,6 +494,9 @@ export type ResolveDecision = {
 
 export type PromptContext = {
   scene: SceneState;
+  keyLocations: KeyLocation[];
+  discoveredKeyLocations: KeyLocation[];
+  recentSceneTrail: string[];
   promptSceneSummary: string;
   activeArc: ArcRecord | undefined;
   activeQuests: QuestRecord[];

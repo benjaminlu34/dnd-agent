@@ -70,6 +70,35 @@ function formatRecentTurnLedger(entries: string[]) {
   return entries.map((entry) => `- ${entry}`).join("\n");
 }
 
+function formatKeyLocations(locations: PromptContext["keyLocations"]) {
+  if (locations.length === 0) {
+    return "None";
+  }
+
+  return locations
+    .map(
+      (location) =>
+        `- ${location.name}: ${location.role} (${location.isPublic ? "public" : "secret"})`,
+    )
+    .join("\n");
+}
+
+function formatDiscoveredKeyLocations(locations: PromptContext["discoveredKeyLocations"]) {
+  if (locations.length === 0) {
+    return "None";
+  }
+
+  return locations.map((location) => `- ${location.name}: ${location.role}`).join("\n");
+}
+
+function formatRecentSceneTrail(locations: PromptContext["recentSceneTrail"]) {
+  if (locations.length === 0) {
+    return "None";
+  }
+
+  return locations.map((location) => `- ${location}`).join("\n");
+}
+
 export function buildDungeonMasterSystemPrompt() {
   return [
     "You are a strict DM for a deterministic solo fantasy RPG.",
@@ -109,7 +138,9 @@ export function buildDungeonMasterSystemPrompt() {
     "Suggested actions must reflect the immediate current moment, not the opening scene or stale earlier options.",
     "Replace stale suggested actions as the story moves. Do not repeat the same suggestions turn after turn unless the situation is truly unchanged.",
     "Use healthDelta (negative for damage, positive for healing) to reflect physical consequences.",
-    "If you set proposedDelta.sceneLocation, reuse the exact established location name unless the player has explicitly traveled into a newly discovered area.",
+    "proposedDelta.sceneLocation is the concrete place the player is standing right now and may be a newly introduced sub-location.",
+    "If the scene is inside, adjacent to, or directly caused by a known campaign anchor, set proposedDelta.sceneKeyLocation to that anchor name.",
+    "Use the exact established anchor name for proposedDelta.sceneKeyLocation, though casing and stray whitespace will be normalized by the engine.",
   ].join("\n");
 }
 
@@ -166,8 +197,18 @@ Setting: ${blueprint.setting}
 CURRENT SCENE
 Title: ${promptContext.scene.title}
 Location: ${promptContext.scene.location}
+Key Anchor: ${promptContext.scene.keyLocationName ?? "None"}
 Summary: ${promptContext.promptSceneSummary}
 Atmosphere: ${promptContext.scene.atmosphere}
+
+KEY ANCHORS
+${formatKeyLocations(promptContext.keyLocations)}
+
+DISCOVERED KEY LOCATIONS
+${formatDiscoveredKeyLocations(promptContext.discoveredKeyLocations)}
+
+RECENT SCENE TRAIL
+${formatRecentSceneTrail(promptContext.recentSceneTrail)}
 
 RECENT TURN LEDGER
 ${formatRecentTurnLedger(promptContext.recentTurnLedger)}
@@ -202,8 +243,18 @@ Setting: ${blueprint.setting}
 CURRENT SCENE
 Title: ${promptContext.scene.title}
 Location: ${promptContext.scene.location}
+Key Anchor: ${promptContext.scene.keyLocationName ?? "None"}
 Summary: ${promptContext.promptSceneSummary}
 Atmosphere: ${promptContext.scene.atmosphere}
+
+KEY ANCHORS
+${formatKeyLocations(promptContext.keyLocations)}
+
+DISCOVERED KEY LOCATIONS
+${formatDiscoveredKeyLocations(promptContext.discoveredKeyLocations)}
+
+RECENT SCENE TRAIL
+${formatRecentSceneTrail(promptContext.recentSceneTrail)}
 
 RECENT TURN LEDGER
 ${formatRecentTurnLedger(promptContext.recentTurnLedger)}
@@ -245,7 +296,9 @@ If a check is required, set narration to null.
 Set isInvestigative to true only if the player's primary action is searching, studying, observing, interrogating, following a lead, looting, or otherwise trying to uncover hidden information.
 If the tactical picture materially changes, include a one-sentence present-tense update in proposedDelta.sceneSnapshot. Do not copy the full narration there. If the scene state has not materially changed, omit sceneSnapshot.
 proposedDelta.sceneSnapshot must be one factual sentence with no metaphors, emotional language, or atmospheric flourish.
-If the scene has moved, set proposedDelta.sceneLocation to the current location name and reuse previously established names exactly unless the player explicitly reached a newly discovered area.
+If the scene has moved, set proposedDelta.sceneLocation to the concrete current place name. This may be a newly introduced sub-location.
+If the scene is inside, adjacent to, or directly caused by a known campaign anchor, set proposedDelta.sceneKeyLocation to that anchor's exact established name.
+If the player newly identifies or gains access to a campaign anchor, add that exact anchor name to proposedDelta.keyLocationDiscoveries.
 If a hidden NPC is encountered or a hidden quest is logged, record that in proposedDelta using the exact entity IDs.
 Use healthDelta (negative for damage, positive for healing) to reflect physical consequences.
 `;
@@ -280,6 +333,9 @@ If no check is required, resolve the declared action itself in actionResolution.
 actionResolution must be 1-2 short sentences of concrete external outcome, not polished narration.
 suggestedActionGoals must be 2-4 short intent summaries for the next beat, not final player-facing menu copy.
 If the tactical picture materially changes, include a one-sentence factual proposedDelta.sceneSnapshot. If it does not materially change, omit it.
+If the scene has moved, set proposedDelta.sceneLocation to the concrete current place name.
+If the resolved beat is inside, adjacent to, or directly caused by a known campaign anchor, set proposedDelta.sceneKeyLocation to that anchor's exact established name.
+If the player newly identifies or gains access to a campaign anchor, add that exact anchor name to proposedDelta.keyLocationDiscoveries.
 If a hidden NPC is encountered or a hidden quest is logged, record it in proposedDelta using exact IDs.
 Use healthDelta (negative for damage, positive for healing) for physical consequences.
 `;
@@ -303,8 +359,18 @@ Setting: ${blueprint.setting}
 CURRENT SCENE
 Title: ${promptContext.scene.title}
 Location: ${promptContext.scene.location}
+Key Anchor: ${promptContext.scene.keyLocationName ?? "None"}
 Summary: ${promptContext.promptSceneSummary}
 Atmosphere: ${promptContext.scene.atmosphere}
+
+KEY ANCHORS
+${formatKeyLocations(promptContext.keyLocations)}
+
+DISCOVERED KEY LOCATIONS
+${formatDiscoveredKeyLocations(promptContext.discoveredKeyLocations)}
+
+RECENT SCENE TRAIL
+${formatRecentSceneTrail(promptContext.recentSceneTrail)}
 
 RECENT TURN LEDGER
 ${formatRecentTurnLedger(promptContext.recentTurnLedger)}
@@ -343,7 +409,9 @@ Return 2-4 suggested actions that follow from this exact resolved outcome, not f
 Include the narration text in the top-level tool field narration.
 If the tactical picture materially changes, include a one-sentence present-tense update in proposedDelta.sceneSnapshot. Do not copy the full narration there. If the scene state has not materially changed, omit sceneSnapshot.
 proposedDelta.sceneSnapshot must be one factual sentence with no metaphors, emotional language, or atmospheric flourish.
-If the scene has moved, set proposedDelta.sceneLocation to the current location name and reuse previously established names exactly unless the player explicitly reached a newly discovered area.
+If the scene has moved, set proposedDelta.sceneLocation to the concrete current place name. This may be a newly introduced sub-location.
+If the scene is inside, adjacent to, or directly caused by a known campaign anchor, set proposedDelta.sceneKeyLocation to that anchor's exact established name.
+If the player newly identifies or gains access to a campaign anchor, add that exact anchor name to proposedDelta.keyLocationDiscoveries.
 If a hidden NPC is encountered or a hidden quest is logged in this outcome, record that in proposedDelta using the exact entity IDs.
 Use healthDelta (negative for damage, positive for healing) to reflect physical consequences.
 `;
@@ -383,6 +451,9 @@ actionResolution must match the exact outcome above and describe the concrete ex
 Do not write polished narration here.
 Use suggestedActionGoals for 2-4 short intent summaries that follow from this exact resolved outcome.
 If the tactical picture materially changes, include a factual proposedDelta.sceneSnapshot. Otherwise omit it.
+If the scene has moved, set proposedDelta.sceneLocation to the concrete current place name.
+If the resolved beat is inside, adjacent to, or directly caused by a known campaign anchor, set proposedDelta.sceneKeyLocation to that anchor's exact established name.
+If the player newly identifies or gains access to a campaign anchor, add that exact anchor name to proposedDelta.keyLocationDiscoveries.
 If a hidden NPC is encountered or a hidden quest is logged in this outcome, record it in proposedDelta using exact IDs.
 Use healthDelta (negative for damage, positive for healing) for physical consequences.
 `;
@@ -405,6 +476,7 @@ export function buildRendererUserPrompt(input: {
 CURRENT SCENE
 Title: ${input.promptContext.scene.title}
 Location: ${input.promptContext.scene.location}
+Key Anchor: ${input.promptContext.scene.keyLocationName ?? "None"}
 Summary: ${input.promptContext.promptSceneSummary}
 Atmosphere: ${input.promptContext.scene.atmosphere}
 
@@ -538,7 +610,16 @@ export const triagePlannerTool = {
           sceneLocation: {
             type: "string",
             description:
-              "The name of the current location. Must match previously established location names exactly unless the player has explicitly traveled to a newly discovered area.",
+              "The concrete current place name. This may be a newly introduced sub-location.",
+          },
+          sceneKeyLocation: {
+            type: ["string", "null"],
+            description:
+              "The exact name of the current campaign anchor when the scene is inside, adjacent to, or directly caused by one.",
+          },
+          keyLocationDiscoveries: {
+            type: "array",
+            items: { type: "string" },
           },
           npcDiscoveries: {
             type: "array",
@@ -596,7 +677,16 @@ export const resolutionPlannerTool = {
           sceneLocation: {
             type: "string",
             description:
-              "The name of the current location. Must match previously established location names exactly unless the player has explicitly traveled to a newly discovered area.",
+              "The concrete current place name. This may be a newly introduced sub-location.",
+          },
+          sceneKeyLocation: {
+            type: ["string", "null"],
+            description:
+              "The exact name of the current campaign anchor when the scene is inside, adjacent to, or directly caused by one.",
+          },
+          keyLocationDiscoveries: {
+            type: "array",
+            items: { type: "string" },
           },
           npcDiscoveries: {
             type: "array",
@@ -713,7 +803,16 @@ export const triageTool = {
           sceneLocation: {
             type: "string",
             description:
-              "The name of the current location. Must match previously established location names exactly unless the player has explicitly traveled to a newly discovered area.",
+              "The concrete current place name. This may be a newly introduced sub-location.",
+          },
+          sceneKeyLocation: {
+            type: ["string", "null"],
+            description:
+              "The exact name of the current campaign anchor when the scene is inside, adjacent to, or directly caused by one.",
+          },
+          keyLocationDiscoveries: {
+            type: "array",
+            items: { type: "string" },
           },
           npcDiscoveries: {
             type: "array",
@@ -757,7 +856,16 @@ export const resolutionTool = {
           sceneLocation: {
             type: "string",
             description:
-              "The name of the current location. Must match previously established location names exactly unless the player has explicitly traveled to a newly discovered area.",
+              "The concrete current place name. This may be a newly introduced sub-location.",
+          },
+          sceneKeyLocation: {
+            type: ["string", "null"],
+            description:
+              "The exact name of the current campaign anchor when the scene is inside, adjacent to, or directly caused by one.",
+          },
+          keyLocationDiscoveries: {
+            type: "array",
+            items: { type: "string" },
           },
           npcDiscoveries: {
             type: "array",

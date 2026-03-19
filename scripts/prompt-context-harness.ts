@@ -23,6 +23,11 @@ function buildPromptContext(): PromptContext {
 
   return {
     scene: state.sceneState,
+    keyLocations: blueprint.keyLocations,
+    discoveredKeyLocations: blueprint.keyLocations.filter((location) =>
+      state.discoveredKeyLocationNames.includes(location.name),
+    ),
+    recentSceneTrail: [],
     promptSceneSummary:
       "You are in the bell square facing a boarded smithy while townsfolk hang back and a single watcher studies the notice post.",
     activeArc: arcs[0],

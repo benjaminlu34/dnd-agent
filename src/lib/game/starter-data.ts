@@ -62,10 +62,13 @@ const seededCharacterStats = {
 } as const;
 
 type StarterStateOverrides = {
-  openingScene?: Omit<SceneState, "id"> & { id?: string };
+  openingScene?: Omit<SceneState, "id" | "keyLocationName"> & {
+    id?: string;
+    keyLocationName?: string | null;
+  };
   activeThreat?: string;
-  locations?: string[];
-  knownLocations?: string[];
+  discoveredSceneLocations?: string[];
+  discoveredKeyLocationNames?: string[];
   villainClock?: number;
   tensionScore?: number;
   dangerLevel?: CampaignState["worldState"]["dangerLevel"];
@@ -185,7 +188,28 @@ export function createDefaultAdventureModuleSetup(): GeneratedCampaignSetup {
           linkedRevealTitle: "The Missing Blacksmith",
         },
       ],
-      locations: ["Ash Market", "Old Smithy", "Lantern Catacombs"],
+      keyLocations: [
+        {
+          name: "Ash Market",
+          role: "crowded town market and rumor hub",
+          isPublic: true,
+        },
+        {
+          name: "Old Smithy",
+          role: "boarded forge tied to the missing blacksmith",
+          isPublic: true,
+        },
+        {
+          name: "Lantern Catacombs",
+          role: "buried cult passages under the town",
+          isPublic: false,
+        },
+        {
+          name: "Shattered Observatory",
+          role: "hilltop ruin where the eclipse rite points",
+          isPublic: true,
+        },
+      ],
     },
   };
 }
@@ -232,6 +256,7 @@ export function createStarterBlueprint(): CampaignBlueprint {
       "A pilgrim-town built around a shattered observatory is sliding toward an eclipse cult uprising.",
     tone: "Gothic adventure with hopeful heroism",
     setting: "The lantern-streaked valley of Briar Glen",
+    keyLocations: createDefaultAdventureModuleSetup().secretEngine.keyLocations,
     villain: {
       name: "Abbess Veyra",
       motive: "Awaken the eclipse saint buried under the observatory",
@@ -286,7 +311,8 @@ export function createStarterState(
     title: "Ash Market at Dusk",
     summary:
       "Wind rattles brass prayer bells while the market square clears around a blood-red eclipse notice nailed to the fountain.",
-    location: "Briar Glen",
+    location: "Ash Market fountain",
+    keyLocationName: "Ash Market",
     atmosphere: "Uneasy, crowded, and one spark away from panic",
     suggestedActions: [
       "Inspect the eclipse notice",
@@ -312,8 +338,9 @@ export function createStarterState(
       activeThreat: overrides.activeThreat ?? "Cult lantern-bearers are searching the old quarter.",
     },
     sceneState,
-    locations: overrides.locations ?? ["Ash Market", "Old Smithy", "Lantern Catacombs"],
-    knownLocations: overrides.knownLocations ?? [sceneState.location],
+    discoveredSceneLocations: overrides.discoveredSceneLocations ?? [sceneState.location],
+    discoveredKeyLocationNames:
+      overrides.discoveredKeyLocationNames ?? (sceneState.keyLocationName ? [sceneState.keyLocationName] : []),
     hooks: blueprint.initialHooks,
     villainClock: overrides.villainClock ?? 2,
     tensionScore: overrides.tensionScore ?? 28,

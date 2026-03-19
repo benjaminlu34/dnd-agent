@@ -57,6 +57,11 @@ function buildPromptContext(): PromptContext {
 
   return {
     scene: state.sceneState,
+    keyLocations: blueprint.keyLocations,
+    discoveredKeyLocations: blueprint.keyLocations.filter((location) =>
+      state.discoveredKeyLocationNames.includes(location.name),
+    ),
+    recentSceneTrail: [],
     promptSceneSummary:
       "You are in the market square with a blood-red notice nailed to the post while townsfolk keep their distance.",
     activeArc: arcs[0],

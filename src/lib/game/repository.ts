@@ -42,6 +42,7 @@ import type {
   NpcRecord,
   PromptContext,
   PlayerCampaignSnapshot,
+  PlayerVisibleKeyLocation,
   PlayerVisibleClue,
   PlayerVisibleNpcRecord,
   PlayerVisibleQuestRecord,
@@ -52,7 +53,7 @@ import type {
   TurnFacts,
 } from "@/lib/game/types";
 import {
-  parseCampaignState,
+  hydrateCampaignState,
   parseGeneratedCampaignSetup,
 } from "@/lib/game/serialization";
 import { getStaleClues } from "@/lib/game/reveals";
@@ -716,6 +717,27 @@ function buildPlayerKnowledgeText(snapshot: CampaignSnapshot, previouslyOn?: str
     .toLowerCase();
 }
 
+function buildRecentSceneTrail(locations: string[], currentLocation: string) {
+  const seen = new Set<string>();
+  const trail: string[] = [];
+
+  for (let index = locations.length - 1; index >= 0; index -= 1) {
+    const location = locations[index];
+    if (!location || location === currentLocation || seen.has(location)) {
+      continue;
+    }
+
+    seen.add(location);
+    trail.push(location);
+
+    if (trail.length >= 8) {
+      break;
+    }
+  }
+
+  return trail.reverse();
+}
+
 function normalizeTurnFacts(value: unknown, playerAction: string): TurnFacts | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -984,6 +1006,12 @@ export async function backfillLegacySceneSummary(campaignId: string) {
     select: {
       id: true,
       stateJson: true,
+      module: {
+        select: {
+          publicSynopsis: true,
+          secretEngine: true,
+        },
+      },
     },
   });
 
@@ -991,7 +1019,11 @@ export async function backfillLegacySceneSummary(campaignId: string) {
     return false;
   }
 
-  const state = parseCampaignState(campaign.stateJson);
+  const setup = parseGeneratedCampaignSetup(
+    campaign.module?.publicSynopsis,
+    campaign.module?.secretEngine,
+  );
+  const state = hydrateCampaignState(campaign.stateJson, setup.secretEngine.keyLocations);
   const audit = auditSceneSnapshot(state.sceneState.summary);
 
   if (!audit.shouldCompress) {
@@ -1042,6 +1074,7 @@ export async function getCampaignSnapshot(
     : [[], []];
   const setup = toGeneratedCampaignSetup(campaign.module);
   const blueprint = buildCampaignBlueprintFromSetup(setup);
+  const state = hydrateCampaignState(campaign.stateJson, blueprint.keyLocations);
   const latestResolvedTurn = recentResolvedTurns[0] ?? null;
 
   return {
@@ -1052,7 +1085,7 @@ export async function getCampaignSnapshot(
     tone: setup.publicSynopsis.tone,
     setting: setup.publicSynopsis.setting,
     blueprint,
-    state: parseCampaignState(campaign.stateJson),
+    state,
     character: toCharacter(campaign.template, campaign.characterInstance),
     quests: campaign.quests.map(toQuest),
     arcs: campaign.arcs.map(toArc),
@@ -1083,6 +1116,12 @@ export function toPlayerCampaignSnapshot(
   const visibleClues = snapshot.clues
     .filter((clue) => clue.status === "discovered")
     .map(toPlayerClue);
+  const knownKeyLocations: PlayerVisibleKeyLocation[] = snapshot.blueprint.keyLocations
+    .filter((location) => snapshot.state.discoveredKeyLocationNames.includes(location.name))
+    .map((location) => ({
+      name: location.name,
+      role: location.role,
+    }));
 
   return {
     campaignId: snapshot.campaignId,
@@ -1091,7 +1130,8 @@ export function toPlayerCampaignSnapshot(
     premise: snapshot.premise,
     tone: snapshot.tone,
     setting: snapshot.setting,
-    knownLocations: snapshot.state.knownLocations,
+    knownKeyLocations,
+    knownSceneLocations: snapshot.state.discoveredSceneLocations,
     state: {
       turnCount: snapshot.state.turnCount,
       sceneState: {
@@ -1187,6 +1227,13 @@ export async function getPromptContext(snapshot: CampaignSnapshot): Promise<Prom
     snapshot.state.turnCount,
     snapshot.recentResolvedTurns,
   );
+  const discoveredKeyLocations = snapshot.blueprint.keyLocations.filter((location) =>
+    snapshot.state.discoveredKeyLocationNames.includes(location.name),
+  );
+  const recentSceneTrail = buildRecentSceneTrail(
+    snapshot.state.discoveredSceneLocations,
+    snapshot.state.sceneState.location,
+  );
 
   const arcPacingHint = activeArc
     ? activeArc.currentTurn / activeArc.expectedTurns >= 0.8
@@ -1196,6 +1243,9 @@ export async function getPromptContext(snapshot: CampaignSnapshot): Promise<Prom
 
   return {
     scene: snapshot.state.sceneState,
+    keyLocations: snapshot.blueprint.keyLocations,
+    discoveredKeyLocations,
+    recentSceneTrail,
     promptSceneSummary,
     activeArc,
     activeQuests,

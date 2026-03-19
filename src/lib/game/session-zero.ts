@@ -1,4 +1,11 @@
 import { z } from "zod";
+import { canonicalizeAnchorName } from "@/lib/game/location-utils";
+
+const keyLocationSchema = z.object({
+  name: z.string().trim().min(1),
+  role: z.string().trim().min(1),
+  isPublic: z.boolean(),
+});
 
 export const generatedCampaignSetupSchema = z.object({
   publicSynopsis: z.object({
@@ -66,7 +73,24 @@ export const generatedCampaignSetupSchema = z.object({
         linkedRevealTitle: z.string().trim().min(1),
       }),
     ),
-    locations: z.array(z.string().trim().min(1)),
+    keyLocations: z.array(keyLocationSchema).min(4).max(6),
+  }).superRefine((secretEngine, ctx) => {
+    const seen = new Set<string>();
+
+    secretEngine.keyLocations.forEach((location, index) => {
+      const key = canonicalizeAnchorName(location.name);
+
+      if (!key || !seen.has(key)) {
+        seen.add(key);
+        return;
+      }
+
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["keyLocations", index, "name"],
+        message: "Key location names must be unique after trimming and lowercasing.",
+      });
+    });
   }),
 });
 
@@ -77,6 +101,7 @@ export const generatedCampaignOpeningSchema = z.object({
     title: z.string().trim().min(1),
     summary: z.string().trim().min(1),
     location: z.string().trim().min(1),
+    keyLocationName: z.string().trim().min(1).nullable().optional(),
     atmosphere: z.string().trim().min(1),
     suggestedActions: z.array(z.string().trim().min(1)).min(1).max(4),
   }),

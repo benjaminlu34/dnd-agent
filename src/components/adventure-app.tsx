@@ -868,7 +868,8 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
   const discoveredClues = snapshot.clues;
   const visibleQuests = snapshot.quests.filter((quest) => quest.status !== "failed");
   const knownPeople = snapshot.npcs;
-  const knownLocations = snapshot.knownLocations;
+  const knownKeyLocations = snapshot.knownKeyLocations;
+  const knownSceneLocations = snapshot.knownSceneLocations;
   const journalEntries = [
     ...(snapshot.previouslyOn
       ? [
@@ -1207,6 +1208,12 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
                 <dt className="scene-meta-label">Location</dt>
                 <dd>{snapshot.state.sceneState.location}</dd>
               </div>
+              {snapshot.state.sceneState.keyLocationName ? (
+                <div>
+                  <dt className="scene-meta-label">Anchor</dt>
+                  <dd>{snapshot.state.sceneState.keyLocationName}</dd>
+                </div>
+              ) : null}
               {sceneMoments.time ? (
                 <div>
                   <dt className="scene-meta-label">Time</dt>
@@ -1270,16 +1277,34 @@ export function AdventureApp({ initialCampaignId }: { initialCampaignId?: string
               {journalTab === "known-world" ? (
                 <div className="space-y-4">
                   <div className="rounded-2xl border border-zinc-800 bg-black px-4 py-4">
-                    <p className="story-kicker">Locations</p>
-                    {knownLocations.length ? (
+                    <p className="story-kicker">Key Locations</p>
+                    {knownKeyLocations.length ? (
+                      <ul className="mt-3 space-y-3 text-sm leading-7 text-zinc-300">
+                        {knownKeyLocations.map((location) => (
+                          <li key={location.name}>
+                            <p className="text-zinc-100">{location.name}</p>
+                            <p className="text-zinc-500">{location.role}</p>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="mt-2 text-sm leading-7 text-zinc-500">
+                        No major places have been identified in the journal yet.
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="rounded-2xl border border-zinc-800 bg-black px-4 py-4">
+                    <p className="story-kicker">Scene Locations</p>
+                    {knownSceneLocations.length ? (
                       <ul className="mt-3 space-y-2 text-sm leading-7 text-zinc-300">
-                        {knownLocations.map((location) => (
+                        {knownSceneLocations.map((location) => (
                           <li key={location}>{location}</li>
                         ))}
                       </ul>
                     ) : (
                       <p className="mt-2 text-sm leading-7 text-zinc-500">
-                        No places have been written into the journal yet.
+                        No scene locations have been written into the journal yet.
                       </p>
                     )}
                   </div>

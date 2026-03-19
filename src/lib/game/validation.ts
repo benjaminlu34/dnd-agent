@@ -9,6 +9,7 @@ import type {
   QuestRecord,
   ValidatedDelta,
 } from "@/lib/game/types";
+import { toCanonicalKeyLocationName } from "@/lib/game/location-utils";
 import { clamp } from "@/lib/utils";
 
 type ValidationInput = {
@@ -40,9 +41,41 @@ export function validateDelta({
     typeof proposedDelta.sceneLocation === "string" && proposedDelta.sceneLocation.trim()
       ? proposedDelta.sceneLocation.trim()
       : state.sceneState.location;
-  const nextKnownLocations = state.knownLocations.includes(nextSceneLocation)
-    ? state.knownLocations
-    : [...state.knownLocations, nextSceneLocation];
+  const sceneKeyLocationMatch =
+    proposedDelta.sceneKeyLocation === null
+      ? null
+      : toCanonicalKeyLocationName(blueprint.keyLocations, proposedDelta.sceneKeyLocation);
+
+  if (
+    typeof proposedDelta.sceneKeyLocation === "string" &&
+    proposedDelta.sceneKeyLocation.trim() &&
+    !sceneKeyLocationMatch
+  ) {
+    warnings.push(`Rejected unknown scene key location ${proposedDelta.sceneKeyLocation.trim()}.`);
+  }
+
+  const acceptedKeyLocationDiscoveries = (proposedDelta.keyLocationDiscoveries ?? [])
+    .map((location) => {
+      const canonicalName = toCanonicalKeyLocationName(blueprint.keyLocations, location);
+
+      if (!canonicalName) {
+        warnings.push(`Rejected unknown key location discovery ${location}.`);
+        return null;
+      }
+
+      return canonicalName;
+    })
+    .filter((location): location is string => Boolean(location));
+  const nextDiscoveredSceneLocations = state.discoveredSceneLocations.includes(nextSceneLocation)
+    ? state.discoveredSceneLocations
+    : [...state.discoveredSceneLocations, nextSceneLocation];
+  const nextDiscoveredKeyLocationNames = Array.from(
+    new Set([
+      ...state.discoveredKeyLocationNames,
+      ...acceptedKeyLocationDiscoveries,
+      ...(sceneKeyLocationMatch ? [sceneKeyLocationMatch] : []),
+    ]),
+  );
   const nextState: CampaignState = {
     ...state,
     sceneState: {
@@ -50,11 +83,16 @@ export function validateDelta({
       summary: proposedDelta.sceneSnapshot ?? state.sceneState.summary,
       title: proposedDelta.sceneTitle ?? state.sceneState.title,
       location: nextSceneLocation,
+      keyLocationName:
+        proposedDelta.sceneKeyLocation === null
+          ? null
+          : sceneKeyLocationMatch ?? state.sceneState.keyLocationName,
       atmosphere: proposedDelta.sceneAtmosphere ?? state.sceneState.atmosphere,
       suggestedActions:
         proposedDelta.suggestedActions?.slice(0, 4) ?? state.sceneState.suggestedActions,
     },
-    knownLocations: nextKnownLocations,
+    discoveredSceneLocations: nextDiscoveredSceneLocations,
+    discoveredKeyLocationNames: nextDiscoveredKeyLocationNames,
     activeArcId: proposedDelta.activeArcId ?? state.activeArcId,
     villainClock: clamp(
       state.villainClock + (proposedDelta.villainClockDelta ?? 0),

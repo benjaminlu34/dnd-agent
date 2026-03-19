@@ -195,6 +195,8 @@ test("getPromptContext classifies snapshot data without extra turn queries", asy
     context.recentTurnLedger,
     buildRecentTurnLedger(snapshot.state.turnCount, recentResolvedTurns),
   );
+  assert.deepEqual(context.discoveredKeyLocations.map((location) => location.name), ["Ash Market"]);
+  assert.deepEqual(context.recentSceneTrail, []);
   assert.equal(context.promptSceneSummary, snapshot.state.sceneState.summary);
 });
 
@@ -246,12 +248,12 @@ test("recent transcript snapshots should keep the latest 30 messages in reading 
   );
 });
 
-test("toPlayerCampaignSnapshot exposes known locations without leaking hidden state locations", () => {
+test("toPlayerCampaignSnapshot exposes split location knowledge without leaking undiscovered anchors", () => {
   const snapshot = createSnapshot({
     state: {
       ...createSnapshot().state,
-      knownLocations: ["Briar Glen", "Old Smithy"],
-      locations: ["Briar Glen", "Old Smithy", "Lantern Catacombs"],
+      discoveredSceneLocations: ["Ash Market fountain", "Back alley"],
+      discoveredKeyLocationNames: ["Ash Market", "Old Smithy"],
     },
     npcs: [
       {
@@ -263,6 +265,16 @@ test("toPlayerCampaignSnapshot exposes known locations without leaking hidden st
 
   const playerSnapshot = toPlayerCampaignSnapshot(snapshot);
 
-  assert.deepEqual(playerSnapshot.knownLocations, ["Briar Glen", "Old Smithy"]);
-  assert.equal("locations" in playerSnapshot, false);
+  assert.deepEqual(playerSnapshot.knownSceneLocations, ["Ash Market fountain", "Back alley"]);
+  assert.deepEqual(playerSnapshot.knownKeyLocations, [
+    {
+      name: "Ash Market",
+      role: "crowded town market and rumor hub",
+    },
+    {
+      name: "Old Smithy",
+      role: "boarded forge tied to the missing blacksmith",
+    },
+  ]);
+  assert.equal("knownLocations" in playerSnapshot, false);
 });

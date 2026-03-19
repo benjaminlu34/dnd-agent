@@ -314,9 +314,20 @@ const campaignSetupTool = {
               required: ["text", "source", "linkedRevealTitle"],
             },
           },
-          locations: {
+          keyLocations: {
             type: "array",
-            items: { type: "string" },
+            minItems: 4,
+            maxItems: 6,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                name: { type: "string" },
+                role: { type: "string" },
+                isPublic: { type: "boolean" },
+              },
+              required: ["name", "role", "isPublic"],
+            },
           },
         },
         required: [
@@ -328,7 +339,7 @@ const campaignSetupTool = {
           "quests",
           "npcs",
           "clues",
-          "locations",
+          "keyLocations",
         ],
       },
     },
@@ -356,6 +367,11 @@ const campaignOpeningTool = {
               "One factual 1-2 sentence tactical snapshot of the current scene state. No metaphors, atmospheric flourish, emotional language, or recap prose.",
           },
           location: { type: "string" },
+          keyLocationName: {
+            type: ["string", "null"],
+            description:
+              "The exact module key anchor name when this opening scene takes place inside, near, or because of one.",
+          },
           atmosphere: { type: "string" },
           suggestedActions: {
             type: "array",
@@ -575,7 +591,7 @@ function sanitizeNarration(text: string) {
 }
 
 function containsStructuredMetaLeak(text: string) {
-  return /(?:^|\n)\s*(?:proposedDelta|sceneSnapshot|npcDiscoveries|questDiscoveries|healthDelta|itemChanges|sceneLocation|roll|reveals|actionResolution|suggestedActions|narration)\s*[:.]/i.test(
+  return /(?:^|\n)\s*(?:proposedDelta|sceneSnapshot|npcDiscoveries|questDiscoveries|keyLocationDiscoveries|healthDelta|itemChanges|sceneLocation|sceneKeyLocation|roll|reveals|actionResolution|suggestedActions|narration)\s*[:.]/i.test(
     text,
   );
 }
@@ -659,6 +675,25 @@ function normalizeDiscoveryDelta(value: Record<string, unknown>) {
   );
   if (sceneLocation) {
     normalized.sceneLocation = sceneLocation;
+  }
+
+  const sceneKeyLocation = extractSceneLocationValue(
+    value.sceneKeyLocation ?? value.scene_key_location ?? value.keyLocationName ?? value.key_location_name,
+  );
+  if (
+    sceneKeyLocation ||
+    value.sceneKeyLocation === null ||
+    value.scene_key_location === null ||
+    value.keyLocationName === null ||
+    value.key_location_name === null
+  ) {
+    normalized.sceneKeyLocation = sceneKeyLocation || null;
+  }
+
+  if ("keyLocationDiscoveries" in value || "key_location_discoveries" in value) {
+    normalized.keyLocationDiscoveries = toStringArray(
+      value.keyLocationDiscoveries ?? value.key_location_discoveries,
+    );
   }
 
   delete (normalized as Record<string, unknown>).sceneSummary;
@@ -1809,6 +1844,7 @@ class OpenRouterDungeonMaster {
           "You are generating a fresh reusable adventure module for a solo fantasy RPG.",
           "The module must be character-agnostic by default.",
           "Create a cohesive campaign framework with 2 arcs, 1-2 quests, 2-4 NPCs, 3-5 clues, and 1-2 reveals.",
+          "Include 4-6 recurring key locations that matter to the campaign's ongoing plot.",
           "Make it reusable across different heroes entering from very different perspectives.",
           "Keep titles and summaries clear, concrete, and gameable.",
           "Keep all output inside publicSynopsis and secretEngine.",
@@ -1818,6 +1854,9 @@ class OpenRouterDungeonMaster {
           "Do not create or describe a specific opening scene for the module.",
           "Do not include arrival beats, starting locations, suggested opening actions, or scene framing tied to a first session.",
           "The opening scene will be generated later at runtime when a specific character launches a campaign from this module.",
+          "keyLocations are recurring campaign anchors such as headquarters, taverns, districts, shrines, estates, gates, dungeons, or villain sites.",
+          "Do not use keyLocations for one-off micro-places like alley corners, single rooms, rooftops, or temporary encounter spots unless they are truly recurring anchors.",
+          "Each key location needs a short role phrase that explains why it matters to the plot.",
           "When revising an existing draft, treat the revision request as authoritative.",
           "If the revision conflicts with the previous draft or the original brief, the revision wins and conflicting details must be replaced, not blended.",
           "Use the previous draft as reference material to preserve what still fits, not as canon that must survive unchanged.",
@@ -2040,6 +2079,8 @@ class OpenRouterDungeonMaster {
                 "Return structured output with narration, activeThreat, and scene details.",
                 "scene.summary must be a short present-tense snapshot of the current tactical situation, not a recap of the whole setup.",
                 "scene.suggestedActions must contain 2-4 concrete immediate actions the player could plausibly take.",
+                "scene.location should be the concrete place the hero is standing, not just the broad campaign anchor.",
+                "If the opening is inside, near, or caused by a module key anchor, set scene.keyLocationName to that exact anchor name.",
               ].join("\n"),
             },
             {
@@ -2134,6 +2175,8 @@ class OpenRouterDungeonMaster {
                 "Do not narrate the player's feelings, confidence, certainty, or private thoughts unless they explicitly stated them.",
                 "Do not end with a thematic or editorial line.",
                 "scene.summary must be a short present-tense snapshot, not a recap paragraph.",
+                "scene.location should be the concrete place the hero is standing, not just the broad campaign anchor.",
+                "If the opening is inside, near, or caused by a module key anchor, set scene.keyLocationName to that exact anchor name.",
                 `JSON schema: ${JSON.stringify(campaignOpeningTool.input_schema)}`,
               ].join("\n"),
             },

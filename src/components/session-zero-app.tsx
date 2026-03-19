@@ -415,13 +415,22 @@ export function SessionZeroApp() {
     }));
   }
 
-  function updateLocation(index: number, value: string) {
+  function updateKeyLocation(
+    index: number,
+    field: "name" | "role" | "isPublic",
+    value: string | boolean,
+  ) {
     updateDraft((current) => ({
       ...current,
       secretEngine: {
         ...current.secretEngine,
-        locations: current.secretEngine.locations.map((location, locationIndex) =>
-          locationIndex === index ? value : location,
+        keyLocations: current.secretEngine.keyLocations.map((location, locationIndex) =>
+          locationIndex === index
+            ? {
+                ...location,
+                [field]: value,
+              }
+            : location,
         ),
       },
     }));
@@ -787,15 +796,39 @@ export function SessionZeroApp() {
               </section>
 
               <section className="mt-6 space-y-4">
-                <h2 className="text-lg font-semibold text-white">Locations</h2>
-                {secretEngine.locations.map((location, index) => (
-                  <FieldShell key={`location-${index}-${location}`} label={`Location ${index + 1}`}>
-                    <input
-                      className={inputClassName()}
-                      value={location}
-                      onChange={(event) => updateLocation(index, event.target.value)}
-                    />
-                  </FieldShell>
+                <h2 className="text-lg font-semibold text-white">Key Locations</h2>
+                {secretEngine.keyLocations.map((location, index) => (
+                  <article
+                    key={`key-location-${index}-${location.name}`}
+                    className="rounded-3xl border border-zinc-800 bg-black p-5"
+                  >
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <FieldShell label="Name">
+                        <input
+                          className={inputClassName()}
+                          value={location.name}
+                          onChange={(event) => updateKeyLocation(index, "name", event.target.value)}
+                        />
+                      </FieldShell>
+                      <FieldShell label="Role">
+                        <input
+                          className={inputClassName()}
+                          value={location.role}
+                          onChange={(event) => updateKeyLocation(index, "role", event.target.value)}
+                        />
+                      </FieldShell>
+                    </div>
+                    <label className="mt-4 flex items-center gap-3 text-sm text-zinc-300">
+                      <input
+                        type="checkbox"
+                        checked={location.isPublic}
+                        onChange={(event) =>
+                          updateKeyLocation(index, "isPublic", event.target.checked)
+                        }
+                      />
+                      Public from the start
+                    </label>
+                  </article>
                 ))}
               </section>
             </section>

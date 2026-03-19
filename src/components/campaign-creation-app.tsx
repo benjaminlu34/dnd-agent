@@ -137,6 +137,10 @@ export function CampaignCreationApp({
         title: input.scene.title.trim(),
         summary: input.scene.summary.trim(),
         location: input.scene.location.trim(),
+        keyLocationName:
+          typeof input.scene.keyLocationName === "string" && input.scene.keyLocationName.trim()
+            ? input.scene.keyLocationName.trim()
+            : null,
         atmosphere: input.scene.atmosphere.trim(),
         suggestedActions: input.scene.suggestedActions.map((action) => action.trim()).filter(Boolean).slice(0, 4),
       },

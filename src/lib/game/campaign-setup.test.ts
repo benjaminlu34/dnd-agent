@@ -13,34 +13,41 @@ const opening: GeneratedCampaignOpening = {
   scene: {
     title: "Ash Market at Dusk",
     summary: "Crowds thin around the fountain while soot drifts from the smithy.",
-    location: "Briar Glen",
+    location: "Ash Market fountain",
+    keyLocationName: "Ash Market",
     atmosphere: "Tense and watchful",
     suggestedActions: ["Inspect the soot trail", "Question the bell-warden"],
   },
 };
 
-test("buildCampaignStateFromSetup initializes knownLocations from public setting and opening location only", () => {
+test("buildCampaignStateFromSetup seeds discovered scene and key locations", () => {
   const setup = createDefaultAdventureModuleSetup();
   const state = buildCampaignStateFromSetup(setup, opening);
 
-  assert.deepEqual(state.knownLocations, [
-    setup.publicSynopsis.setting,
-    opening.scene.location,
-  ]);
-  assert.deepEqual(state.locations, setup.secretEngine.locations);
+  assert.deepEqual(state.discoveredSceneLocations, [opening.scene.location]);
+  assert.deepEqual(
+    state.discoveredKeyLocationNames,
+    setup.secretEngine.keyLocations.filter((location) => location.isPublic).map((location) => location.name),
+  );
 });
 
-test("buildCampaignStateFromSetup dedupes repeated public setting and opening location", () => {
+test("buildCampaignStateFromSetup includes the opening anchor even if it is not public", () => {
   const setup = {
     ...createDefaultAdventureModuleSetup(),
-    publicSynopsis: {
-      ...createDefaultAdventureModuleSetup().publicSynopsis,
-      setting: opening.scene.location,
+    secretEngine: {
+      ...createDefaultAdventureModuleSetup().secretEngine,
+      keyLocations: createDefaultAdventureModuleSetup().secretEngine.keyLocations.map((location) =>
+        location.name === "Ash Market" ? { ...location, isPublic: false } : location,
+      ),
     },
   };
   const state = buildCampaignStateFromSetup(setup, opening);
 
-  assert.deepEqual(state.knownLocations, [opening.scene.location]);
+  assert.deepEqual(state.discoveredKeyLocationNames, [
+    "Old Smithy",
+    "Shattered Observatory",
+    "Ash Market",
+  ]);
 });
 
 test("buildNpcRecordsFromSetup auto-discovers only companions and public-facing roles", () => {

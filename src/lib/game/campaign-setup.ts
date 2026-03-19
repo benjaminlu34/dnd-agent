@@ -9,6 +9,7 @@ import {
   type NpcRecord,
   type QuestRecord,
 } from "@/lib/game/types";
+import { canonicalizeAnchorName, findKeyLocationByName } from "@/lib/game/location-utils";
 import { createStarterState } from "@/lib/game/starter-data";
 import { slugify } from "@/lib/utils";
 
@@ -64,17 +65,6 @@ function buildNormalizedIdMap<T>(
   return map;
 }
 
-function uniqueStrings(values: Array<string | null | undefined>) {
-  return Array.from(
-    new Set(
-      values
-        .filter((value): value is string => typeof value === "string")
-        .map((value) => value.trim())
-        .filter(Boolean),
-    ),
-  );
-}
-
 function isPublicNpcRole(role: string) {
   const normalizedRole = role.trim().toLowerCase();
   return PUBLIC_NPC_ROLE_KEYWORDS.some((keyword) => normalizedRole.includes(keyword));
@@ -109,6 +99,7 @@ export function buildCampaignBlueprintFromSetup(
     premise: setup.publicSynopsis.premise,
     tone: setup.publicSynopsis.tone,
     setting: setup.publicSynopsis.setting,
+    keyLocations: setup.secretEngine.keyLocations,
     villain: {
       name: setup.secretEngine.villain.name,
       motive: setup.secretEngine.villain.motive,
@@ -150,6 +141,10 @@ export function buildCampaignStateFromSetup(
   opening: GeneratedCampaignOpening,
 ): CampaignState {
   const blueprint = buildCampaignBlueprintFromSetup(setup);
+  const openingKeyLocationName = findKeyLocationByName(
+    setup.secretEngine.keyLocations,
+    opening.scene.keyLocationName,
+  )?.name ?? null;
 
   return createStarterState(blueprint, {
     openingScene: {
@@ -157,12 +152,22 @@ export function buildCampaignStateFromSetup(
       title: opening.scene.title,
       summary: opening.scene.summary,
       location: opening.scene.location,
+      keyLocationName: openingKeyLocationName,
       atmosphere: opening.scene.atmosphere,
       suggestedActions: opening.scene.suggestedActions.slice(0, 4),
     },
     activeThreat: opening.activeThreat,
-    locations: setup.secretEngine.locations,
-    knownLocations: uniqueStrings([setup.publicSynopsis.setting, opening.scene.location]),
+    discoveredSceneLocations: [opening.scene.location],
+    discoveredKeyLocationNames: Array.from(
+      new Set(
+        setup.secretEngine.keyLocations
+          .filter((location) => location.isPublic)
+          .map((location) => canonicalizeAnchorName(location.name))
+          .concat(openingKeyLocationName ? [canonicalizeAnchorName(openingKeyLocationName)] : [])
+          .map((key) => blueprint.keyLocations.find((location) => canonicalizeAnchorName(location.name) === key)?.name)
+          .filter((value): value is string => Boolean(value)),
+      ),
+    ),
   });
 }
 

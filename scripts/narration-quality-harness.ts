@@ -34,6 +34,11 @@ function buildPromptContext(): PromptContext {
 
   return {
     scene: state.sceneState,
+    keyLocations: blueprint.keyLocations,
+    discoveredKeyLocations: blueprint.keyLocations.filter((location) =>
+      state.discoveredKeyLocationNames.includes(location.name),
+    ),
+    recentSceneTrail: [],
     promptSceneSummary:
       "You are on the dockside roofline above a narrow alley while two enforcers search below and the nearest veteran is approaching the junction.",
     activeArc: arcs[0],

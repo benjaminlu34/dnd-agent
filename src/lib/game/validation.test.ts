@@ -102,7 +102,11 @@ test("validateDelta accepts valid updates with indexed lookups", () => {
   ]);
   assert.deepEqual(result.acceptedNpcDiscoveries, [fixture.npcs[1]!.id]);
   assert.deepEqual(result.nextState.activeRevealIds, [fixture.blueprint.hiddenReveals[0]!.id]);
-  assert.deepEqual(result.nextState.knownLocations, fixture.state.knownLocations);
+  assert.deepEqual(result.nextState.discoveredSceneLocations, fixture.state.discoveredSceneLocations);
+  assert.deepEqual(
+    result.nextState.discoveredKeyLocationNames,
+    fixture.state.discoveredKeyLocationNames,
+  );
 });
 
 test("validateDelta preserves rejection semantics for invalid and duplicate updates", () => {
@@ -203,19 +207,55 @@ test("validateDelta records a newly discovered scene location once", () => {
   });
 
   assert.equal(result.nextState.sceneState.location, "Old Smithy");
-  assert.deepEqual(result.nextState.knownLocations, [...fixture.state.knownLocations, "Old Smithy"]);
+  assert.deepEqual(result.nextState.discoveredSceneLocations, [
+    ...fixture.state.discoveredSceneLocations,
+    "Old Smithy",
+  ]);
 });
 
-test("validateDelta reuses established location names without duplicating known locations", () => {
+test("validateDelta reuses established scene locations without duplicating discovered scene entries", () => {
   const fixture = createValidationFixture();
   const result = validateDelta({
     ...fixture,
     proposedDelta: {
       sceneTitle: "Ash Market Under Watch",
-      sceneLocation: fixture.state.knownLocations[0],
+      sceneLocation: fixture.state.discoveredSceneLocations[0],
     },
   });
 
-  assert.equal(result.nextState.sceneState.location, fixture.state.knownLocations[0]);
-  assert.deepEqual(result.nextState.knownLocations, fixture.state.knownLocations);
+  assert.equal(result.nextState.sceneState.location, fixture.state.discoveredSceneLocations[0]);
+  assert.deepEqual(result.nextState.discoveredSceneLocations, fixture.state.discoveredSceneLocations);
+});
+
+test("validateDelta accepts normalized key-anchor matches and rewrites them to the canonical display name", () => {
+  const fixture = createValidationFixture();
+  const result = validateDelta({
+    ...fixture,
+    proposedDelta: {
+      sceneKeyLocation: " ash market ",
+      keyLocationDiscoveries: ["old smithy "],
+    },
+  });
+
+  assert.equal(result.nextState.sceneState.keyLocationName, "Ash Market");
+  assert.deepEqual(result.nextState.discoveredKeyLocationNames, ["Ash Market", "Old Smithy"]);
+});
+
+test("validateDelta rejects unknown key anchors", () => {
+  const fixture = createValidationFixture();
+  const result = validateDelta({
+    ...fixture,
+    proposedDelta: {
+      sceneKeyLocation: "Unknown Dock",
+      keyLocationDiscoveries: ["Missing Shrine"],
+    },
+  });
+
+  assert.equal(result.nextState.sceneState.keyLocationName, fixture.state.sceneState.keyLocationName);
+  assert.ok(
+    result.warnings.some((warning) => warning.includes("Rejected unknown scene key location Unknown Dock.")),
+  );
+  assert.ok(
+    result.warnings.some((warning) => warning.includes("Rejected unknown key location discovery Missing Shrine.")),
+  );
 });
