@@ -131,6 +131,10 @@ test("getPromptContext classifies snapshot data without extra turn queries", asy
   ];
 
   const snapshot = createSnapshot({
+    state: {
+      ...createSnapshot().state,
+      turnCount: 12,
+    },
     quests: [
       {
         ...createStarterQuests()[0]!,
@@ -163,8 +167,20 @@ test("getPromptContext classifies snapshot data without extra turn queries", asy
         status: "discovered",
         discoveredAtTurn: 5,
       },
-      createStarterClues()[1]!,
+      {
+        ...createStarterClues()[1]!,
+        status: "discovered",
+        discoveredAtTurn: 1,
+      },
       createStarterClues()[2]!,
+    ],
+    memories: [
+      {
+        id: "memory_summary",
+        type: "session_summary",
+        summary: "You traced the forge smoke to the market fountain and left Mother Ysilde watching the square.",
+        createdAt: new Date(Date.UTC(2026, 0, 1, 0, 6)).toISOString(),
+      },
     ],
     recentResolvedTurns,
     latestResolvedTurnId: recentResolvedTurns[0]!.id,
@@ -190,13 +206,24 @@ test("getPromptContext classifies snapshot data without extra turn queries", asy
       role: "Informer",
     },
   ]);
-  assert.deepEqual(context.discoveredClues.map((clue) => clue.id), ["clue_hammer_marks"]);
+  assert.deepEqual(context.discoveredClues.map((clue) => clue.id), [
+    "clue_hammer_marks",
+    "clue_warm_cinders",
+  ]);
+  assert.deepEqual(context.relevantClues.map((clue) => clue.id), [
+    "clue_hammer_marks",
+    "clue_forged_prayer",
+  ]);
   assert.deepEqual(
     context.recentTurnLedger,
     buildRecentTurnLedger(snapshot.state.turnCount, recentResolvedTurns),
   );
   assert.deepEqual(context.discoveredKeyLocations.map((location) => location.name), ["Ash Market"]);
   assert.deepEqual(context.recentSceneTrail, []);
+  assert.equal(
+    context.narrativeSummary,
+    "You traced the forge smoke to the market fountain and left Mother Ysilde watching the square.",
+  );
   assert.equal(context.promptSceneSummary, snapshot.state.sceneState.summary);
 });
 

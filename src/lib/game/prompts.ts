@@ -157,14 +157,14 @@ export function buildTurnPlannerSystemPrompt() {
 
 export function buildTurnRendererSystemPrompt() {
   return [
-    buildDungeonMasterSystemPrompt(),
-    "You are rendering from a validated beat plan that is already authoritative.",
-    "Do not invent or alter outcomes, discoveries, checks, state changes, or item handling.",
-    "Use the supplied actionResolution as the truth of what happened in this beat.",
-    "Render only player-facing narration and suggested actions through the tool call.",
-    "Never write a literal 'Suggested actions:' heading, bullet list, or any action menu inside narration.",
-    "Put suggested actions only in the structured suggestedActions field of the tool call.",
-    "suggestedActions must sound natural in-fiction, but must stay faithful to the supplied suggestedActionGoals.",
+    "You are a narrative writer for a solo fantasy RPG.",
+    "A validated beat plan tells you exactly what happened mechanically. Your job is to make the player feel it.",
+    "Write vivid, specific, grounded prose. Concrete sensory detail over abstraction. Character voice over narrator voice.",
+    "1-5 paragraphs. End on the sharpest new pressure, image, or line of dialogue - not explanation.",
+    "Physical sensation is welcome: cold, weight, smell, sound, impact. Do not tell the player what they feel emotionally or what they realize - show it through what they see and hear.",
+    "Do not include a 'Suggested actions:' heading, bullet list, or footer inside narration text.",
+    "Return narration and suggestedActions only through the tool call.",
+    "suggestedActions must sound natural in fiction and stay faithful to the supplied suggestedActionGoals.",
   ].join("\n");
 }
 
@@ -213,6 +213,8 @@ ${formatRecentSceneTrail(promptContext.recentSceneTrail)}
 RECENT TURN LEDGER
 ${formatRecentTurnLedger(promptContext.recentTurnLedger)}
 
+${promptContext.narrativeSummary ? `NARRATIVE CONTEXT\n${promptContext.narrativeSummary}\n` : ""}
+
 ACTIVE ARC
 ${promptContext.activeArc ? `${promptContext.activeArc.title}: ${promptContext.activeArc.summary}` : "None"}
 
@@ -258,6 +260,8 @@ ${formatRecentSceneTrail(promptContext.recentSceneTrail)}
 
 RECENT TURN LEDGER
 ${formatRecentTurnLedger(promptContext.recentTurnLedger)}
+
+${promptContext.narrativeSummary ? `NARRATIVE CONTEXT\n${promptContext.narrativeSummary}\n` : ""}
 
 ACTIVE ARC
 ${promptContext.activeArc ? `${promptContext.activeArc.title}: ${promptContext.activeArc.summary}` : "None"}
@@ -374,6 +378,8 @@ ${formatRecentSceneTrail(promptContext.recentSceneTrail)}
 
 RECENT TURN LEDGER
 ${formatRecentTurnLedger(promptContext.recentTurnLedger)}
+
+${promptContext.narrativeSummary ? `NARRATIVE CONTEXT\n${promptContext.narrativeSummary}\n` : ""}
 
 ACTIVE QUESTS
 ${formatQuestState(promptContext.activeQuests)}

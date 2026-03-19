@@ -1155,6 +1155,8 @@ export async function getPromptContext(snapshot: CampaignSnapshot): Promise<Prom
   const activeArc = snapshot.arcs.find((arc) => arc.id === snapshot.state.activeArcId);
   const staleClues = getStaleClues(snapshot.clues, snapshot.state.turnCount);
   const promptSceneSummary = await sanitizePromptSceneSummary(snapshot.state.sceneState.summary);
+  const narrativeSummary =
+    snapshot.memories.find((entry) => entry.type === "session_summary")?.summary ?? null;
   const activeQuests: QuestRecord[] = [];
   const hiddenQuests: QuestRecord[] = [];
   const hiddenNpcs: NpcRecord[] = [];
@@ -1227,6 +1229,7 @@ export async function getPromptContext(snapshot: CampaignSnapshot): Promise<Prom
     snapshot.state.turnCount,
     snapshot.recentResolvedTurns,
   );
+  const recentTurnThreshold = snapshot.state.turnCount - 8;
   const discoveredKeyLocations = snapshot.blueprint.keyLocations.filter((location) =>
     snapshot.state.discoveredKeyLocationNames.includes(location.name),
   );
@@ -1251,7 +1254,14 @@ export async function getPromptContext(snapshot: CampaignSnapshot): Promise<Prom
     activeQuests,
     hiddenQuests,
     recentTurnLedger,
-    relevantClues: clueWindow,
+    narrativeSummary,
+    relevantClues: clueWindow.filter(
+      (clue) =>
+        clue.status === "hidden" ||
+        (clue.status === "discovered" &&
+          clue.discoveredAtTurn !== null &&
+          clue.discoveredAtTurn >= recentTurnThreshold),
+    ),
     staleClues,
     eligibleRevealIds,
     discoveredClues,

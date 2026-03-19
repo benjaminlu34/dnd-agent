@@ -37,6 +37,8 @@ function buildPromptContext(): PromptContext {
       '[Turn 5] Action: "I inspect the notice post for tampering." | Roll: intelligence success (13) | HP: 0 | Discoveries: clue_red_notice | SceneChanged: yes',
       '[Turn 6] Action: "I circle the boarded smithy and listen at the rear door." | Roll: none | HP: 0 | Discoveries: none | SceneChanged: no',
     ],
+    narrativeSummary:
+      "Previously, you traced tampering at the notice post and confirmed someone has been moving around the boarded smithy after dark.",
     relevantClues: clues,
     staleClues: [],
     eligibleRevealIds: [],
@@ -115,10 +117,20 @@ async function main() {
     failures,
   );
   assertCase(
+    triagePrompt.includes("NARRATIVE CONTEXT"),
+    "Triage prompt is missing the narrative summary block.",
+    failures,
+  );
+  assertCase(
     resolvePrompt.includes("DISCOVERY CANDIDATES") &&
       !resolvePrompt.includes("ELIGIBLE REVEALS") &&
       !resolvePrompt.includes("HIDDEN QUESTS AVAILABLE TO DISCOVER"),
     "Resolve prompt still includes old reveal or hidden-summary sections.",
+    failures,
+  );
+  assertCase(
+    resolvePrompt.includes("NARRATIVE CONTEXT"),
+    "Resolve prompt is missing the narrative summary block.",
     failures,
   );
 

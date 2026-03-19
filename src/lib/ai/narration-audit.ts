@@ -298,7 +298,7 @@ function detectActionDeferral(text: string, playerAction: string | undefined) {
   ) {
     return issue({
       code: "action_deferral",
-      severity: "block",
+      severity: "warn",
       message: "Narration or beat summary turns a declared concrete action back into setup or indecision.",
       directive: "Resolve the declared action itself instead of deferring it into suspense or an option menu.",
       evidence: playerAction,
@@ -417,7 +417,7 @@ function detectIrrelevantKeyItem(
 
     return issue({
       code: "irrelevant_key_item",
-      severity: "block",
+      severity: "warn",
       message: "The beat plan introduces a key item without direct handling, threat, or reveal context.",
       directive: `Remove the ${word} from actionResolution unless the beat directly handles it or materially changes its status.`,
       evidence: word,
@@ -440,7 +440,7 @@ function detectBeatContradiction(narration: string, actionResolution: string) {
 
   return issue({
     code: "beat_contradiction",
-    severity: "block",
+    severity: "warn",
     message: "Rendered narration does not appear to reflect the validated beat resolution.",
     directive: "Rewrite the narration so it clearly depicts the validated actionResolution and nothing contradictory.",
     evidence: actionResolution,

@@ -502,6 +502,7 @@ export type PromptContext = {
   activeQuests: QuestRecord[];
   hiddenQuests: QuestRecord[];
   recentTurnLedger: string[];
+  narrativeSummary: string | null;
   relevantClues: Clue[];
   staleClues: Clue[];
   eligibleRevealIds: string[];

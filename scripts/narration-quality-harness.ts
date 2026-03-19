@@ -47,6 +47,8 @@ function buildPromptContext(): PromptContext {
     recentTurnLedger: [
       '[Turn 2] Action: "I vanish up the wall and prepare an ambush from the roofline." | Roll: dexterity success (13) | HP: 0 | Discoveries: none | SceneChanged: yes',
     ],
+    narrativeSummary:
+      "You slipped across the roofline above the alley and marked the veteran enforcer as the next pressure point.",
     relevantClues: clues,
     staleClues: getStaleClues(clues, state.turnCount),
     eligibleRevealIds: [],
@@ -219,7 +221,7 @@ async function main() {
 
   const beatCases = [
     {
-       label: "planner should block irrelevant key item surfacing",
+       label: "planner should warn on irrelevant key item surfacing",
        result: validateBeatPlan({
          mode: "triage",
          playerAction: "I bar the door and listen for footsteps on the stairs.",
@@ -230,7 +232,7 @@ async function main() {
          ],
          requiresCheck: false,
        }),
-      expectSeverity: "block",
+      expectSeverity: "warn",
       expectIssue: "irrelevant_key_item",
     },
     {
@@ -249,7 +251,7 @@ async function main() {
       expectIssue: null,
     },
     {
-      label: "renderer should block contradictions with the beat plan",
+      label: "renderer should warn on contradictions with the beat plan",
       result: auditRenderedNarration({
         mode: "triage",
         narration: "You wait in the dark and plan your next move.",
@@ -261,7 +263,7 @@ async function main() {
           "Search him for orders",
         ],
       }),
-      expectSeverity: "block",
+      expectSeverity: "warn",
       expectIssue: "beat_contradiction",
     },
   ];

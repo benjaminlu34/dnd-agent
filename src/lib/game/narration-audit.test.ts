@@ -22,7 +22,7 @@ test("validateBeatPlan accepts direct key item handling through pronoun actions"
   assert.deepEqual(result.directlyHandledItems, ["amulet"]);
 });
 
-test("validateBeatPlan blocks irrelevant key item surfacing", () => {
+test("validateBeatPlan warns on irrelevant key item surfacing", () => {
   const result = validateBeatPlan({
     mode: "triage",
     playerAction: "I bar the door and listen for footsteps on the stairs.",
@@ -34,7 +34,7 @@ test("validateBeatPlan blocks irrelevant key item surfacing", () => {
     requiresCheck: false,
   });
 
-  assert.equal(result.highestSeverity, "block");
+  assert.equal(result.highestSeverity, "warn");
   assert.ok(result.issues.some((issue) => issue.code === "irrelevant_key_item"));
 });
 
@@ -56,7 +56,7 @@ test("auditRenderedNarration warns on repeated key items in the same beat", () =
   assert.ok(result.issues.some((issue) => issue.code === "repeated_key_item"));
 });
 
-test("auditRenderedNarration blocks contradictions with the validated beat", () => {
+test("auditRenderedNarration warns on contradictions with the validated beat", () => {
   const result = auditRenderedNarration({
     mode: "triage",
     narration: "You linger at the corner and wait for the room to settle.",
@@ -69,7 +69,7 @@ test("auditRenderedNarration blocks contradictions with the validated beat", () 
     ],
   });
 
-  assert.equal(result.highestSeverity, "block");
+  assert.equal(result.highestSeverity, "warn");
   assert.ok(result.issues.some((issue) => issue.code === "beat_contradiction"));
 });
 

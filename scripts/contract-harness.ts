@@ -70,6 +70,8 @@ function buildPromptContext(): PromptContext {
     recentTurnLedger: [
       '[Turn 1] Action: "Inspect the eclipse notice carefully." | Roll: none | HP: 0 | Discoveries: none | SceneChanged: no',
     ],
+    narrativeSummary:
+      "You arrived in the market square with the eclipse notice still fresh on the post and the town watching from a careful distance.",
     relevantClues: clues,
     staleClues: getStaleClues(clues, state.turnCount),
     eligibleRevealIds: [],
