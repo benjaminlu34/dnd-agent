@@ -204,11 +204,11 @@ export function CampaignCreationApp({
     <main className="app-shell">
       <div className="app-frame max-w-6xl">
         <header className="app-hero p-8">
-          <p className="text-[0.68rem] uppercase tracking-[0.28em] text-zinc-500">Campaign Launch</p>
-          <h1 className="font-display mt-4 text-4xl font-semibold tracking-tight text-white md:text-5xl">
+          <p className="ui-label">Campaign Launch</p>
+          <h1 className="ui-title mt-4 text-4xl md:text-5xl">
             Choose your way into the world.
           </h1>
-          <p className="mt-3 max-w-3xl text-sm leading-7 text-zinc-400">
+          <p className="ui-body mt-3 max-w-3xl">
             Pick an entry point, shape the opening draft, and launch a spatial campaign rooted in
             the selected start location.
           </p>
@@ -224,13 +224,13 @@ export function CampaignCreationApp({
           <section className="mt-8 grid gap-8 lg:grid-cols-[0.85fr_1.15fr]">
             <aside className="space-y-8">
               <div className="app-section p-6">
-                <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Module</p>
-                <h2 className="mt-3 text-2xl font-semibold text-white">{module.title}</h2>
-                <p className="mt-3 text-sm leading-7 text-zinc-400">{module.premise}</p>
+                <p className="ui-label">Module</p>
+                <h2 className="ui-title mt-3 text-2xl">{module.title}</h2>
+                <p className="ui-body mt-3">{module.premise}</p>
               </div>
 
               <div className="app-section p-6">
-                <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Entry Points</p>
+                <p className="ui-label">Entry Points</p>
                 <div className="mt-4 space-y-3">
                   {module.entryPoints.map((entryPoint) => (
                     <button
@@ -244,9 +244,9 @@ export function CampaignCreationApp({
                           : "border-zinc-800 bg-black hover:border-zinc-700",
                       ].join(" ")}
                     >
-                      <h3 className="text-base font-semibold text-white">{entryPoint.title}</h3>
-                      <p className="mt-2 text-sm leading-6 text-zinc-400">{entryPoint.summary}</p>
-                      <p className="mt-3 text-xs uppercase tracking-[0.18em] text-zinc-500">
+                      <h3 className="ui-title text-base">{entryPoint.title}</h3>
+                      <p className="ui-body mt-2">{entryPoint.summary}</p>
+                      <p className="ui-label mt-3">
                         {entryPoint.locationName}
                       </p>
                     </button>
@@ -255,11 +255,11 @@ export function CampaignCreationApp({
               </div>
 
               <div className="app-section p-6">
-                <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Character</p>
-                <h3 className="mt-3 text-xl font-semibold text-white">{character.name}</h3>
-                <p className="mt-1 text-sm text-zinc-400">{character.archetype}</p>
+                <p className="ui-label">Character</p>
+                <h3 className="ui-title mt-3 text-xl">{character.name}</h3>
+                <p className="ui-body mt-1">{character.archetype}</p>
                 {character.backstory ? (
-                  <p className="mt-3 text-sm leading-7 text-zinc-400">{character.backstory}</p>
+                  <p className="ui-body mt-3">{character.backstory}</p>
                 ) : null}
               </div>
             </aside>
@@ -267,14 +267,14 @@ export function CampaignCreationApp({
             <div className="app-section p-6">
               <div className="flex items-center justify-between gap-3">
                 <div>
-                  <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Opening Draft</p>
-                  <h2 className="mt-2 text-2xl font-semibold text-white">
+                  <p className="ui-label">Opening Draft</p>
+                  <h2 className="ui-title mt-2 text-2xl">
                     {draft?.scene.title ?? "Generating entry-point opening..."}
                   </h2>
                 </div>
                 <button
                   type="button"
-                  className="button-press rounded-full border border-zinc-700 px-4 py-2 text-sm font-semibold text-zinc-200 disabled:opacity-60"
+                  className="button-press ui-button-secondary rounded-full px-4 py-2 text-sm font-semibold disabled:opacity-60"
                   onClick={() => void generateDraft(followUpPrompt, draft ?? undefined)}
                   disabled={!selectedEntryPointId || generating}
                 >
@@ -294,21 +294,21 @@ export function CampaignCreationApp({
               {draft ? (
                 <div className="mt-8 space-y-6">
                   <div>
-                    <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Narration</p>
-                    <p className="mt-3 whitespace-pre-wrap text-sm leading-7 text-zinc-200">{draft.narration}</p>
+                    <p className="ui-label">Narration</p>
+                    <p className="ui-body mt-3 whitespace-pre-wrap text-zinc-200">{draft.narration}</p>
                   </div>
                   <div className="grid gap-4 md:grid-cols-2">
                     <div className="rounded-2xl border border-zinc-800 p-4">
-                      <p className="text-xs uppercase tracking-[0.18em] text-zinc-500">Active Threat</p>
-                      <p className="mt-2 text-sm leading-6 text-zinc-300">{draft.activeThreat}</p>
+                      <p className="ui-label">Active Threat</p>
+                      <p className="ui-body mt-2 text-zinc-300">{draft.activeThreat}</p>
                     </div>
                     <div className="rounded-2xl border border-zinc-800 p-4">
-                      <p className="text-xs uppercase tracking-[0.18em] text-zinc-500">Location</p>
-                      <p className="mt-2 text-sm leading-6 text-zinc-300">{draft.scene.location}</p>
+                      <p className="ui-label">Location</p>
+                      <p className="ui-body mt-2 text-zinc-300">{draft.scene.location}</p>
                     </div>
                   </div>
                   <div className="rounded-2xl border border-zinc-800 p-4">
-                    <p className="text-xs uppercase tracking-[0.18em] text-zinc-500">Suggested Actions</p>
+                    <p className="ui-label">Suggested Actions</p>
                     <div className="mt-3 flex flex-wrap gap-2">
                       {draft.scene.suggestedActions.map((action) => (
                         <span
@@ -325,7 +325,7 @@ export function CampaignCreationApp({
 
               <button
                 type="button"
-                className="button-press mt-8 rounded-full bg-white px-5 py-3 text-sm font-semibold text-black disabled:opacity-60"
+                className="button-press ui-button-primary mt-8 rounded-full px-5 py-3 text-sm font-semibold disabled:opacity-60"
                 onClick={() => void startCampaign()}
                 disabled={!draft || !selectedEntryPointId || launching}
               >
