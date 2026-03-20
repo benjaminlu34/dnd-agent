@@ -28,7 +28,7 @@ function LibraryCharacterCard({
           onEdit();
         }
       }}
-      className="group relative flex h-[320px] cursor-pointer flex-col overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950/40 p-6 transition-all hover:border-zinc-700 hover:bg-zinc-900/40"
+      className="group relative flex min-h-[320px] cursor-pointer flex-col overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950/40 p-6 transition-all hover:border-zinc-700 hover:bg-zinc-900/40"
     >
       <span className="pointer-events-none absolute right-4 top-4 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
         <ArrowUpRight className="h-4 w-4 text-white" strokeWidth={1.7} />

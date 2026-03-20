@@ -1,4 +1,12 @@
-import type { GeneratedWorldModule } from "@/lib/game/types";
+import type {
+  GeneratedEntryContexts,
+  GeneratedKnowledgeEconomy,
+  GeneratedRegionalLife,
+  GeneratedSocialLayer,
+  GeneratedWorldBible,
+  GeneratedWorldModule,
+  GeneratedWorldSpine,
+} from "@/lib/game/types";
 
 export type ValidationReport = {
   ok: boolean;
@@ -18,6 +26,298 @@ function buildAdjacency(module: GeneratedWorldModule) {
   }
 
   return adjacency;
+}
+
+function buildAdjacencyFromSpine(spine: GeneratedWorldSpine) {
+  const adjacency = new Map<string, Set<string>>();
+
+  for (const location of spine.locations) {
+    adjacency.set(location.key, new Set());
+  }
+
+  for (const edge of spine.edges) {
+    adjacency.get(edge.sourceKey)?.add(edge.targetKey);
+    adjacency.get(edge.targetKey)?.add(edge.sourceKey);
+  }
+
+  return adjacency;
+}
+
+export function validateWorldBible(bible: GeneratedWorldBible): ValidationReport {
+  const issues: string[] = [];
+
+  if (bible.contradictoryMyths.length < 4) {
+    issues.push("World bible needs at least four contradictory myth threads.");
+  }
+
+  if (bible.everydayLife.institutions.length < 4) {
+    issues.push("World bible must describe at least four institutions that shape everyday life.");
+  }
+
+  if (bible.environmentalRules.length < 5) {
+    issues.push("World bible must define at least five environmental rules.");
+  }
+
+  if (bible.historicalFractures.length < 5) {
+    issues.push("World bible should include at least five historical fractures.");
+  }
+
+  if (bible.immersionAnchors.length < 6) {
+    issues.push("World bible should include at least six immersion anchors.");
+  }
+
+  if (bible.everydayLife.trade.length < 3 || bible.everydayLife.gossip.length < 3) {
+    issues.push("World bible should show at least three concrete trade and gossip signals.");
+  }
+
+  return {
+    ok: issues.length === 0,
+    issues,
+  };
+}
+
+export function validateWorldSpine(spine: GeneratedWorldSpine): ValidationReport {
+  const issues: string[] = [];
+  const adjacency = buildAdjacencyFromSpine(spine);
+  const factionKeys = new Set(spine.factions.map((faction) => faction.key));
+  const locationKeys = new Set(spine.locations.map((location) => location.key));
+
+  for (const location of spine.locations) {
+    if (
+      location.controlStatus === "controlled" &&
+      !location.controllingFactionKey
+    ) {
+      issues.push(`Location ${location.name} must name a controlling faction.`);
+    }
+
+    if (
+      location.controllingFactionKey &&
+      !factionKeys.has(location.controllingFactionKey)
+    ) {
+      issues.push(`Location ${location.name} references an unknown faction.`);
+    }
+
+    if (
+      !location.controllingFactionKey &&
+      !["contested", "independent"].includes(location.controlStatus)
+    ) {
+      issues.push(`Location ${location.name} must be controlled, contested, or independent.`);
+    }
+  }
+
+  for (const edge of spine.edges) {
+    if (!locationKeys.has(edge.sourceKey) || !locationKeys.has(edge.targetKey)) {
+      issues.push(`Route ${edge.key} references an unknown location.`);
+    }
+  }
+
+  for (const relation of spine.factionRelations) {
+    if (!factionKeys.has(relation.factionAKey) || !factionKeys.has(relation.factionBKey)) {
+      issues.push(`Faction relation ${relation.key} references an unknown faction.`);
+    }
+  }
+
+  if (spine.locations.length > 0) {
+    const start = spine.locations[0]?.key;
+    const visited = new Set<string>();
+    const queue = start ? [start] : [];
+
+    while (queue.length) {
+      const current = queue.shift();
+      if (!current || visited.has(current)) {
+        continue;
+      }
+
+      visited.add(current);
+      for (const neighbor of adjacency.get(current) ?? []) {
+        if (!visited.has(neighbor)) {
+          queue.push(neighbor);
+        }
+      }
+    }
+
+    if (visited.size !== spine.locations.length) {
+      issues.push("Location graph is disconnected.");
+    }
+  }
+
+  return {
+    ok: issues.length === 0,
+    issues,
+  };
+}
+
+export function validateRegionalLife(
+  regionalLife: GeneratedRegionalLife,
+  expectedLocationIds: string[],
+): ValidationReport {
+  const issues: string[] = [];
+  const counts = new Map<string, number>();
+
+  for (const location of regionalLife.locations) {
+    counts.set(location.locationId, (counts.get(location.locationId) ?? 0) + 1);
+  }
+
+  if (regionalLife.locations.length !== expectedLocationIds.length) {
+    issues.push(
+      `Regional life should contain exactly ${expectedLocationIds.length} locations, received ${regionalLife.locations.length}.`,
+    );
+  }
+
+  for (const locationId of expectedLocationIds) {
+    if (!counts.has(locationId)) {
+      issues.push(`Regional life is missing location ${locationId}.`);
+    }
+  }
+
+  for (const [locationId, count] of counts.entries()) {
+    if (count > 1) {
+      issues.push(`Regional life duplicates location ${locationId}.`);
+    }
+  }
+
+  for (const location of regionalLife.locations) {
+    if (!expectedLocationIds.includes(location.locationId)) {
+      issues.push(`Regional life references unknown location ${location.locationId}.`);
+    }
+
+    if (!location.publicActivity || !location.localPressure || !location.everydayTexture) {
+      issues.push(`Regional life for ${location.locationId} feels like an empty postcard.`);
+    }
+  }
+
+  return {
+    ok: issues.length === 0,
+    issues,
+  };
+}
+
+export function validateSocialLayer(
+  socialLayer: GeneratedSocialLayer,
+  expectedLocationIds: string[],
+): ValidationReport {
+  const issues: string[] = [];
+  const npcConcentration = new Map<string, number>();
+
+  for (const npc of socialLayer.npcs) {
+    if (!expectedLocationIds.includes(npc.currentLocationId)) {
+      issues.push(`NPC ${npc.id} references an unknown currentLocationId.`);
+    }
+
+    if (!npc.summary || !npc.description) {
+      issues.push(`NPC ${npc.id} is missing social grounding.`);
+    }
+
+    npcConcentration.set(
+      npc.currentLocationId,
+      (npcConcentration.get(npc.currentLocationId) ?? 0) + 1,
+    );
+  }
+
+  for (const locationId of expectedLocationIds) {
+    if (!npcConcentration.has(locationId)) {
+      issues.push(`Social layer is missing an anchored NPC for location ${locationId}.`);
+    }
+  }
+
+  const maxNpcShare =
+    socialLayer.npcs.length === 0
+      ? 0
+      : Math.max(...npcConcentration.values()) / Math.max(socialLayer.npcs.length, 1);
+
+  if (maxNpcShare > 0.5) {
+    issues.push("No single location should dominate the socially important NPC population.");
+  }
+
+  return {
+    ok: issues.length === 0,
+    issues,
+  };
+}
+
+export function validateKnowledgeEconomy(
+  knowledgeEconomy: GeneratedKnowledgeEconomy,
+  expectedLocationIds: string[],
+): ValidationReport {
+  const issues: string[] = [];
+
+  const accessibleInfoRatio =
+    knowledgeEconomy.information.length === 0
+      ? 1
+      : knowledgeEconomy.information.filter((information) => information.accessibility === "public").length /
+        knowledgeEconomy.information.length;
+
+  if (accessibleInfoRatio < 0.3) {
+    issues.push("At least 30% of information should be publicly accessible.");
+  }
+
+  for (const locationId of expectedLocationIds) {
+    const publicLeadExists = knowledgeEconomy.information.some(
+      (information) =>
+        information.locationId === locationId && information.accessibility === "public",
+    );
+    if (!publicLeadExists) {
+      issues.push(`Location ${locationId} needs at least one public actionable lead.`);
+    }
+  }
+
+  for (const identity of knowledgeEconomy.locationTradeIdentity) {
+    if (!expectedLocationIds.includes(identity.locationId)) {
+      issues.push(`Location trade identity references unknown location ${identity.locationId}.`);
+    }
+  }
+
+  return {
+    ok: issues.length === 0,
+    issues,
+  };
+}
+
+export function validateEntryContexts(
+  entryContexts: GeneratedEntryContexts,
+  module: GeneratedWorldModule,
+): ValidationReport {
+  const issues: string[] = [];
+  const adjacency = buildAdjacency(module);
+  const npcIds = new Set(module.npcs.map((npc) => npc.id));
+  const informationIds = new Set(module.information.map((information) => information.id));
+
+  for (const entryPoint of entryContexts.entryPoints) {
+    if (!npcIds.has(entryPoint.localContactNpcId)) {
+      issues.push(`Entry point ${entryPoint.id} references an unknown local contact NPC.`);
+    }
+
+    if (!entryPoint.presentNpcIds.includes(entryPoint.localContactNpcId)) {
+      issues.push(`Entry point ${entryPoint.id} should include its local contact among present NPCs.`);
+    }
+
+    if (!entryPoint.immediatePressure || !entryPoint.publicLead || !entryPoint.mundaneActionPath) {
+      issues.push(`Entry point ${entryPoint.id} lacks pressure, lead, or mundane action path.`);
+    }
+
+    for (const informationId of entryPoint.initialInformationIds) {
+      if (!informationIds.has(informationId)) {
+        issues.push(`Entry point ${entryPoint.id} references unknown information ${informationId}.`);
+      }
+    }
+  }
+
+  for (const entryPoint of entryContexts.entryPoints) {
+    for (const location of module.locations) {
+      const hops = shortestHops(adjacency, entryPoint.startLocationId, location.id);
+      if (!Number.isFinite(hops) || hops > 4) {
+        issues.push(
+          `Entry point ${entryPoint.id} cannot reach ${location.name} within four hops.`,
+        );
+        break;
+      }
+    }
+  }
+
+  return {
+    ok: issues.length === 0,
+    issues,
+  };
 }
 
 export function validateWorldModuleCoherence(module: GeneratedWorldModule): ValidationReport {
@@ -198,6 +498,47 @@ export function validateWorldModulePlayability(module: GeneratedWorldModule): Va
         );
         break;
       }
+    }
+  }
+
+  return {
+    ok: issues.length === 0,
+    issues,
+  };
+}
+
+export function validateWorldModuleImmersion(module: GeneratedWorldModule): ValidationReport {
+  const issues: string[] = [];
+
+  for (const location of module.locations) {
+    const hasNpc = module.npcs.some((npc) => npc.currentLocationId === location.id);
+    const hasInformation = module.information.some((information) => information.locationId === location.id);
+    const hasEconomy = module.marketPrices.some((price) => price.locationId === location.id);
+    const hasFactionFootprint =
+      location.controllingFactionId != null ||
+      module.npcs.some((npc) => npc.currentLocationId === location.id && npc.factionId != null);
+
+    if (!hasNpc || !hasInformation) {
+      issues.push(`Location ${location.name} needs visible people and discoverable knowledge.`);
+    }
+
+    if (!hasEconomy && location.type !== "wilderness") {
+      issues.push(`Location ${location.name} needs an economic identity or a deliberate lack of one.`);
+    }
+
+    if (!hasFactionFootprint) {
+      issues.push(`Location ${location.name} should show a faction footprint or deliberate independence.`);
+    }
+  }
+
+  for (const faction of module.factions) {
+    const visibleFootprint =
+      module.locations.some((location) => location.controllingFactionId === faction.id) ||
+      module.npcs.some((npc) => npc.factionId === faction.id) ||
+      module.information.some((information) => information.factionId === faction.id);
+
+    if (!visibleFootprint) {
+      issues.push(`Faction ${faction.name} needs a visible mark on the world.`);
     }
   }
 

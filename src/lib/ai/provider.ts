@@ -3,26 +3,46 @@ import { z } from "zod";
 import { env } from "@/lib/env";
 import { characterTemplateDraftSchema } from "@/lib/game/characters";
 import { MAX_STARTER_ITEMS, normalizeItemNameList } from "@/lib/game/item-utils";
-import { generatedCampaignOpeningSchema, generatedWorldModuleSchema } from "@/lib/game/session-zero";
+import {
+  generatedCampaignOpeningSchema,
+  generatedEconomyMaterialLifeInputSchema,
+  generatedEntryContextsInputSchema,
+  generatedKnowledgeWebInputSchema,
+  generatedRegionalLifeSchema,
+  generatedSocialLayerInputSchema,
+  generatedWorldBibleSchema,
+  generatedWorldSpineSchema,
+} from "@/lib/game/session-zero";
 import type {
   CampaignCharacter,
   CharacterTemplate,
   CharacterTemplateDraft,
   GeneratedCampaignOpening,
+  GeneratedWorldModuleDraft,
   GeneratedWorldModule,
+  OpenWorldGenerationArtifacts,
   OpenWorldEntryPoint,
   SpatialPromptContext,
   TurnActionToolCall,
+  WorldGenerationStageName,
 } from "@/lib/game/types";
 import {
+  validateEntryContexts,
+  validateKnowledgeEconomy,
+  validateRegionalLife,
+  validateSocialLayer,
+  validateWorldBible,
   validateWorldModuleCoherence,
+  validateWorldModuleImmersion,
   validateWorldModulePlayability,
+  validateWorldSpine,
 } from "@/lib/game/world-validation";
 
 type CampaignOpeningInput = {
   module: GeneratedWorldModule;
   character: CharacterTemplate;
   entryPoint: OpenWorldEntryPoint;
+  artifacts?: OpenWorldGenerationArtifacts | null;
   prompt?: string;
   previousDraft?: GeneratedCampaignOpening;
 };
@@ -53,22 +73,266 @@ function safeParseJson(value: unknown): unknown {
     return null;
   }
 
-  try {
-    return JSON.parse(value);
-  } catch {
-    const firstBrace = value.indexOf("{");
-    const lastBrace = value.lastIndexOf("}");
+  const trimmed = value
+    .replace(/^<tool_call>\s*/i, "")
+    .replace(/\s*<\/tool_call>\s*$/i, "")
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
 
-    if (firstBrace >= 0 && lastBrace > firstBrace) {
-      try {
-        return JSON.parse(value.slice(firstBrace, lastBrace + 1));
-      } catch {
-        return null;
+  const tryParse = (candidate: string) => {
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      return null;
+    }
+  };
+
+  const normalizeLiteralControlChars = (candidate: string) => {
+    let normalized = "";
+    let inString = false;
+    let escaped = false;
+
+    for (const char of candidate) {
+      if (escaped) {
+        normalized += char;
+        escaped = false;
+        continue;
       }
+
+      if (char === "\\") {
+        normalized += char;
+        escaped = true;
+        continue;
+      }
+
+      if (char === '"') {
+        normalized += char;
+        inString = !inString;
+        continue;
+      }
+
+      if (inString) {
+        if (char === "\n") {
+          normalized += "\\n";
+          continue;
+        }
+        if (char === "\r") {
+          normalized += "\\r";
+          continue;
+        }
+        if (char === "\t") {
+          normalized += "\\t";
+          continue;
+        }
+      }
+
+      normalized += char;
+    }
+
+    return normalized;
+  };
+
+  const stripTrailingCommas = (candidate: string) => candidate.replace(/,\s*([}\]])/g, "$1");
+
+  const extractBalancedJsonCandidates = (candidate: string) => {
+    const results: string[] = [];
+    const stack: string[] = [];
+    let inString = false;
+    let escaped = false;
+    let start = -1;
+
+    for (let index = 0; index < candidate.length; index += 1) {
+      const char = candidate[index];
+
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+
+      if (char === '"') {
+        inString = !inString;
+        continue;
+      }
+
+      if (inString) {
+        continue;
+      }
+
+      if (char === "{" || char === "[") {
+        if (stack.length === 0) {
+          start = index;
+        }
+        stack.push(char);
+        continue;
+      }
+
+      if (char === "}" || char === "]") {
+        const expected = char === "}" ? "{" : "[";
+        if (stack.at(-1) === expected) {
+          stack.pop();
+          if (stack.length === 0 && start >= 0) {
+            results.push(candidate.slice(start, index + 1));
+            start = -1;
+          }
+        }
+      }
+    }
+
+    return results;
+  };
+
+  const candidates = [
+    trimmed,
+    normalizeLiteralControlChars(trimmed),
+    stripTrailingCommas(trimmed),
+    stripTrailingCommas(normalizeLiteralControlChars(trimmed)),
+    ...extractBalancedJsonCandidates(trimmed),
+    ...extractBalancedJsonCandidates(normalizeLiteralControlChars(trimmed)),
+  ];
+
+  for (const candidate of candidates) {
+    const parsed =
+      tryParse(candidate) ??
+      tryParse(stripTrailingCommas(candidate)) ??
+      tryParse(normalizeLiteralControlChars(candidate)) ??
+      tryParse(stripTrailingCommas(normalizeLiteralControlChars(candidate)));
+
+    if (parsed != null) {
+      return parsed;
     }
   }
 
   return null;
+}
+
+function extractMessageText(content: unknown) {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === "string") {
+          return part;
+        }
+
+        if (
+          part &&
+          typeof part === "object" &&
+          "type" in part &&
+          "text" in part &&
+          (part as { type?: unknown }).type === "text"
+        ) {
+          return String((part as { text: unknown }).text ?? "");
+        }
+
+        return "";
+      })
+      .join("");
+  }
+
+  return "";
+}
+
+function unwrapStructuredPayload(value: unknown): unknown {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === "string") {
+    const parsed = safeParseJson(value);
+    return parsed == null ? null : unwrapStructuredPayload(parsed);
+  }
+
+  if (typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+
+  for (const key of ["arguments", "input", "toolInput", "payload", "result"]) {
+    if (record[key] != null) {
+      const nested = unwrapStructuredPayload(record[key]);
+      if (nested != null) {
+        return nested;
+      }
+    }
+  }
+
+  return record;
+}
+
+function hasUnclosedJsonStructure(value: string) {
+  let inString = false;
+  let escaped = false;
+  const stack: string[] = [];
+
+  for (const char of value) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) {
+      continue;
+    }
+
+    if (char === "{" || char === "[") {
+      stack.push(char);
+      continue;
+    }
+
+    if (char === "}" && stack.at(-1) === "{") {
+      stack.pop();
+      continue;
+    }
+
+    if (char === "]" && stack.at(-1) === "[") {
+      stack.pop();
+    }
+  }
+
+  return inString || stack.length > 0;
+}
+
+function isLikelyTruncatedStructuredPayload(value: unknown) {
+  if (typeof value !== "string") {
+    return false;
+  }
+
+  const trimmed = value
+    .replace(/^<tool_call>\s*/i, "")
+    .replace(/\s*<\/tool_call>\s*$/i, "")
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+
+  if (!trimmed) {
+    return false;
+  }
+
+  if (!(trimmed.startsWith("{") || trimmed.startsWith("["))) {
+    return false;
+  }
+
+  return hasUnclosedJsonStructure(trimmed);
 }
 
 function createClient() {
@@ -92,6 +356,61 @@ function missingAiConfigurationError() {
   return new Error(
     "AI generation is unavailable. Set OPENROUTER_API_KEY or OPENROUTER_API_KEY_2. Deterministic fallback has been disabled for story quality.",
   );
+}
+
+function logOpenRouterRequest(options: {
+  model: string;
+  system: string;
+  user: string;
+  tools?: Array<{ name: string; description: string; input_schema: Record<string, unknown> }>;
+}) {
+  const timestamp = new Date().toISOString();
+  const toolNames = (options.tools ?? []).map((tool) => tool.name);
+
+  console.info(
+    [
+      `[openrouter.request] ${timestamp}`,
+      `model=${options.model}`,
+      `tools=${toolNames.length ? toolNames.join(", ") : "none"}`,
+      "--- system ---",
+      options.system,
+      "--- user ---",
+      options.user,
+      "--- end ---",
+    ].join("\n"),
+  );
+}
+
+function logOpenRouterResponse(stage: string, details: Record<string, unknown>) {
+  const timestamp = new Date().toISOString();
+
+  console.info(
+    [
+      `[openrouter.response] ${timestamp}`,
+      `stage=${stage}`,
+      JSON.stringify(details, null, 2),
+      "--- end ---",
+    ].join("\n"),
+  );
+}
+
+function toPreview(value: unknown, maxLength = 1200) {
+  if (value == null) {
+    return null;
+  }
+
+  const text =
+    typeof value === "string"
+      ? value
+      : (() => {
+          try {
+            return JSON.stringify(value, null, 2);
+          } catch {
+            return String(value);
+          }
+        })();
+
+  return text.length > maxLength ? `${text.slice(0, maxLength)}\n...[truncated]` : text;
 }
 
 function summarizeWorld(module: GeneratedWorldModule) {
@@ -136,6 +455,598 @@ function normalizeCharacterToolInput(input: unknown) {
   };
 }
 
+function describeZodIssues(issues: Array<{ path: PropertyKey[]; message: string }>) {
+  return issues
+    .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
+    .join("\n");
+}
+
+type RegionalLifeDraft = z.infer<typeof generatedRegionalLifeSchema>;
+
+type StructuredTool = {
+  name: string;
+  description: string;
+  input_schema: Record<string, unknown>;
+};
+
+type StageValidation = {
+  category: "schema" | "coherence" | "playability" | "immersion";
+  issues: string[];
+};
+
+const MAX_WORLD_STAGE_ATTEMPTS = 3;
+const REGIONAL_LIFE_BATCH_SIZE = 3;
+const SOCIAL_CAST_BATCH_SIZE = 3;
+
+function createStructuredTool(
+  name: string,
+  description: string,
+  schema: z.ZodTypeAny,
+): StructuredTool {
+  return {
+    name,
+    description,
+    input_schema: z.toJSONSchema(schema),
+  };
+}
+
+function slugify(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .replace(/_{2,}/g, "_")
+    .slice(0, 48);
+}
+
+function assignCanonicalIds(keys: string[], prefix: string) {
+  const used = new Set<string>();
+  const idMap: Record<string, string> = {};
+
+  for (const key of keys) {
+    const base = `${prefix}_${slugify(key) || "entry"}`;
+    let candidate = base;
+    let suffix = 2;
+    while (used.has(candidate)) {
+      candidate = `${base}_${suffix}`;
+      suffix += 1;
+    }
+    used.add(candidate);
+    idMap[key] = candidate;
+  }
+
+  return idMap;
+}
+
+function assignIndexedIds<T>(
+  items: T[],
+  prefix: string,
+  getLabel: (item: T, index: number) => string,
+) {
+  const used = new Set<string>();
+
+  return items.map((item, index) => {
+    const base = `${prefix}_${slugify(getLabel(item, index)) || `${prefix}_${index + 1}`}`;
+    let candidate = base;
+    let suffix = 2;
+    while (used.has(candidate)) {
+      candidate = `${base}_${suffix}`;
+      suffix += 1;
+    }
+    used.add(candidate);
+    return candidate;
+  });
+}
+
+function uniqueNames(values: string[]) {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function findDuplicateStrings(values: string[]) {
+  const counts = new Map<string, number>();
+
+  for (const value of values.filter(Boolean)) {
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+
+  return [...counts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([value]) => value);
+}
+
+function chunkArray<T>(items: T[], size: number) {
+  if (size <= 0) {
+    return [items];
+  }
+
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function summarizeWorldBibleForPrompt(worldBible: z.infer<typeof generatedWorldBibleSchema>) {
+  return {
+    title: worldBible.title,
+    premise: worldBible.premise,
+    tone: worldBible.tone,
+    setting: worldBible.setting,
+    worldOverview: worldBible.worldOverview,
+    environmentalRules: worldBible.environmentalRules.slice(0, 6),
+    historicalFractures: worldBible.historicalFractures.slice(0, 6),
+    contradictoryMyths: worldBible.contradictoryMyths.map((myth) => ({
+      key: myth.key,
+      claim: myth.claim,
+      partialTruth: myth.partialTruth,
+    })),
+    everydayLife: {
+      survival: worldBible.everydayLife.survival,
+      institutions: worldBible.everydayLife.institutions.slice(0, 5),
+      fears: worldBible.everydayLife.fears.slice(0, 4),
+      wants: worldBible.everydayLife.wants.slice(0, 4),
+      trade: worldBible.everydayLife.trade.slice(0, 5),
+      gossip: worldBible.everydayLife.gossip.slice(0, 4),
+    },
+  };
+}
+
+function summarizeRegionalLifeForPrompt(
+  regionalLife: RegionalLifeDraft,
+  locationIds?: string[],
+) {
+  const filterIds = locationIds ? new Set(locationIds) : null;
+
+  return regionalLife.locations
+    .filter((location) => (filterIds ? filterIds.has(location.locationId) : true))
+    .map((location) => ({
+      locationId: location.locationId,
+      publicActivity: location.publicActivity,
+      dominantActivities: location.dominantActivities.slice(0, 3),
+      localPressure: location.localPressure,
+      classTexture: location.classTexture,
+      everydayTexture: location.everydayTexture,
+      publicHazards: location.publicHazards.slice(0, 2),
+      ordinaryKnowledge: location.ordinaryKnowledge.slice(0, 2),
+      institutions: location.institutions.slice(0, 2),
+      gossip: location.gossip.slice(0, 2),
+      reasonsToLinger: location.reasonsToLinger.slice(0, 2),
+      routineSeeds: location.routineSeeds.slice(0, 1),
+      eventSeeds: location.eventSeeds.slice(0, 1),
+    }));
+}
+
+function renderPromptValue(value: unknown, indent = 0): string {
+  const pad = " ".repeat(indent);
+  const childPad = " ".repeat(indent + 2);
+
+  if (value == null) {
+    return `${pad}null`;
+  }
+
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return `${pad}${String(value)}`;
+  }
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      return `${pad}- none`;
+    }
+
+    return value
+      .map((item) => {
+        if (
+          item == null ||
+          typeof item === "string" ||
+          typeof item === "number" ||
+          typeof item === "boolean"
+        ) {
+          return `${pad}- ${String(item)}`;
+        }
+
+        const rendered = renderPromptValue(item, indent + 2);
+        return `${pad}-\n${rendered}`;
+      })
+      .join("\n");
+  }
+
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).filter(([, entry]) => entry !== undefined);
+
+    if (entries.length === 0) {
+      return `${pad}(empty)`;
+    }
+
+    return entries
+      .map(([key, entry]) => {
+        if (
+          entry == null ||
+          typeof entry === "string" ||
+          typeof entry === "number" ||
+          typeof entry === "boolean"
+        ) {
+          return `${pad}${key}: ${String(entry)}`;
+        }
+
+        return `${pad}${key}:\n${renderPromptValue(entry, indent + 2)}`;
+      })
+      .join("\n");
+  }
+
+  return `${pad}${String(value)}`;
+}
+
+function formatPromptBlock(tag: string, value: unknown) {
+  return [`<${tag}>`, renderPromptValue(value), `</${tag}>`].join("\n");
+}
+
+function formatFinalInstruction(lines: string | string[]) {
+  const instructionLines = Array.isArray(lines) ? lines : [lines];
+  return ["---", ...instructionLines].join("\n");
+}
+
+function formatCorrectionNotes(stage: WorldGenerationStageName, category: StageValidation["category"], issues: string[]) {
+  return [
+    `<correction stage="${stage}" category="${category}">`,
+    "Return a complete replacement payload.",
+    "Preserve strong world-specific material when possible.",
+    "Fix these violations exactly:",
+    ...issues.map((issue, index) => `${index + 1}. ${issue}`),
+    "Do not introduce new ids, keys, or references unless the instructions explicitly require them.",
+    "</correction>",
+  ].join("\n");
+}
+
+function summarizeLocationRefs(
+  locations: Array<{
+    id?: string;
+    key?: string;
+    name: string;
+    type: string;
+    summary?: string;
+    controlStatus?: string;
+    controllingFactionKey?: string | null;
+  }>,
+) {
+  return locations.map((location) =>
+    [
+      location.id ?? location.key ?? location.name,
+      location.id && location.key ? `key=${location.key}` : "",
+      location.name,
+      location.type,
+      location.controlStatus ? `control=${location.controlStatus}` : "",
+      location.controllingFactionKey ? `controller=${location.controllingFactionKey}` : "",
+      location.summary ? `summary=${location.summary}` : "",
+    ]
+      .filter(Boolean)
+      .join(" | "),
+  );
+}
+
+function summarizeFactionRefs(
+  factions: Array<{
+    id?: string;
+    key?: string;
+    name: string;
+    type: string;
+    agenda?: string;
+    publicFootprint?: string;
+  }>,
+) {
+  return factions.map((faction) =>
+    [
+      faction.id ?? faction.key ?? faction.name,
+      faction.id && faction.key ? `key=${faction.key}` : "",
+      faction.name,
+      faction.type,
+      faction.agenda ? `agenda=${faction.agenda}` : "",
+      faction.publicFootprint ? `footprint=${faction.publicFootprint}` : "",
+    ]
+      .filter(Boolean)
+      .join(" | "),
+  );
+}
+
+function summarizeNpcRefs(
+  npcs: Array<{
+    id: string;
+    name: string;
+    role: string;
+    currentLocationId: string;
+    factionId: string | null;
+  }>,
+) {
+  return npcs.map((npc) =>
+    [
+      npc.id,
+      `${npc.name} (${npc.role})`,
+      `at=${npc.currentLocationId}`,
+      npc.factionId ? `faction=${npc.factionId}` : "",
+    ]
+      .filter(Boolean)
+      .join(" | "),
+  );
+}
+
+function summarizeInformationRefs(
+  information: Array<{
+    id: string;
+    title: string;
+    accessibility: string;
+    locationId: string | null;
+    sourceNpcId: string | null;
+  }>,
+) {
+  return information.map((entry) =>
+    [
+      entry.id,
+      entry.title,
+      `access=${entry.accessibility}`,
+      `loc=${entry.locationId ?? "none"}`,
+      `source=${entry.sourceNpcId ?? "none"}`,
+    ].join(" | "),
+  );
+}
+
+function summarizeRegionalLifeRefs(regionalLife: RegionalLifeDraft) {
+  return regionalLife.locations.map((location) =>
+    [
+      location.locationId,
+      `activity=${location.publicActivity}`,
+      `pressure=${location.localPressure}`,
+      location.publicHazards[0] ? `hazard=${location.publicHazards[0]}` : "",
+      location.ordinaryKnowledge[0] ? `known=${location.ordinaryKnowledge[0]}` : "",
+    ]
+      .filter(Boolean)
+      .join(" | "),
+  );
+}
+
+function summarizeSocialGravityRefs(
+  socialGravity: Array<{
+    npcId: string;
+    importance: string;
+    bridgeLocationIds: string[];
+    bridgeFactionIds: string[];
+  }>,
+) {
+  return socialGravity.map((entry) =>
+    [
+      entry.npcId,
+      `importance=${entry.importance}`,
+      entry.bridgeLocationIds.length ? `loc_bridges=${entry.bridgeLocationIds.join(",")}` : "",
+      entry.bridgeFactionIds.length ? `faction_bridges=${entry.bridgeFactionIds.join(",")}` : "",
+    ]
+      .filter(Boolean)
+      .join(" | "),
+  );
+}
+
+const WORLD_GEN_PRINCIPLES = [
+  "You are a simulation-first worldbuilder designing a reusable solo RPG setting.",
+  "Prioritize concrete survival, work, trade, territory, debt, weather, and social obligations over abstract lore.",
+  "Prefer political, economic, environmental, and territorial pressure over cosmic destiny.",
+  "Make every major detail usable at the table by tying it to a place, institution, job, route, resource, or conflict.",
+  "Be concise. Every sentence should imply at least one playable cost, risk, opportunity, contact, or obstacle.",
+  "Preserve the prompt's distinctive nouns, imagery, and social texture instead of replacing them with generic fantasy substitutes.",
+  "Reuse exact nouns or noun phrases from the prompt whenever possible instead of renaming the setting into a new generic brand.",
+];
+
+const WORLD_GEN_ANTI_PATTERNS = [
+  "Do not default to chosen ones, ancient evils, prophecy, dark lords, or vague magical corruption.",
+  "Do not create ornamental NPCs, empty postcard locations, or generic fantasy tavern filler.",
+  "Do not solve missing structure by inventing extra ids, keys, factions, or locations outside the provided context.",
+  "Do not use vague phrases when a concrete profession, shortage, hazard, patrol, debt, toll, or route problem would be clearer.",
+  "Treat myths as folk belief, institutional propaganda, or partial explanation unless the user explicitly asks for grand cosmology.",
+];
+
+function buildWorldGenSystemPrompt(lines: string[]) {
+  return [
+    ...WORLD_GEN_PRINCIPLES,
+    "Forbidden patterns:",
+    ...WORLD_GEN_ANTI_PATTERNS.map((line) => `- ${line}`),
+    "Success criteria:",
+    ...lines.map((line) => `- ${line}`),
+  ].join("\n");
+}
+
+function buildWorldGenerationBasePrompt(input: {
+  prompt: string;
+  previousDraft?: GeneratedWorldModule;
+  correctionNotes?: string | null;
+}) {
+  return [
+    formatPromptBlock("prompt", input.prompt),
+    input.previousDraft
+      ? formatPromptBlock("previous_draft_summary", summarizeWorld(input.previousDraft))
+      : "",
+    input.correctionNotes ? input.correctionNotes : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+async function runStructuredStage<T>({
+  stage,
+  system,
+  buildUser,
+  schema,
+  tool,
+  attempts,
+  validationReports,
+  stageSummaries,
+  validate,
+  summarize,
+}: {
+  stage: WorldGenerationStageName;
+  system: string;
+  buildUser: (correctionNotes: string | null) => string;
+  schema: z.ZodType<T>;
+  tool: StructuredTool;
+  attempts: OpenWorldGenerationArtifacts["attempts"];
+  validationReports: OpenWorldGenerationArtifacts["validationReports"];
+  stageSummaries: OpenWorldGenerationArtifacts["stageSummaries"];
+  validate?: (parsed: T) => StageValidation[];
+  summarize?: (parsed: T) => string;
+}): Promise<T> {
+  let correctionNotes: string | null = null;
+
+  for (let attempt = 1; attempt <= MAX_WORLD_STAGE_ATTEMPTS; attempt += 1) {
+    logOpenRouterResponse(`${stage}.attempt`, {
+      stage,
+      attempt,
+      maxAttempts: MAX_WORLD_STAGE_ATTEMPTS,
+      correctionNotes,
+    });
+
+    const user = buildUser(correctionNotes);
+    const response = await runCompletion({
+      system,
+      user,
+      tools: [tool],
+    });
+
+    attempts.push({
+      stage,
+      attempt,
+      correctionNotes,
+      completedAt: new Date().toISOString(),
+    });
+
+    logOpenRouterResponse(`${stage}.raw_input`, {
+      attempt,
+      finishReason: response?.finishReason ?? null,
+      likelyTruncated: response?.likelyTruncated ?? false,
+      preview: toPreview(response?.input),
+    });
+
+    if (response?.likelyTruncated) {
+      const issues = [
+        "Your previous response was cut off before the structured payload finished.",
+        "Return a complete replacement payload.",
+        "Use shorter descriptions so the full JSON fits in one response.",
+        "If the stage uses keys, keep every key under 40 characters.",
+      ];
+
+      validationReports.push({
+        stage,
+        attempt,
+        ok: false,
+        category: "schema",
+        issues,
+      });
+
+      logOpenRouterResponse(`${stage}.truncation`, {
+        attempt,
+        finishReason: response.finishReason ?? null,
+        issues,
+      });
+
+      if (attempt === MAX_WORLD_STAGE_ATTEMPTS) {
+        throw new Error(`${stage} response was truncated before the structured payload completed.`);
+      }
+
+      correctionNotes = formatCorrectionNotes(stage, "schema", issues);
+      continue;
+    }
+
+    const parsed = schema.safeParse(response?.input);
+    if (!parsed.success) {
+      const issues = describeZodIssues(parsed.error.issues).split("\n");
+      validationReports.push({
+        stage,
+        attempt,
+        ok: false,
+        category: "schema",
+        issues,
+      });
+
+      logOpenRouterResponse(`${stage}.schema_failure`, {
+        attempt,
+        issues: parsed.error.issues,
+        inputPreview: toPreview(response?.input),
+      });
+
+      if (attempt === MAX_WORLD_STAGE_ATTEMPTS) {
+        throw new Error(`${stage} returned invalid structured data: ${parsed.error.message}`);
+      }
+
+      correctionNotes = formatCorrectionNotes(
+        stage,
+        "schema",
+        describeZodIssues(parsed.error.issues).split("\n"),
+      );
+      continue;
+    }
+
+    const validations = validate ? validate(parsed.data) : [];
+    let failedValidation: StageValidation | null = null;
+
+    for (const validation of validations) {
+      const ok = validation.issues.length === 0;
+      validationReports.push({
+        stage,
+        attempt,
+        ok,
+        category: validation.category,
+        issues: validation.issues,
+      });
+
+      logOpenRouterResponse(`${stage}.${validation.category}`, {
+        attempt,
+        ok,
+        issues: validation.issues,
+        preview: toPreview(parsed.data),
+      });
+
+      if (!ok && !failedValidation) {
+        failedValidation = validation;
+      }
+    }
+
+    if (failedValidation) {
+      if (attempt === MAX_WORLD_STAGE_ATTEMPTS) {
+        throw new Error(
+          `${stage} ${failedValidation.category} failed: ${failedValidation.issues.join("; ")}`,
+        );
+      }
+
+      correctionNotes = [
+        formatCorrectionNotes(stage, failedValidation.category, failedValidation.issues),
+      ].join("\n");
+      continue;
+    }
+
+    stageSummaries[stage] = summarize ? summarize(parsed.data) : `Completed ${stage}.`;
+
+    logOpenRouterResponse(`${stage}.success`, {
+      attempt,
+      summary: stageSummaries[stage],
+      preview: toPreview(parsed.data),
+    });
+
+    return parsed.data;
+  }
+
+  throw new Error(`${stage} exhausted retry attempts.`);
+}
+
+function enrichLocationDescription(
+  description: string,
+  regionalLife: RegionalLifeDraft["locations"][number] | undefined,
+) {
+  if (!regionalLife) {
+    return description;
+  }
+
+  return [
+    description,
+    `Everyday life here turns around ${regionalLife.publicActivity.toLowerCase()}.`,
+    `The local pressure is ${regionalLife.localPressure.toLowerCase()}.`,
+    `Ordinary residents know ${regionalLife.ordinaryKnowledge[0]?.toLowerCase() ?? "more than they admit"}.`,
+  ].join(" ");
+}
+
 const characterTool = {
   name: "generate_character_template",
   description: "Generate one grounded but vivid solo RPG protagonist.",
@@ -174,11 +1085,92 @@ const characterTool = {
   },
 };
 
-const moduleTool = {
-  name: "generate_open_world_module",
-  description: "Generate an open-world module for a solo fantasy campaign.",
-  input_schema: z.toJSONSchema(generatedWorldModuleSchema),
-};
+const worldBibleTool = createStructuredTool(
+  "generate_world_bible",
+  "Generate the world bible for a living, open-world solo campaign module.",
+  generatedWorldBibleSchema,
+);
+
+const worldSpineFactionsSchema = z.object({
+  factions: generatedWorldSpineSchema.shape.factions,
+});
+
+const worldSpineLocationsSchema = z.object({
+  locations: generatedWorldSpineSchema.shape.locations,
+});
+
+const worldSpineConnectionsSchema = z.object({
+  edges: generatedWorldSpineSchema.shape.edges,
+  factionRelations: generatedWorldSpineSchema.shape.factionRelations,
+});
+
+const worldSpineEdgesSchema = z.object({
+  edges: generatedWorldSpineSchema.shape.edges,
+});
+
+const worldSpineRelationsOnlySchema = z.object({
+  factionRelations: generatedWorldSpineSchema.shape.factionRelations,
+});
+
+const worldSpineFactionsTool = createStructuredTool(
+  "generate_world_spine_factions",
+  "Generate the factions for the world spine.",
+  worldSpineFactionsSchema,
+);
+
+const worldSpineLocationsTool = createStructuredTool(
+  "generate_world_spine_locations",
+  "Generate the locations for the world spine using known faction keys for control.",
+  worldSpineLocationsSchema,
+);
+
+const worldSpineConnectionsTool = createStructuredTool(
+  "generate_world_spine_connections",
+  "Generate travel edges and faction relations for the world spine using known keys.",
+  worldSpineConnectionsSchema,
+);
+
+const worldSpineEdgesTool = createStructuredTool(
+  "generate_world_spine_edges",
+  "Generate travel edges for the world spine using known location keys.",
+  worldSpineEdgesSchema,
+);
+
+const worldSpineRelationsTool = createStructuredTool(
+  "generate_world_spine_relations",
+  "Generate faction relations for the world spine using known faction keys.",
+  worldSpineRelationsOnlySchema,
+);
+
+const regionalLifeTool = createStructuredTool(
+  "generate_regional_life",
+  "Generate regional daily life, pressures, hazards, and ordinary knowledge for each location.",
+  generatedRegionalLifeSchema,
+);
+
+const socialCastTool = createStructuredTool(
+  "generate_social_cast",
+  "Generate socially grounded NPCs who belong to the world and can cross paths with the player naturally.",
+  generatedSocialLayerInputSchema,
+);
+
+const knowledgeWebTool = createStructuredTool(
+  "generate_knowledge_web",
+  "Generate layered information, myth threads, and actionable leads for the world.",
+  generatedKnowledgeWebInputSchema,
+);
+
+const economyMaterialLifeTool = createStructuredTool(
+  "generate_economy_material_life",
+  "Generate commodities, market prices, and local material life for each major location.",
+  generatedEconomyMaterialLifeInputSchema,
+);
+
+const entryContextsTool = createStructuredTool(
+  "generate_entry_contexts",
+  "Generate grounded entry contexts that make the player feel like an arriving participant in a living world.",
+  generatedEntryContextsInputSchema,
+);
 
 const openingTool = {
   name: "generate_campaign_opening",
@@ -439,17 +1431,50 @@ const actionTools = [
 
 function extractToolInput(response: OpenAI.Chat.Completions.ChatCompletion) {
   const toolCall = response.choices[0]?.message?.tool_calls?.[0];
+  const content = extractMessageText(response.choices[0]?.message?.content ?? "");
+  const finishReason = response.choices[0]?.finish_reason ?? null;
+  const rawToolArguments = toolCall?.type === "function" ? toolCall.function.arguments : null;
+  const likelyTruncated = finishReason === "length"
+    || isLikelyTruncatedStructuredPayload(rawToolArguments)
+    || (!toolCall && isLikelyTruncatedStructuredPayload(content));
+
+  logOpenRouterResponse("raw_completion", {
+    hasToolCall: Boolean(toolCall),
+    finishReason,
+    likelyTruncated,
+    toolName: toolCall?.type === "function" ? toolCall.function.name : null,
+    rawToolArgumentsPreview:
+      toolCall?.type === "function" ? toPreview(toolCall.function.arguments) : null,
+    messageContentPreview: toPreview(content),
+  });
 
   if (toolCall?.type === "function") {
+    const input = unwrapStructuredPayload(toolCall.function.arguments);
+
+    logOpenRouterResponse("parsed_tool_input", {
+      toolName: toolCall.function.name,
+      parsedInputPreview: toPreview(input),
+    });
+
     return {
       name: toolCall.function.name,
-      input: safeParseJson(toolCall.function.arguments),
+      input,
+      finishReason,
+      likelyTruncated,
     };
   }
 
+  const input = unwrapStructuredPayload(content);
+
+  logOpenRouterResponse("parsed_message_input", {
+    parsedInputPreview: toPreview(input),
+  });
+
   return {
     name: null,
-    input: safeParseJson(response.choices[0]?.message?.content ?? ""),
+    input,
+    finishReason,
+    likelyTruncated,
   };
 }
 
@@ -457,6 +1482,7 @@ async function runCompletion(options: {
   system: string;
   user: string;
   tools?: Array<{ name: string; description: string; input_schema: Record<string, unknown> }>;
+  maxTokens?: number;
 }) {
   const client = createClient();
 
@@ -464,9 +1490,17 @@ async function runCompletion(options: {
     throw missingAiConfigurationError();
   }
 
+  logOpenRouterRequest({
+    model: env.openRouterModel,
+    system: options.system,
+    user: options.user,
+    tools: options.tools,
+  });
+
   const response = await client.chat.completions.create({
     model: env.openRouterModel,
     temperature: 0.7,
+    max_tokens: options.maxTokens ?? 8000,
     messages: [
       { role: "system", content: options.system },
       { role: "user", content: options.user },
@@ -497,13 +1531,30 @@ class DungeonMasterClient {
         tools: [characterTool],
       });
 
-      const parsed = characterTemplateDraftSchema.safeParse(normalizeCharacterToolInput(response?.input));
+      const normalizedInput = normalizeCharacterToolInput(response?.input);
+
+      logOpenRouterResponse("character.normalized_input", {
+        preview: toPreview(normalizedInput),
+      });
+
+      const parsed = characterTemplateDraftSchema.safeParse(normalizedInput);
       if (!parsed.success) {
+        logOpenRouterResponse("character.schema_failure", {
+          issues: parsed.error.issues,
+          inputPreview: toPreview(normalizedInput),
+        });
         throw new Error(`Character generation returned invalid structured data: ${parsed.error.message}`);
       }
 
+      logOpenRouterResponse("character.success", {
+        preview: toPreview(parsed.data),
+      });
+
       return { character: parsed.data, source: "openrouter" };
     } catch (error) {
+      logOpenRouterResponse("character.error", {
+        message: error instanceof Error ? error.message : String(error),
+      });
       throw new Error(error instanceof Error ? error.message : "Character generation failed.");
     }
   }
@@ -511,46 +1562,1066 @@ class DungeonMasterClient {
   async generateWorldModule(input: {
     prompt: string;
     previousDraft?: GeneratedWorldModule;
-  }): Promise<GeneratedWorldModule> {
+  }): Promise<GeneratedWorldModuleDraft> {
     try {
-      const response = await runCompletion({
-        system: [
-          "Generate a reusable open-world solo fantasy campaign module.",
-          "Return a coherent graph with locations, edges, factions, relations, NPCs, information, commodities, market prices, and entry points via the provided tool schema.",
-          "Favor specificity over generic fantasy wallpaper: every location should have pressure, every faction should want something concrete, and every entry point should drop the player into immediate motion.",
-          "NPCs should feel socially useful, not ornamental; information nodes should expose actionable leads, not lore blobs.",
-          "Avoid vague stakes, placeholder names, and repetitive symmetry unless the prompt clearly demands it.",
-          "Do not write any timeline, world events, or simulation tick output.",
-        ].join("\n"),
-        user: [
-          `Prompt: ${input.prompt}`,
-          input.previousDraft
-            ? `Previous draft to revise. Keep what works, fix what feels flat or repetitive, and materially improve specificity: ${JSON.stringify(summarizeWorld(input.previousDraft))}`
-            : "",
-        ]
-          .filter(Boolean)
-          .join("\n\n"),
-        tools: [moduleTool],
+      const attempts: OpenWorldGenerationArtifacts["attempts"] = [];
+      const validationReports: OpenWorldGenerationArtifacts["validationReports"] = [];
+      const stageSummaries: OpenWorldGenerationArtifacts["stageSummaries"] = {};
+
+      const worldBible = await runStructuredStage({
+        stage: "world_bible",
+        system: buildWorldGenSystemPrompt([
+          "Generate a foundational world bible for an open-world solo fantasy campaign.",
+          "Provide as many environmental rules, historical fractures, immersion anchors, and contradictory myths as the setting needs, while still covering at least 5 rules, 5 fractures, 6 anchors, and 4 myths.",
+          "Environmental rules must affect mundane survival, travel, work, shelter, or communication.",
+          "Historical fractures should be political, technological, territorial, or resource-driven.",
+          "Contradictory myths must each contain a concrete shard of truth.",
+          "Everyday life must explain how ordinary people get food, water, safety, and social protection.",
+          "Do not genericize the setting title, premise nouns, or signature images from the prompt.",
+          "If the prompt does not name the world explicitly, derive an understated title from prompt language rather than inventing melodramatic branding.",
+        ]),
+        buildUser: (correctionNotes) =>
+          [
+            buildWorldGenerationBasePrompt({
+              prompt: input.prompt,
+              previousDraft: input.previousDraft,
+              correctionNotes,
+            }),
+            formatFinalInstruction([
+              "Return the world bible only.",
+              "Do not generate locations, NPCs, commodities, or entry points yet.",
+            ]),
+          ].join("\n\n"),
+        schema: generatedWorldBibleSchema,
+        tool: worldBibleTool,
+        attempts,
+        validationReports,
+        stageSummaries,
+        validate: (parsed) => [
+          {
+            category: "immersion",
+            issues: validateWorldBible(parsed).issues,
+          },
+        ],
+        summarize: (parsed) =>
+          `${parsed.title}: ${parsed.environmentalRules.length} environmental rules, ${parsed.contradictoryMyths.length} myth threads.`,
       });
 
-      const parsed = generatedWorldModuleSchema.safeParse(response?.input);
-      if (!parsed.success) {
-        throw new Error(`World generation returned invalid structured data: ${parsed.error.message}`);
+      const worldPromptContext = summarizeWorldBibleForPrompt(worldBible);
+
+      const worldSpineFactions = await runStructuredStage({
+        stage: "world_spine",
+        system: buildWorldGenSystemPrompt([
+          "Generate factions only.",
+          "Every faction must have a visible agenda, a public footprint, and pressure that affects ordinary people.",
+          "Favor territorial, commercial, religious, labor, or salvage conflicts over mythic destiny.",
+          "Use concise lowercase underscore keys because the engine will assign canonical ids later.",
+          "Every generated key must be 40 characters or fewer.",
+          "Keep the world compact: 5 to 12 factions.",
+          "At least half the factions should be civic, labor, commercial, military, or religious institutions that ordinary residents regularly deal with.",
+          "Reuse and sharpen the prompt's specific nouns instead of replacing them with generic organizations.",
+        ]),
+        buildUser: (correctionNotes) =>
+          [
+            buildWorldGenerationBasePrompt({
+              prompt: input.prompt,
+              previousDraft: input.previousDraft,
+              correctionNotes,
+            }),
+            formatPromptBlock("world_context", worldPromptContext),
+            formatFinalInstruction("Generate only factions for this world spine."),
+          ].join("\n\n"),
+        schema: worldSpineFactionsSchema,
+        tool: worldSpineFactionsTool,
+        attempts,
+        validationReports,
+        stageSummaries,
+        validate: (parsed) => [
+          {
+            category: "coherence",
+            issues: findDuplicateStrings(parsed.factions.map((faction) => faction.key)).map(
+              (key) => `Faction key ${key} is duplicated.`,
+            ),
+          },
+        ],
+        summarize: (parsed) => `${parsed.factions.length} factions with public agendas.`,
+      });
+
+      const worldSpineLocations = await runStructuredStage({
+        stage: "world_spine",
+        system: buildWorldGenSystemPrompt([
+          "Generate locations only.",
+          "Locations must feel distinct because of work, terrain, law, trade, hazard, or ritual, not vague grandeur.",
+          "Use only the provided faction keys when naming a controlling faction.",
+          "Each controlled location must visibly express who profits, patrols, or governs there.",
+          "Use concise lowercase underscore keys and keep the world reasonably compact: 8 to 15 locations.",
+          "Every generated key must be 40 characters or fewer.",
+          "At least half the locations should be work sites, civic hubs, chokepoints, or settlements ordinary people actually use day to day.",
+          "Preserve the prompt's specific imagery and avoid generic city, ruin, or temple reskins.",
+        ]),
+        buildUser: (correctionNotes) =>
+          [
+            buildWorldGenerationBasePrompt({
+              prompt: input.prompt,
+              previousDraft: input.previousDraft,
+              correctionNotes,
+            }),
+            formatPromptBlock("world_context", worldPromptContext),
+            formatPromptBlock(
+              "locked_factions",
+              summarizeFactionRefs(
+                worldSpineFactions.factions.map((faction) => ({
+                  key: faction.key,
+                  name: faction.name,
+                  type: faction.type,
+                  agenda: faction.agenda,
+                  publicFootprint: faction.publicFootprint,
+                })),
+              ),
+            ),
+            formatFinalInstruction(
+              "Generate only locations for this world spine. Use only known faction keys in controllingFactionKey.",
+            ),
+          ].join("\n\n"),
+        schema: worldSpineLocationsSchema,
+        tool: worldSpineLocationsTool,
+        attempts,
+        validationReports,
+        stageSummaries,
+        validate: (parsed) => {
+          const issues = findDuplicateStrings(parsed.locations.map((location) => location.key)).map(
+            (key) => `Location key ${key} is duplicated.`,
+          );
+          const factionKeys = new Set(worldSpineFactions.factions.map((faction) => faction.key));
+
+          parsed.locations.forEach((location) => {
+            if (
+              location.controllingFactionKey &&
+              !factionKeys.has(location.controllingFactionKey)
+            ) {
+              issues.push(`Location ${location.name} uses unknown controller ${location.controllingFactionKey}.`);
+            }
+          });
+
+          return [{ category: "coherence", issues }];
+        },
+        summarize: (parsed) => `${parsed.locations.length} pressured locations.`,
+      });
+
+      const worldSpineEdges = await runStructuredStage({
+        stage: "world_spine",
+        system: buildWorldGenSystemPrompt([
+          "Generate only travel edges.",
+          "The location graph must stay connected.",
+          "Every edge must include a physical travel constraint, danger, patrol, toll, weather issue, or territorial pressure.",
+          "Use only the provided location keys.",
+          "Use concise lowercase underscore keys and keep the network compact enough for a small open world.",
+          "Every generated key must be 40 characters or fewer. Abbreviate if necessary.",
+          "Keep edge descriptions to one tight sentence each.",
+          "Prefer short keys like route_1, route_2, route_3.",
+        ]),
+        buildUser: (correctionNotes) =>
+          [
+            buildWorldGenerationBasePrompt({
+              prompt: input.prompt,
+              previousDraft: input.previousDraft,
+              correctionNotes,
+            }),
+            formatPromptBlock("world_context", worldPromptContext),
+            formatPromptBlock(
+              "locked_locations",
+              summarizeLocationRefs(
+                worldSpineLocations.locations.map((location) => ({
+                  key: location.key,
+                  name: location.name,
+                  type: location.type,
+                  controlStatus: location.controlStatus,
+                  controllingFactionKey: location.controllingFactionKey,
+                  summary: location.summary,
+                })),
+              ),
+            ),
+            formatFinalInstruction("Generate only edges. Every location must be reachable from every other location."),
+          ].join("\n\n"),
+        schema: worldSpineEdgesSchema,
+        tool: worldSpineEdgesTool,
+        attempts,
+        validationReports,
+        stageSummaries,
+        validate: (parsed) => {
+          const issues = findDuplicateStrings(parsed.edges.map((edge) => edge.key)).map(
+            (key) => `Edge key ${key} is duplicated.`,
+          );
+          const locationKeys = new Set(worldSpineLocations.locations.map((location) => location.key));
+
+          parsed.edges.forEach((edge) => {
+            if (!locationKeys.has(edge.sourceKey)) {
+              issues.push(`Edge ${edge.key} uses unknown sourceKey ${edge.sourceKey}.`);
+            }
+            if (!locationKeys.has(edge.targetKey)) {
+              issues.push(`Edge ${edge.key} uses unknown targetKey ${edge.targetKey}.`);
+            }
+          });
+
+          return [{ category: "coherence", issues }];
+        },
+        summarize: (parsed) => `${parsed.edges.length} travel routes.`,
+      });
+
+      const worldSpineRelations = await runStructuredStage({
+        stage: "world_spine",
+        system: buildWorldGenSystemPrompt([
+          "Generate only faction relations.",
+          "Relations must reflect trade dependence, territorial disputes, labor leverage, doctrine clashes, or naval rivalry.",
+          "Use only the provided faction keys.",
+          "Use concise lowercase underscore keys and keep the political map readable.",
+          "Every generated key must be 40 characters or fewer.",
+          "Keep each relation summary to one tight sentence.",
+          "Prefer short keys like rel_1, rel_2, rel_3.",
+        ]),
+        buildUser: (correctionNotes) =>
+          [
+            buildWorldGenerationBasePrompt({
+              prompt: input.prompt,
+              previousDraft: input.previousDraft,
+              correctionNotes,
+            }),
+            formatPromptBlock("world_context", worldPromptContext),
+            formatPromptBlock(
+              "locked_factions",
+              summarizeFactionRefs(
+                worldSpineFactions.factions.map((faction) => ({
+                  key: faction.key,
+                  name: faction.name,
+                  type: faction.type,
+                  agenda: faction.agenda,
+                  publicFootprint: faction.publicFootprint,
+                })),
+              ),
+            ),
+            formatFinalInstruction("Generate only faction relations using the provided faction keys."),
+          ].join("\n\n"),
+        schema: worldSpineRelationsOnlySchema,
+        tool: worldSpineRelationsTool,
+        attempts,
+        validationReports,
+        stageSummaries,
+        validate: (parsed) => {
+          const issues = findDuplicateStrings(parsed.factionRelations.map((relation) => relation.key)).map(
+            (key) => `Faction relation key ${key} is duplicated.`,
+          );
+          const factionKeys = new Set(worldSpineFactions.factions.map((faction) => faction.key));
+
+          parsed.factionRelations.forEach((relation) => {
+            if (!factionKeys.has(relation.factionAKey) || !factionKeys.has(relation.factionBKey)) {
+              issues.push(`Faction relation ${relation.key} references an unknown faction key.`);
+            }
+          });
+
+          return [{ category: "coherence", issues }];
+        },
+        summarize: (parsed) => `${parsed.factionRelations.length} faction relations.`,
+      });
+
+      const worldSpine = {
+        locations: worldSpineLocations.locations,
+        edges: worldSpineEdges.edges,
+        factions: worldSpineFactions.factions,
+        factionRelations: worldSpineRelations.factionRelations,
+      };
+
+      const worldSpineParsed = generatedWorldSpineSchema.safeParse(worldSpine);
+      if (!worldSpineParsed.success) {
+        throw new Error(`world_spine returned invalid structured data: ${worldSpineParsed.error.message}`);
       }
 
-      const coherence = validateWorldModuleCoherence(parsed.data);
-      const playability = validateWorldModulePlayability(parsed.data);
+      const worldSpineValidation = validateWorldSpine(worldSpineParsed.data);
+      validationReports.push({
+        stage: "world_spine",
+        attempt: attempts.filter((attempt) => attempt.stage === "world_spine").length,
+        ok: worldSpineValidation.ok,
+        category: "coherence",
+        issues: worldSpineValidation.issues,
+      });
+      if (!worldSpineValidation.ok) {
+        throw new Error(`world_spine coherence failed: ${worldSpineValidation.issues.join("; ")}`);
+      }
+      stageSummaries.world_spine =
+        `${worldSpineParsed.data.locations.length} locations, ${worldSpineParsed.data.factions.length} factions, ${worldSpineParsed.data.edges.length} routes.`;
 
-      if (!coherence.ok) {
-        throw new Error(`World coherence failed: ${coherence.issues.join("; ")}`);
+      const idMaps: OpenWorldGenerationArtifacts["idMaps"] = {
+        factions: assignCanonicalIds(worldSpineParsed.data.factions.map((faction) => faction.key), "fac"),
+        locations: assignCanonicalIds(worldSpineParsed.data.locations.map((location) => location.key), "loc"),
+        edges: assignCanonicalIds(worldSpineParsed.data.edges.map((edge) => edge.key), "edge"),
+        factionRelations: assignCanonicalIds(
+          worldSpineParsed.data.factionRelations.map((relation) => relation.key),
+          "rel",
+        ),
+        npcs: {},
+        information: {},
+        commodities: {},
+      };
+
+      const lockedLocations = worldSpineParsed.data.locations.map((location) => ({
+        key: location.key,
+        id: idMaps.locations[location.key],
+        name: location.name,
+        type: location.type,
+        summary: location.summary,
+        localIdentity: location.localIdentity,
+        controlStatus: location.controlStatus,
+      }));
+      const lockedFactions = worldSpineParsed.data.factions.map((faction) => ({
+        key: faction.key,
+        id: idMaps.factions[faction.key],
+        name: faction.name,
+        type: faction.type,
+        agenda: faction.agenda,
+        publicFootprint: faction.publicFootprint,
+      }));
+
+      const regionalLifeBatches = chunkArray(lockedLocations, REGIONAL_LIFE_BATCH_SIZE);
+      const regionalLifeBatchResults: RegionalLifeDraft["locations"][] = [];
+
+      for (const [batchIndex, locationBatch] of regionalLifeBatches.entries()) {
+        const regionalLifeBatchSchema = generatedRegionalLifeSchema.extend({
+          locations: generatedRegionalLifeSchema.shape.locations.length(locationBatch.length),
+        });
+        const regionalLifeBatchTool = createStructuredTool(
+          regionalLifeTool.name,
+          regionalLifeTool.description,
+          regionalLifeBatchSchema,
+        );
+
+        const regionalLifeBatch = await runStructuredStage({
+          stage: "regional_life",
+          system: buildWorldGenSystemPrompt([
+            "Generate the lived-in regional layer for each locked location in this batch.",
+            "Each location needs public activity, local pressure, everyday texture, hazards, ordinary knowledge, and reasons a resident stays or leaves.",
+            "Focus on workers, routines, institutions, rot, shortages, tolls, patrols, and weather exposure.",
+            `Return exactly ${locationBatch.length} records, one per location id in the batch.`,
+          ]),
+          buildUser: (correctionNotes) =>
+            [
+              buildWorldGenerationBasePrompt({
+                prompt: input.prompt,
+                previousDraft: input.previousDraft,
+                correctionNotes,
+              }),
+              formatPromptBlock("world_context", worldPromptContext),
+              formatPromptBlock(
+                "locked_locations_batch",
+                summarizeLocationRefs(locationBatch),
+              ),
+              formatFinalInstruction([
+                "Use only the provided location ids.",
+                `Return exactly ${locationBatch.length} regional life records for this batch.`,
+              ]),
+            ].join("\n\n"),
+          schema: regionalLifeBatchSchema,
+          tool: regionalLifeBatchTool,
+          attempts,
+          validationReports,
+          stageSummaries,
+          validate: (parsed) => [
+            {
+              category: "immersion",
+              issues: validateRegionalLife(parsed, locationBatch.map((location) => location.id)).issues,
+            },
+          ],
+          summarize: (parsed) =>
+            `Batch ${batchIndex + 1}/${regionalLifeBatches.length}: ${parsed.locations.length} regional life profiles.`,
+        });
+
+        regionalLifeBatchResults.push(regionalLifeBatch.locations);
       }
 
-      if (!playability.ok) {
-        throw new Error(`World playability failed: ${playability.issues.join("; ")}`);
+      const regionalLife: RegionalLifeDraft = {
+        locations: regionalLifeBatchResults.flat(),
+      };
+      const regionalLifeValidation = validateRegionalLife(
+        regionalLife,
+        lockedLocations.map((location) => location.id),
+      );
+      validationReports.push({
+        stage: "regional_life",
+        attempt: attempts.filter((attempt) => attempt.stage === "regional_life").length,
+        ok: regionalLifeValidation.ok,
+        category: "immersion",
+        issues: regionalLifeValidation.issues,
+      });
+      if (!regionalLifeValidation.ok) {
+        throw new Error(`regional_life immersion failed: ${regionalLifeValidation.issues.join("; ")}`);
+      }
+      stageSummaries.regional_life =
+        `${regionalLife.locations.length} regional life profiles across ${regionalLifeBatches.length} batches.`;
+
+      const socialCastBatches = chunkArray(lockedLocations, SOCIAL_CAST_BATCH_SIZE);
+      const socialCastBatchResults: z.infer<typeof generatedSocialLayerInputSchema>["npcs"][] = [];
+      const regionalLifeDigest = summarizeRegionalLifeForPrompt(regionalLife);
+
+      for (const [batchIndex, locationBatch] of socialCastBatches.entries()) {
+        const socialBatchSchema = generatedSocialLayerInputSchema.extend({
+          npcs: generatedSocialLayerInputSchema.shape.npcs.length(locationBatch.length),
+        });
+        const socialBatchTool = createStructuredTool(
+          socialCastTool.name,
+          socialCastTool.description,
+          socialBatchSchema,
+        );
+
+        const socialBatch = await runStructuredStage({
+          stage: "social_cast",
+          system: buildWorldGenSystemPrompt([
+            "Generate systemic NPCs for this world map batch.",
+            "Every NPC must have a mundane routine, a current concern tied to a local hazard, faction pressure, or commodity shortage, and a transactional or territorial reason to cross paths with the player.",
+            "Do not create ornamental quest-givers or pleas for a hero.",
+            `Return exactly ${locationBatch.length} NPCs, one anchored in each location in the batch.`,
+          ]),
+          buildUser: (correctionNotes) =>
+            [
+              buildWorldGenerationBasePrompt({
+                prompt: input.prompt,
+                previousDraft: input.previousDraft,
+                correctionNotes,
+              }),
+              formatPromptBlock("world_context", worldPromptContext),
+              formatPromptBlock("locked_locations_batch", summarizeLocationRefs(locationBatch)),
+              formatPromptBlock("locked_factions", summarizeFactionRefs(lockedFactions)),
+              formatPromptBlock(
+                "regional_life_digest",
+                summarizeRegionalLifeRefs({
+                  locations: regionalLife.locations.filter((entry) =>
+                    locationBatch.some((location) => location.id === entry.locationId),
+                  ),
+                }),
+              ),
+              formatFinalInstruction([
+                "Use only the provided location ids and faction ids.",
+                `Return exactly ${locationBatch.length} NPCs for this batch, with one currentLocationId per batch location.`,
+              ]),
+            ].join("\n\n"),
+          schema: socialBatchSchema,
+          tool: socialBatchTool,
+          attempts,
+          validationReports,
+          stageSummaries,
+          validate: (parsed) => {
+            const issues: string[] = [];
+            const locationIds = new Set(locationBatch.map((location) => location.id));
+            const allLocationIds = new Set(lockedLocations.map((location) => location.id));
+            const factionIds = new Set(lockedFactions.map((faction) => faction.id));
+            const counts = new Map<string, number>();
+
+            for (const npc of parsed.npcs) {
+              if (!locationIds.has(npc.currentLocationId)) {
+                issues.push(`NPC ${npc.name} must use a currentLocationId from this batch.`);
+              }
+              if (npc.factionId && !factionIds.has(npc.factionId)) {
+                issues.push(`NPC ${npc.name} must use a locked factionId.`);
+              }
+              for (const tiedLocationId of npc.ties.locationIds) {
+                if (!allLocationIds.has(tiedLocationId)) {
+                  issues.push(`NPC ${npc.name} ties reference unknown location ${tiedLocationId}.`);
+                }
+              }
+              for (const bridgeLocationId of npc.bridgeLocationIds) {
+                if (!allLocationIds.has(bridgeLocationId)) {
+                  issues.push(`NPC ${npc.name} bridgeLocationIds reference unknown location ${bridgeLocationId}.`);
+                }
+              }
+              for (const bridgeFactionId of npc.bridgeFactionIds) {
+                if (!factionIds.has(bridgeFactionId)) {
+                  issues.push(`NPC ${npc.name} bridgeFactionIds reference unknown faction ${bridgeFactionId}.`);
+                }
+              }
+
+              counts.set(npc.currentLocationId, (counts.get(npc.currentLocationId) ?? 0) + 1);
+            }
+
+            for (const location of locationBatch) {
+              if ((counts.get(location.id) ?? 0) !== 1) {
+                issues.push(`Batch social cast must include exactly one NPC anchored at ${location.id}.`);
+              }
+            }
+
+            return [{ category: "immersion", issues }];
+          },
+          summarize: (parsed) =>
+            `Batch ${batchIndex + 1}/${socialCastBatches.length}: ${parsed.npcs.length} anchored NPCs.`,
+        });
+
+        socialCastBatchResults.push(socialBatch.npcs);
       }
 
-      return parsed.data;
+      const socialCastInput: z.infer<typeof generatedSocialLayerInputSchema> = {
+        npcs: socialCastBatchResults.flat(),
+      };
+      stageSummaries.social_cast =
+        `${socialCastInput.npcs.length} NPCs across ${socialCastBatches.length} batches.`;
+
+      const socialNpcIds = assignIndexedIds(
+        socialCastInput.npcs,
+        "npc",
+        (npc, index) => `${npc.name}_${npc.role}_${index + 1}`,
+      );
+
+      idMaps.npcs = Object.fromEntries(
+        socialCastInput.npcs.map((npc, index) => [`npc_${index + 1}`, socialNpcIds[index]]),
+      );
+
+      const socialLayer: OpenWorldGenerationArtifacts["socialLayer"] = {
+        npcs: socialCastInput.npcs.map((npc, index) => ({
+          id: socialNpcIds[index],
+          name: npc.name,
+          role: npc.role,
+          summary: npc.summary,
+          description: `${npc.description} Current concern: ${npc.currentConcern}. You might cross paths because ${npc.playerCrossPath.toLowerCase()}.`,
+          factionId: npc.factionId,
+          currentLocationId: npc.currentLocationId,
+          approval: npc.approval,
+          isCompanion: npc.isCompanion,
+        })),
+        socialGravity: socialCastInput.npcs.map((npc, index) => ({
+          npcId: socialNpcIds[index],
+          importance: npc.importance,
+          bridgeLocationIds: npc.bridgeLocationIds,
+          bridgeFactionIds: npc.bridgeFactionIds,
+        })),
+      };
+
+      const socialValidation = validateSocialLayer(
+        socialLayer,
+        lockedLocations.map((location) => location.id),
+      );
+      validationReports.push({
+        stage: "social_cast",
+        attempt: attempts.filter((attempt) => attempt.stage === "social_cast").length,
+        ok: socialValidation.ok,
+        category: "immersion",
+        issues: socialValidation.issues,
+      });
+      if (!socialValidation.ok) {
+        throw new Error(`social_cast immersion failed: ${socialValidation.issues.join("; ")}`);
+      }
+
+      const lockedNpcs = socialLayer.npcs.map((npc) => ({
+        id: npc.id,
+        name: npc.name,
+        role: npc.role,
+        currentLocationId: npc.currentLocationId,
+        factionId: npc.factionId,
+      }));
+
+      const knowledgeWebInput = await runStructuredStage({
+        stage: "knowledge_web",
+        system: buildWorldGenSystemPrompt([
+          "Generate a layered knowledge web for the locked world.",
+          "Public information must provide a physical location, route, object, document, or NPC lead.",
+          "Guarded information must imply what leverage, payment, status, or relationship is required to obtain it.",
+          "Secrets should resolve to concrete places, ledgers, caches, devices, routes, or hidden actors rather than pure metaphysics.",
+        ]),
+        buildUser: (correctionNotes) =>
+          [
+            buildWorldGenerationBasePrompt({
+              prompt: input.prompt,
+              previousDraft: input.previousDraft,
+              correctionNotes,
+            }),
+            formatPromptBlock("world_context", worldPromptContext),
+            formatPromptBlock("locked_locations", summarizeLocationRefs(lockedLocations)),
+            formatPromptBlock("locked_factions", summarizeFactionRefs(lockedFactions)),
+            formatPromptBlock("locked_npcs", summarizeNpcRefs(lockedNpcs)),
+            formatPromptBlock("regional_life_digest", summarizeRegionalLifeRefs(regionalLife)),
+            formatFinalInstruction(
+              "Use only the provided ids for locations, factions, and NPCs. Use unique keys for information nodes.",
+            ),
+          ].join("\n\n"),
+        schema: generatedKnowledgeWebInputSchema,
+        tool: knowledgeWebTool,
+        attempts,
+        validationReports,
+        stageSummaries,
+        validate: (parsed) => {
+          const issues: string[] = [];
+          const locationIds = new Set(lockedLocations.map((location) => location.id));
+          const factionIds = new Set(lockedFactions.map((faction) => faction.id));
+          const npcIds = new Set(lockedNpcs.map((npc) => npc.id));
+
+          for (const information of parsed.information) {
+            if (information.locationId && !locationIds.has(information.locationId)) {
+              issues.push(`Information ${information.title} must use a locked locationId.`);
+            }
+            if (information.factionId && !factionIds.has(information.factionId)) {
+              issues.push(`Information ${information.title} must use a locked factionId.`);
+            }
+            if (information.sourceNpcId && !npcIds.has(information.sourceNpcId)) {
+              issues.push(`Information ${information.title} must use a locked sourceNpcId.`);
+            }
+          }
+
+          const accessibleInfoRatio =
+            parsed.information.length === 0
+              ? 1
+              : parsed.information.filter((information) => information.accessibility === "public")
+                  .length / parsed.information.length;
+
+          if (accessibleInfoRatio < 0.3) {
+            issues.push("At least 30% of information should be publicly accessible.");
+          }
+
+          for (const location of lockedLocations) {
+            const hasPublicLead = parsed.information.some(
+              (information) =>
+                information.locationId === location.id &&
+                information.accessibility === "public" &&
+                information.actionLead.trim().length > 0,
+            );
+            if (!hasPublicLead) {
+              issues.push(`Location ${location.name} needs a public actionable lead.`);
+            }
+          }
+
+          return [{ category: "playability", issues }];
+        },
+        summarize: (parsed) =>
+          `${parsed.information.length} information nodes with ${parsed.mythClusters.length} myth clusters.`,
+      });
+
+      idMaps.information = assignCanonicalIds(
+        knowledgeWebInput.information.map((information) => information.key),
+        "info",
+      );
+      const informationLinkIds = assignCanonicalIds(
+        knowledgeWebInput.informationLinks.map((link) => link.key),
+        "link",
+      );
+
+      const knowledgeLayer = {
+        information: knowledgeWebInput.information.map((information) => ({
+          id: idMaps.information[information.key],
+          title: information.title,
+          summary: information.summary,
+          content: `${information.content} Lead: ${information.actionLead}. Discovery path: ${information.discoverHow}.`,
+          truthfulness: information.truthfulness,
+          accessibility: information.accessibility,
+          locationId: information.locationId,
+          factionId: information.factionId,
+          sourceNpcId: information.sourceNpcId,
+        })),
+        informationLinks: knowledgeWebInput.informationLinks.map((link) => ({
+          id: informationLinkIds[link.key],
+          sourceId: idMaps.information[link.sourceKey],
+          targetId: idMaps.information[link.targetKey],
+          linkType: link.linkType,
+        })),
+        mythClusters: knowledgeWebInput.mythClusters.map((cluster) => ({
+          theme: cluster.theme,
+          publicBeliefs: cluster.publicBeliefs,
+          hiddenTruth: cluster.hiddenTruth,
+          linkedInformationIds: cluster.linkedInformationKeys.map(
+            (informationKey) => idMaps.information[informationKey],
+          ),
+          contradictionThemes: cluster.contradictionThemes,
+        })),
+        pressureSeeds: knowledgeWebInput.pressureSeeds,
+      };
+
+      const economyMaterialLifeInput = await runStructuredStage({
+        stage: "economy_material_life",
+        system: buildWorldGenSystemPrompt([
+          "Generate commodities, market prices, and location-level material life for the locked world.",
+          "Include staple goods, raw materials, and at least one controlled or illicit trade pressure.",
+          "No generic magical loot or ornamental adventuring gear; focus on bulk goods and daily necessities.",
+          "Every commodity should imply scarcity, transport strain, monopoly pressure, hazard, or spoilage.",
+          "Every major location should have a trade identity or a deliberate reason for lacking one.",
+        ]),
+        buildUser: (correctionNotes) =>
+          [
+            buildWorldGenerationBasePrompt({
+              prompt: input.prompt,
+              previousDraft: input.previousDraft,
+              correctionNotes,
+            }),
+            formatPromptBlock("world_context", worldPromptContext),
+            formatPromptBlock("locked_locations", summarizeLocationRefs(lockedLocations)),
+            formatPromptBlock("locked_factions", summarizeFactionRefs(lockedFactions)),
+            formatPromptBlock("locked_npcs", summarizeNpcRefs(lockedNpcs)),
+            formatPromptBlock("regional_life_digest", summarizeRegionalLifeRefs(regionalLife)),
+            formatFinalInstruction(
+              "Use only the provided location ids, faction ids, and NPC ids. Use unique commodity keys.",
+            ),
+          ].join("\n\n"),
+        schema: generatedEconomyMaterialLifeInputSchema,
+        tool: economyMaterialLifeTool,
+        attempts,
+        validationReports,
+        stageSummaries,
+        validate: (parsed) => {
+          const issues: string[] = [];
+          const locationIds = new Set(lockedLocations.map((location) => location.id));
+          const factionIds = new Set(lockedFactions.map((faction) => faction.id));
+          const npcIds = new Set(lockedNpcs.map((npc) => npc.id));
+
+          for (const commodity of parsed.commodities) {
+            for (const factionId of commodity.profitFactionIds) {
+              if (!factionIds.has(factionId)) {
+                issues.push(`Commodity ${commodity.name} references unknown profit faction ${factionId}.`);
+              }
+            }
+          }
+
+          for (const price of parsed.marketPrices) {
+            if (!locationIds.has(price.locationId)) {
+              issues.push(`Market price for ${price.commodityKey} uses unknown location ${price.locationId}.`);
+            }
+            if (price.factionId && !factionIds.has(price.factionId)) {
+              issues.push(`Market price for ${price.commodityKey} uses unknown faction ${price.factionId}.`);
+            }
+            if (price.vendorNpcId && !npcIds.has(price.vendorNpcId)) {
+              issues.push(`Market price for ${price.commodityKey} uses unknown vendor ${price.vendorNpcId}.`);
+            }
+          }
+
+          for (const location of lockedLocations) {
+            if (!parsed.locationTradeIdentity.some((identity) => identity.locationId === location.id)) {
+              issues.push(`Location ${location.name} needs a trade identity entry.`);
+            }
+          }
+
+          return [{ category: "immersion", issues }];
+        },
+        summarize: (parsed) =>
+          `${parsed.commodities.length} commodities and ${parsed.marketPrices.length} market prices.`,
+      });
+
+      idMaps.commodities = assignCanonicalIds(
+        economyMaterialLifeInput.commodities.map((commodity) => commodity.key),
+        "com",
+      );
+
+      const commodityIds = idMaps.commodities;
+      const marketPriceIds = assignIndexedIds(
+        economyMaterialLifeInput.marketPrices,
+        "price",
+        (price, index) => `${price.commodityKey}_${price.locationId}_${index + 1}`,
+      );
+
+      const knowledgeEconomy: OpenWorldGenerationArtifacts["knowledgeEconomy"] = {
+        ...knowledgeLayer,
+        commodities: economyMaterialLifeInput.commodities.map((commodity) => ({
+          id: commodityIds[commodity.key],
+          name: commodity.name,
+          baseValue: commodity.baseValue,
+          tags: uniqueNames([
+            ...commodity.tags,
+            commodity.everydayUse,
+            commodity.scarcityDriver,
+          ]),
+        })),
+        marketPrices: economyMaterialLifeInput.marketPrices.map((price, index) => ({
+          id: marketPriceIds[index],
+          commodityId: commodityIds[price.commodityKey],
+          locationId: price.locationId,
+          vendorNpcId: price.vendorNpcId,
+          factionId: price.factionId,
+          modifier: price.modifier,
+          stock: price.stock,
+          legalStatus: price.legalStatus,
+        })),
+        locationTradeIdentity: economyMaterialLifeInput.locationTradeIdentity,
+      };
+
+      const spineModule: GeneratedWorldModule = {
+        title: worldBible.title,
+        premise: worldBible.premise,
+        tone: worldBible.tone,
+        setting: worldBible.setting,
+        locations: worldSpine.locations.map((location) => ({
+          id: idMaps.locations[location.key],
+          name: location.name,
+          type: location.type,
+          summary: location.summary,
+          description: enrichLocationDescription(
+            `${location.description} ${location.localIdentity}`,
+            regionalLife.locations.find((entry) => entry.locationId === idMaps.locations[location.key]),
+          ),
+          state: location.state,
+          controllingFactionId: location.controllingFactionKey
+            ? idMaps.factions[location.controllingFactionKey]
+            : null,
+          tags: uniqueNames([...location.tags, location.controlStatus]),
+        })),
+        edges: worldSpine.edges.map((edge) => ({
+          id: idMaps.edges[edge.key],
+          sourceId: idMaps.locations[edge.sourceKey],
+          targetId: idMaps.locations[edge.targetKey],
+          travelTimeMinutes: edge.travelTimeMinutes,
+          dangerLevel: edge.dangerLevel,
+          currentStatus: edge.currentStatus,
+          description: edge.description,
+        })),
+        factions: worldSpine.factions.map((faction) => ({
+          id: idMaps.factions[faction.key],
+          name: faction.name,
+          type: faction.type,
+          summary: `${faction.summary} ${faction.publicFootprint}`,
+          agenda: faction.agenda,
+          resources: faction.resources,
+          pressureClock: faction.pressureClock,
+        })),
+        factionRelations: worldSpine.factionRelations.map((relation) => ({
+          id: idMaps.factionRelations[relation.key],
+          factionAId: idMaps.factions[relation.factionAKey],
+          factionBId: idMaps.factions[relation.factionBKey],
+          stance: relation.stance,
+        })),
+        npcs: socialLayer.npcs,
+        information: knowledgeEconomy.information,
+        informationLinks: knowledgeEconomy.informationLinks,
+        commodities: knowledgeEconomy.commodities,
+        marketPrices: knowledgeEconomy.marketPrices,
+        entryPoints: [],
+      };
+
+      const knowledgeEconomyValidation = validateKnowledgeEconomy(
+        knowledgeEconomy,
+        lockedLocations.map((location) => location.id),
+      );
+      validationReports.push({
+        stage: "economy_material_life",
+        attempt: attempts.filter((attempt) => attempt.stage === "economy_material_life").length,
+        ok: knowledgeEconomyValidation.ok,
+        category: "immersion",
+        issues: knowledgeEconomyValidation.issues,
+      });
+      if (!knowledgeEconomyValidation.ok) {
+        throw new Error(
+          `economy_material_life immersion failed: ${knowledgeEconomyValidation.issues.join("; ")}`,
+        );
+      }
+
+      const lockedInformation = knowledgeEconomy.information.map((information) => ({
+        id: information.id,
+        title: information.title,
+        accessibility: information.accessibility,
+        locationId: information.locationId,
+        sourceNpcId: information.sourceNpcId,
+      }));
+
+      const entryContextsInput = await runStructuredStage({
+        stage: "entry_contexts",
+        system: buildWorldGenSystemPrompt([
+          "Generate 3 to 5 grounded entry contexts for the completed world.",
+          "Each entry should begin with minor but immediate personal, commercial, legal, territorial, or administrative pressure.",
+          "The player should arrive as another person navigating an ongoing society, not as a chosen savior.",
+          "Public leads should point to someone, somewhere, or something the player can pursue immediately.",
+        ]),
+        buildUser: (correctionNotes) =>
+          [
+            buildWorldGenerationBasePrompt({
+              prompt: input.prompt,
+              previousDraft: input.previousDraft,
+              correctionNotes,
+            }),
+            formatPromptBlock("world_context", worldPromptContext),
+            formatPromptBlock("locked_locations", summarizeLocationRefs(lockedLocations)),
+            formatPromptBlock("locked_npcs", summarizeNpcRefs(lockedNpcs)),
+            formatPromptBlock("locked_information", summarizeInformationRefs(lockedInformation)),
+            formatPromptBlock("regional_life_digest", summarizeRegionalLifeRefs(regionalLife)),
+            formatPromptBlock("social_gravity", summarizeSocialGravityRefs(socialLayer.socialGravity)),
+            formatFinalInstruction("Use only the provided ids for locations, NPCs, and information."),
+          ].join("\n\n"),
+        schema: generatedEntryContextsInputSchema,
+        tool: entryContextsTool,
+        attempts,
+        validationReports,
+        stageSummaries,
+        validate: (parsed) => {
+          const issues: string[] = [];
+          const locationIds = new Set(lockedLocations.map((location) => location.id));
+          const npcIds = new Set(lockedNpcs.map((npc) => npc.id));
+          const informationIds = new Set(lockedInformation.map((information) => information.id));
+
+          for (const entry of parsed.entryPoints) {
+            if (!locationIds.has(entry.startLocationId)) {
+              issues.push(`Entry context ${entry.title} must use a locked startLocationId.`);
+            }
+            if (!npcIds.has(entry.localContactNpcId)) {
+              issues.push(`Entry context ${entry.title} must use a locked localContactNpcId.`);
+            }
+            for (const npcId of entry.presentNpcIds) {
+              if (!npcIds.has(npcId)) {
+                issues.push(`Entry context ${entry.title} references unknown present NPC ${npcId}.`);
+              }
+            }
+            for (const informationId of entry.initialInformationIds) {
+              if (!informationIds.has(informationId)) {
+                issues.push(
+                  `Entry context ${entry.title} references unknown information ${informationId}.`,
+                );
+              }
+            }
+          }
+
+          const provisionalEntryContexts = {
+            entryPoints: parsed.entryPoints.map((entry, index) => ({
+              id: `entry_validation_${index + 1}`,
+              title: entry.title,
+              summary: entry.summary,
+              startLocationId: entry.startLocationId,
+              presentNpcIds: entry.presentNpcIds,
+              initialInformationIds: entry.initialInformationIds,
+              immediatePressure: entry.immediatePressure,
+              publicLead: entry.publicLead,
+              localContactNpcId: entry.localContactNpcId,
+              mundaneActionPath: entry.mundaneActionPath,
+              evidenceWorldAlreadyMoving: entry.evidenceWorldAlreadyMoving,
+            })),
+          };
+
+          const provisionalModule: GeneratedWorldModule = {
+            ...spineModule,
+            entryPoints: provisionalEntryContexts.entryPoints.map((entryPoint) => ({
+              id: entryPoint.id,
+              title: entryPoint.title,
+              summary: entryPoint.summary,
+              startLocationId: entryPoint.startLocationId,
+              presentNpcIds: entryPoint.presentNpcIds,
+              initialInformationIds: entryPoint.initialInformationIds,
+            })),
+          };
+
+          return [
+            {
+              category: "playability",
+              issues: [
+                ...issues,
+                ...validateEntryContexts(provisionalEntryContexts, provisionalModule).issues,
+              ],
+            },
+          ];
+        },
+        summarize: (parsed) => `${parsed.entryPoints.length} entry contexts with pressure and public leads.`,
+      });
+
+      const entryPointIds = assignIndexedIds(
+        entryContextsInput.entryPoints,
+        "entry",
+        (entry, index) => `${entry.title}_${index + 1}`,
+      );
+
+      const entryContexts: OpenWorldGenerationArtifacts["entryContexts"] = {
+        entryPoints: entryContextsInput.entryPoints.map((entry, index) => ({
+          id: entryPointIds[index],
+          title: entry.title,
+          summary: entry.summary,
+          startLocationId: entry.startLocationId,
+          presentNpcIds: entry.presentNpcIds,
+          initialInformationIds: entry.initialInformationIds,
+          immediatePressure: entry.immediatePressure,
+          publicLead: entry.publicLead,
+          localContactNpcId: entry.localContactNpcId,
+          mundaneActionPath: entry.mundaneActionPath,
+          evidenceWorldAlreadyMoving: entry.evidenceWorldAlreadyMoving,
+        })),
+      };
+
+      const draft: GeneratedWorldModule = {
+        ...spineModule,
+        entryPoints: entryContexts.entryPoints.map((entryPoint) => ({
+          id: entryPoint.id,
+          title: entryPoint.title,
+          summary: `${entryPoint.summary} Immediate pressure: ${entryPoint.immediatePressure}. Public lead: ${entryPoint.publicLead}.`,
+          startLocationId: entryPoint.startLocationId,
+          presentNpcIds: entryPoint.presentNpcIds,
+          initialInformationIds: entryPoint.initialInformationIds,
+        })),
+      };
+
+      const entryValidation = validateEntryContexts(entryContexts, draft);
+      validationReports.push({
+        stage: "entry_contexts",
+        attempt: attempts.filter((attempt) => attempt.stage === "entry_contexts").length,
+        ok: entryValidation.ok,
+        category: "playability",
+        issues: entryValidation.issues,
+      });
+      if (!entryValidation.ok) {
+        throw new Error(`entry_contexts playability failed: ${entryValidation.issues.join("; ")}`);
+      }
+
+      const coherence = validateWorldModuleCoherence(draft);
+      const playability = validateWorldModulePlayability(draft);
+      const immersion = validateWorldModuleImmersion(draft);
+      for (const [category, report] of [
+        ["coherence", coherence],
+        ["playability", playability],
+        ["immersion", immersion],
+      ] as const) {
+        validationReports.push({
+          stage: "final_world",
+          attempt: 1,
+          ok: report.ok,
+          category,
+          issues: report.issues,
+        });
+      }
+
+      logOpenRouterResponse("world.validation", {
+        coherenceOk: coherence.ok,
+        coherenceIssues: coherence.issues,
+        playabilityOk: playability.ok,
+        playabilityIssues: playability.issues,
+        immersionOk: immersion.ok,
+        immersionIssues: immersion.issues,
+        worldSummary: {
+          title: draft.title,
+          locations: draft.locations.length,
+          factions: draft.factions.length,
+          npcs: draft.npcs.length,
+          information: draft.information.length,
+          publicInformation: draft.information.filter((entry) => entry.accessibility === "public").length,
+          entryPoints: draft.entryPoints.length,
+        },
+      });
+
+      if (!coherence.ok || !playability.ok || !immersion.ok) {
+        throw new Error(
+          [
+            !coherence.ok ? `World coherence failed: ${coherence.issues.join("; ")}` : "",
+            !playability.ok ? `World playability failed: ${playability.issues.join("; ")}` : "",
+            !immersion.ok ? `World immersion failed: ${immersion.issues.join("; ")}` : "",
+          ]
+            .filter(Boolean)
+            .join(" | "),
+        );
+      }
+
+      const artifacts: OpenWorldGenerationArtifacts = {
+        prompt: input.prompt,
+        model: env.openRouterModel,
+        createdAt: new Date().toISOString(),
+        worldBible,
+        worldSpine,
+        regionalLife,
+        socialLayer,
+        knowledgeEconomy,
+        entryContexts,
+        attempts,
+        validationReports,
+        idMaps,
+        stageSummaries,
+      };
+
+      return {
+        draft,
+        artifacts,
+      };
     } catch (error) {
+      logOpenRouterResponse("world.error", {
+        message: error instanceof Error ? error.message : String(error),
+      });
       throw new Error(error instanceof Error ? error.message : "World generation failed.");
     }
   }
@@ -567,38 +2638,75 @@ class DungeonMasterClient {
         system: [
           "Write the opening scene for a chosen entry point in an open-world solo RPG.",
           "Stay inside the selected entry-point bubble and do not invent off-screen mechanical facts.",
+          "Open on immediate pressure, sensory detail, and a situation a normal person can act on right now.",
+          "Avoid prophecy, trailer voiceover, destiny framing, and broad setting-summary prose.",
+          "Scene summary must be 40 words or fewer.",
           "Return narration, an active threat, a scene summary, and exact ids for the starting location, present NPCs, and cited information via the provided tool schema.",
-          "Start with active pressure, sensory detail, and a socially legible situation the player can immediately act on.",
-          "Make the opening feel like a live moment in a wider world, not a trailer voiceover or setting summary.",
         ].join("\n"),
-        user: JSON.stringify({
-          module: summarizeWorld(input.module),
-          entryPoint: input.entryPoint,
-          startLocation: location,
-          presentNpcs,
-          seededInformation: seededInformation.map((entry) => ({
-            id: entry.id,
-            title: entry.title,
-            summary: entry.summary,
-          })),
-          character: {
+        user: [
+          formatPromptBlock("module_summary", summarizeWorld(input.module)),
+          formatPromptBlock(
+            "generation_artifacts",
+            input.artifacts
+              ? {
+                  worldBible: {
+                    worldOverview: input.artifacts.worldBible.worldOverview,
+                    immersionAnchors: input.artifacts.worldBible.immersionAnchors,
+                    contradictoryMyths: input.artifacts.worldBible.contradictoryMyths,
+                  },
+                  regionalLife: input.artifacts.regionalLife.locations.filter(
+                    (entry) => entry.locationId === input.entryPoint.startLocationId,
+                  ),
+                  entryContext: input.artifacts.entryContexts.entryPoints.find(
+                    (entry) => entry.id === input.entryPoint.id,
+                  ),
+                }
+              : null,
+          ),
+          formatPromptBlock("entry_point", input.entryPoint),
+          formatPromptBlock("start_location", location),
+          formatPromptBlock("present_npcs", presentNpcs),
+          formatPromptBlock(
+            "seeded_information",
+            seededInformation.map((entry) => ({
+              id: entry.id,
+              title: entry.title,
+              summary: entry.summary,
+            })),
+          ),
+          formatPromptBlock("character", {
             name: input.character.name,
             archetype: input.character.archetype,
             backstory: input.character.backstory,
-          },
-          prompt: input.prompt ?? null,
-          previousDraft: input.previousDraft ?? null,
-        }),
+          }),
+          formatPromptBlock("prompt", input.prompt ?? null),
+          formatPromptBlock("previous_draft", input.previousDraft ?? null),
+        ].join("\n\n"),
         tools: [openingTool],
+      });
+
+      logOpenRouterResponse("opening.raw_input", {
+        preview: toPreview(response?.input),
       });
 
       const parsed = generatedCampaignOpeningSchema.safeParse(response?.input);
       if (!parsed.success) {
+        logOpenRouterResponse("opening.schema_failure", {
+          issues: parsed.error.issues,
+          inputPreview: toPreview(response?.input),
+        });
         throw new Error(`Opening generation returned invalid structured data: ${parsed.error.message}`);
       }
 
+      logOpenRouterResponse("opening.success", {
+        preview: toPreview(parsed.data),
+      });
+
       return parsed.data;
     } catch (error) {
+      logOpenRouterResponse("opening.error", {
+        message: error instanceof Error ? error.message : String(error),
+      });
       throw new Error(error instanceof Error ? error.message : "Opening generation failed.");
     }
   }
@@ -607,28 +2715,43 @@ class DungeonMasterClient {
     try {
       const response = await runCompletion({
         system: [
-          "You are the player's senses in a simulated world.",
+          "You are the player's senses and action router in a simulated world.",
           "Use exactly one tool.",
           "Do not invent named mechanical entities outside the provided context.",
           "Every executable tool call must include timeMode, timeElapsed, narration, suggestedActions, and citedEntities.",
-          "Use request_clarification if the action is too ambiguous to map safely.",
+          "Tool routing hierarchy:",
+          "1. Use execute_travel when the player clearly moves to a known adjacent node or route.",
+          "2. Use execute_converse when the player addresses or negotiates with a named or clearly described NPC.",
+          "3. Use execute_investigate when the player searches, examines closely, tracks evidence, or tries to uncover hidden information.",
+          "4. Use execute_observe when the player is mainly looking, listening, waiting, or taking in the current scene.",
+          "5. Use execute_freeform for a concrete action that does not fit the other tools but can still be resolved safely.",
+          "6. Use request_clarification if the action is too ambiguous, impossible to map, or missing a required target.",
         ].join("\n"),
-        user: JSON.stringify({
-          action: input.playerAction,
-          context: input.promptContext,
-          character: {
+        user: [
+          formatPromptBlock("action", input.playerAction),
+          formatPromptBlock("context", input.promptContext),
+          formatPromptBlock("character", {
             name: input.character.name,
             archetype: input.character.archetype,
             stats: input.character.stats,
-          },
-        }),
+          }),
+        ].join("\n\n"),
         tools: actionTools,
       });
 
       const toolName = response?.name;
       const inputPayload = response?.input;
 
+      logOpenRouterResponse("turn.raw_input", {
+        toolName,
+        inputPreview: toPreview(inputPayload),
+      });
+
       if (toolName && inputPayload && typeof inputPayload === "object") {
+        logOpenRouterResponse("turn.success", {
+          toolName,
+          inputPreview: toPreview(inputPayload),
+        });
         return {
           type: toolName,
           ...(inputPayload as Record<string, unknown>),
@@ -637,6 +2760,9 @@ class DungeonMasterClient {
 
       throw new Error("Turn generation did not return a valid tool call.");
     } catch (error) {
+      logOpenRouterResponse("turn.error", {
+        message: error instanceof Error ? error.message : String(error),
+      });
       throw new Error(error instanceof Error ? error.message : "Turn generation failed.");
     }
   }

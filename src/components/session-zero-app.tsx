@@ -5,9 +5,9 @@ import { useEffect, useState } from "react";
 import type {
   AdventureModuleSummary,
   CharacterTemplateSummary,
+  OpenWorldGenerationArtifacts,
   GeneratedWorldModule,
 } from "@/lib/game/types";
-import { backOrPush } from "@/lib/ui/navigation";
 
 function fieldClassName(multiline = false) {
   return [
@@ -40,6 +40,7 @@ export function SessionZeroApp() {
   const [selectedModuleId, setSelectedModuleId] = useState<string | null>(null);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
   const [draft, setDraft] = useState<GeneratedWorldModule | null>(null);
+  const [draftArtifacts, setDraftArtifacts] = useState<OpenWorldGenerationArtifacts | null>(null);
   const [loading, setLoading] = useState(true);
   const [drafting, setDrafting] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -124,6 +125,7 @@ export function SessionZeroApp() {
 
       const data = (await response.json()) as {
         draft?: GeneratedWorldModule;
+        artifacts?: OpenWorldGenerationArtifacts;
         error?: string;
       };
 
@@ -132,6 +134,7 @@ export function SessionZeroApp() {
       }
 
       setDraft(data.draft);
+      setDraftArtifacts(data.artifacts ?? null);
     } catch (draftError) {
       setError(draftError instanceof Error ? draftError.message : "Failed to generate module draft.");
     } finally {
@@ -153,7 +156,7 @@ export function SessionZeroApp() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ draft }),
+        body: JSON.stringify({ draft, artifacts: draftArtifacts ?? undefined }),
       });
 
       const data = (await response.json()) as {
@@ -169,6 +172,7 @@ export function SessionZeroApp() {
       setModules((current) => [data.module!, ...current.filter((entry) => entry.id !== data.moduleId)]);
       setSelectedModuleId(data.moduleId);
       setDraft(null);
+      setDraftArtifacts(null);
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Failed to save module.");
     } finally {
@@ -204,7 +208,7 @@ export function SessionZeroApp() {
             <button
               type="button"
               className="button-press rounded-full border border-zinc-800 px-5 py-3 text-sm font-semibold text-zinc-300 transition-colors hover:bg-zinc-900 hover:text-white"
-              onClick={() => backOrPush(router, "/", "/")}
+              onClick={() => router.push("/")}
             >
               Back Home
             </button>

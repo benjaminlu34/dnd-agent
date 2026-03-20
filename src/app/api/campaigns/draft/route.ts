@@ -18,12 +18,12 @@ export async function POST(request: Request) {
   }
 
   try {
-    const draft = await dmClient.generateWorldModule({
+    const result = await dmClient.generateWorldModule({
       prompt: payload.data.prompt,
       previousDraft: payload.data.previousDraft,
     });
 
-    return NextResponse.json({ draft });
+    return NextResponse.json(result);
   } catch (error) {
     return NextResponse.json(
       {

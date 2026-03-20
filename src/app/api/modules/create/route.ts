@@ -18,7 +18,10 @@ export async function POST(request: Request) {
   }
 
   try {
-    const adventureModule = await createAdventureModule(payload.data.draft);
+    const adventureModule = await createAdventureModule({
+      draft: payload.data.draft,
+      artifacts: payload.data.artifacts,
+    });
     return NextResponse.json({ moduleId: adventureModule.id, module: adventureModule });
   } catch (error) {
     return NextResponse.json(

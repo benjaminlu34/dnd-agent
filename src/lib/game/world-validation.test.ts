@@ -2,8 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { GeneratedWorldModule } from "./types";
 import {
+  validateRegionalLife,
+  validateSocialLayer,
+  validateWorldBible,
   validateWorldModuleCoherence,
+  validateWorldModuleImmersion,
   validateWorldModulePlayability,
+  validateWorldSpine,
 } from "./world-validation";
 
 function createWorld(): GeneratedWorldModule {
@@ -304,4 +309,317 @@ test("world module playability rejects over-concentrated NPC placement", () => {
   const report = validateWorldModulePlayability(world);
   assert.equal(report.ok, false);
   assert.match(report.issues.join("\n"), /40%/);
+});
+
+test("world bible validation rejects shallow myth structure", () => {
+  const report = validateWorldBible({
+    title: "Beneath the Rain",
+    premise: "The rain never stops.",
+    tone: "Melancholic",
+    setting: "A drowned world",
+    worldOverview: "People survive on floating settlements.",
+    environmentalRules: ["Rain is constant", "The sea hides ruins", "Salt rot eats iron"],
+    historicalFractures: ["The Deluge", "The Vault Wars", "The Leviathan Treaties"],
+    immersionAnchors: ["Tar", "Kelp wine", "Signal bells", "Dry masks"],
+    contradictoryMyths: [
+      {
+        key: "myth_1",
+        claim: "The rain is divine grief.",
+        partialTruth: "It carries a memory-bearing resonance.",
+        believers: ["Canopy priests"],
+        contradictionWith: "myth_2",
+      },
+      {
+        key: "myth_2",
+        claim: "The rain is a machine failure.",
+        partialTruth: "Ancient vault engines still shape the weather.",
+        believers: ["Vault divers"],
+        contradictionWith: "myth_1",
+      },
+    ],
+    everydayLife: {
+      survival: "People barter for dry space and filtered water.",
+      institutions: ["Harbor courts", "Signal towers", "Tide unions"],
+      fears: ["Hull breach", "Deep-song madness"],
+      wants: ["Dry shelter", "Old world salvage"],
+      trade: ["Kelp cloth", "Whale oil"],
+      gossip: ["A vault door opened in the shoals", "The rain spoke a name last week"],
+    },
+  });
+
+  assert.equal(report.ok, false);
+  assert.match(report.issues.join("\n"), /four contradictory myth threads/);
+});
+
+test("world spine validation rejects disconnected geography", () => {
+  const report = validateWorldSpine({
+    locations: [
+      {
+        key: "harbor",
+        name: "Harbor",
+        type: "city",
+        summary: "A wet trade hub.",
+        description: "A barge-city under endless rain.",
+        state: "stable",
+        controlStatus: "controlled",
+        controllingFactionKey: "guild",
+        tags: ["trade"],
+        localIdentity: "Everyone smells like salt and lamp smoke.",
+      },
+      {
+        key: "vault",
+        name: "Sunken Vault",
+        type: "ruin",
+        summary: "A drowned archive.",
+        description: "Dry chambers under black water.",
+        state: "perilous",
+        controlStatus: "independent",
+        controllingFactionKey: null,
+        tags: ["ruin"],
+        localIdentity: "Divers pray before each descent.",
+      },
+      {
+        key: "reef",
+        name: "Bell Reef",
+        type: "reef",
+        summary: "Storm bells and razor coral.",
+        description: "A reef used to warn caravans.",
+        state: "fraying",
+        controlStatus: "contested",
+        controllingFactionKey: null,
+        tags: ["hazard"],
+        localIdentity: "Children learn currents before letters.",
+      },
+      {
+        key: "spire",
+        name: "Storm Spire",
+        type: "tower",
+        summary: "Weather watchers.",
+        description: "A lonely tower in the rain wall.",
+        state: "isolated",
+        controlStatus: "controlled",
+        controllingFactionKey: "guild",
+        tags: ["signal"],
+        localIdentity: "Every meal tastes of lightning and tin.",
+      },
+    ],
+    edges: [
+      {
+        key: "edge_1",
+        sourceKey: "harbor",
+        targetKey: "vault",
+        travelTimeMinutes: 30,
+        dangerLevel: 4,
+        currentStatus: "open",
+        description: null,
+      },
+      {
+        key: "edge_2",
+        sourceKey: "vault",
+        targetKey: "reef",
+        travelTimeMinutes: 25,
+        dangerLevel: 5,
+        currentStatus: "open",
+        description: null,
+      },
+      {
+        key: "edge_3",
+        sourceKey: "reef",
+        targetKey: "harbor",
+        travelTimeMinutes: 20,
+        dangerLevel: 3,
+        currentStatus: "open",
+        description: null,
+      },
+      {
+        key: "edge_4",
+        sourceKey: "spire",
+        targetKey: "spire",
+        travelTimeMinutes: 5,
+        dangerLevel: 1,
+        currentStatus: "open",
+        description: null,
+      },
+    ],
+    factions: [
+      {
+        key: "guild",
+        name: "Lantern Guild",
+        type: "mercantile",
+        summary: "Rain traders.",
+        agenda: "Control salvage lanes.",
+        resources: { gold: 8, military: 2, influence: 7, information: 4 },
+        pressureClock: 3,
+        publicFootprint: "Guild lanterns mark every dock tax point.",
+      },
+      {
+        key: "divers",
+        name: "Vault Divers",
+        type: "explorers",
+        summary: "Dry-vault hunters.",
+        agenda: "Reach the old continents first.",
+        resources: { gold: 3, military: 3, influence: 4, information: 8 },
+        pressureClock: 5,
+        publicFootprint: "Dive bells and patched pressure suits crowd the piers.",
+      },
+    ],
+    factionRelations: [
+      {
+        key: "rel_1",
+        factionAKey: "guild",
+        factionBKey: "divers",
+        stance: "rival",
+        summary: "They need each other and resent it.",
+      },
+    ],
+  });
+
+  assert.equal(report.ok, false);
+  assert.match(report.issues.join("\n"), /disconnected/);
+});
+
+test("world immersion validation rejects empty locations", () => {
+  const world = createWorld();
+  world.marketPrices = [];
+
+  const report = validateWorldModuleImmersion(world);
+
+  assert.equal(report.ok, false);
+  assert.match(report.issues.join("\n"), /economic identity/);
+});
+
+test("regional life validation requires coverage for every location", () => {
+  const report = validateRegionalLife(
+    {
+      locations: [
+        {
+          locationId: "loc_gate",
+          publicActivity: "Customs inspections",
+          dominantActivities: ["queueing", "bribery"],
+          localPressure: "The watch cannot inspect fast enough.",
+          classTexture: "Porters sleep in shifts beside officials.",
+          everydayTexture: "Wet cloaks steam beside brazier lines.",
+          publicHazards: ["pickpockets"],
+          ordinaryKnowledge: ["The watch is stretched thin", "Merchants hide cargo ledgers"],
+          institutions: ["Customs office"],
+          gossip: ["A captain vanished"],
+          reasonsToLinger: ["Cheap guides"],
+          routineSeeds: ["Shift changes jam the gates"],
+          eventSeeds: ["A seized crate breaks open"],
+        },
+      ],
+    },
+    ["loc_gate", "loc_market"],
+  );
+
+  assert.equal(report.ok, false);
+  assert.match(report.issues.join("\n"), /missing location loc_market/);
+});
+
+test("regional life validation rejects duplicate or mismatched location coverage", () => {
+  const report = validateRegionalLife(
+    {
+      locations: [
+        {
+          locationId: "loc_gate",
+          publicActivity: "Customs inspections",
+          dominantActivities: ["queueing", "bribery"],
+          localPressure: "The watch cannot inspect fast enough.",
+          classTexture: "Porters sleep in shifts beside officials.",
+          everydayTexture: "Wet cloaks steam beside brazier lines.",
+          publicHazards: ["pickpockets"],
+          ordinaryKnowledge: ["The watch is stretched thin", "Merchants hide cargo ledgers"],
+          institutions: ["Customs office"],
+          gossip: ["A captain vanished"],
+          reasonsToLinger: ["Cheap guides"],
+          routineSeeds: ["Shift changes jam the gates"],
+          eventSeeds: ["A seized crate breaks open"],
+        },
+        {
+          locationId: "loc_gate",
+          publicActivity: "Inspectors bark over the rain.",
+          dominantActivities: ["inspections", "cargo tallying"],
+          localPressure: "The line never shortens.",
+          classTexture: "Officials stay dry while laborers soak.",
+          everydayTexture: "Ink runs on manifests and tempers run shorter.",
+          publicHazards: ["stampedes"],
+          ordinaryKnowledge: ["Bribes move faster than paper", "Dock gangs watch the queue"],
+          institutions: ["Customs office"],
+          gossip: ["Someone important crossed under false papers"],
+          reasonsToLinger: ["Work can be found nearby"],
+          routineSeeds: ["A clerk demands a second inspection"],
+          eventSeeds: ["A bell rings for a sealed carriage"],
+        },
+        {
+          locationId: "loc_docks",
+          publicActivity: "Crews unload storm-damaged cargo.",
+          dominantActivities: ["unloading", "haggling"],
+          localPressure: "Half the berths are unsafe after last tide.",
+          classTexture: "Stevedores shoulder risk while captains keep accounts.",
+          everydayTexture: "Tar, salt, and river mud cling to everything.",
+          publicHazards: ["slick planks"],
+          ordinaryKnowledge: ["A foreman is skimming stock", "Night crews see unlisted boats"],
+          institutions: ["Harbor office"],
+          gossip: ["A diver came up babbling about bells"],
+          reasonsToLinger: ["Day labor is plentiful"],
+          routineSeeds: ["A cargo crane jams mid-lift"],
+          eventSeeds: ["A wrecked cutter limps into berth"],
+        },
+      ],
+    },
+    ["loc_gate", "loc_market"],
+  );
+
+  assert.equal(report.ok, false);
+  assert.match(report.issues.join("\n"), /exactly 2 locations/);
+  assert.match(report.issues.join("\n"), /duplicates location loc_gate/);
+});
+
+test("social layer validation requires anchored NPC coverage for every location", () => {
+  const report = validateSocialLayer(
+    {
+      npcs: [
+        {
+          id: "npc_1",
+          name: "Captain Voss",
+          role: "commander",
+          summary: "Strained officer.",
+          description: "A strained officer.",
+          factionId: "fac_watch",
+          currentLocationId: "loc_keep",
+          approval: 0,
+          isCompanion: false,
+        },
+        {
+          id: "npc_2",
+          name: "Sela Thorn",
+          role: "broker",
+          summary: "Market fixer.",
+          description: "A market fixer.",
+          factionId: "fac_guild",
+          currentLocationId: "loc_market",
+          approval: 0,
+          isCompanion: false,
+        },
+      ],
+      socialGravity: [
+        {
+          npcId: "npc_1",
+          importance: "pillar",
+          bridgeLocationIds: [],
+          bridgeFactionIds: [],
+        },
+        {
+          npcId: "npc_2",
+          importance: "connector",
+          bridgeLocationIds: [],
+          bridgeFactionIds: [],
+        },
+      ],
+    },
+    ["loc_keep", "loc_market", "loc_docks"],
+  );
+
+  assert.equal(report.ok, false);
+  assert.match(report.issues.join("\n"), /missing an anchored NPC for location loc_docks/);
 });

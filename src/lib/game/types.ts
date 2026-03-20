@@ -233,6 +233,235 @@ export type OpenWorldEntryPoint = {
   initialInformationIds: string[];
 };
 
+export type WorldGenerationStageName =
+  | "world_bible"
+  | "world_spine"
+  | "regional_life"
+  | "social_cast"
+  | "knowledge_web"
+  | "economy_material_life"
+  | "entry_contexts"
+  | "final_world";
+
+export type GeneratedWorldMyth = {
+  key: string;
+  claim: string;
+  partialTruth: string;
+  believers: string[];
+  contradictionWith: string;
+};
+
+export type GeneratedWorldBible = {
+  title: string;
+  premise: string;
+  tone: string;
+  setting: string;
+  worldOverview: string;
+  environmentalRules: string[];
+  historicalFractures: string[];
+  immersionAnchors: string[];
+  contradictoryMyths: GeneratedWorldMyth[];
+  everydayLife: {
+    survival: string;
+    institutions: string[];
+    fears: string[];
+    wants: string[];
+    trade: string[];
+    gossip: string[];
+  };
+};
+
+export type GeneratedWorldSpineLocation = {
+  key: string;
+  name: string;
+  type: string;
+  summary: string;
+  description: string;
+  state: string;
+  controlStatus: "controlled" | "contested" | "independent";
+  controllingFactionKey: string | null;
+  tags: string[];
+  localIdentity: string;
+};
+
+export type GeneratedWorldSpineEdge = {
+  key: string;
+  sourceKey: string;
+  targetKey: string;
+  travelTimeMinutes: number;
+  dangerLevel: number;
+  currentStatus: string;
+  description: string | null;
+};
+
+export type GeneratedWorldSpineFaction = {
+  key: string;
+  name: string;
+  type: string;
+  summary: string;
+  agenda: string;
+  resources: FactionResourcePool;
+  pressureClock: number;
+  publicFootprint: string;
+};
+
+export type GeneratedWorldSpineRelation = {
+  key: string;
+  factionAKey: string;
+  factionBKey: string;
+  stance: "allied" | "neutral" | "rival" | "war";
+  summary: string;
+};
+
+export type GeneratedWorldSpine = {
+  locations: GeneratedWorldSpineLocation[];
+  edges: GeneratedWorldSpineEdge[];
+  factions: GeneratedWorldSpineFaction[];
+  factionRelations: GeneratedWorldSpineRelation[];
+};
+
+export type GeneratedRegionalLifeSummary = {
+  locationId: string;
+  publicActivity: string;
+  dominantActivities: string[];
+  localPressure: string;
+  classTexture: string;
+  everydayTexture: string;
+  publicHazards: string[];
+  ordinaryKnowledge: string[];
+  institutions: string[];
+  gossip: string[];
+  reasonsToLinger: string[];
+  routineSeeds: string[];
+  eventSeeds: string[];
+};
+
+export type GeneratedRegionalLife = {
+  locations: GeneratedRegionalLifeSummary[];
+};
+
+export type GeneratedSocialNpc = Omit<GeneratedNpc, "id"> & {
+  currentConcern: string;
+  playerCrossPath: string;
+  ties: {
+    locationIds: string[];
+    factionIds: string[];
+    economyHooks: string[];
+    informationHooks: string[];
+  };
+  importance: "pillar" | "connector" | "local";
+  bridgeLocationIds: string[];
+  bridgeFactionIds: string[];
+};
+
+export type GeneratedSocialGravity = {
+  npcId: string;
+  importance: "pillar" | "connector" | "local";
+  bridgeLocationIds: string[];
+  bridgeFactionIds: string[];
+};
+
+export type GeneratedSocialLayer = {
+  npcs: GeneratedNpc[];
+  socialGravity: GeneratedSocialGravity[];
+};
+
+export type GeneratedKnowledgeNode = Omit<GeneratedInformation, "id"> & {
+  key: string;
+  actionLead: string;
+  mythThread: string | null;
+  discoverHow: string;
+};
+
+export type GeneratedKnowledgeLink = {
+  key: string;
+  sourceKey: string;
+  targetKey: string;
+  linkType: "supports" | "contradicts" | "extends" | "unlocks";
+};
+
+export type GeneratedMythCluster = {
+  theme: string;
+  publicBeliefs: string[];
+  hiddenTruth: string;
+  linkedInformationIds: string[];
+  contradictionThemes: string[];
+};
+
+export type GeneratedPressureSeed = {
+  subjectType: "location" | "faction";
+  subjectId: string;
+  pressure: string;
+};
+
+export type GeneratedKnowledgeEconomy = {
+  information: GeneratedInformation[];
+  informationLinks: GeneratedInformationLink[];
+  mythClusters: GeneratedMythCluster[];
+  pressureSeeds: GeneratedPressureSeed[];
+  commodities: GeneratedCommodity[];
+  marketPrices: GeneratedMarketPrice[];
+  locationTradeIdentity: Array<{
+    locationId: string;
+    signatureGoods: string[];
+    scarcityNotes: string;
+    streetLevelEconomy: string;
+  }>;
+};
+
+export type GeneratedEntryContext = OpenWorldEntryPoint & {
+  immediatePressure: string;
+  publicLead: string;
+  localContactNpcId: string;
+  mundaneActionPath: string;
+  evidenceWorldAlreadyMoving: string;
+};
+
+export type GeneratedEntryContexts = {
+  entryPoints: GeneratedEntryContext[];
+};
+
+export type OpenWorldGenerationIdMap = {
+  factions: Record<string, string>;
+  locations: Record<string, string>;
+  edges: Record<string, string>;
+  factionRelations: Record<string, string>;
+  npcs: Record<string, string>;
+  information: Record<string, string>;
+  commodities: Record<string, string>;
+};
+
+export type WorldGenerationValidationReport = {
+  stage: WorldGenerationStageName;
+  attempt: number;
+  ok: boolean;
+  category: "schema" | "coherence" | "playability" | "immersion";
+  issues: string[];
+};
+
+export type WorldGenerationAttempt = {
+  stage: WorldGenerationStageName;
+  attempt: number;
+  correctionNotes: string | null;
+  completedAt: string;
+};
+
+export type OpenWorldGenerationArtifacts = {
+  prompt: string;
+  model: string;
+  createdAt: string;
+  worldBible: GeneratedWorldBible;
+  worldSpine: GeneratedWorldSpine;
+  regionalLife: GeneratedRegionalLife;
+  socialLayer: GeneratedSocialLayer;
+  knowledgeEconomy: GeneratedKnowledgeEconomy;
+  entryContexts: GeneratedEntryContexts;
+  attempts: WorldGenerationAttempt[];
+  validationReports: WorldGenerationValidationReport[];
+  idMaps: OpenWorldGenerationIdMap;
+  stageSummaries: Partial<Record<WorldGenerationStageName, string>>;
+};
+
 export type GeneratedWorldModule = {
   title: string;
   premise: string;
@@ -248,6 +477,11 @@ export type GeneratedWorldModule = {
   commodities: GeneratedCommodity[];
   marketPrices: GeneratedMarketPrice[];
   entryPoints: OpenWorldEntryPoint[];
+};
+
+export type GeneratedWorldModuleDraft = {
+  draft: GeneratedWorldModule;
+  artifacts: OpenWorldGenerationArtifacts;
 };
 
 export type GeneratedCampaignOpening = {

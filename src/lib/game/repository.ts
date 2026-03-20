@@ -2,7 +2,10 @@ import { Prisma } from "@prisma/client";
 import { dmClient } from "@/lib/ai/provider";
 import { toCampaignCharacter, toCharacterStats } from "@/lib/game/characters";
 import { createAdHocCampaignInventoryItem } from "@/lib/game/items";
-import { generatedWorldModuleSchema } from "@/lib/game/session-zero";
+import {
+  generatedWorldModuleSchema,
+  openWorldGenerationArtifactsSchema,
+} from "@/lib/game/session-zero";
 import { instanceWorldForCampaign } from "@/lib/game/world-instancing";
 import type {
   AdventureModuleDetail,
@@ -22,6 +25,7 @@ import type {
   InformationSummary,
   LocationSummary,
   MemoryRecord,
+  OpenWorldGenerationArtifacts,
   NpcSummary,
   PlayerCampaignSnapshot,
   PromptInventoryItem,
@@ -59,6 +63,14 @@ type PrismaItemInstanceRecord = Prisma.ItemInstanceGetPayload<{
 
 function parseWorldTemplate(value: unknown): GeneratedWorldModule {
   return generatedWorldModuleSchema.parse(value);
+}
+
+function parseOpenWorldGenerationArtifacts(value: unknown): OpenWorldGenerationArtifacts | null {
+  if (value == null) {
+    return null;
+  }
+
+  return openWorldGenerationArtifactsSchema.parse(value);
 }
 
 function toTemplateRecord(template: Prisma.CharacterTemplateGetPayload<Record<string, never>>): CharacterTemplate {
@@ -312,19 +324,23 @@ export async function getAdventureModuleForUser(moduleId: string): Promise<Adven
   };
 }
 
-export async function createAdventureModule(input: GeneratedWorldModule) {
+export async function createAdventureModule(input: {
+  draft: GeneratedWorldModule;
+  artifacts?: OpenWorldGenerationArtifacts;
+}) {
   const user = await ensureLocalUser();
 
   const adventureModule = await prisma.adventureModule.create({
     data: {
       userId: user.id,
-      title: input.title,
-      premise: input.premise,
-      tone: input.tone,
-      setting: input.setting,
+      title: input.draft.title,
+      premise: input.draft.premise,
+      tone: input.draft.tone,
+      setting: input.draft.setting,
       generationMode: "open_world",
       schemaVersion: 1,
-      openWorldTemplateJson: input,
+      openWorldTemplateJson: input.draft,
+      openWorldGenerationArtifactsJson: input.artifacts ?? Prisma.JsonNull,
     },
     include: {
       _count: {
@@ -391,6 +407,7 @@ export async function generateCampaignOpeningDraftForUser(input: {
   }
 
   const world = parseWorldTemplate(module.openWorldTemplateJson);
+  const generationArtifacts = parseOpenWorldGenerationArtifacts(module.openWorldGenerationArtifactsJson);
   const entryPoint = world.entryPoints.find((entry) => entry.id === input.entryPointId);
 
   if (!entryPoint) {
@@ -401,6 +418,7 @@ export async function generateCampaignOpeningDraftForUser(input: {
     module: world,
     character: toTemplateRecord(template),
     entryPoint,
+    artifacts: generationArtifacts,
     prompt: input.prompt,
     previousDraft: input.previousDraft,
   });

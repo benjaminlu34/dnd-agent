@@ -1,5 +1,27 @@
 import { z } from "zod";
 
+function addDuplicateStringIssues(
+  values: string[],
+  ctx: z.RefinementCtx,
+  pathPrefix: PropertyKey[],
+  message: string,
+) {
+  const seen = new Map<string, number>();
+
+  values.forEach((value, index) => {
+    const previousIndex = seen.get(value);
+    if (previousIndex != null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [...pathPrefix, index],
+        message,
+      });
+    } else {
+      seen.set(value, index);
+    }
+  });
+}
+
 const factionResourcesSchema = z.object({
   gold: z.number().int().min(0),
   military: z.number().int().min(0),
@@ -101,6 +123,377 @@ const entryPointSchema = z.object({
   startLocationId: z.string().trim().min(1),
   presentNpcIds: z.array(z.string().trim().min(1)),
   initialInformationIds: z.array(z.string().trim().min(1)),
+});
+
+const worldMythSchema = z.object({
+  key: z.string().trim().min(1),
+  claim: z.string().trim().min(1),
+  partialTruth: z.string().trim().min(1),
+  believers: z.array(z.string().trim().min(1)).min(1),
+  contradictionWith: z.string().trim().min(1),
+});
+
+export const generatedWorldBibleSchema = z
+  .object({
+    title: z.string().trim().min(1),
+    premise: z.string().trim().min(1),
+    tone: z.string().trim().min(1),
+    setting: z.string().trim().min(1),
+    worldOverview: z.string().trim().min(1),
+    environmentalRules: z.array(z.string().trim().min(1)).min(5),
+    historicalFractures: z.array(z.string().trim().min(1)).min(5),
+    immersionAnchors: z.array(z.string().trim().min(1)).min(6),
+    contradictoryMyths: z.array(worldMythSchema).min(4),
+    everydayLife: z.object({
+      survival: z.string().trim().min(1),
+      institutions: z.array(z.string().trim().min(1)).min(4),
+      fears: z.array(z.string().trim().min(1)).min(3),
+      wants: z.array(z.string().trim().min(1)).min(3),
+      trade: z.array(z.string().trim().min(1)).min(3),
+      gossip: z.array(z.string().trim().min(1)).min(3),
+    }),
+  })
+  .superRefine((draft, ctx) => {
+    addDuplicateStringIssues(
+      draft.contradictoryMyths.map((myth) => myth.key),
+      ctx,
+      ["contradictoryMyths"],
+      "Myth keys must be unique.",
+    );
+  });
+
+const worldSpineKeySchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(40)
+  .regex(/^[a-z0-9_]+$/, "World spine keys must be lowercase alphanumeric with underscores.");
+
+const worldSpineLocationSchema = z.object({
+  key: worldSpineKeySchema,
+  name: z.string().trim().min(1),
+  type: z.string().trim().min(1),
+  summary: z.string().trim().min(1),
+  description: z.string().trim().min(1),
+  state: z.string().trim().min(1),
+  controlStatus: z.enum(["controlled", "contested", "independent"]),
+  controllingFactionKey: z.string().trim().min(1).nullable(),
+  tags: z.array(z.string().trim().min(1)).min(1),
+  localIdentity: z.string().trim().min(1),
+});
+
+const worldSpineEdgeSchema = z.object({
+  key: worldSpineKeySchema,
+  sourceKey: worldSpineKeySchema,
+  targetKey: worldSpineKeySchema,
+  travelTimeMinutes: z.number().int().min(1),
+  dangerLevel: z.number().int().min(0).max(10),
+  currentStatus: z.string().trim().min(1),
+  description: z.string().trim().min(1).nullable(),
+});
+
+const worldSpineFactionSchema = z.object({
+  key: worldSpineKeySchema,
+  name: z.string().trim().min(1),
+  type: z.string().trim().min(1),
+  summary: z.string().trim().min(1),
+  agenda: z.string().trim().min(1),
+  resources: factionResourcesSchema,
+  pressureClock: z.number().int().min(0).max(20),
+  publicFootprint: z.string().trim().min(1),
+});
+
+const worldSpineRelationSchema = z.object({
+  key: worldSpineKeySchema,
+  factionAKey: worldSpineKeySchema,
+  factionBKey: worldSpineKeySchema,
+  stance: z.enum(["allied", "neutral", "rival", "war"]),
+  summary: z.string().trim().min(1),
+});
+
+export const generatedWorldSpineSchema = z
+  .object({
+    locations: z.array(worldSpineLocationSchema).min(8).max(15),
+    edges: z.array(worldSpineEdgeSchema).min(7).max(36),
+    factions: z.array(worldSpineFactionSchema).min(5).max(12),
+    factionRelations: z.array(worldSpineRelationSchema).min(1).max(24),
+  })
+  .superRefine((draft, ctx) => {
+    const factionKeys = new Set(draft.factions.map((faction) => faction.key));
+    const locationKeys = new Set(draft.locations.map((location) => location.key));
+
+    addDuplicateStringIssues(
+      draft.locations.map((location) => location.key),
+      ctx,
+      ["locations"],
+      "Location keys must be unique.",
+    );
+    addDuplicateStringIssues(
+      draft.factions.map((faction) => faction.key),
+      ctx,
+      ["factions"],
+      "Faction keys must be unique.",
+    );
+    addDuplicateStringIssues(
+      draft.edges.map((edge) => edge.key),
+      ctx,
+      ["edges"],
+      "Edge keys must be unique.",
+    );
+    addDuplicateStringIssues(
+      draft.factionRelations.map((relation) => relation.key),
+      ctx,
+      ["factionRelations"],
+      "Faction relation keys must be unique.",
+    );
+
+    draft.locations.forEach((location, index) => {
+      if (location.controlStatus === "controlled" && !location.controllingFactionKey) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["locations", index, "controllingFactionKey"],
+          message: "Controlled locations must name a controlling faction.",
+        });
+      }
+
+      if (
+        location.controllingFactionKey &&
+        !factionKeys.has(location.controllingFactionKey)
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["locations", index, "controllingFactionKey"],
+          message: "Location controller must reference a known faction key.",
+        });
+      }
+    });
+
+    draft.edges.forEach((edge, index) => {
+      if (!locationKeys.has(edge.sourceKey)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["edges", index, "sourceKey"],
+          message: "Edge sourceKey must reference a known location key.",
+        });
+      }
+
+      if (!locationKeys.has(edge.targetKey)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["edges", index, "targetKey"],
+          message: "Edge targetKey must reference a known location key.",
+        });
+      }
+    });
+
+    draft.factionRelations.forEach((relation, index) => {
+      if (!factionKeys.has(relation.factionAKey) || !factionKeys.has(relation.factionBKey)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["factionRelations", index],
+          message: "Faction relations must reference known faction keys.",
+        });
+      }
+    });
+  });
+
+const regionalLifeLocationSchema = z.object({
+  locationId: z.string().trim().min(1),
+  publicActivity: z.string().trim().min(1),
+  dominantActivities: z.array(z.string().trim().min(1)).min(2),
+  localPressure: z.string().trim().min(1),
+  classTexture: z.string().trim().min(1),
+  everydayTexture: z.string().trim().min(1),
+  publicHazards: z.array(z.string().trim().min(1)).min(1),
+  ordinaryKnowledge: z.array(z.string().trim().min(1)).min(2),
+  institutions: z.array(z.string().trim().min(1)).min(1),
+  gossip: z.array(z.string().trim().min(1)).min(1),
+  reasonsToLinger: z.array(z.string().trim().min(1)).min(1),
+  routineSeeds: z.array(z.string().trim().min(1)).min(1),
+  eventSeeds: z.array(z.string().trim().min(1)).min(1),
+});
+
+export const generatedRegionalLifeSchema = z.object({
+  locations: z.array(regionalLifeLocationSchema).min(1),
+});
+
+const generatedSocialNpcSchema = z.object({
+  name: z.string().trim().min(1),
+  role: z.string().trim().min(1),
+  summary: z.string().trim().min(1),
+  description: z.string().trim().min(1),
+  factionId: z.string().trim().min(1).nullable(),
+  currentLocationId: z.string().trim().min(1),
+  approval: z.number().int().min(-10).max(10),
+  isCompanion: z.boolean(),
+  currentConcern: z.string().trim().min(1),
+  playerCrossPath: z.string().trim().min(1),
+  ties: z.object({
+    locationIds: z.array(z.string().trim().min(1)).min(1),
+    factionIds: z.array(z.string().trim().min(1)),
+    economyHooks: z.array(z.string().trim().min(1)).min(1),
+    informationHooks: z.array(z.string().trim().min(1)).min(1),
+  }),
+  importance: z.enum(["pillar", "connector", "local"]),
+  bridgeLocationIds: z.array(z.string().trim().min(1)),
+  bridgeFactionIds: z.array(z.string().trim().min(1)),
+});
+
+export const generatedSocialLayerInputSchema = z.object({
+  npcs: z.array(generatedSocialNpcSchema).min(1),
+});
+
+const knowledgeNodeSchema = z.object({
+  key: z.string().trim().min(1),
+  title: z.string().trim().min(1),
+  summary: z.string().trim().min(1),
+  content: z.string().trim().min(1),
+  truthfulness: z.enum(["true", "partial", "false", "outdated"]),
+  accessibility: z.enum(["public", "guarded", "secret"]),
+  locationId: z.string().trim().min(1).nullable(),
+  factionId: z.string().trim().min(1).nullable(),
+  sourceNpcId: z.string().trim().min(1).nullable(),
+  actionLead: z.string().trim().min(1),
+  mythThread: z.string().trim().min(1).nullable(),
+  discoverHow: z.string().trim().min(1),
+});
+
+const knowledgeLinkSchema = z.object({
+  key: z.string().trim().min(1),
+  sourceKey: z.string().trim().min(1),
+  targetKey: z.string().trim().min(1),
+  linkType: z.enum(["supports", "contradicts", "extends", "unlocks"]),
+});
+
+const mythClusterInputSchema = z.object({
+  theme: z.string().trim().min(1),
+  publicBeliefs: z.array(z.string().trim().min(1)).min(1),
+  hiddenTruth: z.string().trim().min(1),
+  linkedInformationKeys: z.array(z.string().trim().min(1)).min(1),
+  contradictionThemes: z.array(z.string().trim().min(1)),
+});
+
+const pressureSeedSchema = z.object({
+  subjectType: z.enum(["location", "faction"]),
+  subjectId: z.string().trim().min(1),
+  pressure: z.string().trim().min(1),
+});
+
+export const generatedKnowledgeWebInputSchema = z
+  .object({
+    information: z.array(knowledgeNodeSchema).min(4),
+    informationLinks: z.array(knowledgeLinkSchema).min(1),
+    mythClusters: z.array(mythClusterInputSchema).min(1),
+    pressureSeeds: z.array(pressureSeedSchema).min(2),
+  })
+  .superRefine((draft, ctx) => {
+    const keys = new Set(draft.information.map((information) => information.key));
+    addDuplicateStringIssues(
+      draft.information.map((information) => information.key),
+      ctx,
+      ["information"],
+      "Information keys must be unique.",
+    );
+    addDuplicateStringIssues(
+      draft.informationLinks.map((link) => link.key),
+      ctx,
+      ["informationLinks"],
+      "Information link keys must be unique.",
+    );
+
+    draft.informationLinks.forEach((link, index) => {
+      if (!keys.has(link.sourceKey) || !keys.has(link.targetKey)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["informationLinks", index],
+          message: "Information links must reference known information keys.",
+        });
+      }
+    });
+
+    draft.mythClusters.forEach((cluster, index) => {
+      cluster.linkedInformationKeys.forEach((informationKey, linkedIndex) => {
+        if (!keys.has(informationKey)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["mythClusters", index, "linkedInformationKeys", linkedIndex],
+            message: "Myth clusters must reference known information keys.",
+          });
+        }
+      });
+    });
+  });
+
+const economyCommoditySchema = z.object({
+  key: z.string().trim().min(1),
+  name: z.string().trim().min(1),
+  baseValue: z.number().int().min(0),
+  tags: z.array(z.string().trim().min(1)).min(1),
+  everydayUse: z.string().trim().min(1),
+  scarcityDriver: z.string().trim().min(1),
+  profitFactionIds: z.array(z.string().trim().min(1)),
+});
+
+const economyMarketPriceSchema = z.object({
+  commodityKey: z.string().trim().min(1),
+  locationId: z.string().trim().min(1),
+  vendorNpcId: z.string().trim().min(1).nullable(),
+  factionId: z.string().trim().min(1).nullable(),
+  modifier: z.number().positive(),
+  stock: z.number().int().min(-1),
+  legalStatus: z.enum(["legal", "restricted", "contraband"]),
+  whyHere: z.string().trim().min(1),
+});
+
+const locationTradeIdentitySchema = z.object({
+  locationId: z.string().trim().min(1),
+  signatureGoods: z.array(z.string().trim().min(1)).min(1),
+  scarcityNotes: z.string().trim().min(1),
+  streetLevelEconomy: z.string().trim().min(1),
+});
+
+export const generatedEconomyMaterialLifeInputSchema = z
+  .object({
+    commodities: z.array(economyCommoditySchema).min(2),
+    marketPrices: z.array(economyMarketPriceSchema).min(2),
+    locationTradeIdentity: z.array(locationTradeIdentitySchema).min(4),
+  })
+  .superRefine((draft, ctx) => {
+    const commodityKeys = new Set(draft.commodities.map((commodity) => commodity.key));
+
+    addDuplicateStringIssues(
+      draft.commodities.map((commodity) => commodity.key),
+      ctx,
+      ["commodities"],
+      "Commodity keys must be unique.",
+    );
+
+    draft.marketPrices.forEach((price, index) => {
+      if (!commodityKeys.has(price.commodityKey)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["marketPrices", index, "commodityKey"],
+          message: "Market prices must reference known commodity keys.",
+        });
+      }
+    });
+  });
+
+const entryContextSchema = z.object({
+  title: z.string().trim().min(1),
+  summary: z.string().trim().min(1),
+  startLocationId: z.string().trim().min(1),
+  presentNpcIds: z.array(z.string().trim().min(1)).min(1),
+  initialInformationIds: z.array(z.string().trim().min(1)).min(1),
+  immediatePressure: z.string().trim().min(1),
+  publicLead: z.string().trim().min(1),
+  localContactNpcId: z.string().trim().min(1),
+  mundaneActionPath: z.string().trim().min(1),
+  evidenceWorldAlreadyMoving: z.string().trim().min(1),
+});
+
+export const generatedEntryContextsInputSchema = z.object({
+  entryPoints: z.array(entryContextSchema).min(3).max(5),
 });
 
 export const generatedWorldModuleSchema = z
@@ -284,6 +677,99 @@ export const generatedWorldModuleSchema = z
     });
   });
 
+export const openWorldGenerationArtifactsSchema = z.object({
+  prompt: z.string().trim().min(1),
+  model: z.string().trim().min(1),
+  createdAt: z.string().trim().min(1),
+  worldBible: generatedWorldBibleSchema,
+  worldSpine: generatedWorldSpineSchema,
+  regionalLife: generatedRegionalLifeSchema,
+  socialLayer: z.object({
+    npcs: z.array(npcSchema).min(4),
+    socialGravity: z.array(
+      z.object({
+        npcId: z.string().trim().min(1),
+        importance: z.enum(["pillar", "connector", "local"]),
+        bridgeLocationIds: z.array(z.string().trim().min(1)),
+        bridgeFactionIds: z.array(z.string().trim().min(1)),
+      }),
+    ),
+  }),
+  knowledgeEconomy: z.object({
+    information: z.array(informationSchema).min(4),
+    informationLinks: z.array(informationLinkSchema).min(1),
+    mythClusters: z.array(
+      z.object({
+        theme: z.string().trim().min(1),
+        publicBeliefs: z.array(z.string().trim().min(1)).min(1),
+        hiddenTruth: z.string().trim().min(1),
+        linkedInformationIds: z.array(z.string().trim().min(1)).min(1),
+        contradictionThemes: z.array(z.string().trim().min(1)),
+      }),
+    ),
+    pressureSeeds: z.array(pressureSeedSchema).min(2),
+    commodities: z.array(commoditySchema).min(2),
+    marketPrices: z.array(marketPriceSchema).min(2),
+    locationTradeIdentity: z.array(locationTradeIdentitySchema).min(4),
+  }),
+  entryContexts: z.object({
+    entryPoints: z.array(
+      entryPointSchema.extend({
+        immediatePressure: z.string().trim().min(1),
+        publicLead: z.string().trim().min(1),
+        localContactNpcId: z.string().trim().min(1),
+        mundaneActionPath: z.string().trim().min(1),
+        evidenceWorldAlreadyMoving: z.string().trim().min(1),
+      }),
+    ),
+  }),
+  attempts: z.array(
+    z.object({
+      stage: z.enum([
+        "world_bible",
+        "world_spine",
+        "regional_life",
+        "social_cast",
+        "knowledge_web",
+        "economy_material_life",
+        "entry_contexts",
+        "final_world",
+      ]),
+      attempt: z.number().int().min(1),
+      correctionNotes: z.string().nullable(),
+      completedAt: z.string().trim().min(1),
+    }),
+  ),
+  validationReports: z.array(
+    z.object({
+      stage: z.enum([
+        "world_bible",
+        "world_spine",
+        "regional_life",
+        "social_cast",
+        "knowledge_web",
+        "economy_material_life",
+        "entry_contexts",
+        "final_world",
+      ]),
+      attempt: z.number().int().min(1),
+      ok: z.boolean(),
+      category: z.enum(["schema", "coherence", "playability", "immersion"]),
+      issues: z.array(z.string()),
+    }),
+  ),
+  idMaps: z.object({
+    factions: z.record(z.string(), z.string()),
+    locations: z.record(z.string(), z.string()),
+    edges: z.record(z.string(), z.string()),
+    factionRelations: z.record(z.string(), z.string()),
+    npcs: z.record(z.string(), z.string()),
+    information: z.record(z.string(), z.string()),
+    commodities: z.record(z.string(), z.string()),
+  }),
+  stageSummaries: z.record(z.string(), z.string()),
+});
+
 export const generatedCampaignOpeningSchema = z.object({
   narration: z.string().trim().min(1),
   activeThreat: z.string().trim().min(1),
@@ -322,4 +808,5 @@ export const campaignCreateRequestSchema = z.object({
 
 export const moduleCreateRequestSchema = z.object({
   draft: generatedWorldModuleSchema,
+  artifacts: openWorldGenerationArtifactsSchema.optional(),
 });
