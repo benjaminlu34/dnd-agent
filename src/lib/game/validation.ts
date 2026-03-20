@@ -1,328 +1,211 @@
+import { rollCheck } from "@/lib/game/checks";
 import type {
-  ArcRecord,
-  CampaignCharacter,
-  CampaignBlueprint,
-  CampaignState,
-  CheckResult,
-  Clue,
-  NpcRecord,
-  ProposedStateDelta,
-  QuestRecord,
-  ValidatedDelta,
+  CampaignSnapshot,
+  CheckMode,
+  CitedEntities,
+  ExecuteFreeformToolCall,
+  TimeMode,
+  TurnActionToolCall,
+  ValidatedTurnCommand,
 } from "@/lib/game/types";
-import { cloneInventory } from "@/lib/game/characters";
-import { MAX_LOOT_DISCOVERIES, normalizeItemNameList } from "@/lib/game/item-utils";
-import { toCanonicalKeyLocationName } from "@/lib/game/location-utils";
-import { clamp } from "@/lib/utils";
 
-type ValidationInput = {
-  blueprint: CampaignBlueprint;
-  state: CampaignState;
-  character: CampaignCharacter;
-  quests: QuestRecord[];
-  arcs: ArcRecord[];
-  clues: Clue[];
-  npcs: NpcRecord[];
-  isInvestigative: boolean;
-  checkResult?: CheckResult;
-  proposedDelta: ProposedStateDelta;
+export const TIME_MODE_BOUNDS: Record<TimeMode, { min: number; max: number }> = {
+  combat: { min: 1, max: 10 },
+  exploration: { min: 5, max: 240 },
+  travel: { min: 0, max: 0 },
+  rest: { min: 0, max: 0 },
+  downtime: { min: 60, max: 2880 },
 };
 
-export function validateDelta({
-  blueprint,
-  state,
-  character,
-  quests,
-  arcs,
-  clues,
-  npcs,
-  isInvestigative,
-  checkResult,
-  proposedDelta,
-}: ValidationInput): ValidatedDelta {
-  const warnings: string[] = [];
-  const healthDelta = Number.isFinite(proposedDelta.healthDelta)
-    ? Math.trunc(proposedDelta.healthDelta as number)
-    : 0;
-  const nextSceneLocation =
-    typeof proposedDelta.sceneLocation === "string" && proposedDelta.sceneLocation.trim()
-      ? proposedDelta.sceneLocation.trim()
-      : state.sceneState.location;
-  const sceneKeyLocationMatch =
-    proposedDelta.sceneKeyLocation === null
-      ? null
-      : toCanonicalKeyLocationName(blueprint.keyLocations, proposedDelta.sceneKeyLocation);
+function normalizedSuggestedActions(actions: string[] | undefined) {
+  return Array.from(
+    new Set((actions ?? []).map((entry) => entry.trim()).filter(Boolean)),
+  ).slice(0, 4);
+}
 
-  if (
-    typeof proposedDelta.sceneKeyLocation === "string" &&
-    proposedDelta.sceneKeyLocation.trim() &&
-    !sceneKeyLocationMatch
-  ) {
-    warnings.push(`Rejected unknown scene key location ${proposedDelta.sceneKeyLocation.trim()}.`);
+function getAllowedEntities(snapshot: CampaignSnapshot) {
+  const locationIds = new Set<string>([
+    snapshot.currentLocation.id,
+    ...snapshot.adjacentRoutes.map((route) => route.targetLocationId),
+  ]);
+  const npcIds = new Set(snapshot.presentNpcs.map((npc) => npc.id));
+  const factionIds = new Set(snapshot.knownFactions.map((faction) => faction.id));
+  const informationIds = new Set(
+    snapshot.localInformation
+      .map((information) => information.id)
+      .concat(snapshot.discoveredInformation.map((information) => information.id))
+      .concat(snapshot.connectedLeads.map((lead) => lead.information.id)),
+  );
+
+  return { locationIds, npcIds, factionIds, informationIds };
+}
+
+function assertCitedEntities(
+  citedEntities: CitedEntities,
+  snapshot: CampaignSnapshot,
+  warnings: string[],
+) {
+  const allowed = getAllowedEntities(snapshot);
+
+  for (const npcId of citedEntities.npcIds) {
+    if (!allowed.npcIds.has(npcId)) {
+      throw new Error(`Hallucinated NPC citation: ${npcId}.`);
+    }
   }
 
-  const acceptedKeyLocationDiscoveries = (proposedDelta.keyLocationDiscoveries ?? [])
-    .map((location) => {
-      const canonicalName = toCanonicalKeyLocationName(blueprint.keyLocations, location);
+  for (const locationId of citedEntities.locationIds) {
+    if (!allowed.locationIds.has(locationId)) {
+      throw new Error(`Hallucinated location citation: ${locationId}.`);
+    }
+  }
 
-      if (!canonicalName) {
-        warnings.push(`Rejected unknown key location discovery ${location}.`);
-        return null;
-      }
+  for (const factionId of citedEntities.factionIds) {
+    if (!allowed.factionIds.has(factionId)) {
+      throw new Error(`Hallucinated faction citation: ${factionId}.`);
+    }
+  }
 
-      return canonicalName;
-    })
-    .filter((location): location is string => Boolean(location));
-  const nextDiscoveredSceneLocations = state.discoveredSceneLocations.includes(nextSceneLocation)
-    ? state.discoveredSceneLocations
-    : [...state.discoveredSceneLocations, nextSceneLocation];
-  const nextDiscoveredKeyLocationNames = Array.from(
-    new Set([
-      ...state.discoveredKeyLocationNames,
-      ...acceptedKeyLocationDiscoveries,
-      ...(sceneKeyLocationMatch ? [sceneKeyLocationMatch] : []),
-    ]),
-  );
-  const nextState: CampaignState = {
-    ...state,
-    sceneState: {
-      ...state.sceneState,
-      summary: proposedDelta.sceneSnapshot ?? state.sceneState.summary,
-      title: proposedDelta.sceneTitle ?? state.sceneState.title,
-      location: nextSceneLocation,
-      keyLocationName:
-        proposedDelta.sceneKeyLocation === null
-          ? null
-          : sceneKeyLocationMatch ?? state.sceneState.keyLocationName,
-      atmosphere: proposedDelta.sceneAtmosphere ?? state.sceneState.atmosphere,
-      suggestedActions:
-        proposedDelta.suggestedActions?.slice(0, 4) ?? state.sceneState.suggestedActions,
-    },
-    discoveredSceneLocations: nextDiscoveredSceneLocations,
-    discoveredKeyLocationNames: nextDiscoveredKeyLocationNames,
-    activeArcId: proposedDelta.activeArcId ?? state.activeArcId,
-    villainClock: clamp(
-      state.villainClock + (proposedDelta.villainClockDelta ?? 0),
-      0,
-      blueprint.villain.progressClock,
+  for (const informationId of citedEntities.informationIds) {
+    if (!allowed.informationIds.has(informationId)) {
+      throw new Error(`Hallucinated information citation: ${informationId}.`);
+    }
+  }
+
+  if (citedEntities.commodityIds.length) {
+    warnings.push("Commodity citations are currently ignored because trading is deferred.");
+  }
+}
+
+function assertTime(command: Exclude<TurnActionToolCall, { type: "request_clarification" }>, snapshot: CampaignSnapshot) {
+  const bounds = TIME_MODE_BOUNDS[command.timeMode];
+
+  if (!bounds) {
+    throw new Error(`Unknown time mode: ${String(command.timeMode)}.`);
+  }
+
+  if (command.type === "execute_travel") {
+    const route = snapshot.adjacentRoutes.find((entry) => entry.id === command.routeEdgeId);
+
+    if (!route) {
+      throw new Error("Travel route is not adjacent to the player's current location.");
+    }
+
+    if (route.targetLocationId !== command.targetLocationId) {
+      throw new Error("Travel target does not match the selected route.");
+    }
+
+    if (command.timeElapsed !== route.travelTimeMinutes) {
+      throw new Error("Travel time must be derived from the route travelTimeMinutes.");
+    }
+
+    return;
+  }
+
+  if (command.timeElapsed < bounds.min || command.timeElapsed > bounds.max) {
+    throw new Error(
+      `${command.type} produced ${command.timeElapsed} minutes, outside ${command.timeMode} bounds.`,
+    );
+  }
+}
+
+function validateInteractionTarget(snapshot: CampaignSnapshot, command: TurnActionToolCall) {
+  if (command.type === "execute_converse") {
+    if (!snapshot.presentNpcs.some((npc) => npc.id === command.npcId)) {
+      throw new Error("Cannot converse with an NPC who is not present.");
+    }
+  }
+
+  if (command.type === "execute_investigate" && command.targetType === "npc") {
+    if (!snapshot.presentNpcs.some((npc) => npc.id === command.targetId)) {
+      throw new Error("Cannot investigate an NPC who is not present.");
+    }
+  }
+
+  if (command.type === "execute_observe" && command.targetType === "npc") {
+    if (!snapshot.presentNpcs.some((npc) => npc.id === command.targetId)) {
+      throw new Error("Cannot observe an NPC who is not present.");
+    }
+  }
+}
+
+function validateInformationDiscoveries(snapshot: CampaignSnapshot, ids: string[] | undefined) {
+  if (!ids?.length) {
+    return;
+  }
+
+  const accessibleIds = new Set(
+    snapshot.localInformation.map((entry) => entry.id).concat(
+      snapshot.connectedLeads.map((lead) => lead.information.id),
     ),
-    tensionScore: clamp(state.tensionScore + (proposedDelta.tensionDelta ?? 0), 0, 100),
-    turnCount: state.turnCount + 1,
-    pendingTurnId: null,
-  };
-
-  let awardedGold = 0;
-  const acceptedQuestAdvancements: NonNullable<ValidatedDelta["acceptedQuestAdvancements"]> = [];
-  const acceptedQuestDiscoveries: string[] = [];
-  const acceptedClueDiscoveries: string[] = [];
-  const acceptedRevealTriggers: string[] = [];
-  const acceptedArcAdvancements: NonNullable<ValidatedDelta["acceptedArcAdvancements"]> = [];
-  const acceptedNpcChanges: NonNullable<ValidatedDelta["acceptedNpcChanges"]> = [];
-  const acceptedNpcDiscoveries: string[] = [];
-  const acceptedLootDiscoveries: ValidatedDelta["acceptedLootDiscoveries"] = [];
-  const acceptedInventoryChanges: ValidatedDelta["acceptedInventoryChanges"] = {
-    add: [],
-    remove: [] as string[],
-  };
-  const questById = new Map(quests.map((quest) => [quest.id, quest]));
-  const arcById = new Map(arcs.map((arc) => [arc.id, arc]));
-  const npcById = new Map(npcs.map((npc) => [npc.id, npc]));
-  const revealById = new Map(blueprint.hiddenReveals.map((reveal) => [reveal.id, reveal]));
-  const arcIds = new Set(arcById.keys());
-  const clueIds = new Set(clues.map((clue) => clue.id));
-  const unlockedArcIds = new Set(
-    arcs.filter((arc) => arc.status !== "locked").map((arc) => arc.id),
-  );
-  const seenQuestDiscoveries = new Set<string>();
-  const seenNpcDiscoveries = new Set<string>();
-
-  if (proposedDelta.activeArcId && !arcIds.has(proposedDelta.activeArcId)) {
-    warnings.push(`Rejected active arc update for unknown arc ${proposedDelta.activeArcId}.`);
-    nextState.activeArcId = state.activeArcId;
-  }
-
-  for (const update of proposedDelta.questAdvancements ?? []) {
-    const quest = questById.get(update.questId);
-
-    if (!quest) {
-      warnings.push(`Rejected quest advancement for unknown quest ${update.questId}.`);
-      continue;
-    }
-
-    if (update.nextStage < quest.stage || update.nextStage > quest.stage + 1) {
-      warnings.push(`Rejected invalid quest stage jump for ${quest.title}.`);
-      continue;
-    }
-
-    acceptedQuestAdvancements.push(update);
-
-    if ((update.status ?? quest.status) === "completed" && proposedDelta.rewardQuestId === quest.id) {
-      awardedGold += quest.rewardGold;
-      if (quest.rewardItem) {
-        acceptedInventoryChanges.add.push({
-          templateId: quest.rewardItem.templateId,
-        });
-      }
-    }
-  }
-
-  for (const questId of proposedDelta.questDiscoveries ?? []) {
-    if (seenQuestDiscoveries.has(questId)) {
-      continue;
-    }
-    seenQuestDiscoveries.add(questId);
-
-    const quest = questById.get(questId);
-
-    if (!quest) {
-      warnings.push(`Rejected unknown quest discovery ${questId}.`);
-      continue;
-    }
-
-    if (quest.discoveredAtTurn !== null) {
-      continue;
-    }
-
-    acceptedQuestDiscoveries.push(questId);
-  }
-
-  if ((proposedDelta.goldChange ?? 0) > 0 && !proposedDelta.rewardQuestId) {
-    warnings.push("Rejected gold gain without a validated quest reward source.");
-  }
-
-  if ("inventoryChanges" in proposedDelta && proposedDelta.inventoryChanges !== undefined) {
-    warnings.push("Rejected direct inventory mutation. Inventory remains engine-controlled in v1.");
-  }
-
-  const normalizedLootDiscoveries = normalizeItemNameList(proposedDelta.lootDiscoveries ?? []);
-  if (normalizedLootDiscoveries.length > MAX_LOOT_DISCOVERIES) {
-    warnings.push(`Accepted only the first ${MAX_LOOT_DISCOVERIES} loot discoveries this turn.`);
-  }
-
-  if (normalizedLootDiscoveries.length > 0) {
-    if (!proposedDelta.lootSource) {
-      warnings.push("Rejected loot discoveries without a validated loot source.");
-    } else if (proposedDelta.lootSource === "investigation") {
-      if (!isInvestigative) {
-        warnings.push("Rejected investigative loot on a non-investigative turn.");
-      } else {
-        for (const name of normalizedLootDiscoveries.slice(0, MAX_LOOT_DISCOVERIES)) {
-          acceptedLootDiscoveries.push({ name });
-        }
-      }
-    } else if (proposedDelta.lootSource === "defeat") {
-      if (!checkResult) {
-        warnings.push("Rejected defeat loot without a resolved check result.");
-      } else if (checkResult.outcome !== "success") {
-        warnings.push("Rejected defeat loot because the check outcome was not a success.");
-      } else {
-        for (const name of normalizedLootDiscoveries.slice(0, MAX_LOOT_DISCOVERIES)) {
-          acceptedLootDiscoveries.push({ name });
-        }
-      }
-    } else {
-      warnings.push(`Rejected unknown loot source ${proposedDelta.lootSource}.`);
-    }
-  }
-
-  for (const clueId of proposedDelta.clueDiscoveries ?? []) {
-    if (!clueIds.has(clueId)) {
-      warnings.push(`Rejected unknown clue discovery ${clueId}.`);
-      continue;
-    }
-
-    acceptedClueDiscoveries.push(clueId);
-  }
-
-  const discoveredClues = new Set(
-    clues
-      .filter((clue) => clue.status === "discovered")
-      .map((clue) => clue.id)
-      .concat(acceptedClueDiscoveries),
   );
 
-  for (const revealId of proposedDelta.revealTriggers ?? []) {
-    const reveal = revealById.get(revealId);
-
-    if (!reveal) {
-      warnings.push(`Rejected unknown reveal ${revealId}.`);
-      continue;
+  for (const id of ids) {
+    if (!accessibleIds.has(id) && !snapshot.state.discoveredInformationIds.includes(id)) {
+      throw new Error(`Information ${id} is outside the local/discovered bubble.`);
     }
+  }
+}
 
-    const allCluesFound = reveal.requiredClues.every((id) => discoveredClues.has(id));
-    const arcsReady = reveal.requiredArcIds.every((arcId) => unlockedArcIds.has(arcId));
-
-    if (!allCluesFound || !arcsReady) {
-      warnings.push(`Rejected premature reveal ${reveal.title}.`);
-      continue;
-    }
-
-    acceptedRevealTriggers.push(revealId);
+function validateFreeform(command: ExecuteFreeformToolCall) {
+  if (!command.statToCheck) {
+    throw new Error("execute_freeform requires statToCheck.");
   }
 
-  for (const arcUpdate of proposedDelta.arcAdvancements ?? []) {
-    const arc = arcById.get(arcUpdate.arcId);
-
-    if (!arc) {
-      warnings.push(`Rejected arc update for unknown arc ${arcUpdate.arcId}.`);
-      continue;
-    }
-
-    acceptedArcAdvancements.push(arcUpdate);
+  if (!command.intendedMechanicalOutcome.trim()) {
+    throw new Error("execute_freeform requires intendedMechanicalOutcome.");
   }
 
-  const npcIds = new Set(npcById.keys());
-  for (const npcChange of proposedDelta.npcApprovalChanges ?? []) {
-    if (!npcIds.has(npcChange.npcId)) {
-      warnings.push(`Rejected NPC approval change for ${npcChange.npcId}.`);
-      continue;
-    }
+  if (command.estimatedTimeElapsedMinutes !== command.timeElapsed) {
+    throw new Error("execute_freeform estimatedTimeElapsedMinutes must match timeElapsed in pass 1.");
+  }
+}
 
-    acceptedNpcChanges.push(npcChange);
+export function validateTurnCommand(input: {
+  snapshot: CampaignSnapshot;
+  command: TurnActionToolCall;
+}): ValidatedTurnCommand {
+  const { snapshot, command } = input;
+
+  if (command.type === "request_clarification") {
+    return {
+      ...command,
+      options: command.options.map((entry) => entry.trim()).filter(Boolean).slice(0, 4),
+      question: command.question.trim(),
+    };
   }
 
-  for (const npcId of proposedDelta.npcDiscoveries ?? []) {
-    if (seenNpcDiscoveries.has(npcId)) {
-      continue;
-    }
-    seenNpcDiscoveries.add(npcId);
+  const warnings: string[] = [];
+  validateInteractionTarget(snapshot, command);
+  validateInformationDiscoveries(snapshot, "discoverInformationIds" in command ? command.discoverInformationIds : undefined);
+  assertTime(command, snapshot);
+  assertCitedEntities(command.citedEntities, snapshot, warnings);
 
-    if (!npcIds.has(npcId)) {
-      warnings.push(`Rejected unknown NPC discovery ${npcId}.`);
-      continue;
-    }
-
-    const npc = npcById.get(npcId);
-    if (!npc || npc.discoveredAtTurn !== null) {
-      continue;
-    }
-
-    acceptedNpcDiscoveries.push(npcId);
+  const suggestedActions = normalizedSuggestedActions(command.suggestedActions);
+  if (!suggestedActions.length) {
+    warnings.push("Tool call returned no suggested actions; engine provided none.");
   }
 
-  nextState.activeRevealIds = Array.from(
-    new Set([...state.activeRevealIds, ...acceptedRevealTriggers]),
-  );
+  if (command.type === "execute_freeform") {
+    validateFreeform(command);
+    const mode: CheckMode = command.timeMode === "combat" ? "normal" : "normal";
+    const checkResult = rollCheck({
+      stat: command.statToCheck,
+      mode,
+      reason: command.actionDescription,
+      character: snapshot.character,
+    });
+
+    return {
+      ...command,
+      suggestedActions,
+      warnings,
+      checkResult,
+    };
+  }
 
   return {
-    nextState,
-    nextCharacter: {
-      health: Math.max(0, Math.min(character.health + healthDelta, character.maxHealth)),
-      gold: character.gold + awardedGold,
-      inventory: cloneInventory(character.inventory),
-    },
-    healthDelta,
+    ...command,
+    suggestedActions,
     warnings,
-    acceptedQuestAdvancements,
-    acceptedQuestDiscoveries,
-    acceptedClueDiscoveries,
-    acceptedRevealTriggers,
-    acceptedArcAdvancements,
-    acceptedNpcChanges,
-    acceptedNpcDiscoveries,
-    awardedGold,
-    acceptedLootDiscoveries,
-    acceptedInventoryChanges,
-    memorySummary: proposedDelta.memorySummary,
   };
 }

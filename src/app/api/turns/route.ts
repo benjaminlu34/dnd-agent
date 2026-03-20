@@ -17,7 +17,6 @@ export async function POST(request: Request) {
     campaignId?: string;
     sessionId?: string;
     action?: string;
-    slowPath?: boolean;
   };
 
   if (!body.campaignId || !body.sessionId || !body.action?.trim()) {
@@ -30,20 +29,18 @@ export async function POST(request: Request) {
       campaignId: body.campaignId!,
       sessionId: body.sessionId!,
       playerAction: body.action!.trim(),
-      slowPath: body.slowPath,
       stream: {
         narration: (chunk) => bufferedNarration.push(chunk),
       },
     });
 
-    if (result.type === "check_required") {
+    if (result.type === "clarification") {
       for (const warning of result.warnings) {
         send({ type: "warning", message: warning });
       }
       send({
-        type: "check_required",
-        turnId: result.turnId,
-        check: result.check,
+        type: "error",
+        message: `${result.question} Options: ${result.options.join(" / ")}`,
       });
       return;
     }
@@ -56,6 +53,13 @@ export async function POST(request: Request) {
       type: "actions",
       actions: result.suggestedActions,
     });
+
+    if (result.checkResult) {
+      send({
+        type: "check_result",
+        result: result.checkResult,
+      });
+    }
 
     const snapshot = await getCampaignSnapshot(body.campaignId!);
     if (snapshot) {

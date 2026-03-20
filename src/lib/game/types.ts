@@ -8,6 +8,10 @@ export const STATS = [
 ] as const;
 
 export type Stat = (typeof STATS)[number];
+export type CheckMode = "normal" | "advantage" | "disadvantage";
+export type CheckOutcome = "success" | "partial" | "failure";
+export type TimeMode = "combat" | "exploration" | "travel" | "rest" | "downtime";
+
 export const STAT_LABELS: Record<Stat, string> = {
   strength: "Strength",
   dexterity: "Dexterity",
@@ -16,6 +20,7 @@ export const STAT_LABELS: Record<Stat, string> = {
   wisdom: "Wisdom",
   charisma: "Charisma",
 };
+
 export const STAT_ABBREVIATIONS: Record<Stat, string> = {
   strength: "STR",
   dexterity: "DEX",
@@ -28,12 +33,6 @@ export const STAT_ABBREVIATIONS: Record<Stat, string> = {
 export function isStat(value: unknown): value is Stat {
   return typeof value === "string" && STATS.includes(value as Stat);
 }
-
-export type CheckMode = "normal" | "advantage" | "disadvantage";
-export type CheckOutcome = "success" | "partial" | "failure";
-export type QuestStatus = "active" | "completed" | "failed";
-export type ArcStatus = "active" | "complete" | "locked";
-export type ClueStatus = "hidden" | "discovered" | "resolved";
 
 export type CharacterTemplateDraft = {
   name: string;
@@ -53,7 +52,10 @@ export type CharacterTemplate = CharacterTemplateDraft & {
   id: string;
 };
 
-export type LootSource = "investigation" | "defeat";
+export type CharacterTemplateSummary = Omit<CharacterTemplate, "starterItems"> & {
+  createdAt: string;
+  updatedAt: string;
+};
 
 export type ItemTemplate = {
   id: string;
@@ -76,20 +78,6 @@ export type ItemInstance = {
   properties: Record<string, unknown> | null;
 };
 
-export type RewardItemReference = {
-  templateId: string;
-  name: string;
-};
-
-export type InventoryTemplateReference = {
-  templateId: string;
-};
-
-export type PromptInventoryItem = {
-  name: string;
-  description: string | null;
-};
-
 export type CharacterInstance = {
   id: string;
   templateId: string;
@@ -107,213 +95,257 @@ export type CampaignCharacter = CharacterTemplate & {
   inventory: ItemInstance[];
 };
 
-export type CharacterTemplateSummary = Omit<CharacterTemplate, "starterItems"> & {
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type Hook = {
-  id: string;
-  text: string;
-  status: "open" | "resolved";
-};
-
-export type Reveal = {
-  id: string;
-  title: string;
-  truth: string;
-  requiredClues: string[];
-  requiredArcIds: string[];
-  triggered: boolean;
-};
-
-export type Clue = {
-  id: string;
-  text: string;
-  source: string;
-  linkedRevealId: string;
-  status: ClueStatus;
-  discoveredAtTurn: number | null;
-};
-
-export type Subplot = {
-  id: string;
-  title: string;
-  hook: string;
-};
-
-export type CampaignArcBlueprint = {
-  id: string;
-  title: string;
-  summary: string;
-  expectedTurns: number;
-};
-
-export type CampaignBlueprint = {
-  premise: string;
-  tone: string;
-  setting: string;
-  keyLocations: KeyLocation[];
-  villain: {
-    name: string;
-    motive: string;
-    progressClock: number;
-  };
-  arcs: CampaignArcBlueprint[];
-  hiddenReveals: Reveal[];
-  subplotSeeds: Subplot[];
-  initialHooks: Hook[];
-};
-
-export type KeyLocation = {
-  name: string;
-  role: string;
-  isPublic: boolean;
-};
-
-export type GeneratedCampaignSetup = {
-  publicSynopsis: {
-    title: string;
-    premise: string;
-    tone: string;
-    setting: string;
-  };
-  secretEngine: {
-    villain: {
-      name: string;
-      motive: string;
-      progressClock: number;
-    };
-    hooks: {
-      text: string;
-    }[];
-    arcs: {
-      title: string;
-      summary: string;
-      expectedTurns: number;
-    }[];
-    reveals: {
-      title: string;
-      truth: string;
-      requiredClueTitles: string[];
-      requiredArcTitles: string[];
-    }[];
-    subplotSeeds: {
-      title: string;
-      hook: string;
-    }[];
-    quests: {
-      title: string;
-      summary: string;
-      maxStage: number;
-      rewardGold: number;
-      rewardItem?: string | null;
-    }[];
-    npcs: {
-      name: string;
-      role: string;
-      notes: string;
-      isCompanion?: boolean;
-      approval?: number;
-      personalHook?: string | null;
-      status?: string;
-    }[];
-    clues: {
-      text: string;
-      source: string;
-      linkedRevealTitle: string;
-    }[];
-    keyLocations: KeyLocation[];
-  };
-};
-
-export type GeneratedCampaignOpening = {
-  narration: string;
-  activeThreat: string;
-  scene: {
-    title: string;
-    summary: string;
-    location: string;
-    keyLocationName?: string | null;
-    atmosphere: string;
-    suggestedActions: string[];
-  };
-};
-
 export type AdventureModuleSummary = {
   id: string;
   title: string;
   premise: string;
   tone: string;
   setting: string;
+  generationMode: "open_world";
+  entryPointCount: number;
   campaignCount: number;
   createdAt: string;
   updatedAt: string;
 };
 
-export type SceneState = {
+export type ModuleEntryPointSummary = {
   id: string;
   title: string;
   summary: string;
-  location: string;
-  keyLocationName: string | null;
-  atmosphere: string;
-  suggestedActions: string[];
+  locationName: string;
 };
 
-export type CampaignState = {
-  turnCount: number;
-  activeArcId: string;
-  worldState: {
-    dangerLevel: "low" | "rising" | "high";
-    activeThreat: string;
-  };
-  sceneState: SceneState;
-  discoveredSceneLocations: string[];
-  discoveredKeyLocationNames: string[];
-  hooks: Hook[];
-  villainClock: number;
-  tensionScore: number;
-  activeRevealIds: string[];
-  pendingTurnId: string | null;
-};
-
-export type QuestRecord = {
+export type AdventureModuleDetail = {
   id: string;
   title: string;
-  summary: string;
-  stage: number;
-  maxStage: number;
-  status: QuestStatus;
-  rewardGold: number;
-  rewardItem: RewardItemReference | null;
-  discoveredAtTurn: number | null;
+  premise: string;
+  tone: string;
+  setting: string;
+  generationMode: "open_world";
+  schemaVersion: number;
+  entryPoints: ModuleEntryPointSummary[];
+  createdAt: string;
+  updatedAt: string;
 };
 
-export type QuestSeedRecord = Omit<QuestRecord, "rewardItem"> & {
-  rewardItemName: string | null;
+export type FactionResourcePool = {
+  gold: number;
+  military: number;
+  influence: number;
+  information: number;
 };
 
-export type ArcRecord = {
+export type GeneratedLocationNode = {
   id: string;
-  title: string;
+  name: string;
+  type: string;
   summary: string;
-  status: ArcStatus;
-  expectedTurns: number;
-  currentTurn: number;
-  orderIndex: number;
+  description: string;
+  state: string;
+  controllingFactionId: string | null;
+  tags: string[];
 };
 
-export type NpcRecord = {
+export type GeneratedLocationEdge = {
+  id: string;
+  sourceId: string;
+  targetId: string;
+  travelTimeMinutes: number;
+  dangerLevel: number;
+  currentStatus: string;
+  description: string | null;
+};
+
+export type GeneratedFaction = {
+  id: string;
+  name: string;
+  type: string;
+  summary: string;
+  agenda: string;
+  resources: FactionResourcePool;
+  pressureClock: number;
+};
+
+export type GeneratedFactionRelation = {
+  id: string;
+  factionAId: string;
+  factionBId: string;
+  stance: "allied" | "neutral" | "rival" | "war";
+};
+
+export type GeneratedNpc = {
   id: string;
   name: string;
   role: string;
-  status: string;
-  isCompanion: boolean;
+  summary: string;
+  description: string;
+  factionId: string | null;
+  currentLocationId: string;
   approval: number;
-  personalHook: string | null;
-  notes: string;
-  discoveredAtTurn: number | null;
+  isCompanion: boolean;
+};
+
+export type InformationAccessibility = "public" | "guarded" | "secret";
+
+export type GeneratedInformation = {
+  id: string;
+  title: string;
+  summary: string;
+  content: string;
+  truthfulness: "true" | "partial" | "false" | "outdated";
+  accessibility: InformationAccessibility;
+  locationId: string | null;
+  factionId: string | null;
+  sourceNpcId: string | null;
+};
+
+export type GeneratedInformationLink = {
+  id: string;
+  sourceId: string;
+  targetId: string;
+  linkType: "supports" | "contradicts" | "extends" | "unlocks";
+};
+
+export type GeneratedCommodity = {
+  id: string;
+  name: string;
+  baseValue: number;
+  tags: string[];
+};
+
+export type GeneratedMarketPrice = {
+  id: string;
+  commodityId: string;
+  locationId: string;
+  vendorNpcId: string | null;
+  factionId: string | null;
+  modifier: number;
+  stock: number;
+  legalStatus: "legal" | "restricted" | "contraband";
+};
+
+export type OpenWorldEntryPoint = {
+  id: string;
+  title: string;
+  summary: string;
+  startLocationId: string;
+  presentNpcIds: string[];
+  initialInformationIds: string[];
+};
+
+export type GeneratedWorldModule = {
+  title: string;
+  premise: string;
+  tone: string;
+  setting: string;
+  locations: GeneratedLocationNode[];
+  edges: GeneratedLocationEdge[];
+  factions: GeneratedFaction[];
+  factionRelations: GeneratedFactionRelation[];
+  npcs: GeneratedNpc[];
+  information: GeneratedInformation[];
+  informationLinks: GeneratedInformationLink[];
+  commodities: GeneratedCommodity[];
+  marketPrices: GeneratedMarketPrice[];
+  entryPoints: OpenWorldEntryPoint[];
+};
+
+export type GeneratedCampaignOpening = {
+  narration: string;
+  activeThreat: string;
+  entryPointId: string;
+  locationNodeId: string;
+  presentNpcIds: string[];
+  citedInformationIds: string[];
+  scene: {
+    title: string;
+    summary: string;
+    location: string;
+    atmosphere: string;
+    suggestedActions: string[];
+  };
+};
+
+export type CampaignRuntimeState = {
+  currentLocationId: string;
+  globalTime: number;
+  pendingTurnId: string | null;
+  lastActionSummary: string | null;
+  discoveredInformationIds: string[];
+};
+
+export type LocationSummary = {
+  id: string;
+  name: string;
+  type: string;
+  summary: string;
+  description: string | null;
+  state: string;
+  controllingFactionId: string | null;
+  controllingFactionName: string | null;
+  tags: string[];
+};
+
+export type RouteSummary = {
+  id: string;
+  targetLocationId: string;
+  targetLocationName: string;
+  travelTimeMinutes: number;
+  dangerLevel: number;
+  currentStatus: string;
+  description: string | null;
+};
+
+export type FactionSummary = {
+  id: string;
+  name: string;
+  type: string;
+  summary: string;
+  agenda: string;
+  pressureClock: number;
+};
+
+export type NpcSummary = {
+  id: string;
+  name: string;
+  role: string;
+  summary: string;
+  description: string;
+  factionId: string | null;
+  factionName: string | null;
+  currentLocationId: string | null;
+  approval: number;
+  isCompanion: boolean;
+};
+
+export type InformationSummary = {
+  id: string;
+  title: string;
+  summary: string;
+  accessibility: InformationAccessibility;
+  truthfulness: string;
+  locationId: string | null;
+  locationName: string | null;
+  factionId: string | null;
+  factionName: string | null;
+  sourceNpcId: string | null;
+  sourceNpcName: string | null;
+  isDiscovered: boolean;
+};
+
+export type CrossLocationLead = {
+  information: InformationSummary;
+  depth: 1 | 2;
+  viaInformationIds: string[];
+};
+
+export type StoryMessage = {
+  id: string;
+  role: "user" | "assistant" | "system";
+  kind: "action" | "narration" | "warning" | "summary";
+  content: string;
+  createdAt: string;
+  payload?: Record<string, unknown> | null;
 };
 
 export type MemoryRecord = {
@@ -323,89 +355,30 @@ export type MemoryRecord = {
   createdAt: string;
 };
 
-export type RecentResolvedTurn = {
-  id: string;
-  playerAction: string;
-  resultJson: unknown;
-};
-
 export type CampaignSnapshot = {
   campaignId: string;
   sessionId: string;
+  moduleId: string;
+  selectedEntryPointId: string;
   title: string;
   premise: string;
   tone: string;
   setting: string;
-  blueprint: CampaignBlueprint;
-  state: CampaignState;
+  state: CampaignRuntimeState;
   character: CampaignCharacter;
-  quests: QuestRecord[];
-  arcs: ArcRecord[];
-  npcs: NpcRecord[];
-  clues: Clue[];
+  currentLocation: LocationSummary;
+  adjacentRoutes: RouteSummary[];
+  presentNpcs: NpcSummary[];
+  knownFactions: FactionSummary[];
+  localInformation: InformationSummary[];
+  discoveredInformation: InformationSummary[];
+  connectedLeads: CrossLocationLead[];
   memories: MemoryRecord[];
   recentMessages: StoryMessage[];
-  recentResolvedTurns: RecentResolvedTurn[];
-  previouslyOn: string | null;
-  latestResolvedTurnId: string | null;
   canRetryLatestTurn: boolean;
 };
 
-export type PlayerCampaignState = {
-  turnCount: number;
-  sceneState: SceneState;
-};
-
-export type PlayerVisibleQuestRecord = {
-  id: string;
-  title: string;
-  summary: string | null;
-  stage: number;
-  maxStage: number;
-  status: QuestStatus;
-};
-
-export type PlayerVisibleNpcRecord = {
-  id: string;
-  name: string;
-  role: string | null;
-  notes: string | null;
-  isCompanion: boolean;
-};
-
-export type PlayerVisibleClue = {
-  id: string;
-  text: string;
-  source: string;
-  status: ClueStatus;
-  discoveredAtTurn: number | null;
-};
-
-export type PlayerVisibleKeyLocation = {
-  name: string;
-  role: string;
-};
-
-export type PlayerCampaignSnapshot = {
-  campaignId: string;
-  sessionId: string;
-  title: string;
-  premise: string;
-  tone: string;
-  setting: string;
-  knownKeyLocations: PlayerVisibleKeyLocation[];
-  knownSceneLocations: string[];
-  state: PlayerCampaignState;
-  character: CampaignCharacter;
-  quests: PlayerVisibleQuestRecord[];
-  npcs: PlayerVisibleNpcRecord[];
-  clues: PlayerVisibleClue[];
-  memories: MemoryRecord[];
-  recentMessages: StoryMessage[];
-  previouslyOn: string | null;
-  latestResolvedTurnId: string | null;
-  canRetryLatestTurn: boolean;
-};
+export type PlayerCampaignSnapshot = CampaignSnapshot;
 
 export type CampaignListItem = {
   id: string;
@@ -415,101 +388,37 @@ export type CampaignListItem = {
   tone: string;
   characterName: string;
   characterArchetype: string;
-  sessionTitle: string | null;
-  turnCount: number;
+  currentLocationName: string;
   updatedAt: string;
   createdAt: string;
 };
 
-export type StoryMessage = {
-  id: string;
-  role: "user" | "assistant" | "system";
-  kind: "action" | "narration" | "check" | "summary" | "warning";
-  content: string;
-  createdAt: string;
-  payload?: Record<string, unknown> | null;
+export type PromptInventoryItem = {
+  name: string;
+  description: string | null;
 };
 
-export type StructuredActionIntent =
-  | { type: "gain_reward"; questId: string }
-  | { type: "advance_quest"; questId: string; nextStage: number }
-  | { type: "discover_clue"; clueId: string }
-  | { type: "trigger_reveal"; revealId: string }
-  | { type: "use_item"; itemId: string }
-  | { type: "adjust_companion"; npcId: string; approvalDelta: number; reason: string };
-
-export type ProposedStateDelta = {
-  sceneSnapshot?: string;
-  sceneTitle?: string;
-  sceneLocation?: string;
-  sceneKeyLocation?: string | null;
-  sceneAtmosphere?: string;
-  activeArcId?: string;
-  suggestedActions?: string[];
-  healthDelta?: number;
-  goldChange?: number;
-  rewardQuestId?: string | null;
-  lootDiscoveries?: string[];
-  lootSource?: LootSource;
-  inventoryChanges?: {
-    add?: string[];
-    remove?: string[];
-  };
-  questAdvancements?: {
-    questId: string;
-    nextStage: number;
-    status?: QuestStatus;
-  }[];
-  questDiscoveries?: string[];
-  keyLocationDiscoveries?: string[];
-  clueDiscoveries?: string[];
-  revealTriggers?: string[];
-  villainClockDelta?: number;
-  tensionDelta?: number;
-  arcAdvancements?: {
-    arcId: string;
-    currentTurnDelta?: number;
-    status?: ArcStatus;
-  }[];
-  npcApprovalChanges?: {
-    npcId: string;
-    approvalDelta: number;
-    reason: string;
-  }[];
-  npcDiscoveries?: string[];
-  memorySummary?: string;
-  actionIntents?: StructuredActionIntent[];
+export type SpatialPromptContext = {
+  currentLocation: LocationSummary;
+  adjacentRoutes: RouteSummary[];
+  presentNpcs: NpcSummary[];
+  localInformation: InformationSummary[];
+  connectedLeads: CrossLocationLead[];
+  knownFactions: FactionSummary[];
+  inventory: PromptInventoryItem[];
+  memories: MemoryRecord[];
+  recentMessages: StoryMessage[];
+  discoveredInformationIds: string[];
+  globalTime: number;
+  timeOfDay: string;
 };
 
-export type TurnFacts = {
-  action: string;
-  roll?: string;
-  healthDelta: number;
-  discoveries: string[];
-  sceneChanged: boolean;
-};
-
-export type ValidatedDelta = {
-  nextState: CampaignState;
-  nextCharacter: Pick<CampaignCharacter, "health" | "gold" | "inventory">;
-  healthDelta?: number;
-  warnings: string[];
-  acceptedQuestAdvancements: ProposedStateDelta["questAdvancements"];
-  acceptedQuestDiscoveries: string[];
-  acceptedClueDiscoveries: string[];
-  acceptedRevealTriggers: string[];
-  acceptedArcAdvancements: ProposedStateDelta["arcAdvancements"];
-  acceptedNpcChanges: ProposedStateDelta["npcApprovalChanges"];
-  acceptedNpcDiscoveries: string[];
-  awardedGold: number;
-  acceptedLootDiscoveries: {
-    name: string;
-  }[];
-  acceptedInventoryChanges: {
-    add: InventoryTemplateReference[];
-    remove: string[];
-  };
-  memorySummary?: string;
+export type CitedEntities = {
+  npcIds: string[];
+  locationIds: string[];
+  factionIds: string[];
+  commodityIds: string[];
+  informationIds: string[];
 };
 
 export type CheckResult = {
@@ -523,62 +432,111 @@ export type CheckResult = {
   consequences?: string[];
 };
 
-export type TriageDecision = {
-  requiresCheck: boolean;
-  narration: string | null;
-  isInvestigative: boolean;
-  check?: {
-    stat: Stat;
-    mode: CheckMode;
-    reason: string;
-  };
-  suggestedActions: string[];
-  proposedDelta: ProposedStateDelta;
+export type RequestClarificationToolCall = {
+  type: "request_clarification";
+  question: string;
+  options: string[];
 };
 
-export type ResolveDecision = {
+export type ExecuteTravelToolCall = {
+  type: "execute_travel";
+  routeEdgeId: string;
+  targetLocationId: string;
   narration: string;
   suggestedActions: string[];
-  proposedDelta: ProposedStateDelta;
+  timeMode: "travel";
+  timeElapsed: number;
+  citedEntities: CitedEntities;
 };
 
-export type PromptContext = {
-  scene: SceneState;
-  inventory: PromptInventoryItem[];
-  keyLocations: KeyLocation[];
-  discoveredKeyLocations: KeyLocation[];
-  recentSceneTrail: string[];
-  promptSceneSummary: string;
-  activeArc: ArcRecord | undefined;
-  activeQuests: QuestRecord[];
-  hiddenQuests: QuestRecord[];
-  recentTurnLedger: string[];
-  narrativeSummary: string | null;
-  relevantClues: Clue[];
-  staleClues: Clue[];
-  eligibleRevealIds: string[];
-  discoveredClues: Clue[];
-  companion: NpcRecord | null;
-  hiddenNpcs: NpcRecord[];
-  discoveryCandidates: {
-    quests: {
-      id: string;
-      title: string;
-    }[];
-    npcs: {
-      id: string;
-      name: string;
-      role: string;
-    }[];
-  };
-  villainClock: number;
-  tensionScore: number;
-  arcPacingHint: string | null;
+export type ExecuteConverseToolCall = {
+  type: "execute_converse";
+  npcId: string;
+  topic: string;
+  narration: string;
+  suggestedActions: string[];
+  timeMode: Exclude<TimeMode, "travel" | "rest">;
+  timeElapsed: number;
+  citedEntities: CitedEntities;
+  approvalDelta?: number;
+  discoverInformationIds?: string[];
+  memorySummary?: string;
 };
 
-export type PendingCheck = {
-  stat: Stat;
-  mode: CheckMode;
-  reason: string;
-  isInvestigative: boolean;
+export type ExecuteInvestigateToolCall = {
+  type: "execute_investigate";
+  targetType: "location" | "npc" | "route" | "information";
+  targetId: string;
+  method: string;
+  narration: string;
+  suggestedActions: string[];
+  timeMode: Exclude<TimeMode, "travel" | "rest">;
+  timeElapsed: number;
+  citedEntities: CitedEntities;
+  discoverInformationIds?: string[];
+  memorySummary?: string;
+};
+
+export type ExecuteObserveToolCall = {
+  type: "execute_observe";
+  targetType: "location" | "npc" | "route" | "faction";
+  targetId: string;
+  narration: string;
+  suggestedActions: string[];
+  timeMode: Exclude<TimeMode, "travel" | "rest">;
+  timeElapsed: number;
+  citedEntities: CitedEntities;
+  discoverInformationIds?: string[];
+  memorySummary?: string;
+};
+
+export type ExecuteWaitToolCall = {
+  type: "execute_wait";
+  durationMinutes: number;
+  narration: string;
+  suggestedActions: string[];
+  timeMode: "exploration" | "downtime";
+  timeElapsed: number;
+  citedEntities: CitedEntities;
+  memorySummary?: string;
+};
+
+export type ExecuteFreeformToolCall = {
+  type: "execute_freeform";
+  actionDescription: string;
+  statToCheck: Stat;
+  timeMode: Exclude<TimeMode, "travel" | "rest">;
+  estimatedTimeElapsedMinutes: number;
+  timeElapsed: number;
+  intendedMechanicalOutcome: string;
+  dc?: number;
+  failureConsequence?: string;
+  narration: string;
+  suggestedActions: string[];
+  citedEntities: CitedEntities;
+  memorySummary?: string;
+};
+
+export type TurnActionToolCall =
+  | RequestClarificationToolCall
+  | ExecuteTravelToolCall
+  | ExecuteConverseToolCall
+  | ExecuteInvestigateToolCall
+  | ExecuteObserveToolCall
+  | ExecuteWaitToolCall
+  | ExecuteFreeformToolCall;
+
+export type ValidatedTurnCommand =
+  | RequestClarificationToolCall
+  | (Exclude<TurnActionToolCall, RequestClarificationToolCall> & {
+      warnings: string[];
+      checkResult?: CheckResult;
+    });
+
+export type SimulationInverse = {
+  table: string;
+  id: string;
+  field: string;
+  previousValue: unknown;
+  operation?: "update" | "delete_created";
 };

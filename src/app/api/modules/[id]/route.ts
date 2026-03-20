@@ -23,17 +23,7 @@ export async function GET(_: Request, context: Context) {
       );
     }
 
-    return NextResponse.json({
-      module: {
-        id: adventureModule.id,
-        title: adventureModule.setup.publicSynopsis.title,
-        premise: adventureModule.setup.publicSynopsis.premise,
-        tone: adventureModule.setup.publicSynopsis.tone,
-        setting: adventureModule.setup.publicSynopsis.setting,
-        createdAt: adventureModule.createdAt,
-        updatedAt: adventureModule.updatedAt,
-      },
-    });
+    return NextResponse.json({ module: adventureModule });
   } catch (error) {
     return NextResponse.json(
       {

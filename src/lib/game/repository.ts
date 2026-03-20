@@ -1,68 +1,34 @@
+import { Prisma } from "@prisma/client";
+import { dmClient } from "@/lib/ai/provider";
+import { toCampaignCharacter, toCharacterStats } from "@/lib/game/characters";
+import { createAdHocCampaignInventoryItem } from "@/lib/game/items";
+import { generatedWorldModuleSchema } from "@/lib/game/session-zero";
 import type {
-  AdventureModule as PrismaAdventureModule,
-  Arc,
-  Prisma,
-  CharacterInstance as PrismaCharacterInstance,
-  CharacterTemplate as PrismaCharacterTemplate,
-  Clue as PrismaClue,
-  MemoryEntry,
-  Message,
-  NPC,
-} from "@prisma/client";
-import {
-  toCampaignCharacter,
-  toCharacterStats,
-} from "@/lib/game/characters";
-import { auditSceneSnapshot } from "@/lib/ai/narration-audit";
-import {
-  buildArcRecordsFromBlueprint,
-  buildCampaignBlueprintFromSetup,
-  buildCampaignStateFromSetup,
-  buildClueRecordsFromSetup,
-  buildNpcRecordsFromSetup,
-  buildQuestRecordsFromSetup,
-} from "@/lib/game/campaign-setup";
-import type {
+  AdventureModuleDetail,
   AdventureModuleSummary,
-  CampaignCharacter,
   CampaignListItem,
+  CampaignRuntimeState,
   CampaignSnapshot,
   CharacterInstance,
   CharacterTemplate,
   CharacterTemplateDraft,
   CharacterTemplateSummary,
-  CheckResult,
-  Clue,
-  ClueStatus,
+  CrossLocationLead,
+  FactionSummary,
   GeneratedCampaignOpening,
-  GeneratedCampaignSetup,
-  ItemInstance,
-  ItemTemplate,
+  GeneratedWorldModule,
+  InformationSummary,
+  LocationSummary,
   MemoryRecord,
-  NpcRecord,
-  PromptContext,
-  PromptInventoryItem,
+  NpcSummary,
   PlayerCampaignSnapshot,
-  PlayerVisibleKeyLocation,
-  PlayerVisibleClue,
-  PlayerVisibleNpcRecord,
-  PlayerVisibleQuestRecord,
-  QuestRecord,
-  QuestStatus,
-  RecentResolvedTurn,
+  PromptInventoryItem,
+  RouteSummary,
+  SpatialPromptContext,
   StoryMessage,
-  TurnFacts,
 } from "@/lib/game/types";
-import {
-  hydrateCampaignState,
-  parseGeneratedCampaignSetup,
-} from "@/lib/game/serialization";
-import { createAdHocCampaignInventoryItem } from "@/lib/game/items";
-import { getStaleClues } from "@/lib/game/reveals";
-import { dmClient } from "@/lib/ai/provider";
 import { prisma } from "@/lib/prisma";
 
-type PrismaItemTemplateRecord = Prisma.ItemTemplateGetPayload<Record<string, never>>;
 const characterTemplateSummarySelect = {
   id: true,
   name: true,
@@ -82,29 +48,18 @@ const characterTemplateSummarySelect = {
 type PrismaCharacterTemplateSummaryRecord = Prisma.CharacterTemplateGetPayload<{
   select: typeof characterTemplateSummarySelect;
 }>;
+
 type PrismaItemInstanceRecord = Prisma.ItemInstanceGetPayload<{
   include: {
     template: true;
   };
 }>;
-type PrismaQuestRecord = Prisma.QuestGetPayload<{
-  include: {
-    rewardItemTemplate: true;
-  };
-}>;
 
-export async function ensureLocalUser() {
-  return prisma.user.upsert({
-    where: { email: "solo@adventure.local" },
-    update: {},
-    create: {
-      email: "solo@adventure.local",
-      name: "Solo Adventurer",
-    },
-  });
+function parseWorldTemplate(value: unknown): GeneratedWorldModule {
+  return generatedWorldModuleSchema.parse(value);
 }
 
-function toTemplateRecord(template: PrismaCharacterTemplate): CharacterTemplate {
+function toTemplateRecord(template: Prisma.CharacterTemplateGetPayload<Record<string, never>>): CharacterTemplate {
   return {
     id: template.id,
     name: template.name,
@@ -139,25 +94,23 @@ function toTemplateSummary(template: PrismaCharacterTemplateSummaryRecord): Char
   };
 }
 
-function toItemTemplateRecord(template: PrismaItemTemplateRecord): ItemTemplate {
-  return {
-    id: template.id,
-    campaignId: template.campaignId,
-    name: template.name,
-    description: template.description,
-    value: template.value,
-    weight: template.weight,
-    rarity: template.rarity,
-    tags: [...template.tags],
-  };
-}
-
-function toItemInstanceRecord(instance: PrismaItemInstanceRecord): ItemInstance {
+function toItemInstanceRecord(
+  instance: PrismaItemInstanceRecord,
+): CharacterInstance["inventory"][number] {
   return {
     id: instance.id,
     characterInstanceId: instance.characterInstanceId,
     templateId: instance.templateId,
-    template: toItemTemplateRecord(instance.template),
+    template: {
+      id: instance.template.id,
+      campaignId: instance.template.campaignId,
+      name: instance.template.name,
+      description: instance.template.description,
+      value: instance.template.value,
+      weight: instance.template.weight,
+      rarity: instance.template.rarity,
+      tags: [...instance.template.tags],
+    },
     isIdentified: instance.isIdentified,
     charges: instance.charges,
     properties:
@@ -167,231 +120,22 @@ function toItemInstanceRecord(instance: PrismaItemInstanceRecord): ItemInstance 
   };
 }
 
-function toPromptInventory(items: ItemInstance[]): PromptInventoryItem[] {
+function toPromptInventory(items: CharacterInstance["inventory"]): PromptInventoryItem[] {
   return items.map((item) => ({
     name: item.template.name,
     description: item.template.description,
   }));
 }
 
-function toInstanceRecord(
-  instance: PrismaCharacterInstance & {
-    inventory: PrismaItemInstanceRecord[];
-  },
-): CharacterInstance {
-  return {
-    id: instance.id,
-    templateId: instance.templateId,
-    health: instance.health,
-    gold: instance.gold,
-    inventory: instance.inventory.map(toItemInstanceRecord),
-  };
-}
-
-function toCharacter(
-  template: PrismaCharacterTemplate,
-  instance: PrismaCharacterInstance & {
-    inventory: PrismaItemInstanceRecord[];
-  },
-): CampaignCharacter {
-  return toCampaignCharacter(toTemplateRecord(template), toInstanceRecord(instance));
-}
-
-type ModuleWithSetup = Pick<
-  PrismaAdventureModule,
-  "id" | "userId" | "title" | "publicSynopsis" | "secretEngine" | "createdAt" | "updatedAt"
-> & {
-  _count?: {
-    campaigns: number;
-  };
-};
-
-function toGeneratedCampaignSetup(module: Pick<
-  PrismaAdventureModule,
-  "publicSynopsis" | "secretEngine"
->): GeneratedCampaignSetup {
-  return parseGeneratedCampaignSetup(module.publicSynopsis, module.secretEngine);
-}
-
-function toAdventureModuleSummary(module: ModuleWithSetup): AdventureModuleSummary {
-  const setup = toGeneratedCampaignSetup(module);
-
-  return {
-    id: module.id,
-    title: setup.publicSynopsis.title,
-    premise: setup.publicSynopsis.premise,
-    tone: setup.publicSynopsis.tone,
-    setting: setup.publicSynopsis.setting,
-    campaignCount: module._count?.campaigns ?? 0,
-    createdAt: module.createdAt.toISOString(),
-    updatedAt: module.updatedAt.toISOString(),
-  };
-}
-
-function buildCampaignCreationData(input: {
-  module: ModuleWithSetup;
-  template: CharacterTemplate;
-  opening: GeneratedCampaignOpening;
-}) {
-  const setup = toGeneratedCampaignSetup(input.module);
-  const blueprint = buildCampaignBlueprintFromSetup(setup);
-  const state = buildCampaignStateFromSetup(setup, input.opening);
-  const questSeeds = buildQuestRecordsFromSetup(setup);
-  const arcs = buildArcRecordsFromBlueprint(blueprint);
-  const npcs = buildNpcRecordsFromSetup(setup);
-  const clues = buildClueRecordsFromSetup(setup, blueprint);
-
-  return {
-    setup,
-    blueprint,
-    state,
-    questSeeds,
-    arcs,
-    npcs,
-    clues,
-    template: input.template,
-  };
-}
-
-async function createCampaignInTx(
-  tx: Prisma.TransactionClient,
-  input: {
-    userId: string;
-    module: ModuleWithSetup;
-    template: CharacterTemplate;
-    opening: GeneratedCampaignOpening;
-  },
-) {
-  const { state, questSeeds, arcs, npcs, clues, template } = buildCampaignCreationData(input);
-
-  const campaign = await tx.campaign.create({
-    data: {
-      userId: input.userId,
-      moduleId: input.module.id,
-      templateId: template.id,
-      stateJson: state,
-      characterInstance: {
-        create: {
-          templateId: template.id,
-          health: template.maxHealth,
-          gold: 0,
-        },
-      },
-      sessions: {
-        create: {
-          title: "Session 1",
-          status: "active",
-          messages: {
-            create: {
-              role: "assistant",
-              kind: "narration",
-              content: input.opening.narration,
-            },
-          },
-        },
-      },
-    },
-    select: {
-      id: true,
-      characterInstance: {
-        select: {
-          id: true,
-        },
-      },
+export async function ensureLocalUser() {
+  return prisma.user.upsert({
+    where: { email: "solo@adventure.local" },
+    update: {},
+    create: {
+      email: "solo@adventure.local",
+      name: "Solo Adventurer",
     },
   });
-
-  if (!campaign.characterInstance) {
-    throw new Error("Campaign is missing its character instance.");
-  }
-
-  for (const starterItem of template.starterItems) {
-    await createAdHocCampaignInventoryItem(tx, {
-      campaignId: campaign.id,
-      characterInstanceId: campaign.characterInstance.id,
-      name: starterItem,
-    });
-  }
-
-  for (const quest of questSeeds) {
-    const rewardItemTemplate = quest.rewardItemName
-      ? await tx.itemTemplate.create({
-          data: {
-            campaignId: campaign.id,
-            name: quest.rewardItemName,
-            description: null,
-            value: 0,
-            weight: 0,
-            rarity: "common",
-            tags: [],
-          },
-          select: { id: true },
-        })
-      : null;
-
-    await tx.quest.create({
-      data: {
-        id: quest.id,
-        campaignId: campaign.id,
-        title: quest.title,
-        summary: quest.summary,
-        stage: quest.stage,
-        maxStage: quest.maxStage,
-        status: quest.status,
-        rewardGold: quest.rewardGold,
-        rewardItemTemplateId: rewardItemTemplate?.id ?? null,
-        discoveredAtTurn: quest.discoveredAtTurn,
-      },
-    });
-  }
-
-  if (arcs.length) {
-    await tx.arc.createMany({
-      data: arcs.map((arc) => ({
-        id: arc.id,
-        campaignId: campaign.id,
-        title: arc.title,
-        summary: arc.summary,
-        status: arc.status,
-        expectedTurns: arc.expectedTurns,
-        currentTurn: arc.currentTurn,
-        orderIndex: arc.orderIndex,
-      })),
-    });
-  }
-
-  if (npcs.length) {
-    await tx.nPC.createMany({
-      data: npcs.map((npc) => ({
-        id: npc.id,
-        campaignId: campaign.id,
-        name: npc.name,
-        role: npc.role,
-        status: npc.status,
-        isCompanion: npc.isCompanion,
-        approval: npc.approval,
-        personalHook: npc.personalHook,
-        notes: npc.notes,
-        discoveredAtTurn: npc.discoveredAtTurn,
-      })),
-    });
-  }
-
-  if (clues.length) {
-    await tx.clue.createMany({
-      data: clues.map((clue) => ({
-        id: clue.id,
-        campaignId: campaign.id,
-        linkedRevealId: clue.linkedRevealId,
-        text: clue.text,
-        source: clue.source,
-        status: clue.status,
-        discoveredAtTurn: clue.discoveredAtTurn,
-      })),
-    });
-  }
-
-  return campaign;
 }
 
 export async function listCharacterTemplates(): Promise<CharacterTemplateSummary[]> {
@@ -405,193 +149,13 @@ export async function listCharacterTemplates(): Promise<CharacterTemplateSummary
   return templates.map(toTemplateSummary);
 }
 
-export async function listAdventureModules(): Promise<AdventureModuleSummary[]> {
-  const user = await ensureLocalUser();
-  const modules = await prisma.adventureModule.findMany({
-    where: { userId: user.id },
-    include: {
-      _count: {
-        select: {
-          campaigns: true,
-        },
-      },
-    },
-    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
-  });
-
-  return modules.map(toAdventureModuleSummary);
-}
-
-export async function getAdventureModuleForUser(moduleId: string) {
-  const user = await ensureLocalUser();
-  const adventureModule = await prisma.adventureModule.findFirst({
-    where: {
-      id: moduleId,
-      userId: user.id,
-    },
-  });
-
-  if (!adventureModule) {
-    return null;
-  }
-
-  return {
-    id: adventureModule.id,
-    userId: adventureModule.userId,
-    title: adventureModule.title,
-    setup: toGeneratedCampaignSetup(adventureModule),
-    createdAt: adventureModule.createdAt.toISOString(),
-    updatedAt: adventureModule.updatedAt.toISOString(),
-  };
-}
-
-export async function createAdventureModule(input: GeneratedCampaignSetup) {
-  const user = await ensureLocalUser();
-
-  const adventureModule = await prisma.adventureModule.create({
-    data: {
-      userId: user.id,
-      title: input.publicSynopsis.title,
-      publicSynopsis: input.publicSynopsis,
-      secretEngine: input.secretEngine,
-    },
-  });
-
-  return toAdventureModuleSummary(adventureModule);
-}
-
-export async function deleteAdventureModuleForUser(moduleId: string) {
-  const user = await ensureLocalUser();
-  const adventureModule = await prisma.adventureModule.findFirst({
-    where: {
-      id: moduleId,
-      userId: user.id,
-    },
-    include: {
-      _count: {
-        select: {
-          campaigns: true,
-        },
-      },
-    },
-  });
-
-  if (!adventureModule) {
-    return null;
-  }
-
-  await prisma.adventureModule.delete({
-    where: { id: adventureModule.id },
-  });
-
-  return {
-    moduleId: adventureModule.id,
-    campaignCount: adventureModule._count.campaigns,
-  };
-}
-
 export async function getCharacterTemplateForUser(templateId: string) {
   const user = await ensureLocalUser();
   const template = await prisma.characterTemplate.findFirst({
-    where: {
-      id: templateId,
-      userId: user.id,
-    },
+    where: { id: templateId, userId: user.id },
   });
 
   return template ? toTemplateRecord(template) : null;
-}
-
-export async function createCampaignFromModuleForUser(input: {
-  moduleId: string;
-  templateId: string;
-  opening?: GeneratedCampaignOpening;
-}) {
-  const user = await ensureLocalUser();
-  const [module, template] = await Promise.all([
-    prisma.adventureModule.findFirst({
-      where: {
-        id: input.moduleId,
-        userId: user.id,
-      },
-    }),
-    prisma.characterTemplate.findFirst({
-      where: {
-        id: input.templateId,
-        userId: user.id,
-      },
-    }),
-  ]);
-
-  if (!module) {
-    return { error: "module_not_found" as const };
-  }
-
-  if (!template) {
-    return { error: "template_not_found" as const };
-  }
-
-  const templateRecord = toTemplateRecord(template);
-  const setup = toGeneratedCampaignSetup(module);
-  const opening =
-    input.opening ??
-    (await dmClient.generateCampaignOpening({
-      setup,
-      character: templateRecord,
-    }));
-
-  const campaign = await prisma.$transaction((tx) =>
-    createCampaignInTx(tx, {
-      userId: user.id,
-      module,
-      template: templateRecord,
-      opening,
-    }),
-  );
-
-  return { campaignId: campaign.id };
-}
-
-export async function generateCampaignOpeningDraftForUser(input: {
-  moduleId: string;
-  templateId: string;
-  prompt?: string;
-  previousDraft?: GeneratedCampaignOpening;
-}) {
-  const user = await ensureLocalUser();
-  const [module, template] = await Promise.all([
-    prisma.adventureModule.findFirst({
-      where: {
-        id: input.moduleId,
-        userId: user.id,
-      },
-    }),
-    prisma.characterTemplate.findFirst({
-      where: {
-        id: input.templateId,
-        userId: user.id,
-      },
-    }),
-  ]);
-
-  if (!module) {
-    return { error: "module_not_found" as const };
-  }
-
-  if (!template) {
-    return { error: "template_not_found" as const };
-  }
-
-  const setup = toGeneratedCampaignSetup(module);
-  const character = toTemplateRecord(template);
-  const draft = await dmClient.generateCampaignOpening({
-    setup,
-    character,
-    prompt: input.prompt,
-    previousDraft: input.previousDraft,
-  });
-
-  return { draft };
 }
 
 export async function createCharacterTemplate(input: CharacterTemplateDraft) {
@@ -621,10 +185,7 @@ export async function updateCharacterTemplateForUser(
 ) {
   const user = await ensureLocalUser();
   const template = await prisma.characterTemplate.findFirst({
-    where: {
-      id: templateId,
-      userId: user.id,
-    },
+    where: { id: templateId, userId: user.id },
     select: { id: true },
   });
 
@@ -653,10 +214,7 @@ export async function updateCharacterTemplateForUser(
 export async function deleteCharacterTemplateForUser(templateId: string) {
   const user = await ensureLocalUser();
   const template = await prisma.characterTemplate.findFirst({
-    where: {
-      id: templateId,
-      userId: user.id,
-    },
+    where: { id: templateId, userId: user.id },
     select: {
       id: true,
       campaigns: {
@@ -681,47 +239,449 @@ export async function deleteCharacterTemplateForUser(templateId: string) {
   };
 }
 
-export async function getCampaignAggregate(campaignId: string) {
-  return prisma.campaign.findUnique({
-    where: { id: campaignId },
+function toAdventureModuleSummary(
+  module: Prisma.AdventureModuleGetPayload<{
+    include: { _count: { select: { campaigns: true } } };
+  }>,
+): AdventureModuleSummary {
+  const template = parseWorldTemplate(module.openWorldTemplateJson);
+  return {
+    id: module.id,
+    title: module.title,
+    premise: module.premise,
+    tone: module.tone,
+    setting: module.setting,
+    generationMode: "open_world",
+    entryPointCount: template.entryPoints.length,
+    campaignCount: module._count.campaigns,
+    createdAt: module.createdAt.toISOString(),
+    updatedAt: module.updatedAt.toISOString(),
+  };
+}
+
+export async function listAdventureModules(): Promise<AdventureModuleSummary[]> {
+  const user = await ensureLocalUser();
+  const modules = await prisma.adventureModule.findMany({
+    where: { userId: user.id },
     include: {
-      module: true,
-      template: true,
+      _count: {
+        select: {
+          campaigns: true,
+        },
+      },
+    },
+    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+  });
+
+  return modules.map(toAdventureModuleSummary);
+}
+
+export async function getAdventureModuleForUser(moduleId: string): Promise<AdventureModuleDetail | null> {
+  const user = await ensureLocalUser();
+  const adventureModule = await prisma.adventureModule.findFirst({
+    where: { id: moduleId, userId: user.id },
+  });
+
+  if (!adventureModule) {
+    return null;
+  }
+
+  const template = parseWorldTemplate(adventureModule.openWorldTemplateJson);
+
+  return {
+    id: adventureModule.id,
+    title: adventureModule.title,
+    premise: adventureModule.premise,
+    tone: adventureModule.tone,
+    setting: adventureModule.setting,
+    generationMode: "open_world",
+    schemaVersion: adventureModule.schemaVersion,
+    entryPoints: template.entryPoints.map((entryPoint) => {
+      const location = template.locations.find((location) => location.id === entryPoint.startLocationId);
+      return {
+        id: entryPoint.id,
+        title: entryPoint.title,
+        summary: entryPoint.summary,
+        locationName: location?.name ?? entryPoint.startLocationId,
+      };
+    }),
+    createdAt: adventureModule.createdAt.toISOString(),
+    updatedAt: adventureModule.updatedAt.toISOString(),
+  };
+}
+
+export async function createAdventureModule(input: GeneratedWorldModule) {
+  const user = await ensureLocalUser();
+
+  const adventureModule = await prisma.adventureModule.create({
+    data: {
+      userId: user.id,
+      title: input.title,
+      premise: input.premise,
+      tone: input.tone,
+      setting: input.setting,
+      generationMode: "open_world",
+      schemaVersion: 1,
+      isLocked: false,
+      openWorldTemplateJson: input,
+    },
+    include: {
+      _count: {
+        select: {
+          campaigns: true,
+        },
+      },
+    },
+  });
+
+  return toAdventureModuleSummary(adventureModule);
+}
+
+export async function deleteAdventureModuleForUser(moduleId: string) {
+  const user = await ensureLocalUser();
+  const adventureModule = await prisma.adventureModule.findFirst({
+    where: { id: moduleId, userId: user.id },
+    include: {
+      _count: {
+        select: {
+          campaigns: true,
+        },
+      },
+    },
+  });
+
+  if (!adventureModule) {
+    return null;
+  }
+
+  await prisma.adventureModule.delete({
+    where: { id: adventureModule.id },
+  });
+
+  return {
+    moduleId: adventureModule.id,
+    campaignCount: adventureModule._count.campaigns,
+  };
+}
+
+export async function generateCampaignOpeningDraftForUser(input: {
+  moduleId: string;
+  templateId: string;
+  entryPointId: string;
+  prompt?: string;
+  previousDraft?: GeneratedCampaignOpening;
+}) {
+  const user = await ensureLocalUser();
+  const [module, template] = await Promise.all([
+    prisma.adventureModule.findFirst({
+      where: { id: input.moduleId, userId: user.id },
+    }),
+    prisma.characterTemplate.findFirst({
+      where: { id: input.templateId, userId: user.id },
+    }),
+  ]);
+
+  if (!module) {
+    return { error: "module_not_found" as const };
+  }
+
+  if (!template) {
+    return { error: "template_not_found" as const };
+  }
+
+  const world = parseWorldTemplate(module.openWorldTemplateJson);
+  const entryPoint = world.entryPoints.find((entry) => entry.id === input.entryPointId);
+
+  if (!entryPoint) {
+    throw new Error("Entry point not found on selected module.");
+  }
+
+  const draft = await dmClient.generateCampaignOpening({
+    module: world,
+    character: toTemplateRecord(template),
+    entryPoint,
+    prompt: input.prompt,
+    previousDraft: input.previousDraft,
+  });
+
+  return { draft };
+}
+
+async function createCampaignInTx(
+  tx: Prisma.TransactionClient,
+  input: {
+    userId: string;
+    module: Prisma.AdventureModuleGetPayload<Record<string, never>>;
+    template: CharacterTemplate;
+    entryPointId: string;
+    opening: GeneratedCampaignOpening;
+  },
+) {
+  const world = parseWorldTemplate(input.module.openWorldTemplateJson);
+  const entryPoint = world.entryPoints.find((entry) => entry.id === input.entryPointId);
+
+  if (!entryPoint) {
+    throw new Error("Entry point not found during campaign creation.");
+  }
+
+  const state: CampaignRuntimeState = {
+    currentLocationId: entryPoint.startLocationId,
+    globalTime: 480,
+    pendingTurnId: null,
+    lastActionSummary: input.opening.activeThreat,
+    discoveredInformationIds: [...entryPoint.initialInformationIds],
+  };
+
+  const campaign = await tx.campaign.create({
+    data: {
+      userId: input.userId,
+      moduleId: input.module.id,
+      templateId: input.template.id,
+      moduleSchemaVersion: input.module.schemaVersion,
+      selectedEntryPointId: input.entryPointId,
+      stateJson: state,
       characterInstance: {
-        include: {
-          inventory: {
-            orderBy: { createdAt: "asc" },
-            include: {
-              template: true,
+        create: {
+          templateId: input.template.id,
+          health: input.template.maxHealth,
+          gold: 0,
+        },
+      },
+      sessions: {
+        create: {
+          title: "Session 1",
+          status: "active",
+          messages: {
+            create: {
+              role: "assistant",
+              kind: "narration",
+              content: input.opening.narration,
             },
           },
         },
       },
+    },
+    select: {
+      id: true,
+      characterInstance: {
+        select: { id: true },
+      },
       sessions: {
-        orderBy: { createdAt: "desc" },
+        select: { id: true },
         take: 1,
-      },
-      quests: {
-        orderBy: { createdAt: "asc" },
-        include: {
-          rewardItemTemplate: true,
-        },
-      },
-      arcs: {
-        orderBy: { orderIndex: "asc" },
-      },
-      npcs: {
-        orderBy: { createdAt: "asc" },
-      },
-      clues: {
-        orderBy: { createdAt: "asc" },
-      },
-      memories: {
-        orderBy: { createdAt: "desc" },
-        take: 6,
       },
     },
   });
+
+  if (!campaign.characterInstance || !campaign.sessions[0]) {
+    throw new Error("Campaign initialization failed.");
+  }
+
+  if (world.factions.length) {
+    await tx.faction.createMany({
+      data: world.factions.map((faction) => ({
+        id: faction.id,
+        campaignId: campaign.id,
+        name: faction.name,
+        type: faction.type,
+        summary: faction.summary,
+        agenda: faction.agenda,
+        resources: faction.resources,
+        pressureClock: faction.pressureClock,
+      })),
+    });
+  }
+
+  if (world.locations.length) {
+    await tx.locationNode.createMany({
+      data: world.locations.map((location) => ({
+        id: location.id,
+        campaignId: campaign.id,
+        name: location.name,
+        type: location.type,
+        summary: location.summary,
+        description: location.description,
+        state: location.state,
+        controllingFactionId: location.controllingFactionId,
+        tags: location.tags,
+      })),
+    });
+  }
+
+  if (world.edges.length) {
+    await tx.locationEdge.createMany({
+      data: world.edges.map((edge) => ({
+        id: edge.id,
+        campaignId: campaign.id,
+        sourceId: edge.sourceId,
+        targetId: edge.targetId,
+        travelTimeMinutes: edge.travelTimeMinutes,
+        dangerLevel: edge.dangerLevel,
+        currentStatus: edge.currentStatus,
+        description: edge.description,
+      })),
+    });
+  }
+
+  if (world.factionRelations.length) {
+    await tx.factionRelation.createMany({
+      data: world.factionRelations.map((relation) => ({
+        id: relation.id,
+        campaignId: campaign.id,
+        factionAId: relation.factionAId,
+        factionBId: relation.factionBId,
+        stance: relation.stance,
+      })),
+    });
+  }
+
+  if (world.npcs.length) {
+    await tx.nPC.createMany({
+      data: world.npcs.map((npc) => ({
+        id: npc.id,
+        campaignId: campaign.id,
+        name: npc.name,
+        role: npc.role,
+        summary: npc.summary,
+        description: npc.description,
+        factionId: npc.factionId,
+        currentLocationId: npc.currentLocationId,
+        approval: npc.approval,
+        isCompanion: npc.isCompanion,
+      })),
+    });
+  }
+
+  if (world.information.length) {
+    await tx.information.createMany({
+      data: world.information.map((information) => ({
+        id: information.id,
+        campaignId: campaign.id,
+        title: information.title,
+        summary: information.summary,
+        content: information.content,
+        truthfulness: information.truthfulness,
+        accessibility: information.accessibility,
+        locationId: information.locationId,
+        factionId: information.factionId,
+        sourceNpcId: information.sourceNpcId,
+        isDiscovered: entryPoint.initialInformationIds.includes(information.id),
+        discoveredAtTurn: entryPoint.initialInformationIds.includes(information.id) ? 0 : null,
+      })),
+    });
+  }
+
+  if (world.informationLinks.length) {
+    await tx.informationLink.createMany({
+      data: world.informationLinks.map((link) => ({
+        id: link.id,
+        campaignId: campaign.id,
+        sourceId: link.sourceId,
+        targetId: link.targetId,
+        linkType: link.linkType,
+      })),
+    });
+  }
+
+  if (world.commodities.length) {
+    await tx.commodity.createMany({
+      data: world.commodities.map((commodity) => ({
+        id: commodity.id,
+        campaignId: campaign.id,
+        name: commodity.name,
+        baseValue: commodity.baseValue,
+        tags: commodity.tags,
+      })),
+    });
+  }
+
+  if (world.marketPrices.length) {
+    await tx.marketPrice.createMany({
+      data: world.marketPrices.map((price) => ({
+        id: price.id,
+        campaignId: campaign.id,
+        commodityId: price.commodityId,
+        locationId: price.locationId,
+        vendorNpcId: price.vendorNpcId,
+        factionId: price.factionId,
+        modifier: price.modifier,
+        stock: price.stock,
+        legalStatus: price.legalStatus,
+      })),
+    });
+  }
+
+  for (const starterItem of input.template.starterItems) {
+    await createAdHocCampaignInventoryItem(tx, {
+      campaignId: campaign.id,
+      characterInstanceId: campaign.characterInstance.id,
+      name: starterItem,
+    });
+  }
+
+  await tx.adventureModule.update({
+    where: { id: input.module.id },
+    data: {
+      isLocked: true,
+    },
+  });
+
+  return {
+    campaignId: campaign.id,
+    sessionId: campaign.sessions[0].id,
+  };
+}
+
+export async function createCampaignFromModuleForUser(input: {
+  moduleId: string;
+  templateId: string;
+  entryPointId: string;
+  opening?: GeneratedCampaignOpening;
+}) {
+  const user = await ensureLocalUser();
+  const [module, template] = await Promise.all([
+    prisma.adventureModule.findFirst({
+      where: { id: input.moduleId, userId: user.id },
+    }),
+    prisma.characterTemplate.findFirst({
+      where: { id: input.templateId, userId: user.id },
+    }),
+  ]);
+
+  if (!module) {
+    return { error: "module_not_found" as const };
+  }
+
+  if (!template) {
+    return { error: "template_not_found" as const };
+  }
+
+  const world = parseWorldTemplate(module.openWorldTemplateJson);
+  const entryPoint = world.entryPoints.find((entry) => entry.id === input.entryPointId);
+  if (!entryPoint) {
+    throw new Error("Selected entry point was not found.");
+  }
+
+  const templateRecord = toTemplateRecord(template);
+  const opening =
+    input.opening ??
+    (await dmClient.generateCampaignOpening({
+      module: world,
+      character: templateRecord,
+      entryPoint,
+    }));
+
+  const result = await prisma.$transaction((tx) =>
+    createCampaignInTx(tx, {
+      userId: user.id,
+      module,
+      template: templateRecord,
+      entryPointId: input.entryPointId,
+      opening,
+    }),
+  );
+
+  return { campaignId: result.campaignId };
 }
 
 export async function listCampaigns(): Promise<CampaignListItem[]> {
@@ -730,688 +690,392 @@ export async function listCampaigns(): Promise<CampaignListItem[]> {
     include: {
       module: true,
       template: true,
-      sessions: {
-        orderBy: { createdAt: "desc" },
-        take: 1,
-      },
+      locationNodes: true,
     },
   });
 
   return campaigns.map((campaign) => {
-    const moduleSummary = toAdventureModuleSummary(campaign.module);
+    const state = campaign.stateJson as unknown as CampaignRuntimeState;
+    const currentLocation = campaign.locationNodes.find(
+      (location) => location.id === state.currentLocationId,
+    );
 
     return {
       id: campaign.id,
-      title: moduleSummary.title,
-      premise: moduleSummary.premise,
-      setting: moduleSummary.setting,
-      tone: moduleSummary.tone,
+      title: campaign.module.title,
+      premise: campaign.module.premise,
+      setting: campaign.module.setting,
+      tone: campaign.module.tone,
       characterName: campaign.template.name,
       characterArchetype: campaign.template.archetype,
-      sessionTitle: campaign.sessions[0]?.title ?? null,
-      turnCount: campaign.sessions[0]?.turnCount ?? 0,
+      currentLocationName: currentLocation?.name ?? "Unknown location",
       updatedAt: campaign.updatedAt.toISOString(),
       createdAt: campaign.createdAt.toISOString(),
     };
   });
 }
 
-function toQuest(quest: PrismaQuestRecord): QuestRecord {
+function toLocationSummary(
+  location: Prisma.LocationNodeGetPayload<Record<string, never>>,
+  factions: Prisma.FactionGetPayload<Record<string, never>>[],
+): LocationSummary {
+  const controller = location.controllingFactionId
+    ? factions.find((faction) => faction.id === location.controllingFactionId)
+    : null;
+
   return {
-    id: quest.id,
-    title: quest.title,
-    summary: quest.summary,
-    stage: quest.stage,
-    maxStage: quest.maxStage,
-    status: quest.status as QuestStatus,
-    rewardGold: quest.rewardGold,
-    rewardItem: quest.rewardItemTemplate
-      ? {
-          templateId: quest.rewardItemTemplate.id,
-          name: quest.rewardItemTemplate.name,
-        }
-      : null,
-    discoveredAtTurn: quest.discoveredAtTurn,
+    id: location.id,
+    name: location.name,
+    type: location.type,
+    summary: location.summary,
+    description: location.description,
+    state: location.state,
+    controllingFactionId: location.controllingFactionId,
+    controllingFactionName: controller?.name ?? null,
+    tags: [...location.tags],
   };
 }
 
-function toArc(arc: Arc) {
+function toFactionSummary(
+  faction: Prisma.FactionGetPayload<Record<string, never>>,
+): FactionSummary {
   return {
-    id: arc.id,
-    title: arc.title,
-    summary: arc.summary,
-    status: arc.status as "active" | "complete" | "locked",
-    expectedTurns: arc.expectedTurns,
-    currentTurn: arc.currentTurn,
-    orderIndex: arc.orderIndex,
+    id: faction.id,
+    name: faction.name,
+    type: faction.type,
+    summary: faction.summary,
+    agenda: faction.agenda,
+    pressureClock: faction.pressureClock,
   };
 }
 
-function toNpc(npc: NPC): NpcRecord {
+function toNpcSummary(
+  npc: Prisma.NPCGetPayload<Record<string, never>>,
+  factions: Prisma.FactionGetPayload<Record<string, never>>[],
+): NpcSummary {
+  const faction = npc.factionId ? factions.find((entry) => entry.id === npc.factionId) : null;
+
   return {
     id: npc.id,
     name: npc.name,
     role: npc.role,
-    status: npc.status,
-    isCompanion: npc.isCompanion,
+    summary: npc.summary,
+    description: npc.description,
+    factionId: npc.factionId,
+    factionName: faction?.name ?? null,
+    currentLocationId: npc.currentLocationId,
     approval: npc.approval,
-    personalHook: npc.personalHook,
-    notes: npc.notes,
-    discoveredAtTurn: npc.discoveredAtTurn,
-  };
-}
-
-function toClue(clue: PrismaClue): Clue {
-  return {
-    id: clue.id,
-    text: clue.text,
-    source: clue.source,
-    linkedRevealId: clue.linkedRevealId,
-    status: clue.status as ClueStatus,
-    discoveredAtTurn: clue.discoveredAtTurn,
-  };
-}
-
-function toMemory(entry: MemoryEntry): MemoryRecord {
-  return {
-    id: entry.id,
-    type: entry.type,
-    summary: entry.summary,
-    createdAt: entry.createdAt.toISOString(),
-  };
-}
-
-function toMessage(message: Message): StoryMessage {
-  return {
-    id: message.id,
-    role: message.role as StoryMessage["role"],
-    kind: message.kind as StoryMessage["kind"],
-    content: message.content,
-    createdAt: message.createdAt.toISOString(),
-    payload: (message.payload as Record<string, unknown> | null) ?? null,
-  };
-}
-
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function buildPlayerKnowledgeText(snapshot: CampaignSnapshot, previouslyOn?: string | null) {
-  return [
-    snapshot.state.sceneState.title,
-    snapshot.state.sceneState.summary,
-    snapshot.state.sceneState.atmosphere,
-    previouslyOn ?? snapshot.previouslyOn ?? "",
-    ...snapshot.recentMessages.map((message) => message.content),
-    ...snapshot.memories.map((entry) => entry.summary),
-  ]
-    .join(" ")
-    .toLowerCase();
-}
-
-function buildRecentSceneTrail(locations: string[], currentLocation: string) {
-  const seen = new Set<string>();
-  const trail: string[] = [];
-
-  for (let index = locations.length - 1; index >= 0; index -= 1) {
-    const location = locations[index];
-    if (!location || location === currentLocation || seen.has(location)) {
-      continue;
-    }
-
-    seen.add(location);
-    trail.push(location);
-
-    if (trail.length >= 8) {
-      break;
-    }
-  }
-
-  return trail.reverse();
-}
-
-function normalizeTurnFacts(value: unknown, playerAction: string): TurnFacts | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-
-  const raw = value as Record<string, unknown>;
-  const discoveries = Array.isArray(raw.discoveries)
-    ? raw.discoveries.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
-    : [];
-  const healthDelta = Number.isFinite(Number(raw.healthDelta)) ? Math.trunc(Number(raw.healthDelta)) : 0;
-
-  if (typeof raw.action !== "string" || !raw.action.trim()) {
-    return null;
-  }
-
-  return {
-    action: raw.action.trim() || playerAction,
-    roll: typeof raw.roll === "string" && raw.roll.trim() ? raw.roll.trim() : undefined,
-    healthDelta,
-    discoveries,
-    sceneChanged: Boolean(raw.sceneChanged),
-  };
-}
-
-function formatCheckRoll(result: CheckResult) {
-  return `${result.stat} ${result.outcome} (${result.total})`;
-}
-
-function hasRollbackData(resultJson: unknown) {
-  return Boolean(
-    resultJson &&
-      typeof resultJson === "object" &&
-      !Array.isArray(resultJson) &&
-      "rollback" in (resultJson as Record<string, unknown>),
-  );
-}
-
-function extractTurnFacts(resultJson: unknown, playerAction: string): TurnFacts {
-  if (resultJson && typeof resultJson === "object" && !Array.isArray(resultJson)) {
-    const record = resultJson as Record<string, unknown>;
-    const normalized = normalizeTurnFacts(record.turnFacts, playerAction);
-
-    if (normalized) {
-      return normalized;
-    }
-
-    const rawCheck = record.checkResult;
-    if (rawCheck && typeof rawCheck === "object" && !Array.isArray(rawCheck)) {
-      const parsed = rawCheck as CheckResult;
-      return {
-        action: playerAction,
-        roll: formatCheckRoll(parsed),
-        healthDelta: 0,
-        discoveries: [],
-        sceneChanged: false,
-      };
-    }
-  }
-
-  return {
-    action: playerAction,
-    healthDelta: 0,
-    discoveries: [],
-    sceneChanged: false,
-  };
-}
-
-function formatTurnLedgerEntry(turnNumber: number, facts: TurnFacts) {
-  const roll = facts.roll ?? "none";
-  const discoveries = facts.discoveries.length ? facts.discoveries.join(", ") : "none";
-
-  return `[Turn ${turnNumber}] Action: "${facts.action}" | Roll: ${roll} | HP: ${facts.healthDelta} | Discoveries: ${discoveries} | SceneChanged: ${facts.sceneChanged ? "yes" : "no"}`;
-}
-
-export function buildRecentTurnLedger(turnCount: number, recentResolvedTurns: RecentResolvedTurn[]) {
-  const orderedTurns = [...recentResolvedTurns].reverse();
-
-  return orderedTurns.map((turn, index) =>
-    formatTurnLedgerEntry(
-      Math.max(turnCount - orderedTurns.length + index + 1, 1),
-      extractTurnFacts(turn.resultJson, turn.playerAction),
-    ),
-  );
-}
-
-async function sanitizePromptSceneSummary(summary: string) {
-  const normalized = summary.trim();
-  const audit = auditSceneSnapshot(normalized);
-
-  if (!audit.shouldCompress) {
-    return normalized;
-  }
-
-  return dmClient.compressSceneSnapshot(normalized);
-}
-
-function isExactPhraseInKnowledgeText(knowledgeText: string, value: string) {
-  const trimmed = value.trim().toLowerCase();
-
-  if (!trimmed) {
-    return false;
-  }
-
-  return new RegExp(`\\b${escapeRegExp(trimmed)}\\b`, "i").test(knowledgeText);
-}
-
-function isLegacyNameInKnowledgeText(knowledgeText: string, value: string) {
-  if (isExactPhraseInKnowledgeText(knowledgeText, value)) {
-    return true;
-  }
-
-  const stopwords = new Set([
-    "the",
-    "a",
-    "an",
-    "of",
-    "and",
-    "lord",
-    "lady",
-    "sir",
-    "master",
-    "mistress",
-    "high",
-  ]);
-  const tokens = value
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .map((token) => token.trim())
-    .filter((token) => token.length >= 4 && !stopwords.has(token));
-
-  return tokens.some((token) => new RegExp(`\\b${escapeRegExp(token)}\\b`, "i").test(knowledgeText));
-}
-
-function toPlayerQuest(quest: QuestRecord): PlayerVisibleQuestRecord {
-  return {
-    id: quest.id,
-    title: quest.title,
-    summary: quest.summary,
-    stage: quest.stage,
-    maxStage: quest.maxStage,
-    status: quest.status,
-  };
-}
-
-function toPlayerNpc(npc: NpcRecord, knowledgeText: string): PlayerVisibleNpcRecord {
-  return {
-    id: npc.id,
-    name: npc.name,
-    role: isExactPhraseInKnowledgeText(knowledgeText, npc.role) ? npc.role : null,
-    notes: null,
     isCompanion: npc.isCompanion,
   };
 }
 
-function toPlayerClue(clue: Clue): PlayerVisibleClue {
-  return {
-    id: clue.id,
-    text: clue.text,
-    source: clue.source,
-    status: clue.status,
-    discoveredAtTurn: clue.discoveredAtTurn,
-  };
-}
-
-export async function getRecentMessages(sessionId: string) {
-  const messages = await prisma.message.findMany({
-    where: { sessionId },
-    orderBy: { createdAt: "desc" },
-    take: 30,
-  });
-
-  return orderRecentMessages(messages.map(toMessage));
-}
-
-export function orderRecentMessages<T extends { createdAt: string }>(messages: T[], take = 30) {
-  return [...messages]
-    .sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime())
-    .slice(-take);
-}
-
-async function getRecentResolvedTurns(sessionId: string, take = 4): Promise<RecentResolvedTurn[]> {
-  const turns = await prisma.turn.findMany({
-    where: {
-      sessionId,
-      status: "resolved",
-    },
-    orderBy: { updatedAt: "desc" },
-    take,
-    select: {
-      id: true,
-      playerAction: true,
-      resultJson: true,
-    },
-  });
-
-  return turns.map((turn) => ({
-    id: turn.id,
-    playerAction: turn.playerAction,
-    resultJson: turn.resultJson,
-  }));
-}
-
-export async function backfillLegacyDiscoveries(campaignId: string) {
-  const snapshot = await getCampaignSnapshot(campaignId);
-
-  if (!snapshot) {
-    return false;
-  }
-
-  const hasProgressBeyondFreshStart =
-    snapshot.state.turnCount > 0 || snapshot.memories.length > 0 || snapshot.recentMessages.length > 1;
-
-  if (!hasProgressBeyondFreshStart) {
-    return false;
-  }
-
-  const knowledgeText = buildPlayerKnowledgeText(snapshot);
-  const questIdsToDiscover = snapshot.quests
-    .filter(
-      (quest) =>
-        quest.discoveredAtTurn === null && isExactPhraseInKnowledgeText(knowledgeText, quest.title),
-    )
-    .map((quest) => quest.id);
-  const npcIdsToDiscover = snapshot.npcs
-    .filter(
-      (npc) =>
-        npc.discoveredAtTurn === null && isLegacyNameInKnowledgeText(knowledgeText, npc.name),
-    )
-    .map((npc) => npc.id);
-
-  if (!questIdsToDiscover.length && !npcIdsToDiscover.length) {
-    return false;
-  }
-
-  await prisma.$transaction([
-    ...questIdsToDiscover.map((questId) =>
-      prisma.quest.updateMany({
-        where: {
-          id: questId,
-          discoveredAtTurn: null,
-        },
-        data: {
-          discoveredAtTurn: 0,
-        },
-      }),
-    ),
-    ...npcIdsToDiscover.map((npcId) =>
-      prisma.nPC.updateMany({
-        where: {
-          id: npcId,
-          discoveredAtTurn: null,
-        },
-        data: {
-          discoveredAtTurn: 0,
-        },
-      }),
-    ),
-  ]);
-
-  return true;
-}
-
-export async function backfillLegacySceneSummary(campaignId: string) {
-  const campaign = await prisma.campaign.findUnique({
-    where: { id: campaignId },
-    select: {
-      id: true,
-      stateJson: true,
-      module: {
-        select: {
-          publicSynopsis: true,
-          secretEngine: true,
-        },
-      },
-    },
-  });
-
-  if (!campaign) {
-    return false;
-  }
-
-  const setup = parseGeneratedCampaignSetup(
-    campaign.module?.publicSynopsis,
-    campaign.module?.secretEngine,
-  );
-  const state = hydrateCampaignState(campaign.stateJson, setup.secretEngine.keyLocations);
-  const audit = auditSceneSnapshot(state.sceneState.summary);
-
-  if (!audit.shouldCompress) {
-    return false;
-  }
-
-  const compressed = await dmClient.compressSceneSnapshot(state.sceneState.summary);
-  if (!compressed || compressed === state.sceneState.summary) {
-    return false;
-  }
-
-  await prisma.campaign.update({
-    where: { id: campaignId },
-    data: {
-      stateJson: {
-        ...(state as object),
-        sceneState: {
-          ...state.sceneState,
-          summary: compressed,
-        },
-      },
-    },
-  });
-
-  return true;
-}
-
-export async function getCampaignSnapshot(
-  campaignId: string,
-  previouslyOn: string | null = null,
-): Promise<CampaignSnapshot | null> {
-  const campaign = await getCampaignAggregate(campaignId);
-
-  if (!campaign) {
-    return null;
-  }
-
-  if (!campaign.characterInstance) {
-    throw new Error("Campaign is missing its character instance.");
-  }
-
-  const session = campaign.sessions[0];
-  const [recentMessages, recentResolvedTurns] = session
-    ? await Promise.all([
-        getRecentMessages(session.id),
-        getRecentResolvedTurns(session.id),
-      ])
-    : [[], []];
-  const setup = toGeneratedCampaignSetup(campaign.module);
-  const blueprint = buildCampaignBlueprintFromSetup(setup);
-  const state = hydrateCampaignState(campaign.stateJson, blueprint.keyLocations);
-  const latestResolvedTurn = recentResolvedTurns[0] ?? null;
-
-  return {
-    campaignId: campaign.id,
-    sessionId: session?.id ?? "",
-    title: setup.publicSynopsis.title,
-    premise: setup.publicSynopsis.premise,
-    tone: setup.publicSynopsis.tone,
-    setting: setup.publicSynopsis.setting,
-    blueprint,
-    state,
-    character: toCharacter(campaign.template, campaign.characterInstance),
-    quests: campaign.quests.map(toQuest),
-    arcs: campaign.arcs.map(toArc),
-    npcs: campaign.npcs.map(toNpc),
-    clues: campaign.clues.map(toClue),
-    memories: campaign.memories.map(toMemory),
-    recentMessages,
-    recentResolvedTurns,
-    previouslyOn,
-    latestResolvedTurnId: latestResolvedTurn?.id ?? null,
-    canRetryLatestTurn: hasRollbackData(latestResolvedTurn?.resultJson),
-  };
-}
-
-export function toPlayerCampaignSnapshot(
-  snapshot: CampaignSnapshot,
-  previouslyOn: string | null = snapshot.previouslyOn,
-): PlayerCampaignSnapshot {
-  const knowledgeText = buildPlayerKnowledgeText(snapshot, previouslyOn);
-  const suggestedActions =
-    snapshot.state.turnCount === 0 ? [] : snapshot.state.sceneState.suggestedActions;
-  const visibleQuests = snapshot.quests
-    .filter((quest) => quest.discoveredAtTurn !== null)
-    .map(toPlayerQuest);
-  const visibleNpcs = snapshot.npcs
-    .filter((npc) => npc.discoveredAtTurn !== null)
-    .map((npc) => toPlayerNpc(npc, knowledgeText));
-  const visibleClues = snapshot.clues
-    .filter((clue) => clue.status === "discovered")
-    .map(toPlayerClue);
-  const knownKeyLocations: PlayerVisibleKeyLocation[] = snapshot.blueprint.keyLocations
-    .filter((location) => snapshot.state.discoveredKeyLocationNames.includes(location.name))
-    .map((location) => ({
-      name: location.name,
-      role: location.role,
-    }));
-
-  return {
-    campaignId: snapshot.campaignId,
-    sessionId: snapshot.sessionId,
-    title: snapshot.title,
-    premise: snapshot.premise,
-    tone: snapshot.tone,
-    setting: snapshot.setting,
-    knownKeyLocations,
-    knownSceneLocations: snapshot.state.discoveredSceneLocations,
-    state: {
-      turnCount: snapshot.state.turnCount,
-      sceneState: {
-        ...snapshot.state.sceneState,
-        suggestedActions,
-      },
-    },
-    character: snapshot.character,
-    quests: visibleQuests,
-    npcs: visibleNpcs,
-    clues: visibleClues,
-    memories: snapshot.memories,
-    recentMessages: snapshot.recentMessages,
-    previouslyOn,
-    latestResolvedTurnId: snapshot.latestResolvedTurnId,
-    canRetryLatestTurn: snapshot.canRetryLatestTurn,
-  };
-}
-
-export async function getPromptContext(snapshot: CampaignSnapshot): Promise<PromptContext> {
-  const activeArc = snapshot.arcs.find((arc) => arc.id === snapshot.state.activeArcId);
-  const staleClues = getStaleClues(snapshot.clues, snapshot.state.turnCount);
-  const promptSceneSummary = await sanitizePromptSceneSummary(snapshot.state.sceneState.summary);
-  const narrativeSummary =
-    snapshot.memories.find((entry) => entry.type === "session_summary")?.summary ?? null;
-  const activeQuests: QuestRecord[] = [];
-  const hiddenQuests: QuestRecord[] = [];
-  const hiddenNpcs: NpcRecord[] = [];
-  const discoveredClues: Clue[] = [];
-  const clueWindow: Clue[] = [];
-  const discoveryCandidates = {
-    quests: [] as PromptContext["discoveryCandidates"]["quests"],
-    npcs: [] as PromptContext["discoveryCandidates"]["npcs"],
-  };
-  const discoveredClueIds = new Set<string>();
-  let companion: NpcRecord | null = null;
-
-  for (const quest of snapshot.quests) {
-    if (quest.discoveredAtTurn === null) {
-      hiddenQuests.push(quest);
-      if (quest.status === "active") {
-        discoveryCandidates.quests.push({
-          id: quest.id,
-          title: quest.title,
-        });
-      }
-      continue;
-    }
-
-    if (quest.status === "active") {
-      activeQuests.push(quest);
-    }
-  }
-
-  for (const npc of snapshot.npcs) {
-    if (npc.discoveredAtTurn === null) {
-      hiddenNpcs.push(npc);
-      discoveryCandidates.npcs.push({
-        id: npc.id,
-        name: npc.name,
-        role: npc.role,
-      });
-      continue;
-    }
-
-    if (!companion && npc.isCompanion) {
-      companion = npc;
-    }
-  }
-
-  for (const clue of snapshot.clues) {
-    if (clue.status === "hidden" || clue.status === "discovered") {
-      clueWindow.push(clue);
-    }
-
-    if (clue.status === "discovered") {
-      discoveredClues.push(clue);
-      discoveredClueIds.add(clue.id);
-    }
-  }
-
-  const activeRevealIds = new Set(snapshot.state.activeRevealIds);
-  const readyArcIds = new Set(
-    snapshot.arcs.filter((arc) => arc.status !== "locked").map((arc) => arc.id),
-  );
-  const eligibleRevealIds = snapshot.blueprint.hiddenReveals
-    .filter((reveal) => {
-      const allCluesFound = reveal.requiredClues.every((clueId) => discoveredClueIds.has(clueId));
-      const arcReady = reveal.requiredArcIds.every((arcId) => readyArcIds.has(arcId));
-
-      return allCluesFound && arcReady && !activeRevealIds.has(reveal.id);
-    })
-    .map((reveal) => reveal.id);
-  const recentTurnLedger = buildRecentTurnLedger(
-    snapshot.state.turnCount,
-    snapshot.recentResolvedTurns,
-  );
-  const recentTurnThreshold = snapshot.state.turnCount - 8;
-  const discoveredKeyLocations = snapshot.blueprint.keyLocations.filter((location) =>
-    snapshot.state.discoveredKeyLocationNames.includes(location.name),
-  );
-  const recentSceneTrail = buildRecentSceneTrail(
-    snapshot.state.discoveredSceneLocations,
-    snapshot.state.sceneState.location,
-  );
-
-  const arcPacingHint = activeArc
-    ? activeArc.currentTurn / activeArc.expectedTurns >= 0.8
-      ? `ARC ENDING SOON: ${activeArc.title} should conclude within 2-3 turns.`
-      : null
+function toInformationSummary(
+  information: Prisma.InformationGetPayload<Record<string, never>>,
+  locations: Prisma.LocationNodeGetPayload<Record<string, never>>[],
+  factions: Prisma.FactionGetPayload<Record<string, never>>[],
+  npcs: Prisma.NPCGetPayload<Record<string, never>>[],
+): InformationSummary {
+  const location = information.locationId
+    ? locations.find((entry) => entry.id === information.locationId)
+    : null;
+  const faction = information.factionId
+    ? factions.find((entry) => entry.id === information.factionId)
+    : null;
+  const sourceNpc = information.sourceNpcId
+    ? npcs.find((entry) => entry.id === information.sourceNpcId)
     : null;
 
   return {
-    scene: snapshot.state.sceneState,
-    inventory: toPromptInventory(snapshot.character.inventory),
-    keyLocations: snapshot.blueprint.keyLocations,
-    discoveredKeyLocations,
-    recentSceneTrail,
-    promptSceneSummary,
-    activeArc,
-    activeQuests,
-    hiddenQuests,
-    recentTurnLedger,
-    narrativeSummary,
-    relevantClues: clueWindow.filter(
-      (clue) =>
-        clue.status === "hidden" ||
-        (clue.status === "discovered" &&
-          clue.discoveredAtTurn !== null &&
-          clue.discoveredAtTurn >= recentTurnThreshold),
-    ),
-    staleClues,
-    eligibleRevealIds,
-    discoveredClues,
-    companion,
-    hiddenNpcs,
-    discoveryCandidates,
-    villainClock: snapshot.state.villainClock,
-    tensionScore: snapshot.state.tensionScore,
-    arcPacingHint,
+    id: information.id,
+    title: information.title,
+    summary: information.summary,
+    accessibility: information.accessibility as InformationSummary["accessibility"],
+    truthfulness: information.truthfulness,
+    locationId: information.locationId,
+    locationName: location?.name ?? null,
+    factionId: information.factionId,
+    factionName: faction?.name ?? null,
+    sourceNpcId: information.sourceNpcId,
+    sourceNpcName: sourceNpc?.name ?? null,
+    isDiscovered: information.isDiscovered,
   };
 }
 
-export function toStoredTemplateSeed(template: CharacterTemplate) {
+function buildCrossLocationLeads(input: {
+  discoveredInformationIds: string[];
+  information: Prisma.InformationGetPayload<Record<string, never>>[];
+  informationLinks: Prisma.InformationLinkGetPayload<Record<string, never>>[];
+  locations: Prisma.LocationNodeGetPayload<Record<string, never>>[];
+  factions: Prisma.FactionGetPayload<Record<string, never>>[];
+  npcs: Prisma.NPCGetPayload<Record<string, never>>[];
+}): CrossLocationLead[] {
+  const informationById = new Map(input.information.map((entry) => [entry.id, entry]));
+  const linksBySource = new Map<string, Prisma.InformationLinkGetPayload<Record<string, never>>[]>();
+
+  for (const link of input.informationLinks) {
+    const existing = linksBySource.get(link.sourceId) ?? [];
+    existing.push(link);
+    linksBySource.set(link.sourceId, existing);
+  }
+
+  const leads = new Map<string, CrossLocationLead>();
+  const queue = input.discoveredInformationIds.map((id) => ({
+    id,
+    depth: 0,
+    path: [id],
+  }));
+  const seen = new Set<string>(input.discoveredInformationIds);
+
+  while (queue.length) {
+    const current = queue.shift();
+    if (!current) {
+      continue;
+    }
+
+    if (current.depth >= 2) {
+      continue;
+    }
+
+    for (const link of linksBySource.get(current.id) ?? []) {
+      const target = informationById.get(link.targetId);
+      if (!target) {
+        continue;
+      }
+
+      const nextDepth = (current.depth + 1) as 1 | 2;
+      if (!input.discoveredInformationIds.includes(target.id)) {
+        leads.set(target.id, {
+          information: toInformationSummary(target, input.locations, input.factions, input.npcs),
+          depth: nextDepth,
+          viaInformationIds: current.path,
+        });
+      }
+
+      if (!seen.has(target.id)) {
+        seen.add(target.id);
+        queue.push({
+          id: target.id,
+          depth: current.depth + 1,
+          path: [...current.path, target.id],
+        });
+      }
+    }
+  }
+
+  return Array.from(leads.values()).sort((left, right) => left.depth - right.depth);
+}
+
+export async function getCampaignSnapshot(campaignId: string): Promise<CampaignSnapshot | null> {
+  const campaign = await prisma.campaign.findUnique({
+    where: { id: campaignId },
+    include: {
+      module: true,
+      template: true,
+      characterInstance: {
+        include: {
+          inventory: {
+            orderBy: { createdAt: "asc" },
+            include: { template: true },
+          },
+        },
+      },
+      sessions: {
+        orderBy: { createdAt: "desc" },
+        take: 1,
+        include: {
+          messages: {
+            orderBy: { createdAt: "desc" },
+            take: 20,
+          },
+        },
+      },
+      memories: {
+        orderBy: { createdAt: "desc" },
+        take: 12,
+      },
+      locationNodes: {
+        orderBy: { name: "asc" },
+      },
+      locationEdges: {
+        orderBy: { createdAt: "asc" },
+      },
+      factions: {
+        orderBy: { name: "asc" },
+      },
+      npcs: {
+        orderBy: { name: "asc" },
+      },
+      information: {
+        orderBy: { title: "asc" },
+      },
+      informationLinks: {
+        orderBy: { createdAt: "asc" },
+      },
+    },
+  });
+
+  if (!campaign || !campaign.characterInstance || !campaign.sessions[0]) {
+    return null;
+  }
+
+  const state = campaign.stateJson as unknown as CampaignRuntimeState;
+  const session = campaign.sessions[0];
+  const currentLocationRecord = campaign.locationNodes.find((location) => location.id === state.currentLocationId);
+  if (!currentLocationRecord) {
+    return null;
+  }
+
+  const currentLocation = toLocationSummary(currentLocationRecord, campaign.factions);
+  const adjacentRoutes = campaign.locationEdges
+    .filter((edge) => edge.sourceId === currentLocation.id || edge.targetId === currentLocation.id)
+    .map<RouteSummary>((edge) => {
+      const targetId = edge.sourceId === currentLocation.id ? edge.targetId : edge.sourceId;
+      const target = campaign.locationNodes.find((location) => location.id === targetId);
+
+      return {
+        id: edge.id,
+        targetLocationId: targetId,
+        targetLocationName: target?.name ?? targetId,
+        travelTimeMinutes: edge.travelTimeMinutes,
+        dangerLevel: edge.dangerLevel,
+        currentStatus: edge.currentStatus,
+        description: edge.description,
+      };
+    });
+
+  const presentNpcs = campaign.npcs
+    .filter((npc) => npc.currentLocationId === currentLocation.id)
+    .map((npc) => toNpcSummary(npc, campaign.factions));
+
+  const discoveredIds = new Set(state.discoveredInformationIds);
+  const localInformation = campaign.information
+    .filter(
+      (information) =>
+        information.locationId === currentLocation.id &&
+        (information.accessibility === "public" || discoveredIds.has(information.id) || information.isDiscovered),
+    )
+    .map((information) =>
+      toInformationSummary(information, campaign.locationNodes, campaign.factions, campaign.npcs),
+    );
+
+  const discoveredInformation = campaign.information
+    .filter((information) => discoveredIds.has(information.id) || information.isDiscovered)
+    .map((information) =>
+      toInformationSummary(information, campaign.locationNodes, campaign.factions, campaign.npcs),
+    );
+
+  const connectedLeads = buildCrossLocationLeads({
+    discoveredInformationIds: state.discoveredInformationIds,
+    information: campaign.information,
+    informationLinks: campaign.informationLinks,
+    locations: campaign.locationNodes,
+    factions: campaign.factions,
+    npcs: campaign.npcs,
+  });
+
+  const knownFactionIds = new Set<string>();
+  if (currentLocation.controllingFactionId) {
+    knownFactionIds.add(currentLocation.controllingFactionId);
+  }
+  for (const npc of presentNpcs) {
+    if (npc.factionId) {
+      knownFactionIds.add(npc.factionId);
+    }
+  }
+  for (const information of [...localInformation, ...discoveredInformation, ...connectedLeads.map((lead) => lead.information)]) {
+    if (information.factionId) {
+      knownFactionIds.add(information.factionId);
+    }
+  }
+
+  const knownFactions = campaign.factions
+    .filter((faction) => knownFactionIds.has(faction.id))
+    .map(toFactionSummary);
+
+  const instance: CharacterInstance = {
+    id: campaign.characterInstance.id,
+    templateId: campaign.characterInstance.templateId,
+    health: campaign.characterInstance.health,
+    gold: campaign.characterInstance.gold,
+    inventory: campaign.characterInstance.inventory.map(toItemInstanceRecord),
+  };
+
+  const character = toCampaignCharacter(toTemplateRecord(campaign.template), instance);
+
+  const memories: MemoryRecord[] = campaign.memories.map((memory) => ({
+    id: memory.id,
+    type: memory.type,
+    summary: memory.summary,
+    createdAt: memory.createdAt.toISOString(),
+  }));
+
+  const recentMessages: StoryMessage[] = [...session.messages]
+    .reverse()
+    .map((message) => ({
+      id: message.id,
+      role: message.role as StoryMessage["role"],
+      kind: message.kind as StoryMessage["kind"],
+      content: message.content,
+      createdAt: message.createdAt.toISOString(),
+      payload:
+        message.payload && typeof message.payload === "object" && !Array.isArray(message.payload)
+          ? (structuredClone(message.payload) as Record<string, unknown>)
+          : null,
+    }));
+
   return {
-    ...template,
-    stats: toCharacterStats(template),
+    campaignId: campaign.id,
+    sessionId: session.id,
+    moduleId: campaign.moduleId,
+    selectedEntryPointId: campaign.selectedEntryPointId,
+    title: campaign.module.title,
+    premise: campaign.module.premise,
+    tone: campaign.module.tone,
+    setting: campaign.module.setting,
+    state,
+    character: {
+      ...character,
+      stats: toCharacterStats(character),
+    },
+    currentLocation,
+    adjacentRoutes,
+    presentNpcs,
+    knownFactions,
+    localInformation,
+    discoveredInformation,
+    connectedLeads,
+    memories,
+    recentMessages,
+    canRetryLatestTurn: false,
   };
 }
 
-export type RepositorySnapshot = Awaited<ReturnType<typeof getCampaignSnapshot>>;
+export function toPlayerCampaignSnapshot(snapshot: CampaignSnapshot): PlayerCampaignSnapshot {
+  return snapshot;
+}
+
+function timeOfDay(globalTime: number) {
+  const minuteOfDay = ((globalTime % 1440) + 1440) % 1440;
+  if (minuteOfDay < 360) return "night";
+  if (minuteOfDay < 720) return "morning";
+  if (minuteOfDay < 1080) return "afternoon";
+  if (minuteOfDay < 1260) return "evening";
+  return "night";
+}
+
+export async function getPromptContext(snapshot: CampaignSnapshot): Promise<SpatialPromptContext> {
+  return {
+    currentLocation: snapshot.currentLocation,
+    adjacentRoutes: snapshot.adjacentRoutes,
+    presentNpcs: snapshot.presentNpcs,
+    localInformation: snapshot.localInformation,
+    connectedLeads: snapshot.connectedLeads,
+    knownFactions: snapshot.knownFactions,
+    inventory: toPromptInventory(snapshot.character.inventory),
+    memories: snapshot.memories,
+    recentMessages: snapshot.recentMessages.slice(-8),
+    discoveredInformationIds: [...snapshot.state.discoveredInformationIds],
+    globalTime: snapshot.state.globalTime,
+    timeOfDay: timeOfDay(snapshot.state.globalTime),
+  };
+}

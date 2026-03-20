@@ -18,8 +18,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const draft = await dmClient.generateCampaignSetup({
-      basePrompt: payload.data.basePrompt,
+    const draft = await dmClient.generateWorldModule({
       prompt: payload.data.prompt,
       previousDraft: payload.data.previousDraft,
     });

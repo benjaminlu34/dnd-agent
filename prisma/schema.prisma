@@ -20,15 +20,20 @@ model User {
 }
 
 model AdventureModule {
-  id             String     @id @default(cuid())
-  userId         String
-  title          String
-  publicSynopsis Json
-  secretEngine   Json
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
-  user           User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  campaigns      Campaign[]
+  id                   String      @id @default(cuid())
+  userId               String
+  title                String
+  premise              String
+  tone                 String
+  setting              String
+  generationMode       String      @default("open_world")
+  schemaVersion        Int         @default(1)
+  isLocked             Boolean     @default(false)
+  openWorldTemplateJson Json
+  createdAt            DateTime    @default(now())
+  updatedAt            DateTime    @updatedAt
+  user                 User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  campaigns            Campaign[]
 }
 
 model CharacterTemplate {
@@ -52,6 +57,38 @@ model CharacterTemplate {
   instances    CharacterInstance[]
 }
 
+model Campaign {
+  id                  String             @id @default(cuid())
+  userId              String
+  moduleId            String
+  templateId          String
+  moduleSchemaVersion Int                @default(1)
+  selectedEntryPointId String
+  stateJson           Json
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+  user                User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  module              AdventureModule    @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  template            CharacterTemplate  @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  characterInstance   CharacterInstance?
+  sessions            Session[]
+  turns               Turn[]
+  itemTemplates       ItemTemplate[]
+  memories            MemoryEntry[]
+  locationNodes       LocationNode[]
+  locationEdges       LocationEdge[]
+  factions            Faction[]
+  factionRelations    FactionRelation[]
+  npcs                NPC[]
+  information         Information[]
+  informationLinks    InformationLink[]
+  commodities         Commodity[]
+  marketPrices        MarketPrice[]
+  npcRoutines         NpcRoutine[]
+  factionMoves        FactionMove[]
+  worldEvents         WorldEvent[]
+}
+
 model CharacterInstance {
   id         String            @id @default(cuid())
   campaignId String            @unique
@@ -65,28 +102,6 @@ model CharacterInstance {
   inventory  ItemInstance[]
 }
 
-model Campaign {
-  id                String             @id @default(cuid())
-  userId            String
-  moduleId          String
-  templateId        String
-  stateJson         Json
-  createdAt         DateTime           @default(now())
-  updatedAt         DateTime           @updatedAt
-  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-  module            AdventureModule    @relation(fields: [moduleId], references: [id], onDelete: Cascade)
-  template          CharacterTemplate  @relation(fields: [templateId], references: [id], onDelete: Cascade)
-  characterInstance CharacterInstance?
-  sessions          Session[]
-  turns             Turn[]
-  quests            Quest[]
-  itemTemplates     ItemTemplate[]
-  arcs              Arc[]
-  npcs              NPC[]
-  clues             Clue[]
-  memories          MemoryEntry[]
-}
-
 model ItemTemplate {
   id            String         @id @default(cuid())
   campaignId    String
@@ -95,12 +110,11 @@ model ItemTemplate {
   value         Int            @default(0)
   weight        Float          @default(0)
   rarity        String         @default("common")
-  tags          String[]
+  tags          String[]       @default([])
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
   campaign      Campaign       @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   itemInstances ItemInstance[]
-  rewardQuests  Quest[]        @relation("QuestRewardItemTemplate")
 
   @@index([campaignId])
 }
@@ -139,18 +153,19 @@ model Session {
 }
 
 model Turn {
-  id                String   @id @default(cuid())
-  campaignId        String
-  sessionId         String
-  playerAction      String
-  slowPathRequested Boolean  @default(false)
-  status            String
-  pendingCheckJson  Json?
-  resultJson        Json?
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
-  campaign          Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  session           Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  id         String   @id @default(cuid())
+  campaignId String
+  sessionId  String
+  playerAction String
+  status     String
+  toolCallJson Json?
+  resultJson Json?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  session    Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, createdAt])
 }
 
 model Message {
@@ -162,68 +177,8 @@ model Message {
   payload   Json?
   createdAt DateTime @default(now())
   session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-}
 
-model Quest {
-  id                   String        @id @default(cuid())
-  campaignId           String
-  title                String
-  summary              String
-  stage                Int           @default(0)
-  maxStage             Int           @default(1)
-  status               String
-  rewardGold           Int           @default(0)
-  rewardItemTemplateId String?
-  discoveredAtTurn     Int?
-  createdAt            DateTime      @default(now())
-  updatedAt            DateTime      @updatedAt
-  campaign             Campaign      @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  rewardItemTemplate   ItemTemplate? @relation("QuestRewardItemTemplate", fields: [rewardItemTemplateId], references: [id], onDelete: SetNull)
-
-  @@index([rewardItemTemplateId])
-}
-
-model Arc {
-  id            String   @id @default(cuid())
-  campaignId    String
-  title         String
-  summary       String
-  status        String
-  expectedTurns Int
-  currentTurn   Int      @default(0)
-  orderIndex    Int
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-  campaign      Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-}
-
-model NPC {
-  id               String   @id @default(cuid())
-  campaignId       String
-  name             String
-  role             String
-  status           String
-  isCompanion      Boolean  @default(false)
-  approval         Int      @default(0)
-  personalHook     String?
-  notes            String
-  discoveredAtTurn Int?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
-  campaign         Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-}
-
-model Clue {
-  id               String   @id @default(cuid())
-  campaignId       String
-  linkedRevealId   String
-  text             String
-  source           String
-  status           String
-  discoveredAtTurn Int?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
-  campaign         Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  @@index([sessionId, createdAt])
 }
 
 model MemoryEntry {
@@ -235,4 +190,246 @@ model MemoryEntry {
   createdAt  DateTime @default(now())
   campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   session    Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+
+  @@index([campaignId, createdAt])
+}
+
+model LocationNode {
+  id                   String          @id
+  campaignId           String
+  name                 String
+  type                 String
+  summary              String
+  description          String?
+  state                String          @default("active")
+  controllingFactionId String?
+  tags                 String[]        @default([])
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+  campaign             Campaign        @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  controllingFaction   Faction?        @relation("ControlledLocationFaction", fields: [controllingFactionId], references: [id], onDelete: SetNull)
+  edgesFrom            LocationEdge[]  @relation("EdgeSource")
+  edgesTo              LocationEdge[]  @relation("EdgeTarget")
+  npcs                 NPC[]
+  information          Information[]
+  marketPrices         MarketPrice[]
+  worldEvents          WorldEvent[]
+  npcRoutineTargets    NpcRoutine[]    @relation("NpcRoutineTarget")
+
+  @@index([campaignId])
+  @@index([campaignId, controllingFactionId])
+}
+
+model LocationEdge {
+  id                String       @id
+  campaignId        String
+  sourceId          String
+  targetId          String
+  travelTimeMinutes Int
+  dangerLevel       Int          @default(1)
+  currentStatus     String       @default("open")
+  description       String?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  campaign          Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  source            LocationNode @relation("EdgeSource", fields: [sourceId], references: [id], onDelete: Cascade)
+  target            LocationNode @relation("EdgeTarget", fields: [targetId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, sourceId])
+  @@index([campaignId, targetId])
+}
+
+model Faction {
+  id                 String            @id
+  campaignId         String
+  name               String
+  type               String
+  summary            String
+  agenda             String
+  resources          Json
+  pressureClock      Int               @default(0)
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+  campaign           Campaign          @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  controlledLocations LocationNode[]   @relation("ControlledLocationFaction")
+  npcs               NPC[]
+  information        Information[]
+  commodityPrices    MarketPrice[]
+  factionMoves       FactionMove[]
+  relationsFrom      FactionRelation[] @relation("FactionRelationSource")
+  relationsTo        FactionRelation[] @relation("FactionRelationTarget")
+
+  @@index([campaignId])
+}
+
+model FactionRelation {
+  id         String   @id
+  campaignId String
+  factionAId String
+  factionBId String
+  stance     String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  factionA   Faction  @relation("FactionRelationSource", fields: [factionAId], references: [id], onDelete: Cascade)
+  factionB   Faction  @relation("FactionRelationTarget", fields: [factionBId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, factionAId, factionBId])
+  @@index([campaignId])
+}
+
+model NPC {
+  id                String       @id
+  campaignId        String
+  name              String
+  role              String
+  summary           String
+  description       String
+  factionId         String?
+  currentLocationId String?
+  approval          Int          @default(0)
+  isCompanion       Boolean      @default(false)
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  campaign          Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  faction           Faction?     @relation(fields: [factionId], references: [id], onDelete: SetNull)
+  currentLocation   LocationNode? @relation(fields: [currentLocationId], references: [id], onDelete: SetNull)
+  information       Information[] @relation("InformationSourceNpc")
+  marketPrices      MarketPrice[] @relation("VendorNpc")
+  npcRoutines       NpcRoutine[]
+
+  @@index([campaignId])
+  @@index([campaignId, currentLocationId])
+}
+
+model Information {
+  id               String            @id
+  campaignId       String
+  title            String
+  summary          String
+  content          String
+  truthfulness     String            @default("true")
+  accessibility    String            @default("public")
+  locationId       String?
+  factionId        String?
+  sourceNpcId      String?
+  isDiscovered     Boolean           @default(false)
+  discoveredAtTurn Int?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  campaign         Campaign          @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  location         LocationNode?     @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  faction          Faction?          @relation(fields: [factionId], references: [id], onDelete: SetNull)
+  sourceNpc        NPC?              @relation("InformationSourceNpc", fields: [sourceNpcId], references: [id], onDelete: SetNull)
+  sourceLinks      InformationLink[] @relation("InformationLinkSource")
+  targetLinks      InformationLink[] @relation("InformationLinkTarget")
+
+  @@index([campaignId])
+  @@index([campaignId, locationId, isDiscovered])
+}
+
+model InformationLink {
+  id         String      @id
+  campaignId String
+  sourceId   String
+  targetId   String
+  linkType   String
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+  campaign   Campaign    @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  source     Information @relation("InformationLinkSource", fields: [sourceId], references: [id], onDelete: Cascade)
+  target     Information @relation("InformationLinkTarget", fields: [targetId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, sourceId, targetId])
+  @@index([campaignId])
+}
+
+model Commodity {
+  id         String        @id
+  campaignId String
+  name       String
+  baseValue  Int
+  tags       String[]      @default([])
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+  campaign   Campaign      @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  marketPrices MarketPrice[]
+
+  @@index([campaignId])
+}
+
+model MarketPrice {
+  id          String       @id
+  campaignId  String
+  commodityId String
+  locationId  String
+  vendorNpcId String?
+  factionId   String?
+  modifier    Float        @default(1.0)
+  stock       Int          @default(-1)
+  legalStatus String       @default("legal")
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  campaign    Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  commodity   Commodity    @relation(fields: [commodityId], references: [id], onDelete: Cascade)
+  location    LocationNode @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  vendorNpc   NPC?         @relation("VendorNpc", fields: [vendorNpcId], references: [id], onDelete: SetNull)
+  faction     Faction?     @relation(fields: [factionId], references: [id], onDelete: SetNull)
+
+  @@unique([campaignId, commodityId, locationId, vendorNpcId])
+  @@index([campaignId, locationId])
+}
+
+model NpcRoutine {
+  id                 String       @id
+  campaignId         String
+  npcId              String
+  triggerTimeMinutes Int
+  triggerCondition   Json?
+  targetLocationId   String
+  activity           String
+  priority           Int          @default(0)
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+  campaign           Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  npc                NPC          @relation(fields: [npcId], references: [id], onDelete: Cascade)
+  targetLocation     LocationNode @relation("NpcRoutineTarget", fields: [targetLocationId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, npcId])
+}
+
+model FactionMove {
+  id              String   @id
+  campaignId      String
+  factionId       String
+  scheduledAtTime Int
+  description     String
+  payload         Json
+  isExecuted      Boolean  @default(false)
+  isCancelled     Boolean  @default(false)
+  cascadeDepth    Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  campaign        Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  faction         Faction  @relation(fields: [factionId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, scheduledAtTime, isExecuted, isCancelled])
+}
+
+model WorldEvent {
+  id            String       @id
+  campaignId    String
+  locationId    String?
+  triggerTime   Int
+  description   String
+  payload       Json
+  isProcessed   Boolean      @default(false)
+  isCancelled   Boolean      @default(false)
+  cascadeDepth  Int          @default(0)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  campaign      Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  location      LocationNode? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+
+  @@index([campaignId, triggerTime, isProcessed, isCancelled])
 }
