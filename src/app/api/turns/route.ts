@@ -39,8 +39,9 @@ export async function POST(request: Request) {
         send({ type: "warning", message: warning });
       }
       send({
-        type: "error",
-        message: `${result.question} Options: ${result.options.join(" / ")}`,
+        type: "clarification",
+        question: result.question,
+        options: result.options,
       });
       return;
     }

@@ -253,15 +253,15 @@ export function CharacterBuilderApp({
   }
 
   return (
-    <main className="h-screen overflow-y-auto bg-black text-zinc-50">
-      <div className="mx-auto max-w-6xl px-6 py-12">
-        <header className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-8">
+    <main className="app-shell">
+      <div className="app-frame max-w-6xl">
+        <header className="app-hero p-8">
           <p className="text-[0.68rem] uppercase tracking-[0.28em] text-zinc-500">
             {mode === "edit" ? "Character Workshop" : "Character Forge"}
           </p>
           <div className="mt-4 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
             <div>
-              <h1 className="text-4xl font-semibold tracking-tight text-white">
+              <h1 className="font-display text-4xl font-semibold tracking-tight text-white md:text-5xl">
                 {mode === "edit" ? "Refine the hero." : "Build the hero first."}
               </h1>
               <p className="mt-3 max-w-2xl text-sm leading-7 text-zinc-400">
@@ -289,7 +289,7 @@ export function CharacterBuilderApp({
           </div>
         </header>
 
-        <section className="mt-8 rounded-[2rem] border border-zinc-800 bg-zinc-950 p-8">
+        <section className="app-section mt-8 p-8">
           <p className="text-[0.68rem] uppercase tracking-[0.24em] text-zinc-500">AI Assist</p>
           <div className="mt-4 flex flex-col gap-4 lg:flex-row">
             <textarea
@@ -315,13 +315,13 @@ export function CharacterBuilderApp({
                   OpenRouter AI
                 </span>
               </p>
-              {generationWarning ? <p className="text-amber-300">{generationWarning}</p> : null}
+              {generationWarning ? <p className="text-zinc-300">{generationWarning}</p> : null}
             </div>
           ) : null}
         </section>
 
         <form onSubmit={(event) => void onSubmit(event)} className="mt-8 grid gap-8 lg:grid-cols-[1.35fr,0.95fr]">
-          <section className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-8">
+          <section className="app-section p-8">
             <p className="text-[0.68rem] uppercase tracking-[0.24em] text-zinc-500">Character Sheet</p>
             <div className="mt-6 grid gap-4 md:grid-cols-2">
               <BuilderField label="Name">
@@ -438,9 +438,9 @@ export function CharacterBuilderApp({
             </button>
           </section>
 
-          <aside className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-8">
+          <aside className="app-section p-8">
             <p className="text-[0.68rem] uppercase tracking-[0.24em] text-zinc-500">Preview</p>
-            <h2 className="mt-4 text-3xl font-semibold text-white">{values.name || "Unnamed Wanderer"}</h2>
+            <h2 className="font-display mt-4 text-3xl font-semibold text-white">{values.name || "Unnamed Wanderer"}</h2>
             <p className="mt-2 text-sm text-zinc-400">{values.archetype || "Choose an archetype"}</p>
             <div className="mt-6 grid grid-cols-2 gap-3">
               {numericFields.map((field) => (

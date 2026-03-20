@@ -31,8 +31,8 @@ html {
 }
 
 body {
-  height: 100%;
-  overflow: hidden;
+  min-height: 100%;
+  overflow-x: hidden;
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-body), sans-serif;
@@ -79,8 +79,9 @@ textarea {
 }
 
 .panel {
-  background: var(--surface);
+  background: rgb(9 9 11 / 0.5);
   border: 1px solid var(--panel-border);
+  backdrop-filter: blur(12px);
 }
 
 .button-press {
@@ -155,6 +156,86 @@ textarea {
   animation: fade-in 220ms ease;
 }
 
+.app-shell {
+  min-height: 100vh;
+  padding: 2rem 1.25rem 3rem;
+  color: var(--foreground);
+}
+
+.app-frame {
+  margin: 0 auto;
+  width: 100%;
+  max-width: 84rem;
+}
+
+.app-hero {
+  background: rgb(9 9 11 / 0.5);
+  border: 1px solid var(--panel-border);
+  border-radius: 2rem;
+  backdrop-filter: blur(12px);
+}
+
+.app-section {
+  background: rgb(9 9 11 / 0.5);
+  border: 1px solid var(--panel-border);
+  border-radius: 2rem;
+  backdrop-filter: blur(12px);
+}
+
+.ui-label {
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #71717a;
+}
+
+.ui-body {
+  font-size: 0.875rem;
+  line-height: 1.625;
+  color: #a1a1aa;
+}
+
+.ui-title {
+  font-weight: 500;
+  letter-spacing: -0.03em;
+  color: #f4f4f5;
+}
+
+.ui-button-primary {
+  background: #ffffff;
+  color: #000000;
+}
+
+.ui-button-primary:hover {
+  background: #e4e4e7;
+}
+
+.ui-button-secondary {
+  border: 1px solid #27272a;
+  background: transparent;
+  color: #a1a1aa;
+}
+
+.ui-button-secondary:hover {
+  background: #18181b;
+  color: #f4f4f5;
+}
+
+.ui-button-ghost {
+  background: transparent;
+  color: #71717a;
+}
+
+.ui-button-ghost:hover {
+  color: #e4e4e7;
+}
+
+.ui-empty {
+  color: #52525b;
+  font-style: italic;
+}
+
 @keyframes fade-in {
   from {
     opacity: 0;
@@ -183,5 +264,11 @@ textarea {
   .type-cursor {
     animation: none !important;
     transition: none !important;
+  }
+}
+
+@media (max-width: 768px) {
+  .app-shell {
+    padding: 1rem 0.875rem 2rem;
   }
 }

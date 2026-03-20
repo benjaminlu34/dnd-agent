@@ -64,6 +64,24 @@ export function validateWorldModuleCoherence(module: GeneratedWorldModule): Vali
     }
   }
 
+  for (const price of module.marketPrices) {
+    if (!locationIds.has(price.locationId)) {
+      issues.push(`Market price ${price.id} references an unknown location.`);
+    }
+
+    if (!module.commodities.some((commodity) => commodity.id === price.commodityId)) {
+      issues.push(`Market price ${price.id} references an unknown commodity.`);
+    }
+
+    if (price.vendorNpcId && !npcIds.has(price.vendorNpcId)) {
+      issues.push(`Market price ${price.id} references an unknown vendor NPC.`);
+    }
+
+    if (price.factionId && !factionIds.has(price.factionId)) {
+      issues.push(`Market price ${price.id} references an unknown faction.`);
+    }
+  }
+
   for (const link of module.informationLinks) {
     if (!informationIds.has(link.sourceId) || !informationIds.has(link.targetId)) {
       issues.push(`Information link ${link.id} references an unknown information node.`);

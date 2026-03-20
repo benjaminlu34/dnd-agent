@@ -13,6 +13,7 @@ export type StreamEvent =
       type: "check_result";
       result: Record<string, unknown>;
     }
+  | { type: "clarification"; question: string; options: string[] }
   | { type: "actions"; actions: string[] }
   | { type: "state"; snapshot: Record<string, unknown> }
   | { type: "warning"; message: string }

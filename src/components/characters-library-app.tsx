@@ -61,7 +61,6 @@ function LibraryCharacterCard({
         <p className="line-clamp-2 text-xs leading-relaxed text-zinc-500 italic">
           {character.backstory || "No backstory recorded yet."}
         </p>
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-zinc-950/80 to-transparent" />
       </div>
 
       <div className="mt-auto flex items-center justify-between gap-3 pt-4">
@@ -161,9 +160,9 @@ export function CharactersLibraryApp() {
   }
 
   return (
-    <main className="h-screen overflow-y-auto bg-black text-zinc-50">
-      <div className="mx-auto w-full max-w-6xl px-4 py-8">
-        <header className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-8">
+    <main className="app-shell">
+      <div className="app-frame max-w-6xl">
+        <header className="app-hero p-8">
           <p className="text-[0.68rem] uppercase tracking-[0.28em] text-zinc-500">Character Library</p>
           <div className="mt-4 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
             <div>
@@ -174,7 +173,7 @@ export function CharactersLibraryApp() {
               >
                 Home
               </button>
-              <h1 className="text-4xl font-semibold tracking-tight text-white">Manage your cast.</h1>
+              <h1 className="font-display text-4xl font-semibold tracking-tight text-white md:text-5xl">Manage your cast.</h1>
               <p className="mt-3 max-w-2xl text-sm leading-7 text-zinc-400">
                 Save reusable character templates, prune old ones, and head into Session Zero with the right protagonist.
               </p>
@@ -203,7 +202,7 @@ export function CharactersLibraryApp() {
 
         <section className="mt-8">
           {loading ? (
-            <div className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-8 text-sm text-zinc-400">
+            <div className="app-section p-8 text-sm text-zinc-400">
               Loading characters...
             </div>
           ) : characters.length ? (
@@ -219,7 +218,7 @@ export function CharactersLibraryApp() {
               ))}
             </div>
           ) : (
-            <div className="flex flex-col items-center justify-center rounded-[2rem] border border-zinc-800 bg-zinc-950 p-10 text-center">
+            <div className="app-section flex flex-col items-center justify-center p-10 text-center">
               <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Empty Library</p>
               <h2 className="mt-4 text-3xl font-medium tracking-tight text-zinc-100">
                 Every saga needs a hero

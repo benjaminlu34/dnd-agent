@@ -271,7 +271,6 @@ export type CampaignRuntimeState = {
   globalTime: number;
   pendingTurnId: string | null;
   lastActionSummary: string | null;
-  discoveredInformationIds: string[];
 };
 
 export type LocationSummary = {
@@ -303,6 +302,14 @@ export type FactionSummary = {
   summary: string;
   agenda: string;
   pressureClock: number;
+};
+
+export type FactionRelationSummary = {
+  factionAId: string;
+  factionAName: string;
+  factionBId: string;
+  factionBName: string;
+  stance: string;
 };
 
 export type NpcSummary = {
@@ -358,6 +365,7 @@ export type MemoryRecord = {
 export type CampaignSnapshot = {
   campaignId: string;
   sessionId: string;
+  sessionTurnCount: number;
   moduleId: string;
   selectedEntryPointId: string;
   title: string;
@@ -370,6 +378,7 @@ export type CampaignSnapshot = {
   adjacentRoutes: RouteSummary[];
   presentNpcs: NpcSummary[];
   knownFactions: FactionSummary[];
+  factionRelations: FactionRelationSummary[];
   localInformation: InformationSummary[];
   discoveredInformation: InformationSummary[];
   connectedLeads: CrossLocationLead[];
@@ -378,7 +387,10 @@ export type CampaignSnapshot = {
   canRetryLatestTurn: boolean;
 };
 
-export type PlayerCampaignSnapshot = CampaignSnapshot;
+export type PlayerCampaignSnapshot = Omit<
+  CampaignSnapshot,
+  "sessionTurnCount" | "factionRelations" | "connectedLeads"
+>;
 
 export type CampaignListItem = {
   id: string;
@@ -405,6 +417,7 @@ export type SpatialPromptContext = {
   localInformation: InformationSummary[];
   connectedLeads: CrossLocationLead[];
   knownFactions: FactionSummary[];
+  factionRelations: FactionRelationSummary[];
   inventory: PromptInventoryItem[];
   memories: MemoryRecord[];
   recentMessages: StoryMessage[];

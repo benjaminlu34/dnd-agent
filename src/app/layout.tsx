@@ -8,8 +8,8 @@ const bodyFont = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "AI Solo RPG Engine",
-  description: "A deterministic solo RPG engine with a streaming AI dungeon master.",
+  title: "DND Agent",
+  description: "AI-generated solo fantasy campaigns, characters, and play sessions.",
 };
 
 export default function RootLayout({

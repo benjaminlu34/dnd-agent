@@ -11,6 +11,7 @@ import type {
 
 type TurnStreamEvent =
   | { type: "narration"; chunk: string }
+  | { type: "clarification"; question: string; options: string[] }
   | { type: "actions"; actions: string[] }
   | { type: "state"; snapshot: PlayerCampaignSnapshot }
   | { type: "warning"; message: string }
@@ -74,6 +75,10 @@ export function AdventureApp({
   const [loadingSnapshot, setLoadingSnapshot] = useState(false);
   const [action, setAction] = useState("");
   const [turnError, setTurnError] = useState<string | null>(null);
+  const [clarification, setClarification] = useState<{
+    question: string;
+    options: string[];
+  } | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [latestCheck, setLatestCheck] = useState<CheckResult | null>(null);
@@ -176,6 +181,7 @@ export function AdventureApp({
 
     setSubmitting(true);
     setTurnError(null);
+    setClarification(null);
     setWarnings([]);
     setLatestCheck(null);
 
@@ -203,6 +209,11 @@ export function AdventureApp({
       await consumeNdjson(response, (event) => {
         if (event.type === "warning") {
           nextWarnings.push(event.message);
+        } else if (event.type === "clarification") {
+          setClarification({
+            question: event.question,
+            options: event.options,
+          });
         } else if (event.type === "state") {
           nextSnapshot = event.snapshot;
         } else if (event.type === "actions") {
@@ -229,10 +240,10 @@ export function AdventureApp({
   }
 
   return (
-    <main className="min-h-screen bg-black px-6 py-10 text-zinc-50">
-      <div className="mx-auto grid max-w-7xl gap-8 xl:grid-cols-[280px_1fr_320px]">
+    <main className="app-shell">
+      <div className="app-frame grid max-w-7xl gap-8 xl:grid-cols-[280px_1fr_320px]">
         <aside className="space-y-6">
-          <section className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-6">
+          <section className="app-section p-6">
             <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Campaigns</p>
             <div className="mt-4 space-y-3">
               <button
@@ -278,7 +289,7 @@ export function AdventureApp({
           </section>
 
           {snapshot ? (
-            <section className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-6">
+            <section className="app-section p-6">
               <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Character</p>
               <h2 className="mt-3 text-xl font-semibold text-white">{snapshot.character.name}</h2>
               <p className="mt-1 text-sm text-zinc-400">{snapshot.character.archetype}</p>
@@ -289,14 +300,14 @@ export function AdventureApp({
           ) : null}
         </aside>
 
-        <section className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-6">
+        <section className="app-section p-6">
           {loadingSnapshot ? (
             <p className="text-sm text-zinc-400">Loading campaign state...</p>
           ) : snapshot ? (
             <>
-              <header className="border-b border-zinc-800 pb-6">
+              <header className="border-b border-white/10 pb-6">
                 <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Local Area</p>
-                <h1 className="mt-3 text-4xl font-semibold tracking-tight text-white">
+                <h1 className="font-display mt-3 text-4xl font-semibold tracking-tight text-white md:text-5xl">
                   {snapshot.currentLocation.name}
                 </h1>
                 <p className="mt-3 max-w-3xl text-sm leading-7 text-zinc-400">
@@ -347,11 +358,31 @@ export function AdventureApp({
                 >
                   {submitting ? "Resolving..." : "Take Action"}
                 </button>
+                {clarification ? (
+                  <div className="mt-4 rounded-2xl border border-zinc-700 bg-zinc-950 p-4">
+                    <p className="text-sm text-zinc-100">{clarification.question}</p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {clarification.options.map((option) => (
+                        <button
+                          key={option}
+                          type="button"
+                          className="button-press rounded-full border border-zinc-700 px-3 py-2 text-xs text-zinc-100"
+                          onClick={() => {
+                            setAction(option);
+                            setClarification(null);
+                          }}
+                        >
+                          {option}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
                 {turnError ? <p className="mt-4 text-sm text-red-400">{turnError}</p> : null}
                 {warnings.length ? (
                   <div className="mt-4 space-y-2">
                     {warnings.map((warning) => (
-                      <p key={warning} className="text-sm text-amber-300">
+                      <p key={warning} className="text-sm text-zinc-300">
                         {warning}
                       </p>
                     ))}
@@ -365,8 +396,28 @@ export function AdventureApp({
               </div>
             </>
           ) : (
-            <div className="flex min-h-[420px] items-center justify-center text-sm text-zinc-400">
-              No campaign selected.
+            <div className="flex min-h-[420px] flex-col items-center justify-center text-center">
+              <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">No Active Campaign</p>
+              <h2 className="font-display mt-4 text-3xl text-white">Start with a world worth stepping into.</h2>
+              <p className="mt-3 max-w-lg text-sm leading-7 text-zinc-400">
+                Create a module, choose a protagonist, and come back here once a campaign is ready to play.
+              </p>
+              <div className="mt-6 flex flex-wrap justify-center gap-3">
+                <button
+                  type="button"
+                  className="button-press rounded-full bg-white px-5 py-3 text-sm font-semibold text-black"
+                  onClick={() => router.push("/campaigns/new")}
+                >
+                  Create Campaign
+                </button>
+                <button
+                  type="button"
+                  className="button-press rounded-full border border-zinc-700 px-5 py-3 text-sm font-semibold text-zinc-100"
+                  onClick={() => router.push("/characters")}
+                >
+                  View Characters
+                </button>
+              </div>
             </div>
           )}
         </section>
@@ -374,7 +425,7 @@ export function AdventureApp({
         <aside className="space-y-6">
           {snapshot ? (
             <>
-              <section className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-6">
+              <section className="app-section p-6">
                 <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Routes</p>
                 <div className="mt-4 space-y-3">
                   {snapshot.adjacentRoutes.map((route) => (
@@ -388,7 +439,7 @@ export function AdventureApp({
                 </div>
               </section>
 
-              <section className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-6">
+              <section className="app-section p-6">
                 <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Present NPCs</p>
                 <div className="mt-4 space-y-3">
                   {snapshot.presentNpcs.map((npc) => (
@@ -401,7 +452,7 @@ export function AdventureApp({
                 </div>
               </section>
 
-              <section className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-6">
+              <section className="app-section p-6">
                 <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Known Factions</p>
                 <div className="mt-4 space-y-3">
                   {snapshot.knownFactions.map((faction) => (
@@ -413,22 +464,13 @@ export function AdventureApp({
                 </div>
               </section>
 
-              <section className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-6">
+              <section className="app-section p-6">
                 <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Discovered Information</p>
                 <div className="mt-4 space-y-3">
                   {snapshot.discoveredInformation.map((information) => (
                     <div key={information.id} className="rounded-2xl border border-zinc-800 p-4">
                       <h3 className="text-sm font-semibold text-white">{information.title}</h3>
                       <p className="mt-2 text-xs leading-6 text-zinc-400">{information.summary}</p>
-                    </div>
-                  ))}
-                  {snapshot.connectedLeads.map((lead) => (
-                    <div key={lead.information.id} className="rounded-2xl border border-amber-500/30 bg-amber-500/5 p-4">
-                      <p className="text-[0.68rem] uppercase tracking-[0.18em] text-amber-300">
-                        Connected Lead · {lead.depth} hop{lead.depth === 1 ? "" : "s"}
-                      </p>
-                      <h3 className="mt-2 text-sm font-semibold text-white">{lead.information.title}</h3>
-                      <p className="mt-2 text-xs leading-6 text-zinc-300">{lead.information.summary}</p>
                     </div>
                   ))}
                 </div>

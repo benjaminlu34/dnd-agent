@@ -21,15 +21,8 @@ function dedupeStrings(values: string[]) {
 }
 
 function nextStateFromCommand(snapshot: CampaignSnapshot, command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>): CampaignRuntimeState {
-  const discoveredInformationIds = new Set(snapshot.state.discoveredInformationIds);
   const locationId =
     command.type === "execute_travel" ? command.targetLocationId : snapshot.state.currentLocationId;
-
-  const discoveredIds =
-    "discoverInformationIds" in command ? command.discoverInformationIds ?? [] : [];
-  for (const id of discoveredIds) {
-    discoveredInformationIds.add(id);
-  }
 
   return {
     currentLocationId: locationId,
@@ -39,7 +32,6 @@ function nextStateFromCommand(snapshot: CampaignSnapshot, command: Exclude<Valid
       command.type === "execute_freeform"
         ? command.intendedMechanicalOutcome
         : command.narration,
-    discoveredInformationIds: Array.from(discoveredInformationIds),
   };
 }
 
@@ -52,7 +44,7 @@ async function commitResolvedTurn(input: {
 }) {
   const { snapshot, sessionId, turnId, playerAction, command } = input;
   const nextState = nextStateFromCommand(snapshot, command);
-  const nextTurnCount = snapshot.recentMessages.filter((message) => message.kind === "action").length + 1;
+  const nextTurnCount = snapshot.sessionTurnCount + 1;
 
   await prisma.$transaction(async (tx) => {
     await tx.campaign.update({

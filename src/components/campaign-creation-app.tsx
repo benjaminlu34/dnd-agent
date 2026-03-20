@@ -201,11 +201,11 @@ export function CampaignCreationApp({
   }
 
   return (
-    <main className="min-h-screen bg-black px-6 py-10 text-zinc-50">
-      <div className="mx-auto max-w-6xl">
-        <header className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-8">
+    <main className="app-shell">
+      <div className="app-frame max-w-6xl">
+        <header className="app-hero p-8">
           <p className="text-[0.68rem] uppercase tracking-[0.28em] text-zinc-500">Campaign Launch</p>
-          <h1 className="mt-4 text-4xl font-semibold tracking-tight text-white">
+          <h1 className="font-display mt-4 text-4xl font-semibold tracking-tight text-white md:text-5xl">
             Choose your way into the world.
           </h1>
           <p className="mt-3 max-w-3xl text-sm leading-7 text-zinc-400">
@@ -223,13 +223,13 @@ export function CampaignCreationApp({
         ) : module && character ? (
           <section className="mt-8 grid gap-8 lg:grid-cols-[0.85fr_1.15fr]">
             <aside className="space-y-8">
-              <div className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-6">
+              <div className="app-section p-6">
                 <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Module</p>
                 <h2 className="mt-3 text-2xl font-semibold text-white">{module.title}</h2>
                 <p className="mt-3 text-sm leading-7 text-zinc-400">{module.premise}</p>
               </div>
 
-              <div className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-6">
+              <div className="app-section p-6">
                 <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Entry Points</p>
                 <div className="mt-4 space-y-3">
                   {module.entryPoints.map((entryPoint) => (
@@ -254,7 +254,7 @@ export function CampaignCreationApp({
                 </div>
               </div>
 
-              <div className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-6">
+              <div className="app-section p-6">
                 <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Character</p>
                 <h3 className="mt-3 text-xl font-semibold text-white">{character.name}</h3>
                 <p className="mt-1 text-sm text-zinc-400">{character.archetype}</p>
@@ -264,7 +264,7 @@ export function CampaignCreationApp({
               </div>
             </aside>
 
-            <div className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-6">
+            <div className="app-section p-6">
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Opening Draft</p>
@@ -334,7 +334,7 @@ export function CampaignCreationApp({
             </div>
           </section>
         ) : (
-          <div className="mt-8 rounded-[2rem] border border-zinc-800 bg-zinc-950 p-8 text-sm text-zinc-400">
+          <div className="app-section mt-8 p-8 text-sm text-zinc-400">
             Missing module or character context.
           </div>
         )}

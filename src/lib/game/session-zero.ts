@@ -243,6 +243,14 @@ export const generatedWorldModuleSchema = z
           message: "Market price vendorNpcId must reference a known NPC.",
         });
       }
+
+      if (price.factionId && !factionIds.has(price.factionId)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["marketPrices", index, "factionId"],
+          message: "Market price factionId must reference a known faction.",
+        });
+      }
     });
 
     draft.entryPoints.forEach((entryPoint, index) => {

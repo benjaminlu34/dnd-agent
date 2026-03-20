@@ -1,7 +1,6 @@
 import { rollCheck } from "@/lib/game/checks";
 import type {
   CampaignSnapshot,
-  CheckMode,
   CitedEntities,
   ExecuteFreeformToolCall,
   TimeMode,
@@ -135,12 +134,13 @@ function validateInformationDiscoveries(snapshot: CampaignSnapshot, ids: string[
 
   const accessibleIds = new Set(
     snapshot.localInformation.map((entry) => entry.id).concat(
+      snapshot.discoveredInformation.map((entry) => entry.id),
       snapshot.connectedLeads.map((lead) => lead.information.id),
     ),
   );
 
   for (const id of ids) {
-    if (!accessibleIds.has(id) && !snapshot.state.discoveredInformationIds.includes(id)) {
+    if (!accessibleIds.has(id)) {
       throw new Error(`Information ${id} is outside the local/discovered bubble.`);
     }
   }
@@ -187,10 +187,9 @@ export function validateTurnCommand(input: {
 
   if (command.type === "execute_freeform") {
     validateFreeform(command);
-    const mode: CheckMode = command.timeMode === "combat" ? "normal" : "normal";
     const checkResult = rollCheck({
       stat: command.statToCheck,
-      mode,
+      mode: "normal",
       reason: command.actionDescription,
       character: snapshot.character,
     });

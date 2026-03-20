@@ -11,6 +11,7 @@ function createSnapshot(): CampaignSnapshot {
   return {
     campaignId: "camp_1",
     sessionId: "sess_1",
+    sessionTurnCount: 0,
     moduleId: "mod_1",
     selectedEntryPointId: "entry_1",
     title: "Harbor of Knives",
@@ -22,7 +23,6 @@ function createSnapshot(): CampaignSnapshot {
       globalTime: 480,
       pendingTurnId: null,
       lastActionSummary: null,
-      discoveredInformationIds: ["info_1"],
     },
     character: {
       id: "char_1",
@@ -97,6 +97,7 @@ function createSnapshot(): CampaignSnapshot {
         pressureClock: 3,
       },
     ],
+    factionRelations: [],
     localInformation: [
       {
         id: "info_1",

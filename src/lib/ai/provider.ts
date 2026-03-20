@@ -1154,8 +1154,8 @@ class DungeonMasterClient {
 
         return parsed.data;
       }
-    } catch {
-      // Fall back below.
+    } catch (error) {
+      console.error("runTurn fell back to local resolution", error);
     }
 
     return fallback;

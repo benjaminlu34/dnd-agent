@@ -25,7 +25,7 @@ function FieldShell({
 }) {
   return (
     <label className="block space-y-2">
-      <span className="text-[0.68rem] uppercase tracking-[0.24em] text-zinc-500">{label}</span>
+      <span className="ui-label">{label}</span>
       {children}
     </label>
   );
@@ -182,14 +182,14 @@ export function SessionZeroApp() {
   }
 
   return (
-    <main className="min-h-screen bg-black px-6 py-10 text-zinc-50">
-      <div className="mx-auto max-w-6xl">
-        <header className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-8">
-          <p className="text-[0.68rem] uppercase tracking-[0.28em] text-zinc-500">Session Zero</p>
-          <h1 className="mt-4 text-4xl font-semibold tracking-tight text-white">
+    <main className="app-shell">
+      <div className="app-frame max-w-6xl">
+        <header className="app-hero p-8">
+          <p className="ui-label">Session Zero</p>
+          <h1 className="ui-title mt-4 text-4xl md:text-5xl">
             Build an open-world campaign launch.
           </h1>
-          <p className="mt-3 max-w-3xl text-sm leading-7 text-zinc-400">
+          <p className="ui-body mt-3 max-w-3xl">
             Generate a spatial module, save it to your library, choose a protagonist, and move into
             entry-point selection and opening generation.
           </p>
@@ -198,7 +198,7 @@ export function SessionZeroApp() {
         {error ? <p className="mt-6 text-sm text-red-400">{error}</p> : null}
 
         <section className="mt-8 grid gap-8 lg:grid-cols-[1.2fr_0.8fr]">
-          <div className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-6">
+          <div className="app-section p-6">
             <FieldShell label="Module Prompt">
               <textarea
                 className={fieldClassName(true)}
@@ -210,7 +210,7 @@ export function SessionZeroApp() {
             <div className="mt-4 flex gap-3">
               <button
                 type="button"
-                className="button-press rounded-full bg-white px-5 py-3 text-sm font-semibold text-black disabled:opacity-60"
+                className="button-press ui-button-primary rounded-full px-5 py-3 text-sm font-semibold disabled:opacity-60"
                 onClick={() => void generateDraft()}
                 disabled={drafting}
               >
@@ -219,7 +219,7 @@ export function SessionZeroApp() {
               {draft ? (
                 <button
                   type="button"
-                  className="button-press rounded-full border border-zinc-700 px-5 py-3 text-sm font-semibold text-zinc-200 disabled:opacity-60"
+                  className="button-press ui-button-secondary rounded-full px-5 py-3 text-sm font-semibold disabled:opacity-60"
                   onClick={() => void saveDraft()}
                   disabled={saving}
                 >
@@ -231,30 +231,30 @@ export function SessionZeroApp() {
             {draft ? (
               <div className="mt-8 space-y-6">
                 <div>
-                  <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Draft Title</p>
-                  <h2 className="mt-2 text-2xl font-semibold text-white">{draft.title}</h2>
-                  <p className="mt-3 text-sm leading-7 text-zinc-400">{draft.premise}</p>
+                  <p className="ui-label">Draft Title</p>
+                  <h2 className="ui-title mt-2 text-2xl">{draft.title}</h2>
+                  <p className="ui-body mt-3">{draft.premise}</p>
                 </div>
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="rounded-2xl border border-zinc-800 p-4">
-                    <p className="text-xs uppercase tracking-[0.18em] text-zinc-500">Locations</p>
-                    <p className="mt-2 text-2xl font-semibold text-white">{draft.locations.length}</p>
+                    <p className="ui-label">Locations</p>
+                    <p className="ui-title mt-2 text-2xl">{draft.locations.length}</p>
                   </div>
                   <div className="rounded-2xl border border-zinc-800 p-4">
-                    <p className="text-xs uppercase tracking-[0.18em] text-zinc-500">Entry Points</p>
-                    <p className="mt-2 text-2xl font-semibold text-white">{draft.entryPoints.length}</p>
+                    <p className="ui-label">Entry Points</p>
+                    <p className="ui-title mt-2 text-2xl">{draft.entryPoints.length}</p>
                   </div>
                 </div>
                 <div>
-                  <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Entry Points</p>
+                  <p className="ui-label">Entry Points</p>
                   <div className="mt-3 grid gap-4 md:grid-cols-2">
                     {draft.entryPoints.map((entryPoint) => {
                       const location = draft.locations.find((locationEntry) => locationEntry.id === entryPoint.startLocationId);
                       return (
                         <article key={entryPoint.id} className="rounded-2xl border border-zinc-800 p-4">
-                          <h3 className="text-lg font-semibold text-white">{entryPoint.title}</h3>
-                          <p className="mt-2 text-sm leading-6 text-zinc-400">{entryPoint.summary}</p>
-                          <p className="mt-3 text-xs uppercase tracking-[0.18em] text-zinc-500">
+                          <h3 className="ui-title text-lg">{entryPoint.title}</h3>
+                          <p className="ui-body mt-2">{entryPoint.summary}</p>
+                          <p className="ui-label mt-3">
                             Starts at {location?.name ?? entryPoint.startLocationId}
                           </p>
                         </article>
@@ -267,8 +267,8 @@ export function SessionZeroApp() {
           </div>
 
           <div className="space-y-8">
-            <section className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-6">
-              <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Saved Modules</p>
+            <section className="app-section p-6">
+              <p className="ui-label">Saved Modules</p>
               {loading ? (
                 <p className="mt-4 text-sm text-zinc-400">Loading modules...</p>
               ) : modules.length ? (
@@ -285,9 +285,9 @@ export function SessionZeroApp() {
                           : "border-zinc-800 bg-black hover:border-zinc-700",
                       ].join(" ")}
                     >
-                      <h3 className="text-base font-semibold text-white">{module.title}</h3>
-                      <p className="mt-2 text-sm leading-6 text-zinc-400">{module.premise}</p>
-                      <p className="mt-3 text-xs uppercase tracking-[0.18em] text-zinc-500">
+                      <h3 className="ui-title text-base">{module.title}</h3>
+                      <p className="ui-body mt-2">{module.premise}</p>
+                      <p className="ui-label mt-3">
                         {module.entryPointCount} entry points
                       </p>
                     </button>
@@ -298,8 +298,8 @@ export function SessionZeroApp() {
               )}
             </section>
 
-            <section className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-6">
-              <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Character Templates</p>
+            <section className="app-section p-6">
+              <p className="ui-label">Character Templates</p>
               {loading ? (
                 <p className="mt-4 text-sm text-zinc-400">Loading characters...</p>
               ) : characters.length ? (
@@ -316,8 +316,8 @@ export function SessionZeroApp() {
                           : "border-zinc-800 bg-black hover:border-zinc-700",
                       ].join(" ")}
                     >
-                      <h3 className="text-base font-semibold text-white">{character.name}</h3>
-                      <p className="mt-1 text-sm text-zinc-400">{character.archetype}</p>
+                      <h3 className="ui-title text-base">{character.name}</h3>
+                      <p className="ui-body mt-1">{character.archetype}</p>
                     </button>
                   ))}
                 </div>
@@ -326,14 +326,14 @@ export function SessionZeroApp() {
               )}
             </section>
 
-            <section className="rounded-[2rem] border border-zinc-800 bg-zinc-950 p-6">
-              <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Launch</p>
-              <p className="mt-3 text-sm leading-7 text-zinc-400">
+            <section className="app-section p-6">
+              <p className="ui-label">Launch</p>
+              <p className="ui-body mt-3">
                 Continue to choose an entry point and generate the opening from the selected module.
               </p>
               <button
                 type="button"
-                className="button-press mt-4 rounded-full bg-white px-5 py-3 text-sm font-semibold text-black disabled:opacity-60"
+                className="button-press ui-button-primary mt-4 rounded-full px-5 py-3 text-sm font-semibold disabled:opacity-60"
                 disabled={!selectedModule || !selectedTemplateId}
                 onClick={continueToCampaignCreation}
               >

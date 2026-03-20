@@ -3,6 +3,7 @@ import { dmClient } from "@/lib/ai/provider";
 import { toCampaignCharacter, toCharacterStats } from "@/lib/game/characters";
 import { createAdHocCampaignInventoryItem } from "@/lib/game/items";
 import { generatedWorldModuleSchema } from "@/lib/game/session-zero";
+import { instanceWorldForCampaign } from "@/lib/game/world-instancing";
 import type {
   AdventureModuleDetail,
   AdventureModuleSummary,
@@ -14,6 +15,7 @@ import type {
   CharacterTemplateDraft,
   CharacterTemplateSummary,
   CrossLocationLead,
+  FactionRelationSummary,
   FactionSummary,
   GeneratedCampaignOpening,
   GeneratedWorldModule,
@@ -322,7 +324,6 @@ export async function createAdventureModule(input: GeneratedWorldModule) {
       setting: input.setting,
       generationMode: "open_world",
       schemaVersion: 1,
-      isLocked: false,
       openWorldTemplateJson: input,
     },
     include: {
@@ -418,19 +419,11 @@ async function createCampaignInTx(
   },
 ) {
   const world = parseWorldTemplate(input.module.openWorldTemplateJson);
-  const entryPoint = world.entryPoints.find((entry) => entry.id === input.entryPointId);
+  const moduleEntryPoint = world.entryPoints.find((entry) => entry.id === input.entryPointId);
 
-  if (!entryPoint) {
+  if (!moduleEntryPoint) {
     throw new Error("Entry point not found during campaign creation.");
   }
-
-  const state: CampaignRuntimeState = {
-    currentLocationId: entryPoint.startLocationId,
-    globalTime: 480,
-    pendingTurnId: null,
-    lastActionSummary: input.opening.activeThreat,
-    discoveredInformationIds: [...entryPoint.initialInformationIds],
-  };
 
   const campaign = await tx.campaign.create({
     data: {
@@ -439,7 +432,12 @@ async function createCampaignInTx(
       templateId: input.template.id,
       moduleSchemaVersion: input.module.schemaVersion,
       selectedEntryPointId: input.entryPointId,
-      stateJson: state,
+      stateJson: {
+        currentLocationId: "",
+        globalTime: 480,
+        pendingTurnId: null,
+        lastActionSummary: input.opening.activeThreat,
+      } satisfies CampaignRuntimeState,
       characterInstance: {
         create: {
           templateId: input.template.id,
@@ -477,9 +475,22 @@ async function createCampaignInTx(
     throw new Error("Campaign initialization failed.");
   }
 
-  if (world.factions.length) {
+  const { world: instancedWorld, entryPoint } = instanceWorldForCampaign(
+    campaign.id,
+    world,
+    input.entryPointId,
+  );
+
+  const state: CampaignRuntimeState = {
+    currentLocationId: entryPoint.startLocationId,
+    globalTime: 480,
+    pendingTurnId: null,
+    lastActionSummary: input.opening.activeThreat,
+  };
+
+  if (instancedWorld.factions.length) {
     await tx.faction.createMany({
-      data: world.factions.map((faction) => ({
+      data: instancedWorld.factions.map((faction) => ({
         id: faction.id,
         campaignId: campaign.id,
         name: faction.name,
@@ -492,9 +503,9 @@ async function createCampaignInTx(
     });
   }
 
-  if (world.locations.length) {
+  if (instancedWorld.locations.length) {
     await tx.locationNode.createMany({
-      data: world.locations.map((location) => ({
+      data: instancedWorld.locations.map((location) => ({
         id: location.id,
         campaignId: campaign.id,
         name: location.name,
@@ -508,9 +519,9 @@ async function createCampaignInTx(
     });
   }
 
-  if (world.edges.length) {
+  if (instancedWorld.edges.length) {
     await tx.locationEdge.createMany({
-      data: world.edges.map((edge) => ({
+      data: instancedWorld.edges.map((edge) => ({
         id: edge.id,
         campaignId: campaign.id,
         sourceId: edge.sourceId,
@@ -523,9 +534,9 @@ async function createCampaignInTx(
     });
   }
 
-  if (world.factionRelations.length) {
+  if (instancedWorld.factionRelations.length) {
     await tx.factionRelation.createMany({
-      data: world.factionRelations.map((relation) => ({
+      data: instancedWorld.factionRelations.map((relation) => ({
         id: relation.id,
         campaignId: campaign.id,
         factionAId: relation.factionAId,
@@ -535,9 +546,9 @@ async function createCampaignInTx(
     });
   }
 
-  if (world.npcs.length) {
+  if (instancedWorld.npcs.length) {
     await tx.nPC.createMany({
-      data: world.npcs.map((npc) => ({
+      data: instancedWorld.npcs.map((npc) => ({
         id: npc.id,
         campaignId: campaign.id,
         name: npc.name,
@@ -552,9 +563,9 @@ async function createCampaignInTx(
     });
   }
 
-  if (world.information.length) {
+  if (instancedWorld.information.length) {
     await tx.information.createMany({
-      data: world.information.map((information) => ({
+      data: instancedWorld.information.map((information) => ({
         id: information.id,
         campaignId: campaign.id,
         title: information.title,
@@ -571,9 +582,9 @@ async function createCampaignInTx(
     });
   }
 
-  if (world.informationLinks.length) {
+  if (instancedWorld.informationLinks.length) {
     await tx.informationLink.createMany({
-      data: world.informationLinks.map((link) => ({
+      data: instancedWorld.informationLinks.map((link) => ({
         id: link.id,
         campaignId: campaign.id,
         sourceId: link.sourceId,
@@ -583,9 +594,9 @@ async function createCampaignInTx(
     });
   }
 
-  if (world.commodities.length) {
+  if (instancedWorld.commodities.length) {
     await tx.commodity.createMany({
-      data: world.commodities.map((commodity) => ({
+      data: instancedWorld.commodities.map((commodity) => ({
         id: commodity.id,
         campaignId: campaign.id,
         name: commodity.name,
@@ -595,9 +606,9 @@ async function createCampaignInTx(
     });
   }
 
-  if (world.marketPrices.length) {
+  if (instancedWorld.marketPrices.length) {
     await tx.marketPrice.createMany({
-      data: world.marketPrices.map((price) => ({
+      data: instancedWorld.marketPrices.map((price) => ({
         id: price.id,
         campaignId: campaign.id,
         commodityId: price.commodityId,
@@ -619,10 +630,10 @@ async function createCampaignInTx(
     });
   }
 
-  await tx.adventureModule.update({
-    where: { id: input.module.id },
+  await tx.campaign.update({
+    where: { id: campaign.id },
     data: {
-      isLocked: true,
+      stateJson: state,
     },
   });
 
@@ -690,16 +701,30 @@ export async function listCampaigns(): Promise<CampaignListItem[]> {
     include: {
       module: true,
       template: true,
-      locationNodes: true,
     },
   });
 
-  return campaigns.map((campaign) => {
-    const state = campaign.stateJson as unknown as CampaignRuntimeState;
-    const currentLocation = campaign.locationNodes.find(
-      (location) => location.id === state.currentLocationId,
-    );
+  if (!campaigns.length) {
+    return [];
+  }
 
+  const locationRecords = await prisma.locationNode.findMany({
+    where: {
+      OR: campaigns.map((campaign) => ({
+        campaignId: campaign.id,
+        id: (campaign.stateJson as CampaignRuntimeState).currentLocationId,
+      })),
+    },
+    select: {
+      campaignId: true,
+      name: true,
+    },
+  });
+  const currentLocationNameByCampaignId = new Map(
+    locationRecords.map((location) => [location.campaignId, location.name]),
+  );
+
+  return campaigns.map((campaign) => {
     return {
       id: campaign.id,
       title: campaign.module.title,
@@ -708,7 +733,7 @@ export async function listCampaigns(): Promise<CampaignListItem[]> {
       tone: campaign.module.tone,
       characterName: campaign.template.name,
       characterArchetype: campaign.template.archetype,
-      currentLocationName: currentLocation?.name ?? "Unknown location",
+      currentLocationName: currentLocationNameByCampaignId.get(campaign.id) ?? "Unknown location",
       updatedAt: campaign.updatedAt.toISOString(),
       createdAt: campaign.createdAt.toISOString(),
     };
@@ -746,6 +771,22 @@ function toFactionSummary(
     summary: faction.summary,
     agenda: faction.agenda,
     pressureClock: faction.pressureClock,
+  };
+}
+
+function toFactionRelationSummary(
+  relation: Prisma.FactionRelationGetPayload<Record<string, never>>,
+  factions: Prisma.FactionGetPayload<Record<string, never>>[],
+): FactionRelationSummary {
+  const factionA = factions.find((entry) => entry.id === relation.factionAId);
+  const factionB = factions.find((entry) => entry.id === relation.factionBId);
+
+  return {
+    factionAId: relation.factionAId,
+    factionAName: factionA?.name ?? relation.factionAId,
+    factionBId: relation.factionBId,
+    factionBName: factionB?.name ?? relation.factionBId,
+    stance: relation.stance,
   };
 }
 
@@ -842,7 +883,7 @@ function buildCrossLocationLeads(input: {
         continue;
       }
 
-      const nextDepth = (current.depth + 1) as 1 | 2;
+      const nextDepth = current.depth === 0 ? 1 : 2;
       if (!input.discoveredInformationIds.includes(target.id)) {
         leads.set(target.id, {
           information: toInformationSummary(target, input.locations, input.factions, input.npcs),
@@ -902,6 +943,9 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
       factions: {
         orderBy: { name: "asc" },
       },
+      factionRelations: {
+        orderBy: { createdAt: "asc" },
+      },
       npcs: {
         orderBy: { name: "asc" },
       },
@@ -947,12 +991,14 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     .filter((npc) => npc.currentLocationId === currentLocation.id)
     .map((npc) => toNpcSummary(npc, campaign.factions));
 
-  const discoveredIds = new Set(state.discoveredInformationIds);
+  const discoveredIds = new Set(
+    campaign.information.filter((information) => information.isDiscovered).map((information) => information.id),
+  );
   const localInformation = campaign.information
     .filter(
       (information) =>
         information.locationId === currentLocation.id &&
-        (information.accessibility === "public" || discoveredIds.has(information.id) || information.isDiscovered),
+        (information.accessibility === "public" || discoveredIds.has(information.id)),
     )
     .map((information) =>
       toInformationSummary(information, campaign.locationNodes, campaign.factions, campaign.npcs),
@@ -965,7 +1011,7 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     );
 
   const connectedLeads = buildCrossLocationLeads({
-    discoveredInformationIds: state.discoveredInformationIds,
+    discoveredInformationIds: Array.from(discoveredIds),
     information: campaign.information,
     informationLinks: campaign.informationLinks,
     locations: campaign.locationNodes,
@@ -991,6 +1037,11 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
   const knownFactions = campaign.factions
     .filter((faction) => knownFactionIds.has(faction.id))
     .map(toFactionSummary);
+  const factionRelations = campaign.factionRelations
+    .filter(
+      (relation) => knownFactionIds.has(relation.factionAId) && knownFactionIds.has(relation.factionBId),
+    )
+    .map((relation) => toFactionRelationSummary(relation, campaign.factions));
 
   const instance: CharacterInstance = {
     id: campaign.characterInstance.id,
@@ -1026,6 +1077,7 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
   return {
     campaignId: campaign.id,
     sessionId: session.id,
+    sessionTurnCount: session.turnCount,
     moduleId: campaign.moduleId,
     selectedEntryPointId: campaign.selectedEntryPointId,
     title: campaign.module.title,
@@ -1041,6 +1093,7 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     adjacentRoutes,
     presentNpcs,
     knownFactions,
+    factionRelations,
     localInformation,
     discoveredInformation,
     connectedLeads,
@@ -1051,7 +1104,27 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
 }
 
 export function toPlayerCampaignSnapshot(snapshot: CampaignSnapshot): PlayerCampaignSnapshot {
-  return snapshot;
+  return {
+    campaignId: snapshot.campaignId,
+    sessionId: snapshot.sessionId,
+    moduleId: snapshot.moduleId,
+    selectedEntryPointId: snapshot.selectedEntryPointId,
+    title: snapshot.title,
+    premise: snapshot.premise,
+    tone: snapshot.tone,
+    setting: snapshot.setting,
+    state: snapshot.state,
+    character: snapshot.character,
+    currentLocation: snapshot.currentLocation,
+    adjacentRoutes: snapshot.adjacentRoutes,
+    presentNpcs: snapshot.presentNpcs,
+    knownFactions: snapshot.knownFactions,
+    localInformation: snapshot.localInformation,
+    discoveredInformation: snapshot.discoveredInformation,
+    memories: snapshot.memories,
+    recentMessages: snapshot.recentMessages,
+    canRetryLatestTurn: snapshot.canRetryLatestTurn,
+  };
 }
 
 function timeOfDay(globalTime: number) {
@@ -1071,10 +1144,11 @@ export async function getPromptContext(snapshot: CampaignSnapshot): Promise<Spat
     localInformation: snapshot.localInformation,
     connectedLeads: snapshot.connectedLeads,
     knownFactions: snapshot.knownFactions,
+    factionRelations: snapshot.factionRelations,
     inventory: toPromptInventory(snapshot.character.inventory),
     memories: snapshot.memories,
     recentMessages: snapshot.recentMessages.slice(-8),
-    discoveredInformationIds: [...snapshot.state.discoveredInformationIds],
+    discoveredInformationIds: snapshot.discoveredInformation.map((information) => information.id),
     globalTime: snapshot.state.globalTime,
     timeOfDay: timeOfDay(snapshot.state.globalTime),
   };
