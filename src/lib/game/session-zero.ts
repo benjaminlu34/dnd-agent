@@ -169,7 +169,7 @@ const worldSpineKeySchema = z
   .max(40)
   .regex(/^[a-z0-9_]+$/, "World spine keys must be lowercase alphanumeric with underscores.");
 
-const worldSpineLocationSchema = z.object({
+export const worldSpineLocationSchema = z.object({
   key: worldSpineKeySchema,
   name: z.string().trim().min(1),
   type: z.string().trim().min(1),
@@ -383,8 +383,6 @@ export const generatedKnowledgeWebInputSchema = z
   .object({
     information: z.array(knowledgeNodeSchema).min(4),
     informationLinks: z.array(knowledgeLinkSchema).min(1),
-    mythClusters: z.array(mythClusterInputSchema).min(1),
-    pressureSeeds: z.array(pressureSeedSchema).min(2),
   })
   .superRefine((draft, ctx) => {
     const keys = new Set(draft.information.map((information) => information.key));
@@ -411,17 +409,12 @@ export const generatedKnowledgeWebInputSchema = z
       }
     });
 
-    draft.mythClusters.forEach((cluster, index) => {
-      cluster.linkedInformationKeys.forEach((informationKey, linkedIndex) => {
-        if (!keys.has(informationKey)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ["mythClusters", index, "linkedInformationKeys", linkedIndex],
-            message: "Myth clusters must reference known information keys.",
-          });
-        }
-      });
-    });
+  });
+
+export const generatedKnowledgeThreadsInputSchema = z
+  .object({
+    mythClusters: z.array(mythClusterInputSchema).min(1).max(4),
+    pressureSeeds: z.array(pressureSeedSchema).min(2).max(8),
   });
 
 const economyCommoditySchema = z.object({
@@ -731,6 +724,7 @@ export const openWorldGenerationArtifactsSchema = z.object({
         "regional_life",
         "social_cast",
         "knowledge_web",
+        "knowledge_threads",
         "economy_material_life",
         "entry_contexts",
         "final_world",
@@ -748,6 +742,7 @@ export const openWorldGenerationArtifactsSchema = z.object({
         "regional_life",
         "social_cast",
         "knowledge_web",
+        "knowledge_threads",
         "economy_material_life",
         "entry_contexts",
         "final_world",
@@ -789,6 +784,7 @@ export const generatedCampaignOpeningSchema = z.object({
 export const campaignDraftRequestSchema = z.object({
   prompt: z.string().trim().min(1, "Prompt is required."),
   previousDraft: generatedWorldModuleSchema.optional(),
+  progressId: z.string().trim().min(1).optional(),
 });
 
 export const campaignOpeningDraftRequestSchema = z.object({

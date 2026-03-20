@@ -198,6 +198,7 @@ export function validateSocialLayer(
 ): ValidationReport {
   const issues: string[] = [];
   const npcConcentration = new Map<string, number>();
+  const seenNames = new Map<string, string>();
 
   for (const npc of socialLayer.npcs) {
     if (!expectedLocationIds.includes(npc.currentLocationId)) {
@@ -206,6 +207,14 @@ export function validateSocialLayer(
 
     if (!npc.summary || !npc.description) {
       issues.push(`NPC ${npc.id} is missing social grounding.`);
+    }
+
+    const normalizedName = npc.name.trim().toLowerCase();
+    const firstSeenId = seenNames.get(normalizedName);
+    if (firstSeenId) {
+      issues.push(`NPC names must be unique; ${npc.name} is duplicated by ${firstSeenId} and ${npc.id}.`);
+    } else if (normalizedName) {
+      seenNames.set(normalizedName, npc.id);
     }
 
     npcConcentration.set(

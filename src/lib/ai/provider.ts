@@ -7,11 +7,13 @@ import {
   generatedCampaignOpeningSchema,
   generatedEconomyMaterialLifeInputSchema,
   generatedEntryContextsInputSchema,
+  generatedKnowledgeThreadsInputSchema,
   generatedKnowledgeWebInputSchema,
   generatedRegionalLifeSchema,
   generatedSocialLayerInputSchema,
   generatedWorldBibleSchema,
   generatedWorldSpineSchema,
+  worldSpineLocationSchema,
 } from "@/lib/game/session-zero";
 import type {
   CampaignCharacter,
@@ -37,6 +39,10 @@ import {
   validateWorldModulePlayability,
   validateWorldSpine,
 } from "@/lib/game/world-validation";
+import {
+  getWorldGenerationStageRunningMessage,
+  type WorldGenerationProgressUpdate,
+} from "@/lib/game/world-generation-progress";
 
 type CampaignOpeningInput = {
   module: GeneratedWorldModule;
@@ -475,6 +481,7 @@ type StageValidation = {
 };
 
 const MAX_WORLD_STAGE_ATTEMPTS = 3;
+const WORLD_SPINE_LOCATION_BATCH_SIZE = 3;
 const REGIONAL_LIFE_BATCH_SIZE = 3;
 const SOCIAL_CAST_BATCH_SIZE = 3;
 
@@ -490,21 +497,21 @@ function createStructuredTool(
   };
 }
 
-function slugify(value: string) {
+function slugify(value: string, maxLength = 24) {
   return value
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "")
     .replace(/_{2,}/g, "_")
-    .slice(0, 48);
+    .slice(0, maxLength);
 }
 
-function assignCanonicalIds(keys: string[], prefix: string) {
+function assignCanonicalIds(keys: string[], prefix: string, maxSlugLength = 24) {
   const used = new Set<string>();
   const idMap: Record<string, string> = {};
 
   for (const key of keys) {
-    const base = `${prefix}_${slugify(key) || "entry"}`;
+    const base = `${prefix}_${slugify(key, maxSlugLength) || "entry"}`;
     let candidate = base;
     let suffix = 2;
     while (used.has(candidate)) {
@@ -522,11 +529,12 @@ function assignIndexedIds<T>(
   items: T[],
   prefix: string,
   getLabel: (item: T, index: number) => string,
+  maxSlugLength = 24,
 ) {
   const used = new Set<string>();
 
   return items.map((item, index) => {
-    const base = `${prefix}_${slugify(getLabel(item, index)) || `${prefix}_${index + 1}`}`;
+    const base = `${prefix}_${slugify(getLabel(item, index), maxSlugLength) || `${prefix}_${index + 1}`}`;
     let candidate = base;
     let suffix = 2;
     while (used.has(candidate)) {
@@ -614,6 +622,59 @@ function summarizeRegionalLifeForPrompt(
       routineSeeds: location.routineSeeds.slice(0, 1),
       eventSeeds: location.eventSeeds.slice(0, 1),
     }));
+}
+
+function isEverydayUseWorldSpineLocation(location: {
+  name: string;
+  type: string;
+  summary?: string;
+  description?: string;
+  tags?: string[];
+}) {
+  const haystack = [
+    location.name,
+    location.type,
+    location.summary ?? "",
+    location.description ?? "",
+    ...(location.tags ?? []),
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  const everydaySignals = [
+    "market",
+    "farm",
+    "coop",
+    "dock",
+    "port",
+    "harbor",
+    "outpost",
+    "checkpoint",
+    "customs",
+    "yard",
+    "workshop",
+    "forge",
+    "guild",
+    "camp",
+    "settlement",
+    "village",
+    "town",
+    "city",
+    "platform",
+    "station",
+    "tower",
+    "trade",
+    "civic",
+    "naval",
+    "salvage",
+    "anchor",
+    "lamp",
+    "tax",
+    "route",
+    "chokepoint",
+  ];
+
+  return everydaySignals.some((signal) => haystack.includes(signal));
 }
 
 function renderPromptValue(value: unknown, indent = 0): string {
@@ -1095,6 +1156,10 @@ const worldSpineFactionsSchema = z.object({
   factions: generatedWorldSpineSchema.shape.factions,
 });
 
+const worldSpineLocationPlanSchema = z.object({
+  locationCount: z.union([z.literal(9), z.literal(12), z.literal(15)]),
+});
+
 const worldSpineLocationsSchema = z.object({
   locations: generatedWorldSpineSchema.shape.locations,
 });
@@ -1116,6 +1181,12 @@ const worldSpineFactionsTool = createStructuredTool(
   "generate_world_spine_factions",
   "Generate the factions for the world spine.",
   worldSpineFactionsSchema,
+);
+
+const worldSpineLocationPlanTool = createStructuredTool(
+  "generate_world_spine_location_plan",
+  "Choose how many world spine locations to generate. Must be 9, 12, or 15.",
+  worldSpineLocationPlanSchema,
 );
 
 const worldSpineLocationsTool = createStructuredTool(
@@ -1156,8 +1227,14 @@ const socialCastTool = createStructuredTool(
 
 const knowledgeWebTool = createStructuredTool(
   "generate_knowledge_web",
-  "Generate layered information, myth threads, and actionable leads for the world.",
+  "Generate layered information links and actionable leads for the world.",
   generatedKnowledgeWebInputSchema,
+);
+
+const knowledgeThreadsTool = createStructuredTool(
+  "generate_knowledge_threads",
+  "Generate myth clusters and pressure seeds using known information keys and locked ids.",
+  generatedKnowledgeThreadsInputSchema,
 );
 
 const economyMaterialLifeTool = createStructuredTool(
@@ -1497,19 +1574,37 @@ async function runCompletion(options: {
     tools: options.tools,
   });
 
-  const response = await client.chat.completions.create({
-    model: env.openRouterModel,
-    temperature: 0.7,
-    max_tokens: options.maxTokens ?? 8000,
-    messages: [
-      { role: "system", content: options.system },
-      { role: "user", content: options.user },
-    ],
-    tools: options.tools?.map(toFunctionTool),
-    tool_choice: options.tools?.length ? "auto" : undefined,
-  });
+  try {
+    const response = await client.chat.completions.create({
+      model: env.openRouterModel,
+      temperature: 0.7,
+      max_tokens: options.maxTokens ?? 8000,
+      messages: [
+        { role: "system", content: options.system },
+        { role: "user", content: options.user },
+      ],
+      tools: options.tools?.map(toFunctionTool),
+      tool_choice: options.tools?.length ? "auto" : undefined,
+    });
 
-  return extractToolInput(response);
+    return extractToolInput(response);
+  } catch (error) {
+    const errorRecord = error as Record<string, unknown>;
+
+    logOpenRouterResponse("completion.error", {
+      name: error instanceof Error ? error.name : null,
+      message: error instanceof Error ? error.message : String(error),
+      status: typeof errorRecord.status === "number" ? errorRecord.status : null,
+      code: typeof errorRecord.code === "string" ? errorRecord.code : null,
+      type: typeof errorRecord.type === "string" ? errorRecord.type : null,
+      cause:
+        error instanceof Error && error.cause
+          ? String(error.cause)
+          : null,
+    });
+
+    throw error;
+  }
 }
 
 export function getTurnQualityMeta() {
@@ -1562,12 +1657,21 @@ class DungeonMasterClient {
   async generateWorldModule(input: {
     prompt: string;
     previousDraft?: GeneratedWorldModule;
+    onProgress?: (update: WorldGenerationProgressUpdate) => void;
   }): Promise<GeneratedWorldModuleDraft> {
     try {
       const attempts: OpenWorldGenerationArtifacts["attempts"] = [];
       const validationReports: OpenWorldGenerationArtifacts["validationReports"] = [];
       const stageSummaries: OpenWorldGenerationArtifacts["stageSummaries"] = {};
+      const notifyProgress = (update: WorldGenerationProgressUpdate) => {
+        input.onProgress?.(update);
+      };
 
+      notifyProgress({
+        stage: "world_bible",
+        status: "running",
+        message: getWorldGenerationStageRunningMessage("world_bible"),
+      });
       const worldBible = await runStructuredStage({
         stage: "world_bible",
         system: buildWorldGenSystemPrompt([
@@ -1606,9 +1710,19 @@ class DungeonMasterClient {
         summarize: (parsed) =>
           `${parsed.title}: ${parsed.environmentalRules.length} environmental rules, ${parsed.contradictoryMyths.length} myth threads.`,
       });
+      notifyProgress({
+        stage: "world_bible",
+        status: "complete",
+        message: stageSummaries.world_bible,
+      });
 
       const worldPromptContext = summarizeWorldBibleForPrompt(worldBible);
 
+      notifyProgress({
+        stage: "world_spine",
+        status: "running",
+        message: getWorldGenerationStageRunningMessage("world_spine"),
+      });
       const worldSpineFactions = await runStructuredStage({
         stage: "world_spine",
         system: buildWorldGenSystemPrompt([
@@ -1647,17 +1761,13 @@ class DungeonMasterClient {
         summarize: (parsed) => `${parsed.factions.length} factions with public agendas.`,
       });
 
-      const worldSpineLocations = await runStructuredStage({
+      const worldSpineLocationPlan = await runStructuredStage({
         stage: "world_spine",
         system: buildWorldGenSystemPrompt([
-          "Generate locations only.",
-          "Locations must feel distinct because of work, terrain, law, trade, hazard, or ritual, not vague grandeur.",
-          "Use only the provided faction keys when naming a controlling faction.",
-          "Each controlled location must visibly express who profits, patrols, or governs there.",
-          "Use concise lowercase underscore keys and keep the world reasonably compact: 8 to 15 locations.",
-          "Every generated key must be 40 characters or fewer.",
-          "At least half the locations should be work sites, civic hubs, chokepoints, or settlements ordinary people actually use day to day.",
-          "Preserve the prompt's specific imagery and avoid generic city, ruin, or temple reskins.",
+          "Choose how many total locations the world spine should have.",
+          "Return only a locationCount value of 9, 12, or 15.",
+          "Pick the smallest count that still gives the setting enough room for distinct work sites, civic hubs, chokepoints, and hazards.",
+          "Favor compactness unless the prompt clearly needs more distinct places.",
         ]),
         buildUser: (correctionNotes) =>
           [
@@ -1679,34 +1789,180 @@ class DungeonMasterClient {
                 })),
               ),
             ),
-            formatFinalInstruction(
-              "Generate only locations for this world spine. Use only known faction keys in controllingFactionKey.",
-            ),
+            formatFinalInstruction("Return only locationCount: 9, 12, or 15."),
           ].join("\n\n"),
-        schema: worldSpineLocationsSchema,
-        tool: worldSpineLocationsTool,
+        schema: worldSpineLocationPlanSchema,
+        tool: worldSpineLocationPlanTool,
         attempts,
         validationReports,
         stageSummaries,
-        validate: (parsed) => {
-          const issues = findDuplicateStrings(parsed.locations.map((location) => location.key)).map(
-            (key) => `Location key ${key} is duplicated.`,
-          );
-          const factionKeys = new Set(worldSpineFactions.factions.map((faction) => faction.key));
-
-          parsed.locations.forEach((location) => {
-            if (
-              location.controllingFactionKey &&
-              !factionKeys.has(location.controllingFactionKey)
-            ) {
-              issues.push(`Location ${location.name} uses unknown controller ${location.controllingFactionKey}.`);
-            }
-          });
-
-          return [{ category: "coherence", issues }];
-        },
-        summarize: (parsed) => `${parsed.locations.length} pressured locations.`,
+        summarize: (parsed) => `${parsed.locationCount} planned world spine locations.`,
       });
+
+      const worldSpineLocationTarget = worldSpineLocationPlan.locationCount;
+      const worldSpineLocationBatchCount = Math.ceil(
+        worldSpineLocationTarget / WORLD_SPINE_LOCATION_BATCH_SIZE,
+      );
+      const worldSpineEverydayLocationTarget = Math.ceil(worldSpineLocationTarget / 2);
+      const worldSpineLocationBatches: z.infer<typeof worldSpineLocationsSchema>["locations"][] = [];
+
+      for (let batchIndex = 0; batchIndex < worldSpineLocationBatchCount; batchIndex += 1) {
+        const worldSpineLocationBatchSchema = z.object({
+          locations: z.array(worldSpineLocationSchema).length(WORLD_SPINE_LOCATION_BATCH_SIZE),
+        });
+        const worldSpineLocationBatchTool = createStructuredTool(
+          worldSpineLocationsTool.name,
+          worldSpineLocationsTool.description,
+          worldSpineLocationBatchSchema,
+        );
+
+        const priorLocations = worldSpineLocationBatches.flat();
+        const priorEverydayCount = priorLocations.filter((location) =>
+          isEverydayUseWorldSpineLocation(location),
+        ).length;
+        const remainingAfterThisBatch =
+          worldSpineLocationTarget - priorLocations.length - WORLD_SPINE_LOCATION_BATCH_SIZE;
+        const minimumEverydayNeededThisBatch = Math.max(
+          0,
+          worldSpineEverydayLocationTarget - priorEverydayCount - remainingAfterThisBatch,
+        );
+        const suggestedNonEverydaySlotsThisBatch = Math.max(
+          0,
+          WORLD_SPINE_LOCATION_BATCH_SIZE - minimumEverydayNeededThisBatch,
+        );
+
+        const worldSpineLocationBatch = await runStructuredStage({
+          stage: "world_spine",
+          system: buildWorldGenSystemPrompt([
+            "Generate locations only for this batch.",
+            "Locations must feel distinct because of work, terrain, law, trade, hazard, or ritual, not vague grandeur.",
+            "Use only the provided faction keys when naming a controlling faction.",
+            "Each controlled location must visibly express who profits, patrols, or governs there.",
+            `This world should finish with ${worldSpineLocationTarget} total locations, returned in batches of ${WORLD_SPINE_LOCATION_BATCH_SIZE}.`,
+            "Every generated key must be 40 characters or fewer.",
+            "At least half the final location set should be work sites, civic hubs, chokepoints, or settlements ordinary people actually use day to day.",
+            "The rest should lean toward dangerous routes, sacred sites, remote hazards, vaults, monster territory, extraction zones, or other special-purpose places people approach for a reason rather than daily routine.",
+            "Do not make every location a work site, civic hub, chokepoint, or settlement.",
+            "Preserve the prompt's specific imagery and avoid generic city, ruin, or temple reskins.",
+            "Keep descriptions short so the full structured payload fits in one response.",
+          ]),
+          buildUser: (correctionNotes) =>
+            [
+              buildWorldGenerationBasePrompt({
+                prompt: input.prompt,
+                previousDraft: input.previousDraft,
+                correctionNotes,
+              }),
+              formatPromptBlock("world_context", worldPromptContext),
+              formatPromptBlock(
+                "locked_factions",
+                summarizeFactionRefs(
+                  worldSpineFactions.factions.map((faction) => ({
+                    key: faction.key,
+                    name: faction.name,
+                    type: faction.type,
+                    agenda: faction.agenda,
+                    publicFootprint: faction.publicFootprint,
+                  })),
+                ),
+              ),
+              priorLocations.length
+                ? formatPromptBlock(
+                    "existing_locations",
+                    summarizeLocationRefs(
+                      priorLocations.map((location) => ({
+                        key: location.key,
+                        name: location.name,
+                        type: location.type,
+                        controlStatus: location.controlStatus,
+                        controllingFactionKey: location.controllingFactionKey,
+                        summary: location.summary,
+                      })),
+                    ),
+                  )
+                : "",
+              formatPromptBlock("composition_tracker", {
+                targetLocationCount: worldSpineLocationTarget,
+                targetEverydayUseMinimum: worldSpineEverydayLocationTarget,
+                alreadyGeneratedLocationCount: priorLocations.length,
+                alreadyGeneratedEverydayUseCount: priorEverydayCount,
+                minimumEverydayUseNeededThisBatch: minimumEverydayNeededThisBatch,
+                suggestedNonEverydaySlotsThisBatch,
+                remainingLocationsAfterThisBatch: remainingAfterThisBatch,
+              }),
+              formatFinalInstruction([
+                `Generate exactly ${WORLD_SPINE_LOCATION_BATCH_SIZE} new locations for batch ${batchIndex + 1} of ${worldSpineLocationBatchCount}.`,
+                "Use only known faction keys in controllingFactionKey.",
+                "Do not repeat or rename any existing location shown above.",
+                `Ensure at least ${minimumEverydayNeededThisBatch} of this batch's locations are work sites, civic hubs, chokepoints, or settlements ordinary people actually use day to day.`,
+                suggestedNonEverydaySlotsThisBatch > 0
+                  ? `Use the remaining ${suggestedNonEverydaySlotsThisBatch} slot(s), when possible, for dangerous, sacred, remote, hidden, or otherwise special-purpose locations people do not use in everyday routine.`
+                  : "If this batch is forced to be fully everyday-use by the composition tracker, keep later batches available for stranger or more dangerous special-purpose sites.",
+              ]),
+            ]
+              .filter(Boolean)
+              .join("\n\n"),
+          schema: worldSpineLocationBatchSchema,
+          tool: worldSpineLocationBatchTool,
+          attempts,
+          validationReports,
+          stageSummaries,
+          validate: (parsed) => {
+            const issues = findDuplicateStrings(parsed.locations.map((location) => location.key)).map(
+              (key) => `Location key ${key} is duplicated within this batch.`,
+            );
+            const factionKeys = new Set(worldSpineFactions.factions.map((faction) => faction.key));
+            const priorLocationKeys = new Set(priorLocations.map((location) => location.key));
+            const batchEverydayCount = parsed.locations.filter((location) =>
+              isEverydayUseWorldSpineLocation(location),
+            ).length;
+
+            parsed.locations.forEach((location) => {
+              if (
+                location.controllingFactionKey &&
+                !factionKeys.has(location.controllingFactionKey)
+              ) {
+                issues.push(`Location ${location.name} uses unknown controller ${location.controllingFactionKey}.`);
+              }
+              if (priorLocationKeys.has(location.key)) {
+                issues.push(`Location key ${location.key} was already used in a previous batch.`);
+              }
+            });
+
+            if (batchEverydayCount < minimumEverydayNeededThisBatch) {
+              issues.push(
+                `This batch needs at least ${minimumEverydayNeededThisBatch} everyday-use locations to keep the final world composition on track.`,
+              );
+            }
+
+            return [{ category: "coherence", issues }];
+          },
+          summarize: (parsed) =>
+            `Location batch ${batchIndex + 1}/${worldSpineLocationBatchCount}: ${parsed.locations.length} locations.`,
+        });
+
+        worldSpineLocationBatches.push(worldSpineLocationBatch.locations);
+      }
+
+      const worldSpineLocations = {
+        locations: worldSpineLocationBatches.flat(),
+      };
+
+      const worldSpineLocationsValidation = worldSpineLocationsSchema.safeParse(worldSpineLocations);
+      if (!worldSpineLocationsValidation.success) {
+        throw new Error(
+          `world_spine locations returned invalid structured data: ${worldSpineLocationsValidation.error.message}`,
+        );
+      }
+
+      const finalEverydayCount = worldSpineLocations.locations.filter((location) =>
+        isEverydayUseWorldSpineLocation(location),
+      ).length;
+      if (finalEverydayCount < worldSpineEverydayLocationTarget) {
+        throw new Error(
+          `world_spine locations need at least ${worldSpineEverydayLocationTarget} everyday-use locations, received ${finalEverydayCount}.`,
+        );
+      }
 
       const worldSpineEdges = await runStructuredStage({
         stage: "world_spine",
@@ -1848,6 +2104,11 @@ class DungeonMasterClient {
       }
       stageSummaries.world_spine =
         `${worldSpineParsed.data.locations.length} locations, ${worldSpineParsed.data.factions.length} factions, ${worldSpineParsed.data.edges.length} routes.`;
+      notifyProgress({
+        stage: "world_spine",
+        status: "complete",
+        message: stageSummaries.world_spine,
+      });
 
       const idMaps: OpenWorldGenerationArtifacts["idMaps"] = {
         factions: assignCanonicalIds(worldSpineParsed.data.factions.map((faction) => faction.key), "fac"),
@@ -1880,6 +2141,11 @@ class DungeonMasterClient {
         publicFootprint: faction.publicFootprint,
       }));
 
+      notifyProgress({
+        stage: "regional_life",
+        status: "running",
+        message: getWorldGenerationStageRunningMessage("regional_life"),
+      });
       const regionalLifeBatches = chunkArray(lockedLocations, REGIONAL_LIFE_BATCH_SIZE);
       const regionalLifeBatchResults: RegionalLifeDraft["locations"][] = [];
 
@@ -1955,7 +2221,17 @@ class DungeonMasterClient {
       }
       stageSummaries.regional_life =
         `${regionalLife.locations.length} regional life profiles across ${regionalLifeBatches.length} batches.`;
+      notifyProgress({
+        stage: "regional_life",
+        status: "complete",
+        message: stageSummaries.regional_life,
+      });
 
+      notifyProgress({
+        stage: "social_cast",
+        status: "running",
+        message: getWorldGenerationStageRunningMessage("social_cast"),
+      });
       const socialCastBatches = chunkArray(lockedLocations, SOCIAL_CAST_BATCH_SIZE);
       const socialCastBatchResults: z.infer<typeof generatedSocialLayerInputSchema>["npcs"][] = [];
       const regionalLifeDigest = summarizeRegionalLifeForPrompt(regionalLife);
@@ -1969,12 +2245,22 @@ class DungeonMasterClient {
           socialCastTool.description,
           socialBatchSchema,
         );
+        const priorNpcNames = new Set(
+          socialCastBatchResults
+            .flat()
+            .map((npc) => npc.name.trim().toLowerCase())
+            .filter(Boolean),
+        );
 
         const socialBatch = await runStructuredStage({
           stage: "social_cast",
           system: buildWorldGenSystemPrompt([
             "Generate systemic NPCs for this world map batch.",
             "Every NPC must have a mundane routine, a current concern tied to a local hazard, faction pressure, or commodity shortage, and a transactional or territorial reason to cross paths with the player.",
+            "Favor workers, pilots, wardens, clerks, brokers, crew leads, and other routine social roles over colorful eccentrics.",
+            "playerCrossPath should describe an ordinary deal, toll, patrol, dispute, inspection, delivery, rumor, or work dependency instead of a cinematic mission pitch.",
+            "Do not reuse any exact NPC name shown from earlier batches.",
+            "If correction notes mention duplicate names, keep the same NPC concepts and only rename the duplicated NPCs.",
             "Do not create ornamental quest-givers or pleas for a hero.",
             `Return exactly ${locationBatch.length} NPCs, one anchored in each location in the batch.`,
           ]),
@@ -2012,6 +2298,7 @@ class DungeonMasterClient {
             const allLocationIds = new Set(lockedLocations.map((location) => location.id));
             const factionIds = new Set(lockedFactions.map((faction) => faction.id));
             const counts = new Map<string, number>();
+            const batchNames = new Set<string>();
 
             for (const npc of parsed.npcs) {
               if (!locationIds.has(npc.currentLocationId)) {
@@ -2034,6 +2321,21 @@ class DungeonMasterClient {
                 if (!factionIds.has(bridgeFactionId)) {
                   issues.push(`NPC ${npc.name} bridgeFactionIds reference unknown faction ${bridgeFactionId}.`);
                 }
+              }
+
+              const normalizedName = npc.name.trim().toLowerCase();
+              if (priorNpcNames.has(normalizedName)) {
+                issues.push(
+                  `Rename ${npc.name}; this exact full name is already used in an earlier batch. Keep the same NPC's role, location, and concerns, and change only the name.`,
+                );
+              }
+              if (batchNames.has(normalizedName)) {
+                issues.push(
+                  `Rename ${npc.name}; this exact full name is duplicated within this batch. Keep the same NPC's role, location, and concerns, and change only the name.`,
+                );
+              }
+              if (normalizedName) {
+                batchNames.add(normalizedName);
               }
 
               counts.set(npc.currentLocationId, (counts.get(npc.currentLocationId) ?? 0) + 1);
@@ -2059,6 +2361,11 @@ class DungeonMasterClient {
       };
       stageSummaries.social_cast =
         `${socialCastInput.npcs.length} NPCs across ${socialCastBatches.length} batches.`;
+      notifyProgress({
+        stage: "social_cast",
+        status: "complete",
+        message: stageSummaries.social_cast,
+      });
 
       const socialNpcIds = assignIndexedIds(
         socialCastInput.npcs,
@@ -2112,14 +2419,23 @@ class DungeonMasterClient {
         currentLocationId: npc.currentLocationId,
         factionId: npc.factionId,
       }));
+      const targetInformationNodeCount = Math.min(lockedLocations.length + 3, 18);
 
+      notifyProgress({
+        stage: "knowledge_web",
+        status: "running",
+        message: getWorldGenerationStageRunningMessage("knowledge_web"),
+      });
       const knowledgeWebInput = await runStructuredStage({
         stage: "knowledge_web",
         system: buildWorldGenSystemPrompt([
-          "Generate a layered knowledge web for the locked world.",
+          "Generate the playable information web for the locked world.",
           "Public information must provide a physical location, route, object, document, or NPC lead.",
           "Guarded information must imply what leverage, payment, status, or relationship is required to obtain it.",
           "Secrets should resolve to concrete places, ledgers, caches, devices, routes, or hidden actors rather than pure metaphysics.",
+          "Keep every field concise: summary, content, actionLead, and discoverHow should each be one tight sentence.",
+          "Return exactly one public actionable information node for each locked location, plus a small extra layer of guarded or secret nodes.",
+          "Keep the network compact: return no more than 18 information nodes and no more than 24 information links.",
         ]),
         buildUser: (correctionNotes) =>
           [
@@ -2133,9 +2449,11 @@ class DungeonMasterClient {
             formatPromptBlock("locked_factions", summarizeFactionRefs(lockedFactions)),
             formatPromptBlock("locked_npcs", summarizeNpcRefs(lockedNpcs)),
             formatPromptBlock("regional_life_digest", summarizeRegionalLifeRefs(regionalLife)),
-            formatFinalInstruction(
-              "Use only the provided ids for locations, factions, and NPCs. Use unique keys for information nodes.",
-            ),
+            formatFinalInstruction([
+              "Use only the provided ids for locations, factions, and NPCs.",
+              "Use unique keys for information nodes and information links.",
+              `Return exactly ${targetInformationNodeCount} information nodes and 12 to 24 information links.`,
+            ]),
           ].join("\n\n"),
         schema: generatedKnowledgeWebInputSchema,
         tool: knowledgeWebTool,
@@ -2185,7 +2503,95 @@ class DungeonMasterClient {
           return [{ category: "playability", issues }];
         },
         summarize: (parsed) =>
-          `${parsed.information.length} information nodes with ${parsed.mythClusters.length} myth clusters.`,
+          `${parsed.information.length} information nodes with ${parsed.informationLinks.length} links.`,
+      });
+      notifyProgress({
+        stage: "knowledge_web",
+        status: "complete",
+        message: stageSummaries.knowledge_web,
+      });
+
+      notifyProgress({
+        stage: "knowledge_threads",
+        status: "running",
+        message: getWorldGenerationStageRunningMessage("knowledge_threads"),
+      });
+      const knowledgeThreadsInput = await runStructuredStage({
+        stage: "knowledge_threads",
+        system: buildWorldGenSystemPrompt([
+          "Generate a compact myth-and-pressure layer using the existing information web.",
+          "Myth clusters should connect public beliefs to the already generated information nodes instead of inventing new lore objects.",
+          "Pressure seeds should name a locked location or faction and describe a near-term pressure that can move play.",
+          "Keep hiddenTruth and pressure text to one tight sentence each.",
+          "Return 2 to 4 myth clusters and 3 to 6 pressure seeds.",
+        ]),
+        buildUser: (correctionNotes) =>
+          [
+            buildWorldGenerationBasePrompt({
+              prompt: input.prompt,
+              previousDraft: input.previousDraft,
+              correctionNotes,
+            }),
+            formatPromptBlock("world_context", worldPromptContext),
+            formatPromptBlock("locked_locations", summarizeLocationRefs(lockedLocations)),
+            formatPromptBlock("locked_factions", summarizeFactionRefs(lockedFactions)),
+            formatPromptBlock(
+              "information_web",
+              knowledgeWebInput.information.map((information) =>
+                [
+                  information.key,
+                  information.title,
+                  `access=${information.accessibility}`,
+                  information.locationId ? `loc=${information.locationId}` : "",
+                  information.factionId ? `faction=${information.factionId}` : "",
+                  information.mythThread ? `myth=${information.mythThread}` : "",
+                ]
+                  .filter(Boolean)
+                  .join(" | "),
+              ),
+            ),
+            formatFinalInstruction([
+              "Use only existing information keys and the provided location and faction ids.",
+              "Return exactly 3 myth clusters and 4 pressure seeds unless the correction notes require otherwise.",
+            ]),
+          ].join("\n\n"),
+        schema: generatedKnowledgeThreadsInputSchema,
+        tool: knowledgeThreadsTool,
+        attempts,
+        validationReports,
+        stageSummaries,
+        validate: (parsed) => {
+          const issues: string[] = [];
+          const informationKeys = new Set(knowledgeWebInput.information.map((information) => information.key));
+          const locationIds = new Set(lockedLocations.map((location) => location.id));
+          const factionIds = new Set(lockedFactions.map((faction) => faction.id));
+
+          for (const cluster of parsed.mythClusters) {
+            for (const informationKey of cluster.linkedInformationKeys) {
+              if (!informationKeys.has(informationKey)) {
+                issues.push(`Myth cluster ${cluster.theme} references unknown information ${informationKey}.`);
+              }
+            }
+          }
+
+          for (const seed of parsed.pressureSeeds) {
+            if (seed.subjectType === "location" && !locationIds.has(seed.subjectId)) {
+              issues.push(`Pressure seed ${seed.pressure} must use a locked location id.`);
+            }
+            if (seed.subjectType === "faction" && !factionIds.has(seed.subjectId)) {
+              issues.push(`Pressure seed ${seed.pressure} must use a locked faction id.`);
+            }
+          }
+
+          return [{ category: "playability", issues }];
+        },
+        summarize: (parsed) =>
+          `${parsed.mythClusters.length} myth clusters and ${parsed.pressureSeeds.length} pressure seeds.`,
+      });
+      notifyProgress({
+        stage: "knowledge_threads",
+        status: "complete",
+        message: stageSummaries.knowledge_threads,
       });
 
       idMaps.information = assignCanonicalIds(
@@ -2215,7 +2621,7 @@ class DungeonMasterClient {
           targetId: idMaps.information[link.targetKey],
           linkType: link.linkType,
         })),
-        mythClusters: knowledgeWebInput.mythClusters.map((cluster) => ({
+        mythClusters: knowledgeThreadsInput.mythClusters.map((cluster) => ({
           theme: cluster.theme,
           publicBeliefs: cluster.publicBeliefs,
           hiddenTruth: cluster.hiddenTruth,
@@ -2224,9 +2630,14 @@ class DungeonMasterClient {
           ),
           contradictionThemes: cluster.contradictionThemes,
         })),
-        pressureSeeds: knowledgeWebInput.pressureSeeds,
+        pressureSeeds: knowledgeThreadsInput.pressureSeeds,
       };
 
+      notifyProgress({
+        stage: "economy_material_life",
+        status: "running",
+        message: getWorldGenerationStageRunningMessage("economy_material_life"),
+      });
       const economyMaterialLifeInput = await runStructuredStage({
         stage: "economy_material_life",
         system: buildWorldGenSystemPrompt([
@@ -2400,6 +2811,11 @@ class DungeonMasterClient {
           `economy_material_life immersion failed: ${knowledgeEconomyValidation.issues.join("; ")}`,
         );
       }
+      notifyProgress({
+        stage: "economy_material_life",
+        status: "complete",
+        message: stageSummaries.economy_material_life,
+      });
 
       const lockedInformation = knowledgeEconomy.information.map((information) => ({
         id: information.id,
@@ -2409,6 +2825,11 @@ class DungeonMasterClient {
         sourceNpcId: information.sourceNpcId,
       }));
 
+      notifyProgress({
+        stage: "entry_contexts",
+        status: "running",
+        message: getWorldGenerationStageRunningMessage("entry_contexts"),
+      });
       const entryContextsInput = await runStructuredStage({
         stage: "entry_contexts",
         system: buildWorldGenSystemPrompt([
@@ -2504,6 +2925,11 @@ class DungeonMasterClient {
         },
         summarize: (parsed) => `${parsed.entryPoints.length} entry contexts with pressure and public leads.`,
       });
+      notifyProgress({
+        stage: "entry_contexts",
+        status: "complete",
+        message: stageSummaries.entry_contexts,
+      });
 
       const entryPointIds = assignIndexedIds(
         entryContextsInput.entryPoints,
@@ -2538,6 +2964,12 @@ class DungeonMasterClient {
           initialInformationIds: entryPoint.initialInformationIds,
         })),
       };
+
+      notifyProgress({
+        stage: "final_world",
+        status: "running",
+        message: getWorldGenerationStageRunningMessage("final_world"),
+      });
 
       const entryValidation = validateEntryContexts(entryContexts, draft);
       validationReports.push({
@@ -2597,6 +3029,12 @@ class DungeonMasterClient {
             .join(" | "),
         );
       }
+
+      notifyProgress({
+        stage: "final_world",
+        status: "complete",
+        message: `${draft.locations.length} places, ${draft.npcs.length} NPCs, and ${draft.entryPoints.length} opening situations are ready.`,
+      });
 
       const artifacts: OpenWorldGenerationArtifacts = {
         prompt: input.prompt,

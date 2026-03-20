@@ -239,6 +239,7 @@ export type WorldGenerationStageName =
   | "regional_life"
   | "social_cast"
   | "knowledge_web"
+  | "knowledge_threads"
   | "economy_material_life"
   | "entry_contexts"
   | "final_world";

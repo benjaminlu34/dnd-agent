@@ -1,13 +1,18 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   AdventureModuleSummary,
   CharacterTemplateSummary,
   OpenWorldGenerationArtifacts,
   GeneratedWorldModule,
 } from "@/lib/game/types";
+import {
+  WORLD_GENERATION_PROGRESS_STAGES,
+  getWorldGenerationStageStep,
+  type DraftGenerationProgress,
+} from "@/lib/game/world-generation-progress";
 
 function fieldClassName(multiline = false) {
   return [
@@ -45,11 +50,21 @@ export function SessionZeroApp() {
   const [drafting, setDrafting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [draftProgressId, setDraftProgressId] = useState<string | null>(null);
+  const [draftProgress, setDraftProgress] = useState<DraftGenerationProgress | null>(null);
+  const progressStreamRef = useRef<EventSource | null>(null);
 
   const selectedModule = modules.find((module) => module.id === selectedModuleId) ?? null;
   const selectedCharacter =
     characters.find((character) => character.id === selectedTemplateId) ?? null;
   const activeStep = !selectedModuleId ? 1 : !selectedTemplateId ? 2 : 3;
+  const totalGenerationStages = WORLD_GENERATION_PROGRESS_STAGES.length;
+  const currentGenerationStage =
+    draftProgress?.status === "complete"
+      ? totalGenerationStages
+      : getWorldGenerationStageStep(draftProgress?.stage ?? null);
+  const generationProgressPercent =
+    totalGenerationStages > 0 ? (currentGenerationStage / totalGenerationStages) * 100 : 0;
 
   useEffect(() => {
     let active = true;
@@ -106,13 +121,73 @@ export function SessionZeroApp() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!draftProgressId) {
+      return;
+    }
+
+    const progressId = draftProgressId;
+    const stream = new EventSource(
+      `/api/campaigns/draft/progress?progressId=${encodeURIComponent(progressId)}`,
+    );
+    progressStreamRef.current = stream;
+
+    stream.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data) as
+          | { type: "connected"; progressId: string }
+          | { type: "progress"; progress: DraftGenerationProgress };
+
+        if (payload.type === "progress") {
+          setDraftProgress(payload.progress);
+
+          if (payload.progress.status === "complete" || payload.progress.status === "error") {
+            stream.close();
+            if (progressStreamRef.current === stream) {
+              progressStreamRef.current = null;
+            }
+          }
+        }
+      } catch {
+        // Ignore malformed stream payloads.
+      }
+    };
+
+    stream.onerror = () => {
+      stream.close();
+      if (progressStreamRef.current === stream) {
+        progressStreamRef.current = null;
+      }
+    };
+
+    return () => {
+      stream.close();
+      if (progressStreamRef.current === stream) {
+        progressStreamRef.current = null;
+      }
+    };
+  }, [draftProgressId]);
+
   async function generateDraft() {
     if (!prompt.trim() || drafting) {
       return;
     }
 
+    const progressId = crypto.randomUUID();
     setDrafting(true);
     setError(null);
+    setDraftProgressId(progressId);
+    setDraftProgress({
+      id: progressId,
+      status: "queued",
+      stage: null,
+      label: "Starting Your Draft",
+      message: "Getting the world generation process ready.",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      completedAt: null,
+      error: null,
+    });
 
     try {
       const response = await fetch("/api/campaigns/draft", {
@@ -120,7 +195,7 @@ export function SessionZeroApp() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ prompt, previousDraft: draft ?? undefined }),
+        body: JSON.stringify({ prompt, previousDraft: draft ?? undefined, progressId }),
       });
 
       const data = (await response.json()) as {
@@ -135,9 +210,39 @@ export function SessionZeroApp() {
 
       setDraft(data.draft);
       setDraftArtifacts(data.artifacts ?? null);
+      setDraftProgress((current) =>
+        current
+          ? {
+              ...current,
+              status: "complete",
+              label: "Draft Ready",
+              message: "Your campaign draft is ready to review.",
+              updatedAt: new Date().toISOString(),
+              completedAt: new Date().toISOString(),
+              error: null,
+            }
+          : current,
+      );
     } catch (draftError) {
       setError(draftError instanceof Error ? draftError.message : "Failed to generate module draft.");
+      setDraftProgress((current) =>
+        current
+          ? {
+              ...current,
+              status: "error",
+              label: "Generation Failed",
+              message:
+                draftError instanceof Error ? draftError.message : "Failed to generate module draft.",
+              updatedAt: new Date().toISOString(),
+              completedAt: new Date().toISOString(),
+              error:
+                draftError instanceof Error ? draftError.message : "Failed to generate module draft.",
+            }
+          : current,
+      );
     } finally {
+      progressStreamRef.current?.close();
+      progressStreamRef.current = null;
       setDrafting(false);
     }
   }
@@ -241,6 +346,52 @@ export function SessionZeroApp() {
                 placeholder="A storm-battered trade city where three factions are quietly preparing for open conflict..."
               />
             </FieldShell>
+            {draftProgress ? (
+              <div className="mt-4 rounded-2xl border border-zinc-800 bg-zinc-950/80 px-4 py-4">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-500">
+                      {draftProgress.status === "complete"
+                        ? "Ready"
+                        : draftProgress.status === "error"
+                          ? "Issue"
+                          : "In Progress"}
+                    </p>
+                    <p className="mt-2 text-sm font-semibold text-zinc-100">{draftProgress.label}</p>
+                  </div>
+                  <div
+                    className={[
+                      "h-2.5 w-2.5 rounded-full",
+                      draftProgress.status === "error"
+                        ? "bg-red-400"
+                        : draftProgress.status === "complete"
+                          ? "bg-emerald-400"
+                          : "bg-amber-300",
+                    ].join(" ")}
+                  />
+                </div>
+                <div className="mt-3 flex items-center justify-between gap-4 text-xs text-zinc-500">
+                  <span>
+                    Stage {currentGenerationStage} of {totalGenerationStages}
+                  </span>
+                  <span>{Math.round(generationProgressPercent)}%</span>
+                </div>
+                <div className="mt-2 h-2 overflow-hidden rounded-full bg-zinc-900">
+                  <div
+                    className={[
+                      "h-full rounded-full transition-[width] duration-500",
+                      draftProgress.status === "error"
+                        ? "bg-red-400"
+                        : draftProgress.status === "complete"
+                          ? "bg-emerald-400"
+                          : "bg-zinc-200",
+                    ].join(" ")}
+                    style={{ width: `${generationProgressPercent}%` }}
+                  />
+                </div>
+                <p className="mt-3 text-sm leading-relaxed text-zinc-400">{draftProgress.message}</p>
+              </div>
+            ) : null}
             <div className="mt-4 flex flex-wrap gap-3">
               <button
                 type="button"

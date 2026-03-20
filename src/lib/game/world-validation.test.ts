@@ -623,3 +623,39 @@ test("social layer validation requires anchored NPC coverage for every location"
   assert.equal(report.ok, false);
   assert.match(report.issues.join("\n"), /missing an anchored NPC for location loc_docks/);
 });
+
+test("social layer validation rejects duplicate NPC names", () => {
+  const report = validateSocialLayer(
+    {
+      npcs: [
+        {
+          id: "npc_1",
+          name: "Captain Voss",
+          role: "commander",
+          summary: "Strained officer.",
+          description: "A strained officer.",
+          factionId: "fac_watch",
+          currentLocationId: "loc_keep",
+          approval: 0,
+          isCompanion: false,
+        },
+        {
+          id: "npc_2",
+          name: "Captain Voss",
+          role: "broker",
+          summary: "Market fixer.",
+          description: "A market fixer.",
+          factionId: "fac_guild",
+          currentLocationId: "loc_market",
+          approval: 0,
+          isCompanion: false,
+        },
+      ],
+      socialGravity: [],
+    },
+    ["loc_keep", "loc_market"],
+  );
+
+  assert.equal(report.ok, false);
+  assert.match(report.issues.join("\n"), /NPC names must be unique/);
+});
