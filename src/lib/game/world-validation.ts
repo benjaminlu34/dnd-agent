@@ -199,6 +199,7 @@ export function validateSocialLayer(
   const issues: string[] = [];
   const npcConcentration = new Map<string, number>();
   const seenNames = new Map<string, string>();
+  const seenFirstNames = new Map<string, string>();
 
   for (const npc of socialLayer.npcs) {
     if (!expectedLocationIds.includes(npc.currentLocationId)) {
@@ -215,6 +216,16 @@ export function validateSocialLayer(
       issues.push(`NPC names must be unique; ${npc.name} is duplicated by ${firstSeenId} and ${npc.id}.`);
     } else if (normalizedName) {
       seenNames.set(normalizedName, npc.id);
+    }
+
+    const normalizedFirstName = npc.name.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+    const firstSeenFirstNameId = seenFirstNames.get(normalizedFirstName);
+    if (firstSeenFirstNameId) {
+      issues.push(
+        `NPC first names must be unique; ${npc.name} repeats the first name used by ${firstSeenFirstNameId} and ${npc.id}.`,
+      );
+    } else if (normalizedFirstName) {
+      seenFirstNames.set(normalizedFirstName, npc.id);
     }
 
     npcConcentration.set(
@@ -260,16 +271,6 @@ export function validateKnowledgeEconomy(
     issues.push("At least 30% of information should be publicly accessible.");
   }
 
-  for (const locationId of expectedLocationIds) {
-    const publicLeadExists = knowledgeEconomy.information.some(
-      (information) =>
-        information.locationId === locationId && information.accessibility === "public",
-    );
-    if (!publicLeadExists) {
-      issues.push(`Location ${locationId} needs at least one public actionable lead.`);
-    }
-  }
-
   for (const identity of knowledgeEconomy.locationTradeIdentity) {
     if (!expectedLocationIds.includes(identity.locationId)) {
       issues.push(`Location trade identity references unknown location ${identity.locationId}.`);
@@ -311,15 +312,14 @@ export function validateEntryContexts(
     }
   }
 
+  const minimumNearbyLocations = minimumEntryRadius(module.locations.length);
+
   for (const entryPoint of entryContexts.entryPoints) {
-    for (const location of module.locations) {
-      const hops = shortestHops(adjacency, entryPoint.startLocationId, location.id);
-      if (!Number.isFinite(hops) || hops > 4) {
-        issues.push(
-          `Entry point ${entryPoint.id} cannot reach ${location.name} within four hops.`,
-        );
-        break;
-      }
+    const nearbyReach = countLocationsWithinHops(adjacency, entryPoint.startLocationId, 4);
+    if (nearbyReach < minimumNearbyLocations) {
+      issues.push(
+        `Entry point ${entryPoint.id} should reach at least ${minimumNearbyLocations} locations within four hops, but only reaches ${nearbyReach}.`,
+      );
     }
   }
 
@@ -462,6 +462,40 @@ function shortestHops(adjacency: Map<string, Set<string>>, from: string, to: str
   return Number.POSITIVE_INFINITY;
 }
 
+function countLocationsWithinHops(
+  adjacency: Map<string, Set<string>>,
+  startLocationId: string,
+  maxHops: number,
+) {
+  const visited = new Set<string>([startLocationId]);
+  const queue: Array<{ id: string; depth: number }> = [{ id: startLocationId, depth: 0 }];
+
+  while (queue.length) {
+    const current = queue.shift();
+    if (!current) {
+      continue;
+    }
+
+    if (current.depth >= maxHops) {
+      continue;
+    }
+
+    for (const neighbor of adjacency.get(current.id) ?? []) {
+      if (visited.has(neighbor)) {
+        continue;
+      }
+      visited.add(neighbor);
+      queue.push({ id: neighbor, depth: current.depth + 1 });
+    }
+  }
+
+  return visited.size;
+}
+
+function minimumEntryRadius(totalLocations: number) {
+  return Math.min(totalLocations, Math.max(4, Math.ceil(totalLocations * 0.4)));
+}
+
 export function validateWorldModulePlayability(module: GeneratedWorldModule): ValidationReport {
   const issues: string[] = [];
   const adjacency = buildAdjacency(module);
@@ -498,15 +532,14 @@ export function validateWorldModulePlayability(module: GeneratedWorldModule): Va
     issues.push("At least one non-war faction relationship should exist.");
   }
 
+  const minimumNearbyLocations = minimumEntryRadius(module.locations.length);
+
   for (const entryPoint of module.entryPoints) {
-    for (const location of module.locations) {
-      const hops = shortestHops(adjacency, entryPoint.startLocationId, location.id);
-      if (!Number.isFinite(hops) || hops > 4) {
-        issues.push(
-          `Entry point ${entryPoint.id} cannot reach ${location.name} within four hops.`,
-        );
-        break;
-      }
+    const nearbyReach = countLocationsWithinHops(adjacency, entryPoint.startLocationId, 4);
+    if (nearbyReach < minimumNearbyLocations) {
+      issues.push(
+        `Entry point ${entryPoint.id} should reach at least ${minimumNearbyLocations} locations within four hops, but only reaches ${nearbyReach}.`,
+      );
     }
   }
 

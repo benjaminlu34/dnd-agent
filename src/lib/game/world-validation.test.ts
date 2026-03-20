@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { GeneratedWorldModule } from "./types";
+import type { GeneratedKnowledgeEconomy, GeneratedWorldModule } from "./types";
 import {
+  validateEntryContexts,
+  validateKnowledgeEconomy,
   validateRegionalLife,
   validateSocialLayer,
   validateWorldBible,
@@ -658,4 +660,242 @@ test("social layer validation rejects duplicate NPC names", () => {
 
   assert.equal(report.ok, false);
   assert.match(report.issues.join("\n"), /NPC names must be unique/);
+});
+
+test("social layer validation rejects duplicate NPC first names", () => {
+  const report = validateSocialLayer(
+    {
+      npcs: [
+        {
+          id: "npc_1",
+          name: "Captain Voss",
+          role: "commander",
+          summary: "Strained officer.",
+          description: "A strained officer.",
+          factionId: "fac_watch",
+          currentLocationId: "loc_keep",
+          approval: 0,
+          isCompanion: false,
+        },
+        {
+          id: "npc_2",
+          name: "Captain Thorn",
+          role: "broker",
+          summary: "Market fixer.",
+          description: "A market fixer.",
+          factionId: "fac_guild",
+          currentLocationId: "loc_market",
+          approval: 0,
+          isCompanion: false,
+        },
+      ],
+      socialGravity: [],
+    },
+    ["loc_keep", "loc_market"],
+  );
+
+  assert.equal(report.ok, false);
+  assert.match(report.issues.join("\n"), /NPC first names must be unique/);
+});
+
+test("knowledge economy validation does not require public leads at every location", () => {
+  const knowledgeEconomy: GeneratedKnowledgeEconomy = {
+    information: [
+      {
+        id: "info_public",
+        title: "Dock prices rise before storm week",
+        summary: "Everyone knows fuel is running short.",
+        content: "Everyone knows fuel is running short.",
+        truthfulness: "true",
+        accessibility: "public",
+        locationId: "loc_market",
+        factionId: null,
+        sourceNpcId: null,
+      },
+      {
+        id: "info_guarded",
+        title: "The archive clerk sells night access",
+        summary: "A clerk quietly trades access for favors.",
+        content: "A clerk quietly trades access for favors.",
+        truthfulness: "true",
+        accessibility: "guarded",
+        locationId: "loc_archive",
+        factionId: null,
+        sourceNpcId: null,
+      },
+      {
+        id: "info_secret",
+        title: "A reef cache sits under patrol markers",
+        summary: "Only smugglers know the marker pattern.",
+        content: "Only smugglers know the marker pattern.",
+        truthfulness: "partial",
+        accessibility: "secret",
+        locationId: "loc_reef",
+        factionId: null,
+        sourceNpcId: null,
+      },
+    ],
+    informationLinks: [
+      {
+        id: "link_1",
+        sourceId: "info_public",
+        targetId: "info_guarded",
+        linkType: "extends",
+      },
+    ],
+    mythClusters: [
+      {
+        theme: "Storm Debt",
+        publicBeliefs: ["The storm chooses who pays."],
+        hiddenTruth: "Harbor rationing is driving the panic.",
+        linkedInformationIds: ["info_public"],
+        contradictionThemes: [],
+      },
+    ],
+    pressureSeeds: [
+      {
+        subjectType: "location",
+        subjectId: "loc_market",
+        pressure: "Fuel rationing will trigger fights by week's end.",
+      },
+    ],
+    commodities: [
+      {
+        id: "com_1",
+        name: "Lamp Oil",
+        baseValue: 4,
+        tags: ["fuel"],
+      },
+    ],
+    marketPrices: [
+      {
+        id: "price_1",
+        commodityId: "com_1",
+        locationId: "loc_market",
+        vendorNpcId: null,
+        factionId: null,
+        modifier: 2,
+        stock: 5,
+        legalStatus: "legal",
+      },
+    ],
+    locationTradeIdentity: [
+      {
+        locationId: "loc_market",
+        signatureGoods: ["lamp oil"],
+        scarcityNotes: "Fuel boats are arriving late.",
+        streetLevelEconomy: "Dock crews barter for lamp time after dark.",
+      },
+      {
+        locationId: "loc_archive",
+        signatureGoods: ["sealed records"],
+        scarcityNotes: "Dry storage is more valuable than coin.",
+        streetLevelEconomy: "Copyists trade access, favors, and dry shelf space.",
+      },
+      {
+        locationId: "loc_reef",
+        signatureGoods: ["smuggled salt fish"],
+        scarcityNotes: "Patrol sweeps keep trade irregular.",
+        streetLevelEconomy: "Small crews trade fast and vanish before inspection.",
+      },
+    ],
+  };
+
+  const report = validateKnowledgeEconomy(knowledgeEconomy, [
+    "loc_market",
+    "loc_archive",
+    "loc_reef",
+  ]);
+
+  assert.equal(report.ok, true);
+  assert.deepEqual(report.issues, []);
+});
+
+test("entry contexts allow connected worlds with longer overall travel diameter", () => {
+  const longWorld = createWorld();
+  longWorld.locations.push(
+    {
+      id: "loc_outer_1",
+      name: "Outer 1",
+      type: "shoals",
+      summary: "Outer shoals.",
+      description: "A distant shoal.",
+      state: "active",
+      controllingFactionId: null,
+      tags: [],
+    },
+    {
+      id: "loc_outer_2",
+      name: "Outer 2",
+      type: "reef",
+      summary: "Far reef.",
+      description: "A far reef.",
+      state: "active",
+      controllingFactionId: null,
+      tags: [],
+    },
+    {
+      id: "loc_outer_3",
+      name: "Outer 3",
+      type: "wreck",
+      summary: "Distant wreck.",
+      description: "A distant wreck.",
+      state: "active",
+      controllingFactionId: null,
+      tags: [],
+    },
+  );
+  longWorld.edges.push(
+    {
+      id: "edge_5",
+      sourceId: "loc_keep",
+      targetId: "loc_outer_1",
+      travelTimeMinutes: 20,
+      dangerLevel: 2,
+      currentStatus: "open",
+      description: null,
+    },
+    {
+      id: "edge_6",
+      sourceId: "loc_outer_1",
+      targetId: "loc_outer_2",
+      travelTimeMinutes: 20,
+      dangerLevel: 2,
+      currentStatus: "open",
+      description: null,
+    },
+    {
+      id: "edge_7",
+      sourceId: "loc_outer_2",
+      targetId: "loc_outer_3",
+      travelTimeMinutes: 20,
+      dangerLevel: 2,
+      currentStatus: "open",
+      description: null,
+    },
+  );
+
+  const report = validateEntryContexts(
+    {
+      entryPoints: [
+        {
+          id: "entry_1",
+          title: "Gate Arrival",
+          summary: "Arrive under watch.",
+          startLocationId: "loc_gate",
+          presentNpcIds: ["npc_4"],
+          initialInformationIds: ["info_2"],
+          immediatePressure: "The queue is backing up and tempers are rising.",
+          publicLead: "A local guide is already offering work nearby.",
+          localContactNpcId: "npc_4",
+          mundaneActionPath: "Help a merchant clear customs for fast coin.",
+          evidenceWorldAlreadyMoving: "Inspectors are waving through sealed carts ahead of you.",
+        },
+      ],
+    },
+    longWorld,
+  );
+
+  assert.equal(report.ok, true);
+  assert.deepEqual(report.issues, []);
 });

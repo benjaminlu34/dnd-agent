@@ -497,7 +497,7 @@ function createStructuredTool(
   };
 }
 
-function slugify(value: string, maxLength = 24) {
+function slugify(value: string, maxLength = 40) {
   return value
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
@@ -506,7 +506,7 @@ function slugify(value: string, maxLength = 24) {
     .slice(0, maxLength);
 }
 
-function assignCanonicalIds(keys: string[], prefix: string, maxSlugLength = 24) {
+function assignCanonicalIds(keys: string[], prefix: string, maxSlugLength = 40) {
   const used = new Set<string>();
   const idMap: Record<string, string> = {};
 
@@ -548,6 +548,10 @@ function assignIndexedIds<T>(
 
 function uniqueNames(values: string[]) {
   return [...new Set(values.filter(Boolean))];
+}
+
+function firstNameOf(name: string) {
+  return name.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
 }
 
 function findDuplicateStrings(values: string[]) {
@@ -768,11 +772,14 @@ function summarizeLocationRefs(
     controlStatus?: string;
     controllingFactionKey?: string | null;
   }>,
+  options?: {
+    includeKey?: boolean;
+  },
 ) {
   return locations.map((location) =>
     [
       location.id ?? location.key ?? location.name,
-      location.id && location.key ? `key=${location.key}` : "",
+      options?.includeKey !== false && location.id && location.key ? `key=${location.key}` : "",
       location.name,
       location.type,
       location.controlStatus ? `control=${location.controlStatus}` : "",
@@ -793,11 +800,14 @@ function summarizeFactionRefs(
     agenda?: string;
     publicFootprint?: string;
   }>,
+  options?: {
+    includeKey?: boolean;
+  },
 ) {
   return factions.map((faction) =>
     [
       faction.id ?? faction.key ?? faction.name,
-      faction.id && faction.key ? `key=${faction.key}` : "",
+      options?.includeKey !== false && faction.id && faction.key ? `key=${faction.key}` : "",
       faction.name,
       faction.type,
       faction.agenda ? `agenda=${faction.agenda}` : "",
@@ -1968,7 +1978,9 @@ class DungeonMasterClient {
         stage: "world_spine",
         system: buildWorldGenSystemPrompt([
           "Generate only travel edges.",
-          "The location graph must stay connected.",
+          "The location graph must stay connected and feel well-interlinked rather than like a single-file route.",
+          "Prefer loops, alternate routes, and a few connective hubs over long linear chains.",
+          "Important civic hubs, markets, harbors, and major routes should help players branch into the wider map within a few moves.",
           "Every edge must include a physical travel constraint, danger, patrol, toll, weather issue, or territorial pressure.",
           "Use only the provided location keys.",
           "Use concise lowercase underscore keys and keep the network compact enough for a small open world.",
@@ -2177,7 +2189,7 @@ class DungeonMasterClient {
               formatPromptBlock("world_context", worldPromptContext),
               formatPromptBlock(
                 "locked_locations_batch",
-                summarizeLocationRefs(locationBatch),
+                summarizeLocationRefs(locationBatch, { includeKey: false }),
               ),
               formatFinalInstruction([
                 "Use only the provided location ids.",
@@ -2251,6 +2263,12 @@ class DungeonMasterClient {
             .map((npc) => npc.name.trim().toLowerCase())
             .filter(Boolean),
         );
+        const priorFirstNames = new Set(
+          socialCastBatchResults
+            .flat()
+            .map((npc) => firstNameOf(npc.name))
+            .filter(Boolean),
+        );
 
         const socialBatch = await runStructuredStage({
           stage: "social_cast",
@@ -2258,9 +2276,16 @@ class DungeonMasterClient {
             "Generate systemic NPCs for this world map batch.",
             "Every NPC must have a mundane routine, a current concern tied to a local hazard, faction pressure, or commodity shortage, and a transactional or territorial reason to cross paths with the player.",
             "Favor workers, pilots, wardens, clerks, brokers, crew leads, and other routine social roles over colorful eccentrics.",
+            "Use highly varied first-name sounds and syllable patterns so the cast does not cluster around a few repeated drowned-world name shapes.",
+            "Every NPC's first name must be unique across the whole world.",
             "playerCrossPath should describe an ordinary deal, toll, patrol, dispute, inspection, delivery, rumor, or work dependency instead of a cinematic mission pitch.",
+            "Use only the exact provided ids in factionId, currentLocationId, ties.locationIds, bridgeLocationIds, and bridgeFactionIds; never use faction keys, location keys, or names in those fields.",
+            "Every factionId and bridgeFactionId must match a provided fac_* id exactly.",
+            "Keep summary, description, currentConcern, and playerCrossPath to one tight sentence each.",
+            "Keep ties compact: 1 to 2 locationIds, 0 to 2 factionIds, 1 to 2 economyHooks, 1 to 2 informationHooks, and only 0 to 2 bridge ids when truly useful.",
             "Do not reuse any exact NPC name shown from earlier batches.",
             "If correction notes mention duplicate names, keep the same NPC concepts and only rename the duplicated NPCs.",
+            "If correction notes mention invalid ids or wrong anchors, keep the same NPC concepts where possible and fix only the referenced ids, anchors, and names.",
             "Do not create ornamental quest-givers or pleas for a hero.",
             `Return exactly ${locationBatch.length} NPCs, one anchored in each location in the batch.`,
           ]),
@@ -2272,8 +2297,14 @@ class DungeonMasterClient {
                 correctionNotes,
               }),
               formatPromptBlock("world_context", worldPromptContext),
-              formatPromptBlock("locked_locations_batch", summarizeLocationRefs(locationBatch)),
-              formatPromptBlock("locked_factions", summarizeFactionRefs(lockedFactions)),
+              formatPromptBlock(
+                "locked_locations_batch",
+                summarizeLocationRefs(locationBatch, { includeKey: false }),
+              ),
+              formatPromptBlock(
+                "locked_factions",
+                summarizeFactionRefs(lockedFactions, { includeKey: false }),
+              ),
               formatPromptBlock(
                 "regional_life_digest",
                 summarizeRegionalLifeRefs({
@@ -2284,6 +2315,7 @@ class DungeonMasterClient {
               ),
               formatFinalInstruction([
                 "Use only the provided location ids and faction ids.",
+                "For structured fields, use ids like loc_* and fac_* exactly as shown above, never the key= values.",
                 `Return exactly ${locationBatch.length} NPCs for this batch, with one currentLocationId per batch location.`,
               ]),
             ].join("\n\n"),
@@ -2299,6 +2331,7 @@ class DungeonMasterClient {
             const factionIds = new Set(lockedFactions.map((faction) => faction.id));
             const counts = new Map<string, number>();
             const batchNames = new Set<string>();
+            const batchFirstNames = new Set<string>();
 
             for (const npc of parsed.npcs) {
               if (!locationIds.has(npc.currentLocationId)) {
@@ -2336,6 +2369,21 @@ class DungeonMasterClient {
               }
               if (normalizedName) {
                 batchNames.add(normalizedName);
+              }
+
+              const normalizedFirstName = firstNameOf(npc.name);
+              if (priorFirstNames.has(normalizedFirstName)) {
+                issues.push(
+                  `Rename ${npc.name}; the first name '${normalizedFirstName}' is already used in an earlier batch. Keep the same NPC's role, location, and concerns, and change only the name.`,
+                );
+              }
+              if (batchFirstNames.has(normalizedFirstName)) {
+                issues.push(
+                  `Rename ${npc.name}; the first name '${normalizedFirstName}' is already duplicated within this batch. Keep the same NPC's role, location, and concerns, and change only the name.`,
+                );
+              }
+              if (normalizedFirstName) {
+                batchFirstNames.add(normalizedFirstName);
               }
 
               counts.set(npc.currentLocationId, (counts.get(npc.currentLocationId) ?? 0) + 1);
@@ -2434,7 +2482,8 @@ class DungeonMasterClient {
           "Guarded information must imply what leverage, payment, status, or relationship is required to obtain it.",
           "Secrets should resolve to concrete places, ledgers, caches, devices, routes, or hidden actors rather than pure metaphysics.",
           "Keep every field concise: summary, content, actionLead, and discoverHow should each be one tight sentence.",
-          "Return exactly one public actionable information node for each locked location, plus a small extra layer of guarded or secret nodes.",
+          "Return at least one actionable information node for each locked location.",
+          "Some locations may surface public leads while others rely on guarded leads; choose what fits the place instead of forcing the same access level everywhere.",
           "Keep the network compact: return no more than 18 information nodes and no more than 24 information links.",
         ]),
         buildUser: (correctionNotes) =>
@@ -2445,8 +2494,14 @@ class DungeonMasterClient {
               correctionNotes,
             }),
             formatPromptBlock("world_context", worldPromptContext),
-            formatPromptBlock("locked_locations", summarizeLocationRefs(lockedLocations)),
-            formatPromptBlock("locked_factions", summarizeFactionRefs(lockedFactions)),
+            formatPromptBlock(
+              "locked_locations",
+              summarizeLocationRefs(lockedLocations, { includeKey: false }),
+            ),
+            formatPromptBlock(
+              "locked_factions",
+              summarizeFactionRefs(lockedFactions, { includeKey: false }),
+            ),
             formatPromptBlock("locked_npcs", summarizeNpcRefs(lockedNpcs)),
             formatPromptBlock("regional_life_digest", summarizeRegionalLifeRefs(regionalLife)),
             formatFinalInstruction([
@@ -2489,14 +2544,13 @@ class DungeonMasterClient {
           }
 
           for (const location of lockedLocations) {
-            const hasPublicLead = parsed.information.some(
+            const hasLead = parsed.information.some(
               (information) =>
-                information.locationId === location.id &&
-                information.accessibility === "public" &&
-                information.actionLead.trim().length > 0,
+                information.locationId === location.id && information.actionLead.trim().length > 0,
             );
-            if (!hasPublicLead) {
-              issues.push(`Location ${location.name} needs a public actionable lead.`);
+
+            if (!hasLead) {
+              issues.push(`Location ${location.name} needs an actionable lead.`);
             }
           }
 
@@ -2533,8 +2587,14 @@ class DungeonMasterClient {
               correctionNotes,
             }),
             formatPromptBlock("world_context", worldPromptContext),
-            formatPromptBlock("locked_locations", summarizeLocationRefs(lockedLocations)),
-            formatPromptBlock("locked_factions", summarizeFactionRefs(lockedFactions)),
+            formatPromptBlock(
+              "locked_locations",
+              summarizeLocationRefs(lockedLocations, { includeKey: false }),
+            ),
+            formatPromptBlock(
+              "locked_factions",
+              summarizeFactionRefs(lockedFactions, { includeKey: false }),
+            ),
             formatPromptBlock(
               "information_web",
               knowledgeWebInput.information.map((information) =>
@@ -2655,8 +2715,14 @@ class DungeonMasterClient {
               correctionNotes,
             }),
             formatPromptBlock("world_context", worldPromptContext),
-            formatPromptBlock("locked_locations", summarizeLocationRefs(lockedLocations)),
-            formatPromptBlock("locked_factions", summarizeFactionRefs(lockedFactions)),
+            formatPromptBlock(
+              "locked_locations",
+              summarizeLocationRefs(lockedLocations, { includeKey: false }),
+            ),
+            formatPromptBlock(
+              "locked_factions",
+              summarizeFactionRefs(lockedFactions, { includeKey: false }),
+            ),
             formatPromptBlock("locked_npcs", summarizeNpcRefs(lockedNpcs)),
             formatPromptBlock("regional_life_digest", summarizeRegionalLifeRefs(regionalLife)),
             formatFinalInstruction(
@@ -2837,6 +2903,8 @@ class DungeonMasterClient {
           "Each entry should begin with minor but immediate personal, commercial, legal, territorial, or administrative pressure.",
           "The player should arrive as another person navigating an ongoing society, not as a chosen savior.",
           "Public leads should point to someone, somewhere, or something the player can pursue immediately.",
+          "Prefer starting locations that connect to several nearby places within a few hops, so each opening has room to branch into the wider world.",
+          "Avoid using only isolated edge locations as opening starts unless they still sit near multiple practical follow-up destinations.",
         ]),
         buildUser: (correctionNotes) =>
           [
@@ -2846,7 +2914,10 @@ class DungeonMasterClient {
               correctionNotes,
             }),
             formatPromptBlock("world_context", worldPromptContext),
-            formatPromptBlock("locked_locations", summarizeLocationRefs(lockedLocations)),
+            formatPromptBlock(
+              "locked_locations",
+              summarizeLocationRefs(lockedLocations, { includeKey: false }),
+            ),
             formatPromptBlock("locked_npcs", summarizeNpcRefs(lockedNpcs)),
             formatPromptBlock("locked_information", summarizeInformationRefs(lockedInformation)),
             formatPromptBlock("regional_life_digest", summarizeRegionalLifeRefs(regionalLife)),

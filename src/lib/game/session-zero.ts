@@ -329,14 +329,14 @@ const generatedSocialNpcSchema = z.object({
   currentConcern: z.string().trim().min(1),
   playerCrossPath: z.string().trim().min(1),
   ties: z.object({
-    locationIds: z.array(z.string().trim().min(1)).min(1),
-    factionIds: z.array(z.string().trim().min(1)),
-    economyHooks: z.array(z.string().trim().min(1)).min(1),
-    informationHooks: z.array(z.string().trim().min(1)).min(1),
+    locationIds: z.array(z.string().trim().min(1)).min(1).max(2),
+    factionIds: z.array(z.string().trim().min(1)).max(2),
+    economyHooks: z.array(z.string().trim().min(1)).min(1).max(2),
+    informationHooks: z.array(z.string().trim().min(1)).min(1).max(2),
   }),
   importance: z.enum(["pillar", "connector", "local"]),
-  bridgeLocationIds: z.array(z.string().trim().min(1)),
-  bridgeFactionIds: z.array(z.string().trim().min(1)),
+  bridgeLocationIds: z.array(z.string().trim().min(1)).max(2),
+  bridgeFactionIds: z.array(z.string().trim().min(1)).max(2),
 });
 
 export const generatedSocialLayerInputSchema = z.object({
