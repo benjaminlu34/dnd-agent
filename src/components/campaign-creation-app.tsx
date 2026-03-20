@@ -7,6 +7,7 @@ import type {
   CharacterTemplate,
   GeneratedCampaignOpening,
 } from "@/lib/game/types";
+import { backOrPush } from "@/lib/ui/navigation";
 
 function fieldClassName(multiline = false) {
   return [
@@ -205,13 +206,22 @@ export function CampaignCreationApp({
       <div className="app-frame max-w-6xl">
         <header className="app-hero p-8">
           <p className="ui-label">Campaign Launch</p>
-          <h1 className="ui-title mt-4 text-4xl md:text-5xl">
-            Choose your way into the world.
-          </h1>
-          <p className="ui-body mt-3 max-w-3xl">
-            Pick an entry point, shape the opening draft, and launch a spatial campaign rooted in
-            the selected start location.
-          </p>
+          <div className="mt-4 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+              <h1 className="ui-title text-4xl md:text-5xl">Choose your way into the world.</h1>
+              <p className="ui-body mt-3 max-w-3xl">
+                Pick an entry point, shape the opening draft, and launch a spatial campaign rooted
+                in the selected start location.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="button-press ui-button-secondary rounded-full px-5 py-3 text-sm font-semibold"
+              onClick={() => backOrPush(router, "/campaigns/new", "/campaigns")}
+            >
+              Back to Session Zero
+            </button>
+          </div>
         </header>
 
         {error ? <p className="mt-6 text-sm text-red-400">{error}</p> : null}

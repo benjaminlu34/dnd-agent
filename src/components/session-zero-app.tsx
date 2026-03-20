@@ -7,6 +7,7 @@ import type {
   CharacterTemplateSummary,
   GeneratedWorldModule,
 } from "@/lib/game/types";
+import { backOrPush } from "@/lib/ui/navigation";
 
 function fieldClassName(multiline = false) {
   return [
@@ -45,6 +46,9 @@ export function SessionZeroApp() {
   const [error, setError] = useState<string | null>(null);
 
   const selectedModule = modules.find((module) => module.id === selectedModuleId) ?? null;
+  const selectedCharacter =
+    characters.find((character) => character.id === selectedTemplateId) ?? null;
+  const activeStep = !selectedModuleId ? 1 : !selectedTemplateId ? 2 : 3;
 
   useEffect(() => {
     let active = true;
@@ -182,23 +186,49 @@ export function SessionZeroApp() {
   }
 
   return (
-    <main className="app-shell">
-      <div className="app-frame max-w-6xl">
-        <header className="app-hero p-8">
-          <p className="ui-label">Session Zero</p>
-          <h1 className="ui-title mt-4 text-4xl md:text-5xl">
-            Build an open-world campaign launch.
-          </h1>
-          <p className="ui-body mt-3 max-w-3xl">
-            Generate a spatial module, save it to your library, choose a protagonist, and move into
-            entry-point selection and opening generation.
+    <main className="bg-black px-4 py-12 text-zinc-100">
+      <div className="mx-auto max-w-4xl">
+        <header className="mb-8">
+          <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-500">
+            Session Zero
           </p>
+          <div className="mt-4 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+            <div>
+              <h1 className="text-4xl font-medium tracking-tight text-zinc-100">
+                Build an open-world campaign launch.
+              </h1>
+              <p className="mt-3 text-sm leading-relaxed text-zinc-400">
+                Generate or choose a module, pick a protagonist, then move into the launch flow.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="button-press rounded-full border border-zinc-800 px-5 py-3 text-sm font-semibold text-zinc-300 transition-colors hover:bg-zinc-900 hover:text-white"
+              onClick={() => backOrPush(router, "/", "/")}
+            >
+              Back Home
+            </button>
+          </div>
         </header>
 
-        {error ? <p className="mt-6 text-sm text-red-400">{error}</p> : null}
+        {error ? <p className="mb-6 text-sm text-red-400">{error}</p> : null}
 
-        <section className="mt-8 grid gap-8 lg:grid-cols-[1.2fr_0.8fr]">
-          <div className="app-section p-6">
+        <section
+          className={[
+            "mb-6 rounded-xl p-8",
+            activeStep === 1
+              ? "border border-zinc-700 bg-zinc-950/50 shadow-[0_0_30px_rgba(255,255,255,0.02)]"
+              : "border border-zinc-800/50 opacity-50",
+          ].join(" ")}
+        >
+          <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-500">
+            Step 1
+          </p>
+          <h2 className="mt-3 text-2xl font-medium tracking-tight text-zinc-100">
+            Generate or choose a module
+          </h2>
+
+          <div className="mt-6">
             <FieldShell label="Module Prompt">
               <textarea
                 className={fieldClassName(true)}
@@ -207,10 +237,10 @@ export function SessionZeroApp() {
                 placeholder="A storm-battered trade city where three factions are quietly preparing for open conflict..."
               />
             </FieldShell>
-            <div className="mt-4 flex gap-3">
+            <div className="mt-4 flex flex-wrap gap-3">
               <button
                 type="button"
-                className="button-press ui-button-primary rounded-full px-5 py-3 text-sm font-semibold disabled:opacity-60"
+                className="button-press rounded-full bg-white px-5 py-3 text-sm font-semibold text-black transition-colors hover:bg-zinc-200 disabled:opacity-60"
                 onClick={() => void generateDraft()}
                 disabled={drafting}
               >
@@ -219,7 +249,7 @@ export function SessionZeroApp() {
               {draft ? (
                 <button
                   type="button"
-                  className="button-press ui-button-secondary rounded-full px-5 py-3 text-sm font-semibold disabled:opacity-60"
+                  className="button-press rounded-full border border-zinc-800 px-5 py-3 text-sm font-semibold text-zinc-300 transition-colors hover:bg-zinc-900 hover:text-white disabled:opacity-60"
                   onClick={() => void saveDraft()}
                   disabled={saving}
                 >
@@ -227,119 +257,192 @@ export function SessionZeroApp() {
                 </button>
               ) : null}
             </div>
-
-            {draft ? (
-              <div className="mt-8 space-y-6">
-                <div>
-                  <p className="ui-label">Draft Title</p>
-                  <h2 className="ui-title mt-2 text-2xl">{draft.title}</h2>
-                  <p className="ui-body mt-3">{draft.premise}</p>
-                </div>
-                <div className="grid gap-4 md:grid-cols-2">
-                  <div className="rounded-2xl border border-zinc-800 p-4">
-                    <p className="ui-label">Locations</p>
-                    <p className="ui-title mt-2 text-2xl">{draft.locations.length}</p>
-                  </div>
-                  <div className="rounded-2xl border border-zinc-800 p-4">
-                    <p className="ui-label">Entry Points</p>
-                    <p className="ui-title mt-2 text-2xl">{draft.entryPoints.length}</p>
-                  </div>
-                </div>
-                <div>
-                  <p className="ui-label">Entry Points</p>
-                  <div className="mt-3 grid gap-4 md:grid-cols-2">
-                    {draft.entryPoints.map((entryPoint) => {
-                      const location = draft.locations.find((locationEntry) => locationEntry.id === entryPoint.startLocationId);
-                      return (
-                        <article key={entryPoint.id} className="rounded-2xl border border-zinc-800 p-4">
-                          <h3 className="ui-title text-lg">{entryPoint.title}</h3>
-                          <p className="ui-body mt-2">{entryPoint.summary}</p>
-                          <p className="ui-label mt-3">
-                            Starts at {location?.name ?? entryPoint.startLocationId}
-                          </p>
-                        </article>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-            ) : null}
           </div>
 
-          <div className="space-y-8">
-            <section className="app-section p-6">
-              <p className="ui-label">Saved Modules</p>
-              {loading ? (
-                <p className="mt-4 text-sm text-zinc-400">Loading modules...</p>
-              ) : modules.length ? (
-                <div className="mt-4 space-y-3">
-                  {modules.map((module) => (
-                    <button
-                      key={module.id}
-                      type="button"
-                      onClick={() => setSelectedModuleId(module.id)}
-                      className={[
-                        "w-full rounded-2xl border p-4 text-left transition-colors",
-                        selectedModuleId === module.id
-                          ? "border-zinc-500 bg-black"
-                          : "border-zinc-800 bg-black hover:border-zinc-700",
-                      ].join(" ")}
-                    >
-                      <h3 className="ui-title text-base">{module.title}</h3>
-                      <p className="ui-body mt-2">{module.premise}</p>
-                      <p className="ui-label mt-3">
-                        {module.entryPointCount} entry points
-                      </p>
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <p className="mt-4 text-sm text-zinc-400">No modules saved yet.</p>
-              )}
-            </section>
-
-            <section className="app-section p-6">
-              <p className="ui-label">Character Templates</p>
-              {loading ? (
-                <p className="mt-4 text-sm text-zinc-400">Loading characters...</p>
-              ) : characters.length ? (
-                <div className="mt-4 space-y-3">
-                  {characters.map((character) => (
-                    <button
-                      key={character.id}
-                      type="button"
-                      onClick={() => setSelectedTemplateId(character.id)}
-                      className={[
-                        "w-full rounded-2xl border p-4 text-left transition-colors",
-                        selectedTemplateId === character.id
-                          ? "border-zinc-500 bg-black"
-                          : "border-zinc-800 bg-black hover:border-zinc-700",
-                      ].join(" ")}
-                    >
-                      <h3 className="ui-title text-base">{character.name}</h3>
-                      <p className="ui-body mt-1">{character.archetype}</p>
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <p className="mt-4 text-sm text-zinc-400">Create a character template first.</p>
-              )}
-            </section>
-
-            <section className="app-section p-6">
-              <p className="ui-label">Launch</p>
-              <p className="ui-body mt-3">
-                Continue to choose an entry point and generate the opening from the selected module.
+          {draft ? (
+            <div className="mt-8 rounded-xl border border-zinc-800 bg-zinc-950 p-6">
+              <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-500">
+                Generated Draft
               </p>
-              <button
-                type="button"
-                className="button-press ui-button-primary mt-4 rounded-full px-5 py-3 text-sm font-semibold disabled:opacity-60"
-                disabled={!selectedModule || !selectedTemplateId}
-                onClick={continueToCampaignCreation}
-              >
-                Continue To Launch
-              </button>
-            </section>
+              <h3 className="mt-3 text-xl font-medium tracking-tight text-zinc-100">
+                {draft.title}
+              </h3>
+              <p className="mt-3 text-sm leading-relaxed text-zinc-400">{draft.premise}</p>
+              <div className="mt-5 grid gap-4 sm:grid-cols-2">
+                <div className="rounded-lg border border-zinc-800 p-4">
+                  <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-500">
+                    Locations
+                  </p>
+                  <p className="mt-2 text-lg font-medium tracking-tight text-zinc-100">
+                    {draft.locations.length}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-zinc-800 p-4">
+                  <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-500">
+                    Entry Points
+                  </p>
+                  <p className="mt-2 text-lg font-medium tracking-tight text-zinc-100">
+                    {draft.entryPoints.length}
+                  </p>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          <div className="mt-8">
+            <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-500">
+              Saved Modules
+            </p>
+            {loading ? (
+              <p className="mt-4 text-sm leading-relaxed text-zinc-400">Loading modules...</p>
+            ) : modules.length ? (
+              <div className="mt-4 space-y-3">
+                {modules.map((module) => (
+                  <button
+                    key={module.id}
+                    type="button"
+                    onClick={() => setSelectedModuleId(module.id)}
+                    className={[
+                      "flex w-full cursor-pointer items-center justify-between rounded-lg border p-4 text-left transition-colors",
+                      selectedModuleId === module.id
+                        ? "border-zinc-400 bg-zinc-900"
+                        : "border-zinc-800 bg-transparent hover:border-zinc-700",
+                    ].join(" ")}
+                  >
+                    <div>
+                      <h3 className="text-base font-medium tracking-tight text-zinc-100">
+                        {module.title}
+                      </h3>
+                      <p className="mt-2 text-sm leading-relaxed text-zinc-400">
+                        {module.premise}
+                      </p>
+                    </div>
+                    <span className="ml-4 text-[10px] font-medium uppercase tracking-widest text-zinc-500">
+                      {module.entryPointCount} Entry Points
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <p className="mt-4 text-sm italic leading-relaxed text-zinc-600">
+                No saved modules yet.
+              </p>
+            )}
+          </div>
+        </section>
+
+        <section
+          className={[
+            "mb-6 rounded-xl p-8",
+            activeStep === 2
+              ? "border border-zinc-700 bg-zinc-950/50 shadow-[0_0_30px_rgba(255,255,255,0.02)]"
+              : "border border-zinc-800/50 opacity-50",
+          ].join(" ")}
+        >
+          <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-500">
+            Step 2
+          </p>
+          <h2 className="mt-3 text-2xl font-medium tracking-tight text-zinc-100">
+            Choose a protagonist
+          </h2>
+
+          {loading ? (
+            <p className="mt-4 text-sm leading-relaxed text-zinc-400">Loading characters...</p>
+          ) : characters.length ? (
+            <div className="mt-6 space-y-3">
+              {characters.map((character) => (
+                <button
+                  key={character.id}
+                  type="button"
+                  onClick={() => setSelectedTemplateId(character.id)}
+                  className={[
+                    "flex w-full cursor-pointer items-center justify-between rounded-lg border p-4 text-left transition-colors",
+                    selectedTemplateId === character.id
+                      ? "border-zinc-400 bg-zinc-900"
+                      : "border-zinc-800 bg-transparent hover:border-zinc-700",
+                  ].join(" ")}
+                >
+                  <div>
+                    <h3 className="text-base font-medium tracking-tight text-zinc-100">
+                      {character.name}
+                    </h3>
+                    <p className="mt-1 text-[10px] font-medium uppercase tracking-widest text-zinc-500">
+                      {character.archetype}
+                    </p>
+                  </div>
+                  <span className="text-[10px] font-medium uppercase tracking-widest text-zinc-500">
+                    Max HP {character.maxHealth}
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p className="mt-4 text-sm italic leading-relaxed text-zinc-600">
+              Create a character template first.
+            </p>
+          )}
+        </section>
+
+        <section
+          className={[
+            "rounded-xl p-8",
+            activeStep === 3
+              ? "border border-zinc-700 bg-zinc-950/50 shadow-[0_0_30px_rgba(255,255,255,0.02)]"
+              : "border border-zinc-800/50 opacity-50",
+          ].join(" ")}
+        >
+          <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-500">
+            Step 3
+          </p>
+          <h2 className="mt-3 text-2xl font-medium tracking-tight text-zinc-100">
+            Review and launch
+          </h2>
+
+          <div className="mt-6 grid gap-4 sm:grid-cols-2">
+            <div className="rounded-lg border border-zinc-800 p-4">
+              <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-500">
+                Module
+              </p>
+              <p className="mt-2 text-base font-medium tracking-tight text-zinc-100">
+                {selectedModule?.title ?? "No module selected"}
+              </p>
+            </div>
+            <div className="rounded-lg border border-zinc-800 p-4">
+              <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-500">
+                Character
+              </p>
+              <p className="mt-2 text-base font-medium tracking-tight text-zinc-100">
+                {selectedCharacter?.name ?? "No character selected"}
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-8 flex flex-wrap items-center justify-between gap-3">
+            <button
+              type="button"
+              className="button-press rounded-full border border-zinc-800 px-5 py-3 text-sm font-semibold text-zinc-300 transition-colors hover:bg-zinc-900 hover:text-white"
+              onClick={() => {
+                if (selectedTemplateId) {
+                  setSelectedTemplateId(null);
+                  return;
+                }
+
+                if (selectedModuleId) {
+                  setSelectedModuleId(null);
+                }
+              }}
+            >
+              Back
+            </button>
+
+            <button
+              type="button"
+              className="button-press rounded-full bg-white px-5 py-3 text-sm font-semibold text-black transition-colors hover:bg-zinc-200 disabled:opacity-60"
+              disabled={!selectedModule || !selectedTemplateId}
+              onClick={continueToCampaignCreation}
+            >
+              Launch Campaign
+            </button>
           </div>
         </section>
       </div>

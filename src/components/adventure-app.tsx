@@ -249,6 +249,20 @@ export function AdventureApp({
               <button
                 type="button"
                 className="button-press w-full rounded-full bg-white px-4 py-3 text-sm font-semibold text-black"
+                onClick={() => router.push("/")}
+              >
+                Home
+              </button>
+              <button
+                type="button"
+                className="button-press w-full rounded-full border border-zinc-700 px-4 py-3 text-sm font-semibold text-zinc-200"
+                onClick={() => router.push("/campaigns")}
+              >
+                View All Campaigns
+              </button>
+              <button
+                type="button"
+                className="button-press w-full rounded-full bg-white px-4 py-3 text-sm font-semibold text-black"
                 onClick={() => router.push("/campaigns/new")}
               >
                 New Campaign

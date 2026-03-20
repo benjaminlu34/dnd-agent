@@ -12,6 +12,14 @@ import { getStaleClues } from "../src/lib/game/reveals";
 import { rollCheck } from "../src/lib/game/checks";
 import type { CampaignCharacter, PromptContext } from "../src/lib/game/types";
 
+function assertOpenRouterConfigured() {
+  if (!process.env.OPENROUTER_API_KEY && !process.env.OPENROUTER_API_KEY_2) {
+    throw new Error(
+      "contract-harness requires OPENROUTER_API_KEY or OPENROUTER_API_KEY_2. Local fallback providers are not supported.",
+    );
+  }
+}
+
 const character: CampaignCharacter = {
   id: "harness_char",
   templateId: "harness_char",
@@ -98,6 +106,8 @@ function buildPromptContext(): PromptContext {
 }
 
 async function main() {
+  assertOpenRouterConfigured();
+
   const blueprint = createStarterBlueprint();
   const promptContext = buildPromptContext();
   let malformed = 0;
@@ -146,7 +156,7 @@ async function main() {
         runs: 30,
         malformedPayloads: malformed,
         checks,
-        provider: process.env.OPENROUTER_API_KEY ? "openrouter" : "local",
+        provider: "openrouter",
       },
       null,
       2,

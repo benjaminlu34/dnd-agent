@@ -1,7 +1,20 @@
 const requiredAtRuntime = ["DATABASE_URL"] as const;
 
 function readEnv(name: string) {
-  return process.env[name]?.trim();
+  const value = process.env[name]?.trim();
+
+  if (!value) {
+    return value;
+  }
+
+  const hasMatchingDoubleQuotes = value.startsWith("\"") && value.endsWith("\"");
+  const hasMatchingSingleQuotes = value.startsWith("'") && value.endsWith("'");
+
+  if (hasMatchingDoubleQuotes || hasMatchingSingleQuotes) {
+    return value.slice(1, -1).trim();
+  }
+
+  return value;
 }
 
 export function getEnv(name: string) {

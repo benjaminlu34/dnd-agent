@@ -1,13 +1,13 @@
 ## AI Solo RPG Engine
 
-A personal-use solo fantasy RPG built with Next.js, Prisma, PostgreSQL, and a deterministic game engine. The database owns state, the engine validates mutations, and the AI DM only narrates and proposes structured intents.
+A personal-use solo fantasy RPG built with Next.js, Prisma, PostgreSQL, and an AI-driven narration layer. The database owns state, the engine validates mutations, and the AI DM only narrates and proposes structured intents.
 
 ## Stack
 
 - Next.js App Router + TypeScript
 - Tailwind CSS v4
 - Prisma + PostgreSQL
-- OpenRouter with a deterministic local DM fallback
+- OpenRouter for character, module, opening, and turn generation
 - NDJSON streaming for turn events
 
 ## Setup
@@ -16,7 +16,7 @@ A personal-use solo fantasy RPG built with Next.js, Prisma, PostgreSQL, and a de
 2. Copy `.env.example` to `.env`.
 3. Point `DATABASE_URL` at your pooled/runtime PostgreSQL connection.
 4. Point `DIRECT_URL` at your direct PostgreSQL connection for Prisma schema operations.
-5. Optionally set `OPENROUTER_API_KEY` to use OpenRouter instead of the local deterministic DM.
+5. Set `OPENROUTER_API_KEY` or `OPENROUTER_API_KEY_2` to enable AI generation.
 6. Generate the Prisma client and push the schema.
 
 ```bash
@@ -60,7 +60,7 @@ npm run build
 npm run contract-harness
 ```
 
-The contract harness runs 30 turns against the configured DM provider and reports malformed payloads plus check frequency. Without `OPENROUTER_API_KEY`, it uses the local deterministic provider so the repo still works locally.
+The contract harness runs 30 turns against the configured DM provider and reports malformed payloads plus check frequency. AI generation requires `OPENROUTER_API_KEY` or `OPENROUTER_API_KEY_2`.
 
 ## Notes
 

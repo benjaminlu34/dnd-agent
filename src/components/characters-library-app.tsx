@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowUpRight, Plus } from "lucide-react";
 import type { CharacterTemplateSummary } from "@/lib/game/types";
+import { backOrPush } from "@/lib/ui/navigation";
 
 function LibraryCharacterCard({
   character,
@@ -27,21 +28,25 @@ function LibraryCharacterCard({
           onEdit();
         }
       }}
-      className="group relative flex h-[320px] cursor-pointer flex-col overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950/50 p-6 backdrop-blur-md transition-[border-color,transform] duration-200 hover:scale-[1.02] hover:border-zinc-400"
+      className="group relative flex h-[320px] cursor-pointer flex-col overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950/40 p-6 transition-all hover:border-zinc-700 hover:bg-zinc-900/40"
     >
       <span className="pointer-events-none absolute right-4 top-4 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
         <ArrowUpRight className="h-4 w-4 text-white" strokeWidth={1.7} />
       </span>
 
       <div className="min-w-0 pr-8">
-          <p className="ui-label">Character Template</p>
-          <h2 className="ui-title mt-3 truncate text-xl transition-colors group-hover:text-white">
+          <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-500">
+            Character Template
+          </p>
+          <h2 className="mt-3 truncate text-xl font-medium tracking-tight text-zinc-100 transition-colors group-hover:text-white">
             {character.name}
           </h2>
-        <p className="ui-label mt-1 italic">{character.archetype}</p>
+        <p className="mt-1 text-[10px] uppercase tracking-widest text-zinc-500">
+          {character.archetype}
+        </p>
       </div>
 
-      <div className="my-4 grid grid-cols-5 gap-2 border-y border-zinc-800 py-4">
+      <div className="my-5 grid grid-cols-5 gap-2 border-y border-zinc-800/50 py-4">
         {[
           ["STR", character.strength],
           ["DEX", character.dexterity],
@@ -51,7 +56,7 @@ function LibraryCharacterCard({
           ["CHA", character.charisma]
         ].map(([label, value]) => (
           <div key={String(label)} className="flex flex-col items-center">
-            <span className="ui-label">{label}</span>
+            <span className="text-[10px] text-zinc-600">{label}</span>
             <span className="font-mono text-sm text-zinc-200">{value}</span>
           </div>
         ))}
@@ -163,32 +168,36 @@ export function CharactersLibraryApp() {
     <main className="app-shell">
       <div className="app-frame max-w-6xl">
         <header className="app-hero p-8">
-          <p className="ui-label">Character Library</p>
+          <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-500">
+            Character Library
+          </p>
           <div className="mt-4 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
             <div>
-              <button
-                type="button"
-                className="button-press ui-button-ghost text-xs uppercase tracking-[0.22em] transition-colors"
-                onClick={() => router.push("/")}
-              >
-                Home
-              </button>
-              <h1 className="ui-title text-4xl md:text-5xl">Manage your cast.</h1>
-              <p className="ui-body mt-3 max-w-2xl">
+              <h1 className="text-4xl font-medium tracking-tight text-zinc-100 md:text-5xl">
+                Manage your cast.
+              </h1>
+              <p className="mt-3 max-w-2xl text-sm leading-relaxed text-zinc-400">
                 Save reusable character templates, prune old ones, and head into Session Zero with the right protagonist.
               </p>
             </div>
             <div className="flex items-center gap-3">
               <button
                 type="button"
-                className="button-press ui-button-secondary rounded-md px-4 py-2 text-sm font-medium transition-colors"
+                className="button-press rounded-md border border-zinc-800 px-4 py-2 text-sm font-medium text-zinc-300 transition-colors hover:bg-zinc-900 hover:text-white"
+                onClick={() => backOrPush(router, "/", "/")}
+              >
+                Back Home
+              </button>
+              <button
+                type="button"
+                className="button-press rounded-md border border-zinc-800 px-4 py-2 text-sm font-medium text-zinc-300 transition-colors hover:bg-zinc-900 hover:text-white"
                 onClick={() => router.push("/campaigns/new")}
               >
                 Draft New Campaign
               </button>
               <button
                 type="button"
-                className="button-press ui-button-primary inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-colors"
+                className="button-press inline-flex items-center gap-2 rounded-md bg-white px-4 py-2 text-sm font-medium text-black transition-colors hover:bg-zinc-200"
                 onClick={() => router.push("/characters/new")}
               >
                 <Plus className="h-4 w-4" strokeWidth={1.8} />
@@ -219,16 +228,18 @@ export function CharactersLibraryApp() {
             </div>
           ) : (
             <div className="app-section flex flex-col items-center justify-center p-10 text-center">
-              <p className="ui-label">Empty Library</p>
-              <h2 className="ui-title mt-4 text-3xl">
+              <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-500">
+                Empty Library
+              </p>
+              <h2 className="mt-4 text-3xl font-medium tracking-tight text-zinc-100">
                 Every saga needs a hero
               </h2>
-              <p className="ui-empty mt-3 max-w-xl text-sm leading-7">
+              <p className="mt-3 max-w-xl text-sm italic leading-relaxed text-zinc-600">
                 Draft a character template and give your next campaign someone worth following into the dark.
               </p>
               <button
                 type="button"
-                className="button-press ui-button-primary mt-6 rounded-full px-5 py-3 text-sm font-semibold"
+                className="button-press mt-6 rounded-full bg-white px-5 py-3 text-sm font-semibold text-black transition-colors hover:bg-zinc-200"
                 onClick={() => router.push("/characters/new")}
               >
                 Draft a New Character

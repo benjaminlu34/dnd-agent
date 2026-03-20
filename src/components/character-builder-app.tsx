@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { MAX_STARTER_ITEMS } from "@/lib/game/item-utils";
 import type { CharacterTemplate } from "@/lib/game/types";
+import { backOrPush } from "@/lib/ui/navigation";
 
 type CharacterFormValues = {
   name: string;
@@ -23,7 +24,6 @@ type CharacterFormValues = {
 type CharacterGenerationResponse = {
   character?: CharacterFormValues & { backstory?: string | null; starterItems?: string[] };
   source?: "openrouter";
-  warning?: string;
   error?: string;
 };
 
@@ -79,7 +79,6 @@ export function CharacterBuilderApp({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [generationSource, setGenerationSource] = useState<"openrouter" | null>(null);
-  const [generationWarning, setGenerationWarning] = useState<string | null>(null);
   const {
     register,
     handleSubmit,
@@ -140,7 +139,6 @@ export function CharacterBuilderApp({
 
     setGenerating(true);
     setError(null);
-    setGenerationWarning(null);
 
     try {
       const response = await fetch("/api/characters/generate", {
@@ -163,7 +161,6 @@ export function CharacterBuilderApp({
         starterItems: data.character.starterItems ?? [],
       });
       setGenerationSource(data.source ?? null);
-      setGenerationWarning(data.warning ?? null);
     } catch (generationError) {
       setGenerationSource(null);
       setError(
@@ -274,14 +271,18 @@ export function CharacterBuilderApp({
               <button
                 type="button"
                 className="button-press rounded-full border border-zinc-800 px-5 py-3 text-sm font-semibold text-zinc-100 hover:bg-black"
-                onClick={() => router.push(mode === "edit" ? "/" : "/characters")}
+                onClick={() =>
+                  backOrPush(router, mode === "edit" ? "/" : "/characters", "/characters")
+                }
               >
                 {mode === "edit" ? "Home" : "Character Library"}
               </button>
               <button
                 type="button"
                 className="button-press rounded-full border border-zinc-800 px-5 py-3 text-sm font-semibold text-zinc-100 hover:bg-black"
-                onClick={() => router.push(mode === "edit" ? "/characters" : "/campaigns/new")}
+                onClick={() =>
+                  backOrPush(router, mode === "edit" ? "/characters" : "/campaigns/new", "/campaigns")
+                }
               >
                 {mode === "edit" ? "Back to Library" : "Back to Session Zero"}
               </button>
@@ -315,7 +316,6 @@ export function CharacterBuilderApp({
                   OpenRouter AI
                 </span>
               </p>
-              {generationWarning ? <p className="text-zinc-300">{generationWarning}</p> : null}
             </div>
           ) : null}
         </section>

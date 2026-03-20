@@ -24,6 +24,14 @@ type HarnessProvider = {
   resolveTurn: typeof dmClient.resolveTurn;
 };
 
+function assertOpenRouterConfigured() {
+  if (!process.env.OPENROUTER_API_KEY && !process.env.OPENROUTER_API_KEY_2) {
+    throw new Error(
+      "narration-quality-harness requires OPENROUTER_API_KEY or OPENROUTER_API_KEY_2. Local fallback providers are not supported.",
+    );
+  }
+}
+
 function buildPromptContext(): PromptContext {
   const blueprint = createStarterBlueprint();
   const state = createStarterState(blueprint);
@@ -165,6 +173,8 @@ async function runProviderChecks(name: string, provider: HarnessProvider, failur
 }
 
 async function main() {
+  assertOpenRouterConfigured();
+
   const failures: string[] = [];
 
   const staticCases = [
@@ -303,14 +313,12 @@ async function main() {
     }
   }
 
-  if (process.env.OPENROUTER_API_KEY) {
-    await runProviderChecks("openrouter", dmClient, failures);
-  }
+  await runProviderChecks("openrouter", dmClient, failures);
 
   console.log(
     JSON.stringify(
       {
-        provider: process.env.OPENROUTER_API_KEY ? "openrouter" : "not_configured",
+        provider: "openrouter",
         staticCases: staticCases.length,
         failures,
       },
