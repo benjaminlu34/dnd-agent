@@ -341,13 +341,11 @@ function isLikelyTruncatedStructuredPayload(value: unknown) {
   return hasUnclosedJsonStructure(trimmed);
 }
 
-function createClient() {
-  const apiKey = env.openRouterApiKey || env.openRouterApiKey2;
+function getOpenRouterApiKeys() {
+  return [...new Set([env.openRouterApiKey, env.openRouterApiKey2, env.openRouterApiKey3].filter(Boolean))];
+}
 
-  if (!apiKey) {
-    return null;
-  }
-
+function createClient(apiKey: string) {
   return new OpenAI({
     apiKey,
     baseURL: "https://openrouter.ai/api/v1",
@@ -554,6 +552,67 @@ function firstNameOf(name: string) {
   return name.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
 }
 
+type WorldPromptProfile = {
+  explanationStyle: "folkloric" | "speculative" | "grounded";
+  minimumExplanationThreads: number;
+};
+
+function inferWorldPromptProfile(prompt: string): WorldPromptProfile {
+  const normalized = prompt.toLowerCase();
+  const folkloricSignals = [
+    "myth",
+    "legend",
+    "folklore",
+    "god",
+    "gods",
+    "divine",
+    "curse",
+    "sacred",
+    "spirit",
+    "spirits",
+    "ritual",
+    "cult",
+    "oracle",
+    "prophecy",
+  ];
+  const speculativeSignals = [
+    "machine",
+    "engine",
+    "artifact",
+    "experiment",
+    "theory",
+    "scientific",
+    "science",
+    "technology",
+    "device",
+    "system",
+    "simulation",
+    "containment",
+    "laboratory",
+  ];
+  const folkloreScore = folkloricSignals.filter((signal) => normalized.includes(signal)).length;
+  const speculativeScore = speculativeSignals.filter((signal) => normalized.includes(signal)).length;
+  const wantsDenseCompetingExplanations =
+    /\bevery culture\b/.test(normalized) ||
+    /\bdifferent myths?\b/.test(normalized) ||
+    /\bcompeting beliefs?\b/.test(normalized) ||
+    /\bcontradictory\b/.test(normalized) ||
+    /\bpartially true\b/.test(normalized);
+
+  let explanationStyle: WorldPromptProfile["explanationStyle"] = "grounded";
+
+  if (folkloreScore >= speculativeScore + 1) {
+    explanationStyle = "folkloric";
+  } else if (speculativeScore >= folkloreScore + 1) {
+    explanationStyle = "speculative";
+  }
+
+  return {
+    explanationStyle,
+    minimumExplanationThreads: wantsDenseCompetingExplanations ? 4 : 2,
+  };
+}
+
 function findDuplicateStrings(values: string[]) {
   const counts = new Map<string, number>();
 
@@ -578,19 +637,24 @@ function chunkArray<T>(items: T[], size: number) {
   return chunks;
 }
 
-function summarizeWorldBibleForPrompt(worldBible: z.infer<typeof generatedWorldBibleSchema>) {
+function summarizeWorldBibleForPrompt(
+  worldBible: z.infer<typeof generatedWorldBibleSchema>,
+  profile: WorldPromptProfile,
+) {
   return {
     title: worldBible.title,
     premise: worldBible.premise,
     tone: worldBible.tone,
     setting: worldBible.setting,
     worldOverview: worldBible.worldOverview,
-    environmentalRules: worldBible.environmentalRules.slice(0, 6),
+    explanationStyle: profile.explanationStyle,
+    systemicPressures: worldBible.systemicPressures.slice(0, 6),
     historicalFractures: worldBible.historicalFractures.slice(0, 6),
-    contradictoryMyths: worldBible.contradictoryMyths.map((myth) => ({
-      key: myth.key,
-      claim: myth.claim,
-      partialTruth: myth.partialTruth,
+    competingExplanations: worldBible.explanationThreads.map((thread) => ({
+      key: thread.key,
+      phenomenon: thread.phenomenon,
+      prevailingTheories: thread.prevailingTheories,
+      actionableSecret: thread.actionableSecret,
     })),
     everydayLife: {
       survival: worldBible.everydayLife.survival,
@@ -899,16 +963,16 @@ const WORLD_GEN_PRINCIPLES = [
   "Prefer political, economic, environmental, and territorial pressure over cosmic destiny.",
   "Make every major detail usable at the table by tying it to a place, institution, job, route, resource, or conflict.",
   "Be concise. Every sentence should imply at least one playable cost, risk, opportunity, contact, or obstacle.",
-  "Preserve the prompt's distinctive nouns, imagery, and social texture instead of replacing them with generic fantasy substitutes.",
+  "Preserve the prompt's distinctive nouns, imagery, and social texture instead of replacing them with generic genre substitutes.",
   "Reuse exact nouns or noun phrases from the prompt whenever possible instead of renaming the setting into a new generic brand.",
 ];
 
 const WORLD_GEN_ANTI_PATTERNS = [
   "Do not default to chosen ones, ancient evils, prophecy, dark lords, or vague magical corruption.",
-  "Do not create ornamental NPCs, empty postcard locations, or generic fantasy tavern filler.",
+  "Do not create ornamental NPCs, empty postcard locations, or generic stock-setting filler.",
   "Do not solve missing structure by inventing extra ids, keys, factions, or locations outside the provided context.",
   "Do not use vague phrases when a concrete profession, shortage, hazard, patrol, debt, toll, or route problem would be clearer.",
-  "Treat myths as folk belief, institutional propaganda, or partial explanation unless the user explicitly asks for grand cosmology.",
+  "Translate the prompt into concrete systemic pressures; if it implies magic, myth, technology, or politics, express those through lived constraints, hazards, institutions, shortages, and conflicts rather than forcing a genre-mismatched trope layer.",
 ];
 
 function buildWorldGenSystemPrompt(lines: string[]) {
@@ -937,6 +1001,164 @@ function buildWorldGenerationBasePrompt(input: {
     .join("\n\n");
 }
 
+function normalizeEntryContextsInput(input: unknown) {
+  if (!input || typeof input !== "object") {
+    return input;
+  }
+
+  const draft = input as Record<string, unknown>;
+  if (!Array.isArray(draft.entryPoints)) {
+    return input;
+  }
+
+  return {
+    ...draft,
+    entryPoints: draft.entryPoints.slice(0, 3).map((entry) => {
+      if (!entry || typeof entry !== "object") {
+        return entry;
+      }
+
+      const normalizedEntry = { ...(entry as Record<string, unknown>) };
+      const evidence =
+        typeof normalizedEntry.evidenceWorldAlreadyMoving === "string"
+          ? normalizedEntry.evidenceWorldAlreadyMoving.trim()
+          : "";
+
+      if (!evidence) {
+        const immediatePressure =
+          typeof normalizedEntry.immediatePressure === "string"
+            ? normalizedEntry.immediatePressure.trim()
+            : "";
+        const summary =
+          typeof normalizedEntry.summary === "string" ? normalizedEntry.summary.trim() : "";
+        const fallbackSource = immediatePressure || summary || "local pressures are already shifting";
+        const fallback =
+          fallbackSource.charAt(0).toLowerCase() + fallbackSource.slice(1).replace(/\.$/, "");
+
+        normalizedEntry.evidenceWorldAlreadyMoving =
+          `People nearby are already reacting because ${fallback}.`;
+      }
+
+      return normalizedEntry;
+    }),
+  };
+}
+
+function normalizeWorldSpineRelationsInput(input: unknown, maxRelations: number) {
+  if (!input || typeof input !== "object") {
+    return input;
+  }
+
+  const draft = input as Record<string, unknown>;
+  if (!Array.isArray(draft.factionRelations)) {
+    return input;
+  }
+
+  return {
+    ...draft,
+    factionRelations: draft.factionRelations.slice(0, maxRelations),
+  };
+}
+
+function normalizeEconomyMaterialLifeInput(
+  input: unknown,
+  maxCommodities: number,
+  maxMarketPrices: number,
+) {
+  if (!input || typeof input !== "object") {
+    return input;
+  }
+
+  const draft = input as Record<string, unknown>;
+  const normalized: Record<string, unknown> = { ...draft };
+
+  if (Array.isArray(draft.commodities)) {
+    normalized.commodities = draft.commodities.slice(0, maxCommodities).map((commodity) => {
+      if (!commodity || typeof commodity !== "object") {
+        return commodity;
+      }
+
+      const normalizedCommodity = { ...(commodity as Record<string, unknown>) };
+      if (typeof normalizedCommodity.baseValue === "number" && Number.isFinite(normalizedCommodity.baseValue)) {
+        normalizedCommodity.baseValue = Math.round(normalizedCommodity.baseValue);
+      }
+
+      return normalizedCommodity;
+    });
+  }
+
+  if (Array.isArray(draft.marketPrices)) {
+    normalized.marketPrices = draft.marketPrices.slice(0, maxMarketPrices).map((price) => {
+      if (!price || typeof price !== "object") {
+        return price;
+      }
+
+      const normalizedPrice = { ...(price as Record<string, unknown>) };
+      if (typeof normalizedPrice.stock === "number" && Number.isFinite(normalizedPrice.stock)) {
+        normalizedPrice.stock = Math.round(normalizedPrice.stock);
+      }
+
+      return normalizedPrice;
+    });
+  }
+
+  return normalized;
+}
+
+function normalizeStringList(value: unknown) {
+  if (Array.isArray(value)) {
+    return value
+      .filter((entry): entry is string => typeof entry === "string")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  }
+
+  if (typeof value !== "string") {
+    return value;
+  }
+
+  return value
+    .split(/(?:\s*[;,]\s*|\n+|\s+\|\s+)/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function normalizeRegionalLifeInput(input: unknown, expectedLocations: number) {
+  if (!input || typeof input !== "object") {
+    return input;
+  }
+
+  const draft = input as Record<string, unknown>;
+  if (!Array.isArray(draft.locations)) {
+    return input;
+  }
+
+  return {
+    ...draft,
+    locations: draft.locations.slice(0, expectedLocations).map((location) => {
+      if (!location || typeof location !== "object") {
+        return location;
+      }
+
+      const normalizedLocation = { ...(location as Record<string, unknown>) };
+      for (const key of [
+        "dominantActivities",
+        "publicHazards",
+        "ordinaryKnowledge",
+        "institutions",
+        "gossip",
+        "reasonsToLinger",
+        "routineSeeds",
+        "eventSeeds",
+      ]) {
+        normalizedLocation[key] = normalizeStringList(normalizedLocation[key]);
+      }
+
+      return normalizedLocation;
+    }),
+  };
+}
+
 async function runStructuredStage<T>({
   stage,
   system,
@@ -948,6 +1170,7 @@ async function runStructuredStage<T>({
   stageSummaries,
   validate,
   summarize,
+  normalizeInput,
 }: {
   stage: WorldGenerationStageName;
   system: string;
@@ -959,6 +1182,7 @@ async function runStructuredStage<T>({
   stageSummaries: OpenWorldGenerationArtifacts["stageSummaries"];
   validate?: (parsed: T) => StageValidation[];
   summarize?: (parsed: T) => string;
+  normalizeInput?: (input: unknown) => unknown;
 }): Promise<T> {
   let correctionNotes: string | null = null;
 
@@ -991,7 +1215,10 @@ async function runStructuredStage<T>({
       preview: toPreview(response?.input),
     });
 
-    if (response?.likelyTruncated) {
+    const normalizedInput = normalizeInput ? normalizeInput(response?.input) : response?.input;
+    const parsed = schema.safeParse(normalizedInput);
+
+    if (response?.likelyTruncated && !parsed.success) {
       const issues = [
         "Your previous response was cut off before the structured payload finished.",
         "Return a complete replacement payload.",
@@ -1021,7 +1248,14 @@ async function runStructuredStage<T>({
       continue;
     }
 
-    const parsed = schema.safeParse(response?.input);
+    if (response?.likelyTruncated && parsed.success) {
+      logOpenRouterResponse(`${stage}.truncation_recovered`, {
+        attempt,
+        finishReason: response.finishReason ?? null,
+        preview: toPreview(normalizedInput),
+      });
+    }
+
     if (!parsed.success) {
       const issues = describeZodIssues(parsed.error.issues).split("\n");
       validationReports.push({
@@ -1035,7 +1269,7 @@ async function runStructuredStage<T>({
       logOpenRouterResponse(`${stage}.schema_failure`, {
         attempt,
         issues: parsed.error.issues,
-        inputPreview: toPreview(response?.input),
+        inputPreview: toPreview(normalizedInput),
       });
 
       if (attempt === MAX_WORLD_STAGE_ATTEMPTS) {
@@ -1243,7 +1477,7 @@ const knowledgeWebTool = createStructuredTool(
 
 const knowledgeThreadsTool = createStructuredTool(
   "generate_knowledge_threads",
-  "Generate myth clusters and pressure seeds using known information keys and locked ids.",
+  "Generate knowledge networks and pressure seeds using known information keys and locked ids.",
   generatedKnowledgeThreadsInputSchema,
 );
 
@@ -1571,50 +1805,79 @@ async function runCompletion(options: {
   tools?: Array<{ name: string; description: string; input_schema: Record<string, unknown> }>;
   maxTokens?: number;
 }) {
-  const client = createClient();
+  const apiKeys = getOpenRouterApiKeys();
 
-  if (!client) {
+  if (!apiKeys.length) {
     throw missingAiConfigurationError();
   }
 
-  logOpenRouterRequest({
-    model: env.openRouterModel,
-    system: options.system,
-    user: options.user,
-    tools: options.tools,
-  });
+  let lastError: unknown = null;
 
-  try {
-    const response = await client.chat.completions.create({
+  for (const [index, apiKey] of apiKeys.entries()) {
+    const client = createClient(apiKey);
+
+    logOpenRouterRequest({
       model: env.openRouterModel,
-      temperature: 0.7,
-      max_tokens: options.maxTokens ?? 8000,
-      messages: [
-        { role: "system", content: options.system },
-        { role: "user", content: options.user },
-      ],
-      tools: options.tools?.map(toFunctionTool),
-      tool_choice: options.tools?.length ? "auto" : undefined,
+      system: options.system,
+      user: options.user,
+      tools: options.tools,
     });
 
-    return extractToolInput(response);
-  } catch (error) {
-    const errorRecord = error as Record<string, unknown>;
+    try {
+      const response = await client.chat.completions.create({
+        model: env.openRouterModel,
+        temperature: 0.7,
+        max_tokens: options.maxTokens ?? 8000,
+        messages: [
+          { role: "system", content: options.system },
+          { role: "user", content: options.user },
+        ],
+        tools: options.tools?.map(toFunctionTool),
+        tool_choice: options.tools?.length ? "auto" : undefined,
+      });
 
-    logOpenRouterResponse("completion.error", {
-      name: error instanceof Error ? error.name : null,
-      message: error instanceof Error ? error.message : String(error),
-      status: typeof errorRecord.status === "number" ? errorRecord.status : null,
-      code: typeof errorRecord.code === "string" ? errorRecord.code : null,
-      type: typeof errorRecord.type === "string" ? errorRecord.type : null,
-      cause:
-        error instanceof Error && error.cause
-          ? String(error.cause)
-          : null,
-    });
+      if (index > 0) {
+        logOpenRouterResponse("completion.key_success", {
+          keySlot: index + 1,
+          message: "Completion succeeded after failing over to a secondary OpenRouter API key.",
+        });
+      }
 
-    throw error;
+      return extractToolInput(response);
+    } catch (error) {
+      lastError = error;
+      const errorRecord = error as Record<string, unknown>;
+      const status = typeof errorRecord.status === "number" ? errorRecord.status : null;
+      const canFailOver = status === 429 && index < apiKeys.length - 1;
+
+      logOpenRouterResponse("completion.error", {
+        keySlot: index + 1,
+        message: error instanceof Error ? error.message : String(error),
+        name: error instanceof Error ? error.name : null,
+        status,
+        code: typeof errorRecord.code === "string" ? errorRecord.code : null,
+        type: typeof errorRecord.type === "string" ? errorRecord.type : null,
+        cause:
+          error instanceof Error && error.cause
+            ? String(error.cause)
+            : null,
+        willFailOver: canFailOver,
+      });
+
+      if (canFailOver) {
+        logOpenRouterResponse("completion.key_failover", {
+          fromKeySlot: index + 1,
+          toKeySlot: index + 2,
+          reason: "Received HTTP 429 from OpenRouter.",
+        });
+        continue;
+      }
+
+      throw error;
+    }
   }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 export function getTurnQualityMeta() {
@@ -1626,7 +1889,7 @@ class DungeonMasterClient {
     try {
       const response = await runCompletion({
         system: [
-          "You create grounded but vivid solo fantasy protagonists for an open-world RPG.",
+          "You create grounded but vivid solo RPG protagonists for an open-world campaign.",
           "Return exactly one playable character template via the provided tool schema.",
           "Make the character specific, competent, and adventure-ready without becoming mythic or overpowered.",
           `starterItems must contain at most ${MAX_STARTER_ITEMS} specific, mundane items.`,
@@ -1673,6 +1936,7 @@ class DungeonMasterClient {
       const attempts: OpenWorldGenerationArtifacts["attempts"] = [];
       const validationReports: OpenWorldGenerationArtifacts["validationReports"] = [];
       const stageSummaries: OpenWorldGenerationArtifacts["stageSummaries"] = {};
+      const worldPromptProfile = inferWorldPromptProfile(input.prompt);
       const notifyProgress = (update: WorldGenerationProgressUpdate) => {
         input.onProgress?.(update);
       };
@@ -1685,11 +1949,17 @@ class DungeonMasterClient {
       const worldBible = await runStructuredStage({
         stage: "world_bible",
         system: buildWorldGenSystemPrompt([
-          "Generate a foundational world bible for an open-world solo fantasy campaign.",
-          "Provide as many environmental rules, historical fractures, immersion anchors, and contradictory myths as the setting needs, while still covering at least 5 rules, 5 fractures, 6 anchors, and 4 myths.",
-          "Environmental rules must affect mundane survival, travel, work, shelter, or communication.",
+          "Generate a foundational world bible for an open-world solo campaign module.",
+          `Provide as many systemic pressures, historical fractures, immersion anchors, and competing explanation threads as the setting needs, while still covering at least 5 pressures, 5 fractures, 6 anchors, and ${worldPromptProfile.minimumExplanationThreads} explanation threads.`,
+          "Systemic pressures must affect mundane survival, travel, work, shelter, communication, maintenance, law, debt, or access.",
           "Historical fractures should be political, technological, territorial, or resource-driven.",
-          "Contradictory myths must each contain a concrete shard of truth.",
+          "Use the explanationThreads field for competing explanations, beliefs, doctrines, rumors, theories, or myths as appropriate to the prompt.",
+          worldPromptProfile.explanationStyle === "folkloric"
+            ? "Let explanationThreads lean folkloric or religious when the prompt clearly invites that, but keep each one tied to lived institutions, places, or risks."
+            : worldPromptProfile.explanationStyle === "speculative"
+              ? "If the setting leans speculative or technological, let explanationThreads hold rival theories, doctrines, or official explanations instead of forcing folklore."
+              : "If the setting leans practical or political, let explanationThreads hold rival beliefs, rumors, doctrines, or institutional explanations instead of forcing mythic lore.",
+          "Each explanationThreads entry should name a phenomenon, show several prevailing theories, and point to an actionable secret.",
           "Everyday life must explain how ordinary people get food, water, safety, and social protection.",
           "Do not genericize the setting title, premise nouns, or signature images from the prompt.",
           "If the prompt does not name the world explicitly, derive an understated title from prompt language rather than inventing melodramatic branding.",
@@ -1714,11 +1984,13 @@ class DungeonMasterClient {
         validate: (parsed) => [
           {
             category: "immersion",
-            issues: validateWorldBible(parsed).issues,
+            issues: validateWorldBible(parsed, {
+              minimumExplanationThreads: worldPromptProfile.minimumExplanationThreads,
+            }).issues,
           },
         ],
         summarize: (parsed) =>
-          `${parsed.title}: ${parsed.environmentalRules.length} environmental rules, ${parsed.contradictoryMyths.length} myth threads.`,
+          `${parsed.title}: ${parsed.systemicPressures.length} systemic pressures, ${parsed.explanationThreads.length} explanation threads.`,
       });
       notifyProgress({
         stage: "world_bible",
@@ -1726,7 +1998,7 @@ class DungeonMasterClient {
         message: stageSummaries.world_bible,
       });
 
-      const worldPromptContext = summarizeWorldBibleForPrompt(worldBible);
+      const worldPromptContext = summarizeWorldBibleForPrompt(worldBible, worldPromptProfile);
 
       notifyProgress({
         stage: "world_spine",
@@ -1738,7 +2010,7 @@ class DungeonMasterClient {
         system: buildWorldGenSystemPrompt([
           "Generate factions only.",
           "Every faction must have a visible agenda, a public footprint, and pressure that affects ordinary people.",
-          "Favor territorial, commercial, religious, labor, or salvage conflicts over mythic destiny.",
+          "Favor territorial, commercial, legal, religious, labor, corporate, civic, military, or salvage conflicts over destiny framing.",
           "Use concise lowercase underscore keys because the engine will assign canonical ids later.",
           "Every generated key must be 40 characters or fewer.",
           "Keep the world compact: 5 to 12 factions.",
@@ -1906,7 +2178,7 @@ class DungeonMasterClient {
                 "Do not repeat or rename any existing location shown above.",
                 `Ensure at least ${minimumEverydayNeededThisBatch} of this batch's locations are work sites, civic hubs, chokepoints, or settlements ordinary people actually use day to day.`,
                 suggestedNonEverydaySlotsThisBatch > 0
-                  ? `Use the remaining ${suggestedNonEverydaySlotsThisBatch} slot(s), when possible, for dangerous, sacred, remote, hidden, or otherwise special-purpose locations people do not use in everyday routine.`
+                  ? `Use the remaining ${suggestedNonEverydaySlotsThisBatch} slot(s) for dangerous, sacred, remote, hidden, or otherwise special-purpose locations people do not use in everyday routine.`
                   : "If this batch is forced to be fully everyday-use by the composition tracker, keep later batches available for stranger or more dangerous special-purpose sites.",
               ]),
             ]
@@ -1981,9 +2253,11 @@ class DungeonMasterClient {
           "The location graph must stay connected and feel well-interlinked rather than like a single-file route.",
           "Prefer loops, alternate routes, and a few connective hubs over long linear chains.",
           "Important civic hubs, markets, harbors, and major routes should help players branch into the wider map within a few moves.",
+          "Indirect reachability is enough: locations can connect through intermediate routes, and hidden or remote places do not need direct links to every major hub.",
           "Every edge must include a physical travel constraint, danger, patrol, toll, weather issue, or territorial pressure.",
           "Use only the provided location keys.",
           "Use concise lowercase underscore keys and keep the network compact enough for a small open world.",
+          "Always use very short edge keys such as route_1, route_2, route_3; do not build keys from full location names.",
           "Every generated key must be 40 characters or fewer. Abbreviate if necessary.",
           "Keep edge descriptions to one tight sentence each.",
           "Prefer short keys like route_1, route_2, route_3.",
@@ -2021,6 +2295,9 @@ class DungeonMasterClient {
             (key) => `Edge key ${key} is duplicated.`,
           );
           const locationKeys = new Set(worldSpineLocations.locations.map((location) => location.key));
+          const locationNames = new Map(
+            worldSpineLocations.locations.map((location) => [location.key, location.name]),
+          );
 
           parsed.edges.forEach((edge) => {
             if (!locationKeys.has(edge.sourceKey)) {
@@ -2031,16 +2308,66 @@ class DungeonMasterClient {
             }
           });
 
+          if (locationKeys.size > 0 && issues.length === 0) {
+            const adjacency = new Map<string, string[]>();
+            locationKeys.forEach((key) => adjacency.set(key, []));
+
+            parsed.edges.forEach((edge) => {
+              if (adjacency.has(edge.sourceKey) && adjacency.has(edge.targetKey)) {
+                adjacency.get(edge.sourceKey)?.push(edge.targetKey);
+                adjacency.get(edge.targetKey)?.push(edge.sourceKey);
+              }
+            });
+
+            const [startNode] = locationKeys;
+            if (startNode) {
+              const visited = new Set<string>([startNode]);
+              const queue = [startNode];
+
+              while (queue.length > 0) {
+                const current = queue.shift();
+                if (!current) {
+                  continue;
+                }
+
+                for (const neighbor of adjacency.get(current) ?? []) {
+                  if (!visited.has(neighbor)) {
+                    visited.add(neighbor);
+                    queue.push(neighbor);
+                  }
+                }
+              }
+
+              if (visited.size < locationKeys.size) {
+                const missing = [...locationKeys].filter((key) => !visited.has(key));
+                const missingLabels = missing.map(
+                  (key) => `${key} (${locationNames.get(key) ?? "unknown location"})`,
+                );
+                issues.push(
+                  `The location graph is disconnected. These locations cannot be reached from the rest of the map: ${missingLabels.join(", ")}. Generate additional travel edges that connect them through the network.`,
+                );
+              }
+            }
+          }
+
           return [{ category: "coherence", issues }];
         },
         summarize: (parsed) => `${parsed.edges.length} travel routes.`,
       });
+
+      const maxWorldSpineRelations = 24;
+      const targetWorldSpineRelations = Math.min(
+        20,
+        Math.max(10, worldSpineFactions.factions.length * 2),
+      );
 
       const worldSpineRelations = await runStructuredStage({
         stage: "world_spine",
         system: buildWorldGenSystemPrompt([
           "Generate only faction relations.",
           "Relations must reflect trade dependence, territorial disputes, labor leverage, doctrine clashes, or naval rivalry.",
+          `Return exactly ${targetWorldSpineRelations} faction relations, not a full pair-by-pair matrix.`,
+          "Choose only the most important relationships needed to understand the political map.",
           "Use only the provided faction keys.",
           "Use concise lowercase underscore keys and keep the political map readable.",
           "Every generated key must be 40 characters or fewer.",
@@ -2067,13 +2394,16 @@ class DungeonMasterClient {
                 })),
               ),
             ),
-            formatFinalInstruction("Generate only faction relations using the provided faction keys."),
+            formatFinalInstruction(
+              `Generate exactly ${targetWorldSpineRelations} faction relations using only the provided faction keys. Do not generate a full pair-by-pair matrix.`,
+            ),
           ].join("\n\n"),
         schema: worldSpineRelationsOnlySchema,
         tool: worldSpineRelationsTool,
         attempts,
         validationReports,
         stageSummaries,
+        normalizeInput: (input) => normalizeWorldSpineRelationsInput(input, maxWorldSpineRelations),
         validate: (parsed) => {
           const issues = findDuplicateStrings(parsed.factionRelations.map((relation) => relation.key)).map(
             (key) => `Faction relation key ${key} is duplicated.`,
@@ -2177,6 +2507,7 @@ class DungeonMasterClient {
             "Generate the lived-in regional layer for each locked location in this batch.",
             "Each location needs public activity, local pressure, everyday texture, hazards, ordinary knowledge, and reasons a resident stays or leaves.",
             "Focus on workers, routines, institutions, rot, shortages, tolls, patrols, and weather exposure.",
+            "dominantActivities, publicHazards, ordinaryKnowledge, institutions, gossip, reasonsToLinger, routineSeeds, and eventSeeds must all be arrays of short strings.",
             `Return exactly ${locationBatch.length} records, one per location id in the batch.`,
           ]),
           buildUser: (correctionNotes) =>
@@ -2201,6 +2532,7 @@ class DungeonMasterClient {
           attempts,
           validationReports,
           stageSummaries,
+          normalizeInput: (input) => normalizeRegionalLifeInput(input, locationBatch.length),
           validate: (parsed) => [
             {
               category: "immersion",
@@ -2573,11 +2905,11 @@ class DungeonMasterClient {
       const knowledgeThreadsInput = await runStructuredStage({
         stage: "knowledge_threads",
         system: buildWorldGenSystemPrompt([
-          "Generate a compact myth-and-pressure layer using the existing information web.",
-          "Myth clusters should connect public beliefs to the already generated information nodes instead of inventing new lore objects.",
+          "Generate a compact worldview-and-pressure layer using the existing information web.",
+          "Use knowledgeNetworks for compact clusters of public beliefs, competing explanations, rumors, doctrines, theories, or myths that connect back to the existing information web instead of inventing new lore objects.",
           "Pressure seeds should name a locked location or faction and describe a near-term pressure that can move play.",
           "Keep hiddenTruth and pressure text to one tight sentence each.",
-          "Return 2 to 4 myth clusters and 3 to 6 pressure seeds.",
+          "Return 2 to 4 worldview clusters and 3 to 6 pressure seeds.",
         ]),
         buildUser: (correctionNotes) =>
           [
@@ -2604,7 +2936,7 @@ class DungeonMasterClient {
                   `access=${information.accessibility}`,
                   information.locationId ? `loc=${information.locationId}` : "",
                   information.factionId ? `faction=${information.factionId}` : "",
-                  information.mythThread ? `myth=${information.mythThread}` : "",
+                  information.knowledgeThread ? `thread=${information.knowledgeThread}` : "",
                 ]
                   .filter(Boolean)
                   .join(" | "),
@@ -2612,7 +2944,8 @@ class DungeonMasterClient {
             ),
             formatFinalInstruction([
               "Use only existing information keys and the provided location and faction ids.",
-              "Return exactly 3 myth clusters and 4 pressure seeds unless the correction notes require otherwise.",
+              "Use knowledgeNetworks for belief, rumor, doctrine, theory, or myth clusters as appropriate to the setting.",
+              "Return exactly 3 knowledgeNetworks and 4 pressure seeds unless the correction notes require otherwise.",
             ]),
           ].join("\n\n"),
         schema: generatedKnowledgeThreadsInputSchema,
@@ -2626,10 +2959,10 @@ class DungeonMasterClient {
           const locationIds = new Set(lockedLocations.map((location) => location.id));
           const factionIds = new Set(lockedFactions.map((faction) => faction.id));
 
-          for (const cluster of parsed.mythClusters) {
+          for (const cluster of parsed.knowledgeNetworks) {
             for (const informationKey of cluster.linkedInformationKeys) {
               if (!informationKeys.has(informationKey)) {
-                issues.push(`Myth cluster ${cluster.theme} references unknown information ${informationKey}.`);
+                issues.push(`Worldview cluster ${cluster.theme} references unknown information ${informationKey}.`);
               }
             }
           }
@@ -2646,7 +2979,7 @@ class DungeonMasterClient {
           return [{ category: "playability", issues }];
         },
         summarize: (parsed) =>
-          `${parsed.mythClusters.length} myth clusters and ${parsed.pressureSeeds.length} pressure seeds.`,
+          `${parsed.knowledgeNetworks.length} worldview clusters and ${parsed.pressureSeeds.length} pressure seeds.`,
       });
       notifyProgress({
         stage: "knowledge_threads",
@@ -2681,7 +3014,7 @@ class DungeonMasterClient {
           targetId: idMaps.information[link.targetKey],
           linkType: link.linkType,
         })),
-        mythClusters: knowledgeThreadsInput.mythClusters.map((cluster) => ({
+        knowledgeNetworks: knowledgeThreadsInput.knowledgeNetworks.map((cluster) => ({
           theme: cluster.theme,
           publicBeliefs: cluster.publicBeliefs,
           hiddenTruth: cluster.hiddenTruth,
@@ -2698,14 +3031,19 @@ class DungeonMasterClient {
         status: "running",
         message: getWorldGenerationStageRunningMessage("economy_material_life"),
       });
+      const targetCommodityCount = 6;
+      const targetMarketPriceCount = Math.min(8, lockedLocations.length);
       const economyMaterialLifeInput = await runStructuredStage({
         stage: "economy_material_life",
         system: buildWorldGenSystemPrompt([
           "Generate commodities, market prices, and location-level material life for the locked world.",
+          `Return exactly ${targetCommodityCount} commodities and exactly ${targetMarketPriceCount} market prices.`,
+          `Return one locationTradeIdentity entry for every locked location (${lockedLocations.length} total).`,
           "Include staple goods, raw materials, and at least one controlled or illicit trade pressure.",
-          "No generic magical loot or ornamental adventuring gear; focus on bulk goods and daily necessities.",
+          "No generic treasure filler or ornamental adventuring gear; focus on bulk goods, infrastructure, consumables, and daily necessities.",
           "Every commodity should imply scarcity, transport strain, monopoly pressure, hazard, or spoilage.",
           "Every major location should have a trade identity or a deliberate reason for lacking one.",
+          "Keep every field terse: one short sentence or short phrase, not a paragraph.",
         ]),
         buildUser: (correctionNotes) =>
           [
@@ -2726,7 +3064,7 @@ class DungeonMasterClient {
             formatPromptBlock("locked_npcs", summarizeNpcRefs(lockedNpcs)),
             formatPromptBlock("regional_life_digest", summarizeRegionalLifeRefs(regionalLife)),
             formatFinalInstruction(
-              "Use only the provided location ids, faction ids, and NPC ids. Use unique commodity keys.",
+              `Use only the provided location ids, faction ids, and NPC ids. Use unique commodity keys. Return exactly ${targetCommodityCount} commodities, exactly ${targetMarketPriceCount} marketPrices, and exactly ${lockedLocations.length} locationTradeIdentity entries.`,
             ),
           ].join("\n\n"),
         schema: generatedEconomyMaterialLifeInputSchema,
@@ -2734,6 +3072,8 @@ class DungeonMasterClient {
         attempts,
         validationReports,
         stageSummaries,
+        normalizeInput: (input) =>
+          normalizeEconomyMaterialLifeInput(input, targetCommodityCount, targetMarketPriceCount),
         validate: (parsed) => {
           const issues: string[] = [];
           const locationIds = new Set(lockedLocations.map((location) => location.id));
@@ -2899,12 +3239,14 @@ class DungeonMasterClient {
       const entryContextsInput = await runStructuredStage({
         stage: "entry_contexts",
         system: buildWorldGenSystemPrompt([
-          "Generate 3 to 5 grounded entry contexts for the completed world.",
+          "Generate exactly 3 grounded entry contexts for the completed world.",
           "Each entry should begin with minor but immediate personal, commercial, legal, territorial, or administrative pressure.",
           "The player should arrive as another person navigating an ongoing society, not as a chosen savior.",
           "Public leads should point to someone, somewhere, or something the player can pursue immediately.",
           "Prefer starting locations that connect to several nearby places within a few hops, so each opening has room to branch into the wider world.",
           "Avoid using only isolated edge locations as opening starts unless they still sit near multiple practical follow-up destinations.",
+          "EVERY entry must include the evidenceWorldAlreadyMoving field.",
+          "evidenceWorldAlreadyMoving must be a concrete sensory detail showing the world is already active before the player acts, such as guards loading crates, debt collectors arriving, bells sounding, crowds scattering, or workers already arguing over scarce supplies.",
         ]),
         buildUser: (correctionNotes) =>
           [
@@ -2922,13 +3264,18 @@ class DungeonMasterClient {
             formatPromptBlock("locked_information", summarizeInformationRefs(lockedInformation)),
             formatPromptBlock("regional_life_digest", summarizeRegionalLifeRefs(regionalLife)),
             formatPromptBlock("social_gravity", summarizeSocialGravityRefs(socialLayer.socialGravity)),
-            formatFinalInstruction("Use only the provided ids for locations, NPCs, and information."),
+            formatFinalInstruction([
+              "Use only the provided ids for locations, NPCs, and information.",
+              "Return exactly 3 entryPoints.",
+              "Every entryPoint must include evidenceWorldAlreadyMoving as a non-empty sentence.",
+            ]),
           ].join("\n\n"),
         schema: generatedEntryContextsInputSchema,
         tool: entryContextsTool,
         attempts,
         validationReports,
         stageSummaries,
+        normalizeInput: normalizeEntryContextsInput,
         validate: (parsed) => {
           const issues: string[] = [];
           const locationIds = new Set(lockedLocations.map((location) => location.id));
@@ -3157,11 +3504,11 @@ class DungeonMasterClient {
           formatPromptBlock(
             "generation_artifacts",
             input.artifacts
-              ? {
+                ? {
                   worldBible: {
                     worldOverview: input.artifacts.worldBible.worldOverview,
                     immersionAnchors: input.artifacts.worldBible.immersionAnchors,
-                    contradictoryMyths: input.artifacts.worldBible.contradictoryMyths,
+                    competingExplanations: input.artifacts.worldBible.explanationThreads,
                   },
                   regionalLife: input.artifacts.regionalLife.locations.filter(
                     (entry) => entry.locationId === input.entryPoint.startLocationId,

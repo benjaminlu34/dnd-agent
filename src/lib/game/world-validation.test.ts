@@ -313,44 +313,109 @@ test("world module playability rejects over-concentrated NPC placement", () => {
   assert.match(report.issues.join("\n"), /40%/);
 });
 
-test("world bible validation rejects shallow myth structure", () => {
+test("world bible validation rejects too few competing explanation threads by default", () => {
   const report = validateWorldBible({
     title: "Beneath the Rain",
     premise: "The rain never stops.",
     tone: "Melancholic",
     setting: "A drowned world",
     worldOverview: "People survive on floating settlements.",
-    environmentalRules: ["Rain is constant", "The sea hides ruins", "Salt rot eats iron"],
-    historicalFractures: ["The Deluge", "The Vault Wars", "The Leviathan Treaties"],
-    immersionAnchors: ["Tar", "Kelp wine", "Signal bells", "Dry masks"],
-    contradictoryMyths: [
+    systemicPressures: [
+      "Rain is constant",
+      "The sea hides ruins",
+      "Salt rot eats iron",
+      "Storms erase charts",
+      "Boats are the only roads",
+    ],
+    historicalFractures: [
+      "The Deluge",
+      "The Vault Wars",
+      "The Leviathan Treaties",
+      "The Harbor Schism",
+      "The Lantern Famine",
+    ],
+    immersionAnchors: ["Tar", "Kelp wine", "Signal bells", "Dry masks", "Hull chalk", "Salt tea"],
+    explanationThreads: [
       {
         key: "myth_1",
-        claim: "The rain is divine grief.",
-        partialTruth: "It carries a memory-bearing resonance.",
-        believers: ["Canopy priests"],
-        contradictionWith: "myth_2",
-      },
-      {
-        key: "myth_2",
-        claim: "The rain is a machine failure.",
-        partialTruth: "Ancient vault engines still shape the weather.",
-        believers: ["Vault divers"],
-        contradictionWith: "myth_1",
+        phenomenon: "The unending rain.",
+        prevailingTheories: ["It is divine grief.", "It is punishment for old hubris."],
+        actionableSecret: "The rain carries a memory-bearing resonance tied to old vault machinery.",
       },
     ],
     everydayLife: {
       survival: "People barter for dry space and filtered water.",
-      institutions: ["Harbor courts", "Signal towers", "Tide unions"],
-      fears: ["Hull breach", "Deep-song madness"],
-      wants: ["Dry shelter", "Old world salvage"],
-      trade: ["Kelp cloth", "Whale oil"],
-      gossip: ["A vault door opened in the shoals", "The rain spoke a name last week"],
+      institutions: ["Harbor courts", "Signal towers", "Tide unions", "Lamp guilds"],
+      fears: ["Hull breach", "Deep-song madness", "Ration riots"],
+      wants: ["Dry shelter", "Old world salvage", "Lamp oil"],
+      trade: ["Kelp cloth", "Whale oil", "Signal powder"],
+      gossip: [
+        "A vault door opened in the shoals",
+        "The rain spoke a name last week",
+        "Someone is faking signal bells",
+      ],
     },
   });
 
   assert.equal(report.ok, false);
-  assert.match(report.issues.join("\n"), /four contradictory myth threads/);
+  assert.match(report.issues.join("\n"), /at least 2 competing explanation threads/);
+});
+
+test("world bible validation can require denser competing explanations for myth-heavy prompts", () => {
+  const report = validateWorldBible(
+    {
+      title: "Beneath the Rain",
+      premise: "The rain never stops.",
+      tone: "Melancholic",
+      setting: "A drowned world",
+      worldOverview: "People survive on floating settlements.",
+      systemicPressures: [
+        "Rain is constant",
+        "The sea hides ruins",
+        "Salt rot eats iron",
+        "Signal fires fail in storms",
+        "Boats are the only roads",
+      ],
+      historicalFractures: [
+        "The Deluge",
+        "The Vault Wars",
+        "The Leviathan Treaties",
+        "The Harbor Schism",
+        "The Lantern Famine",
+      ],
+      immersionAnchors: ["Tar", "Kelp wine", "Signal bells", "Dry masks", "Rust prayer", "Hull charms"],
+      explanationThreads: [
+        {
+          key: "myth_1",
+          phenomenon: "The unending rain.",
+          prevailingTheories: ["It is divine grief.", "It is sacred punishment."],
+          actionableSecret: "The rain carries a memory-bearing resonance tied to old vault machinery.",
+        },
+        {
+          key: "myth_2",
+          phenomenon: "The unending rain.",
+          prevailingTheories: ["A buried machine is failing.", "Ancient regulators still drive the storms."],
+          actionableSecret: "Ancient vault engines still shape the weather from below the flooded coast.",
+        },
+      ],
+      everydayLife: {
+        survival: "People barter for dry space and filtered water.",
+        institutions: ["Harbor courts", "Signal towers", "Tide unions", "Lamp guilds"],
+        fears: ["Hull breach", "Deep-song madness", "Ration riots"],
+        wants: ["Dry shelter", "Old world salvage", "Lamp oil"],
+        trade: ["Kelp cloth", "Whale oil", "Signal powder"],
+        gossip: [
+          "A vault door opened in the shoals",
+          "The rain spoke a name last week",
+          "Someone is faking signal bells",
+        ],
+      },
+    },
+    { minimumExplanationThreads: 4 },
+  );
+
+  assert.equal(report.ok, false);
+  assert.match(report.issues.join("\n"), /at least 4 competing explanation threads/);
 });
 
 test("world spine validation rejects disconnected geography", () => {
@@ -488,6 +553,28 @@ test("world immersion validation rejects empty locations", () => {
 
   assert.equal(report.ok, false);
   assert.match(report.issues.join("\n"), /economic identity/);
+});
+
+test("world immersion validation accepts a textual faction footprint", () => {
+  const world = createWorld();
+  world.factions.push({
+    id: "fac_whimsical",
+    name: "Whimsical Creature Clans",
+    type: "social",
+    summary: "Clan networks in the canopy.",
+    agenda: "Protect creature territories.",
+    resources: { gold: 2, military: 1, influence: 5, information: 4 },
+    pressureClock: 2,
+  });
+  world.locations[1] = {
+    ...world.locations[1],
+    summary: `${world.locations[1].summary} Whimsical creatures gather here to barter favors.`,
+    description: `${world.locations[1].description} Clan elders keep a perch above the stalls.`,
+  };
+
+  const report = validateWorldModuleImmersion(world);
+
+  assert.doesNotMatch(report.issues.join("\n"), /Whimsical Creature Clans needs a visible mark on the world/);
 });
 
 test("regional life validation requires coverage for every location", () => {
@@ -743,7 +830,7 @@ test("knowledge economy validation does not require public leads at every locati
         linkType: "extends",
       },
     ],
-    mythClusters: [
+    knowledgeNetworks: [
       {
         theme: "Storm Debt",
         publicBeliefs: ["The storm chooses who pays."],

@@ -57,7 +57,7 @@ const STAGE_COPY: Record<WorldGenerationStageName, { label: string; running: str
   },
   knowledge_threads: {
     label: "Linking Hidden Tensions",
-    running: "Tying myths and pressure points back into the playable world.",
+    running: "Tying public beliefs, hidden truths, and pressure points back into the playable world.",
   },
   economy_material_life: {
     label: "Setting Trade and Scarcity",

@@ -244,12 +244,11 @@ export type WorldGenerationStageName =
   | "entry_contexts"
   | "final_world";
 
-export type GeneratedWorldMyth = {
+export type GeneratedExplanationThread = {
   key: string;
-  claim: string;
-  partialTruth: string;
-  believers: string[];
-  contradictionWith: string;
+  phenomenon: string;
+  prevailingTheories: string[];
+  actionableSecret: string;
 };
 
 export type GeneratedWorldBible = {
@@ -258,10 +257,10 @@ export type GeneratedWorldBible = {
   tone: string;
   setting: string;
   worldOverview: string;
-  environmentalRules: string[];
+  systemicPressures: string[];
   historicalFractures: string[];
   immersionAnchors: string[];
-  contradictoryMyths: GeneratedWorldMyth[];
+  explanationThreads: GeneratedExplanationThread[];
   everydayLife: {
     survival: string;
     institutions: string[];
@@ -370,7 +369,7 @@ export type GeneratedSocialLayer = {
 export type GeneratedKnowledgeNode = Omit<GeneratedInformation, "id"> & {
   key: string;
   actionLead: string;
-  mythThread: string | null;
+  knowledgeThread: string | null;
   discoverHow: string;
 };
 
@@ -381,7 +380,7 @@ export type GeneratedKnowledgeLink = {
   linkType: "supports" | "contradicts" | "extends" | "unlocks";
 };
 
-export type GeneratedMythCluster = {
+export type GeneratedKnowledgeNetwork = {
   theme: string;
   publicBeliefs: string[];
   hiddenTruth: string;
@@ -398,7 +397,7 @@ export type GeneratedPressureSeed = {
 export type GeneratedKnowledgeEconomy = {
   information: GeneratedInformation[];
   informationLinks: GeneratedInformationLink[];
-  mythClusters: GeneratedMythCluster[];
+  knowledgeNetworks: GeneratedKnowledgeNetwork[];
   pressureSeeds: GeneratedPressureSeed[];
   commodities: GeneratedCommodity[];
   marketPrices: GeneratedMarketPrice[];

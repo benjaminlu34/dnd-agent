@@ -13,6 +13,31 @@ export type ValidationReport = {
   issues: string[];
 };
 
+type WorldBibleValidationOptions = {
+  minimumExplanationThreads?: number;
+};
+
+const FACTION_TEXT_STOPWORDS = new Set([
+  "the",
+  "and",
+  "for",
+  "with",
+  "from",
+  "into",
+  "of",
+  "council",
+  "order",
+  "clan",
+  "clans",
+  "guild",
+  "union",
+  "company",
+  "companies",
+  "tribe",
+  "tribes",
+  "cult",
+]);
+
 function buildAdjacency(module: GeneratedWorldModule) {
   const adjacency = new Map<string, Set<string>>();
 
@@ -43,19 +68,72 @@ function buildAdjacencyFromSpine(spine: GeneratedWorldSpine) {
   return adjacency;
 }
 
-export function validateWorldBible(bible: GeneratedWorldBible): ValidationReport {
-  const issues: string[] = [];
+function factionTextTokens(name: string) {
+  const tokens = name
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 4 && !FACTION_TEXT_STOPWORDS.has(token));
 
-  if (bible.contradictoryMyths.length < 4) {
-    issues.push("World bible needs at least four contradictory myth threads.");
+  return [...new Set(tokens.flatMap((token) => {
+    const variants = new Set([token]);
+
+    if (token.endsWith("ies")) {
+      variants.add(`${token.slice(0, -3)}y`);
+    }
+
+    if (token.endsWith("s")) {
+      variants.add(token.slice(0, -1));
+    } else {
+      variants.add(`${token}s`);
+    }
+
+    if (token.endsWith("ers")) {
+      variants.add(token.slice(0, -1));
+      variants.add(token.replace(/ers$/, "er"));
+    }
+
+    return [...variants].filter((variant) => variant.length >= 4);
+  }))];
+}
+
+function hasTextualFactionFootprint(module: GeneratedWorldModule, factionName: string) {
+  const tokens = factionTextTokens(factionName);
+
+  if (tokens.length === 0) {
+    return false;
+  }
+
+  const haystacks = [
+    ...module.locations.map((location) => `${location.name} ${location.summary} ${location.description}`),
+    ...module.npcs.map((npc) => `${npc.name} ${npc.role} ${npc.summary} ${npc.description}`),
+    ...module.information.map((information) => `${information.title} ${information.summary} ${information.content}`),
+  ].map((text) => text.toLowerCase());
+
+  return haystacks.some((haystack) => {
+    const matchedTokens = tokens.filter((token) => haystack.includes(token));
+    return matchedTokens.length >= 2 || matchedTokens.some((token) => token.length >= 9);
+  });
+}
+
+export function validateWorldBible(
+  bible: GeneratedWorldBible,
+  options: WorldBibleValidationOptions = {},
+): ValidationReport {
+  const issues: string[] = [];
+  const minimumExplanationThreads = options.minimumExplanationThreads ?? 2;
+
+  if (bible.explanationThreads.length < minimumExplanationThreads) {
+    issues.push(
+      `World bible needs at least ${minimumExplanationThreads} competing explanation threads.`,
+    );
   }
 
   if (bible.everydayLife.institutions.length < 4) {
     issues.push("World bible must describe at least four institutions that shape everyday life.");
   }
 
-  if (bible.environmentalRules.length < 5) {
-    issues.push("World bible must define at least five environmental rules.");
+  if (bible.systemicPressures.length < 5) {
+    issues.push("World bible must define at least five systemic pressures.");
   }
 
   if (bible.historicalFractures.length < 5) {
@@ -577,7 +655,8 @@ export function validateWorldModuleImmersion(module: GeneratedWorldModule): Vali
     const visibleFootprint =
       module.locations.some((location) => location.controllingFactionId === faction.id) ||
       module.npcs.some((npc) => npc.factionId === faction.id) ||
-      module.information.some((information) => information.factionId === faction.id);
+      module.information.some((information) => information.factionId === faction.id) ||
+      hasTextualFactionFootprint(module, faction.name);
 
     if (!visibleFootprint) {
       issues.push(`Faction ${faction.name} needs a visible mark on the world.`);

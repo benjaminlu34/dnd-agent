@@ -125,12 +125,11 @@ const entryPointSchema = z.object({
   initialInformationIds: z.array(z.string().trim().min(1)),
 });
 
-const worldMythSchema = z.object({
+const explanationThreadSchema = z.object({
   key: z.string().trim().min(1),
-  claim: z.string().trim().min(1),
-  partialTruth: z.string().trim().min(1),
-  believers: z.array(z.string().trim().min(1)).min(1),
-  contradictionWith: z.string().trim().min(1),
+  phenomenon: z.string().trim().min(1),
+  prevailingTheories: z.array(z.string().trim().min(1)).min(2),
+  actionableSecret: z.string().trim().min(1),
 });
 
 export const generatedWorldBibleSchema = z
@@ -140,10 +139,10 @@ export const generatedWorldBibleSchema = z
     tone: z.string().trim().min(1),
     setting: z.string().trim().min(1),
     worldOverview: z.string().trim().min(1),
-    environmentalRules: z.array(z.string().trim().min(1)).min(5),
+    systemicPressures: z.array(z.string().trim().min(1)).min(5),
     historicalFractures: z.array(z.string().trim().min(1)).min(5),
     immersionAnchors: z.array(z.string().trim().min(1)).min(6),
-    contradictoryMyths: z.array(worldMythSchema).min(4),
+    explanationThreads: z.array(explanationThreadSchema).min(2),
     everydayLife: z.object({
       survival: z.string().trim().min(1),
       institutions: z.array(z.string().trim().min(1)).min(4),
@@ -155,10 +154,10 @@ export const generatedWorldBibleSchema = z
   })
   .superRefine((draft, ctx) => {
     addDuplicateStringIssues(
-      draft.contradictoryMyths.map((myth) => myth.key),
+      draft.explanationThreads.map((thread) => thread.key),
       ctx,
-      ["contradictoryMyths"],
-      "Myth keys must be unique.",
+      ["explanationThreads"],
+      "Explanation thread keys must be unique.",
     );
   });
 
@@ -354,7 +353,7 @@ const knowledgeNodeSchema = z.object({
   factionId: z.string().trim().min(1).nullable(),
   sourceNpcId: z.string().trim().min(1).nullable(),
   actionLead: z.string().trim().min(1),
-  mythThread: z.string().trim().min(1).nullable(),
+  knowledgeThread: z.string().trim().min(1).nullable(),
   discoverHow: z.string().trim().min(1),
 });
 
@@ -365,7 +364,7 @@ const knowledgeLinkSchema = z.object({
   linkType: z.enum(["supports", "contradicts", "extends", "unlocks"]),
 });
 
-const mythClusterInputSchema = z.object({
+const knowledgeNetworkInputSchema = z.object({
   theme: z.string().trim().min(1),
   publicBeliefs: z.array(z.string().trim().min(1)).min(1),
   hiddenTruth: z.string().trim().min(1),
@@ -413,7 +412,7 @@ export const generatedKnowledgeWebInputSchema = z
 
 export const generatedKnowledgeThreadsInputSchema = z
   .object({
-    mythClusters: z.array(mythClusterInputSchema).min(1).max(4),
+    knowledgeNetworks: z.array(knowledgeNetworkInputSchema).min(1).max(4),
     pressureSeeds: z.array(pressureSeedSchema).min(2).max(8),
   });
 
@@ -486,7 +485,7 @@ const entryContextSchema = z.object({
 });
 
 export const generatedEntryContextsInputSchema = z.object({
-  entryPoints: z.array(entryContextSchema).min(3).max(5),
+  entryPoints: z.array(entryContextSchema).length(3),
 });
 
 export const generatedWorldModuleSchema = z
@@ -691,7 +690,7 @@ export const openWorldGenerationArtifactsSchema = z.object({
   knowledgeEconomy: z.object({
     information: z.array(informationSchema).min(4),
     informationLinks: z.array(informationLinkSchema).min(1),
-    mythClusters: z.array(
+    knowledgeNetworks: z.array(
       z.object({
         theme: z.string().trim().min(1),
         publicBeliefs: z.array(z.string().trim().min(1)).min(1),
