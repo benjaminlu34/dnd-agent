@@ -2,6 +2,7 @@ import { z } from "zod";
 import { MAX_STARTER_ITEMS, normalizeItemNameList } from "@/lib/game/item-utils";
 import type {
   CampaignCharacter,
+  CharacterCommodityStack,
   CharacterInstance,
   CharacterTemplate,
   CharacterTemplateDraft,
@@ -55,6 +56,10 @@ export function cloneInventory(items: ItemInstance[]): ItemInstance[] {
   return structuredClone(items);
 }
 
+export function cloneCommodityStacks(stacks: CharacterCommodityStack[]): CharacterCommodityStack[] {
+  return structuredClone(stacks);
+}
+
 export function toCharacterStats(character: Pick<
   CharacterTemplateDraft,
   "strength" | "dexterity" | "constitution" | "intelligence" | "wisdom" | "charisma"
@@ -81,6 +86,7 @@ export function toCampaignCharacter(
     health: instance.health,
     gold: instance.gold,
     inventory: cloneInventory(instance.inventory),
+    commodityStacks: cloneCommodityStacks(instance.commodityStacks),
   };
 }
 
@@ -98,5 +104,6 @@ export function toCampaignSeedCharacter(
     health: template.maxHealth,
     gold: 0,
     inventory: [],
+    commodityStacks: [],
   };
 }

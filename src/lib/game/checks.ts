@@ -21,6 +21,7 @@ export function rollCheck(input: {
   mode: CheckMode;
   reason: string;
   character: CampaignCharacter;
+  dc?: number;
 }): CheckResult {
   const first = roll2d6();
   const second = roll2d6();
@@ -35,6 +36,15 @@ export function rollCheck(input: {
 
   const modifier = input.character.stats[input.stat];
   const total = chosen + modifier;
+  const dc = input.dc;
+  const outcome =
+    typeof dc === "number"
+      ? total >= dc
+        ? "success"
+        : total >= dc - 2
+          ? "partial"
+          : "failure"
+      : outcomeForTotal(total);
 
   return {
     stat: input.stat,
@@ -43,11 +53,12 @@ export function rollCheck(input: {
     rolls: [first, second],
     modifier,
     total,
-    outcome: outcomeForTotal(total),
+    dc,
+    outcome,
     consequences:
-      total <= 6
+      outcome === "failure"
         ? ["The situation worsens and tension rises."]
-        : total <= 9
+        : outcome === "partial"
           ? ["You get what you want, but not cleanly."]
           : ["Momentum shifts in your favor."],
   };

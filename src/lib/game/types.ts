@@ -11,6 +11,10 @@ export type Stat = (typeof STATS)[number];
 export type CheckMode = "normal" | "advantage" | "disadvantage";
 export type CheckOutcome = "success" | "partial" | "failure";
 export type TimeMode = "combat" | "exploration" | "travel" | "rest" | "downtime";
+export type NpcState = "active" | "wounded" | "incapacitated" | "dead";
+export type CombatApproach = "attack" | "subdue" | "assassinate";
+export type TradeAction = "buy" | "sell";
+export type RestType = "light" | "full";
 
 export const STAT_LABELS: Record<Stat, string> = {
   strength: "Strength",
@@ -78,12 +82,29 @@ export type ItemInstance = {
   properties: Record<string, unknown> | null;
 };
 
+export type CommoditySummary = {
+  id: string;
+  campaignId: string;
+  name: string;
+  baseValue: number;
+  tags: string[];
+};
+
+export type CharacterCommodityStack = {
+  id: string;
+  characterInstanceId: string;
+  commodityId: string;
+  quantity: number;
+  commodity: CommoditySummary;
+};
+
 export type CharacterInstance = {
   id: string;
   templateId: string;
   health: number;
   gold: number;
   inventory: ItemInstance[];
+  commodityStacks: CharacterCommodityStack[];
 };
 
 export type CampaignCharacter = CharacterTemplate & {
@@ -93,6 +114,7 @@ export type CampaignCharacter = CharacterTemplate & {
   health: number;
   gold: number;
   inventory: ItemInstance[];
+  commodityStacks: CharacterCommodityStack[];
 };
 
 export type AdventureModuleSummary = {
@@ -557,6 +579,8 @@ export type NpcSummary = {
   currentLocationId: string | null;
   approval: number;
   isCompanion: boolean;
+  state: NpcState;
+  threatLevel: number;
 };
 
 export type InformationSummary = {
@@ -572,12 +596,51 @@ export type InformationSummary = {
   sourceNpcId: string | null;
   sourceNpcName: string | null;
   isDiscovered: boolean;
+  expiresAtTime: number | null;
 };
 
 export type CrossLocationLead = {
   information: InformationSummary;
   depth: 1 | 2;
   viaInformationIds: string[];
+};
+
+export type TemporaryActorSummary = {
+  id: string;
+  label: string;
+  currentLocationId: string;
+  interactionCount: number;
+  firstSeenAtTurn: number;
+  lastSeenAtTurn: number;
+  lastSeenAtTime: number;
+  recentTopics: string[];
+  lastSummary: string | null;
+  holdsInventory: boolean;
+  affectedWorldState: boolean;
+  isInMemoryGraph: boolean;
+  promotedNpcId: string | null;
+};
+
+export type RecentLocalEventSummary = {
+  id: string;
+  description: string;
+  locationId: string | null;
+  triggerTime: number;
+  minutesAgo: number;
+};
+
+export type PromptNpcSummary = Pick<NpcSummary, "id" | "name" | "role">;
+
+export type PromptInformationSummary = Pick<
+  InformationSummary,
+  "id" | "title" | "summary" | "truthfulness"
+>;
+
+export type CharacterRelationshipSummary = {
+  npcId: string;
+  npcName: string;
+  approval: number;
+  approvalLevel: "hostile" | "cold" | "neutral" | "warm" | "trusted";
 };
 
 export type StoryMessage = {
@@ -616,6 +679,7 @@ export type CampaignSnapshot = {
   localInformation: InformationSummary[];
   discoveredInformation: InformationSummary[];
   connectedLeads: CrossLocationLead[];
+  temporaryActors: TemporaryActorSummary[];
   memories: MemoryRecord[];
   recentMessages: StoryMessage[];
   canRetryLatestTurn: boolean;
@@ -640,24 +704,24 @@ export type CampaignListItem = {
 };
 
 export type PromptInventoryItem = {
+  kind: "item" | "commodity";
+  id: string;
   name: string;
   description: string | null;
+  quantity?: number;
 };
 
 export type SpatialPromptContext = {
-  currentLocation: LocationSummary;
+  currentLocation: Pick<LocationSummary, "id" | "name" | "type" | "summary" | "state">;
   adjacentRoutes: RouteSummary[];
-  presentNpcs: NpcSummary[];
-  localInformation: InformationSummary[];
-  connectedLeads: CrossLocationLead[];
-  knownFactions: FactionSummary[];
-  factionRelations: FactionRelationSummary[];
+  presentNpcs: PromptNpcSummary[];
+  recentLocalEvents: RecentLocalEventSummary[];
+  recentTurnLedger: string[];
+  discoveredInformation: PromptInformationSummary[];
   inventory: PromptInventoryItem[];
-  memories: MemoryRecord[];
-  recentMessages: StoryMessage[];
-  discoveredInformationIds: string[];
   globalTime: number;
   timeOfDay: string;
+  dayCount: number;
 };
 
 export type CitedEntities = {
@@ -675,8 +739,56 @@ export type CheckResult = {
   rolls: [number, number];
   modifier: number;
   total: number;
+  dc?: number;
   outcome: CheckOutcome;
   consequences?: string[];
+};
+
+export type MarketPriceDetail = {
+  marketPriceId: string;
+  commodityId: string;
+  commodityName: string;
+  baseValue: number;
+  modifier: number;
+  price: number;
+  stock: number;
+  legalStatus: string;
+  vendorNpcId: string | null;
+  vendorNpcName: string | null;
+  locationId: string;
+  locationName: string;
+  restockTime: number | null;
+};
+
+export type FactionMoveSummary = {
+  id: string;
+  description: string;
+  scheduledAtTime: number;
+  isExecuted: boolean;
+  isCancelled: boolean;
+  cancellationReason: string | null;
+};
+
+export type FactionIntel = FactionSummary & {
+  relations: FactionRelationSummary[];
+  visibleMoves: FactionMoveSummary[];
+  controlledLocationIds: string[];
+};
+
+export type InformationDetail = InformationSummary & {
+  content: string;
+};
+
+export type RelationshipHistory = {
+  npcId: string;
+  npcName: string;
+  memories: MemoryRecord[];
+};
+
+export type NpcDetail = NpcSummary & {
+  knownInformation: InformationSummary[];
+  relationshipHistory: MemoryRecord[];
+  temporaryActorId: string | null;
 };
 
 export type RequestClarificationToolCall = {
@@ -684,6 +796,70 @@ export type RequestClarificationToolCall = {
   question: string;
   options: string[];
 };
+
+export type FetchNpcDetailToolCall = {
+  type: "fetch_npc_detail";
+  npcId: string;
+};
+
+export type FetchMarketPricesToolCall = {
+  type: "fetch_market_prices";
+  locationId: string;
+};
+
+export type FetchFactionIntelToolCall = {
+  type: "fetch_faction_intel";
+  factionId: string;
+};
+
+export type FetchInformationDetailToolCall = {
+  type: "fetch_information_detail";
+  informationId: string;
+};
+
+export type FetchInformationConnectionsToolCall = {
+  type: "fetch_information_connections";
+  informationIds: string[];
+};
+
+export type FetchRelationshipHistoryToolCall = {
+  type: "fetch_relationship_history";
+  npcId: string;
+};
+
+export type TurnFetchToolCall =
+  | FetchNpcDetailToolCall
+  | FetchMarketPricesToolCall
+  | FetchFactionIntelToolCall
+  | FetchInformationDetailToolCall
+  | FetchInformationConnectionsToolCall
+  | FetchRelationshipHistoryToolCall;
+
+export type TurnFetchToolResult =
+  | {
+      type: "fetch_npc_detail";
+      result: NpcDetail;
+    }
+  | {
+      type: "fetch_market_prices";
+      result: MarketPriceDetail[];
+    }
+  | {
+      type: "fetch_faction_intel";
+      result: FactionIntel;
+    }
+  | {
+      type: "fetch_information_detail";
+      result: InformationDetail;
+    }
+  | {
+      type: "fetch_information_connections";
+      result: CrossLocationLead[];
+    }
+  | {
+      type: "fetch_relationship_history";
+      result: RelationshipHistory;
+    };
 
 export type ExecuteTravelToolCall = {
   type: "execute_travel";
@@ -694,6 +870,18 @@ export type ExecuteTravelToolCall = {
   timeMode: "travel";
   timeElapsed: number;
   citedEntities: CitedEntities;
+};
+
+export type ExecuteCombatToolCall = {
+  type: "execute_combat";
+  targetNpcId: string;
+  approach: CombatApproach;
+  narration: string;
+  suggestedActions: string[];
+  timeMode: "combat" | "exploration";
+  timeElapsed: number;
+  citedEntities: CitedEntities;
+  memorySummary?: string;
 };
 
 export type ExecuteConverseToolCall = {
@@ -749,6 +937,31 @@ export type ExecuteWaitToolCall = {
   memorySummary?: string;
 };
 
+export type ExecuteTradeToolCall = {
+  type: "execute_trade";
+  action: TradeAction;
+  marketPriceId: string;
+  commodityId: string;
+  quantity: number;
+  narration: string;
+  suggestedActions: string[];
+  timeMode: "exploration" | "downtime";
+  timeElapsed: number;
+  citedEntities: CitedEntities;
+  memorySummary?: string;
+};
+
+export type ExecuteRestToolCall = {
+  type: "execute_rest";
+  restType: RestType;
+  narration: string;
+  suggestedActions: string[];
+  timeMode: "rest";
+  timeElapsed: number;
+  citedEntities: CitedEntities;
+  memorySummary?: string;
+};
+
 export type ExecuteFreeformToolCall = {
   type: "execute_freeform";
   actionDescription: string;
@@ -768,11 +981,21 @@ export type ExecuteFreeformToolCall = {
 export type TurnActionToolCall =
   | RequestClarificationToolCall
   | ExecuteTravelToolCall
+  | ExecuteCombatToolCall
   | ExecuteConverseToolCall
   | ExecuteInvestigateToolCall
   | ExecuteObserveToolCall
+  | ExecuteTradeToolCall
+  | ExecuteRestToolCall
   | ExecuteWaitToolCall
   | ExecuteFreeformToolCall;
+
+export type TurnModelToolCall = TurnFetchToolCall | TurnActionToolCall;
+
+export type TurnResolution = {
+  command: TurnActionToolCall;
+  fetchedFacts: TurnFetchToolResult[];
+};
 
 export type ValidatedTurnCommand =
   | RequestClarificationToolCall
@@ -781,10 +1004,108 @@ export type ValidatedTurnCommand =
       checkResult?: CheckResult;
     });
 
+export type NpcRoutineCondition =
+  | { type: "location_state"; locationId: string; state: string }
+  | { type: "faction_at_war"; factionId: string }
+  | { type: "npc_state"; npcId: string; state: NpcState }
+  | { type: "time_range"; minMinutes: number; maxMinutes: number }
+  | { type: "player_in_location"; locationId: string }
+  | { type: "and"; conditions: NpcRoutineCondition[] }
+  | { type: "or"; conditions: NpcRoutineCondition[] };
+
+export type SimulationPayload =
+  | { type: "change_location_state"; locationId: string; newState: string }
+  | { type: "change_faction_control"; locationId: string; factionId: string | null }
+  | { type: "change_npc_state"; npcId: string; newState: NpcState }
+  | { type: "change_faction_resources"; factionId: string; delta: Partial<FactionResourcePool> }
+  | {
+      type: "spawn_world_event";
+      event: {
+        locationId: string | null;
+        triggerTime: number;
+        description: string;
+        triggerCondition?: NpcRoutineCondition | null;
+        payload: Exclude<SimulationPayload, { type: "spawn_world_event" }>;
+      };
+    }
+  | {
+      type: "spawn_information";
+      information: {
+        title: string;
+        summary: string;
+        content: string;
+        truthfulness: "true" | "partial" | "false" | "outdated";
+        accessibility: InformationAccessibility;
+        locationId: string | null;
+        factionId: string | null;
+        sourceNpcId: string | null;
+        expiresAtTime?: number | null;
+      };
+    }
+  | { type: "cancel_faction_move"; factionMoveId: string; reason: string }
+  | { type: "change_route_status"; edgeId: string; newStatus: string }
+  | { type: "change_market_price"; marketPriceId: string; newModifier: number }
+  | {
+      type: "transfer_location_control";
+      locationId: string;
+      fromFactionId: string | null;
+      toFactionId: string | null;
+    }
+  | { type: "change_npc_location"; npcId: string; newLocationId: string };
+
+export type GeneratedDailySchedule = {
+  worldEvents: Array<{
+    locationId: string | null;
+    triggerTime: number;
+    description: string;
+    triggerCondition?: NpcRoutineCondition | null;
+    payload: SimulationPayload;
+    cascadeDepth?: number;
+  }>;
+  factionMoves: Array<{
+    factionId: string;
+    scheduledAtTime: number;
+    description: string;
+    payload: SimulationPayload;
+    cascadeDepth?: number;
+  }>;
+};
+
+export type WorldFidelityIssue = {
+  code:
+    | "hallucinated_entity"
+    | "uncited_mechanical_entity"
+    | "invented_price"
+    | "invented_fact"
+    | "temporal_inconsistency"
+    | "spatial_inconsistency";
+  severity: "warn" | "block";
+  evidence: string;
+};
+
 export type SimulationInverse = {
   table: string;
   id: string;
   field: string;
   previousValue: unknown;
-  operation?: "update" | "delete_created";
+  operation: "update" | "delete_created";
+};
+
+export type TurnRollbackData = {
+  previousState: CampaignRuntimeState;
+  previousSessionTurnCount: number;
+  createdMessageIds: string[];
+  createdMemoryIds: string[];
+  discoveredInformation: Array<{
+    id: string;
+    previousIsDiscovered: boolean;
+    previousDiscoveredAtTurn: number | null;
+  }>;
+  simulationInverses: SimulationInverse[];
+  processedEventIds: string[];
+  cancelledMoveIds: string[];
+  createdWorldEventIds: string[];
+  createdFactionMoveIds: string[];
+  createdTemporaryActorIds: string[];
+  createdCommodityStackIds: string[];
 };

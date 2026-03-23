@@ -41,6 +41,7 @@ export const env = {
   appUrl: readEnv("APP_URL") ?? "http://localhost:3000",
   databaseUrl: readEnv("DATABASE_URL") ?? "",
   directUrl: readEnv("DIRECT_URL") ?? "",
+  enableTurnUndo: readEnv("ENABLE_TURN_UNDO") === "true",
   openRouterApiKey: readEnv("OPENROUTER_API_KEY") ?? "",
   openRouterApiKey2: readEnv("OPENROUTER_API_KEY_2") ?? "",
   openRouterApiKey3: readEnv("OPENROUTER_API_KEY_3") ?? "",

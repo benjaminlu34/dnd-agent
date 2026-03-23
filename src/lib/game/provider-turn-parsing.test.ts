@@ -10,11 +10,7 @@ function createPromptContext(): SpatialPromptContext {
       name: "Ash Gate",
       type: "district",
       summary: "Arrival district.",
-      description: null,
       state: "active",
-      controllingFactionId: "fac_watch",
-      controllingFactionName: "Watch",
-      tags: [],
     },
     adjacentRoutes: [
       {
@@ -32,49 +28,32 @@ function createPromptContext(): SpatialPromptContext {
         id: "npc_guide",
         name: "Tarin Ash",
         role: "guide",
-        summary: "Local guide.",
-        description: "Quick-footed guide.",
-        factionId: null,
-        factionName: null,
-        currentLocationId: "loc_gate",
-        approval: 2,
-        isCompanion: false,
       },
     ],
-    localInformation: [
+    recentLocalEvents: [
+      {
+        locationId: "loc_gate",
+        id: "event_gate_watch",
+        description: "Watch patrols keep doubling back through the gate.",
+        triggerTime: 470,
+        minutesAgo: 10,
+      },
+    ],
+    recentTurnLedger: [
+      "A dockhand warned that the watch is overwhelmed.",
+    ],
+    discoveredInformation: [
       {
         id: "info_1",
         title: "The watch is stretched thin",
         summary: "The watch is reacting instead of controlling.",
-        accessibility: "public",
         truthfulness: "true",
-        locationId: "loc_gate",
-        locationName: "Ash Gate",
-        factionId: "fac_watch",
-        factionName: "Watch",
-        sourceNpcId: null,
-        sourceNpcName: null,
-        isDiscovered: true,
       },
     ],
-    connectedLeads: [],
-    knownFactions: [
-      {
-        id: "fac_watch",
-        name: "Watch",
-        type: "military",
-        summary: "City watch.",
-        agenda: "Hold the city.",
-        pressureClock: 3,
-      },
-    ],
-    factionRelations: [],
     inventory: [],
-    memories: [],
-    recentMessages: [],
-    discoveredInformationIds: ["info_1"],
     globalTime: 480,
     timeOfDay: "morning",
+    dayCount: 1,
   };
 }
 

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { dmClient } from "@/lib/ai/provider";
 import { toCampaignCharacter, toCharacterStats } from "@/lib/game/characters";
@@ -7,6 +8,7 @@ import {
   openWorldGenerationArtifactsSchema,
 } from "@/lib/game/session-zero";
 import { instanceWorldForCampaign } from "@/lib/game/world-instancing";
+import { env } from "@/lib/env";
 import type {
   AdventureModuleDetail,
   AdventureModuleSummary,
@@ -18,20 +20,28 @@ import type {
   CharacterTemplateDraft,
   CharacterTemplateSummary,
   CrossLocationLead,
+  FactionIntel,
   FactionRelationSummary,
+  FactionMoveSummary,
   FactionSummary,
   GeneratedCampaignOpening,
   GeneratedWorldModule,
+  InformationDetail,
   InformationSummary,
   LocationSummary,
+  MarketPriceDetail,
   MemoryRecord,
+  NpcDetail,
   OpenWorldGenerationArtifacts,
   NpcSummary,
   PlayerCampaignSnapshot,
   PromptInventoryItem,
+  RelationshipHistory,
+  RecentLocalEventSummary,
   RouteSummary,
   SpatialPromptContext,
   StoryMessage,
+  TemporaryActorSummary,
 } from "@/lib/game/types";
 import { prisma } from "@/lib/prisma";
 
@@ -61,6 +71,12 @@ type PrismaItemInstanceRecord = Prisma.ItemInstanceGetPayload<{
   };
 }>;
 
+type PrismaCommodityStackRecord = Prisma.CharacterCommodityStackGetPayload<{
+  include: {
+    commodity: true;
+  };
+}>;
+
 function parseWorldTemplate(value: unknown): GeneratedWorldModule {
   return generatedWorldModuleSchema.parse(value);
 }
@@ -71,6 +87,44 @@ function parseOpenWorldGenerationArtifacts(value: unknown): OpenWorldGenerationA
   }
 
   return openWorldGenerationArtifactsSchema.parse(value);
+}
+
+function collectNearbyLocationIds(world: GeneratedWorldModule, startLocationId: string) {
+  const nearby = new Set<string>();
+
+  for (const edge of world.edges) {
+    if (edge.sourceId === startLocationId) {
+      nearby.add(edge.targetId);
+    }
+    if (edge.targetId === startLocationId) {
+      nearby.add(edge.sourceId);
+    }
+  }
+
+  return Array.from(nearby).slice(0, 3);
+}
+
+async function generateStartingHydratedNpcs(input: {
+  world: GeneratedWorldModule;
+  entryPoint: GeneratedWorldModule["entryPoints"][number];
+  template: CharacterTemplate;
+  opening: GeneratedCampaignOpening;
+}) {
+  try {
+    return await dmClient.generateStartingLocalNpcs({
+      module: input.world,
+      character: input.template,
+      entryPoint: input.entryPoint,
+      opening: input.opening,
+      nearbyLocationIds: collectNearbyLocationIds(input.world, input.entryPoint.startLocationId),
+    });
+  } catch (error) {
+    console.warn(
+      "[campaign-start-hydration] Failed to generate additional starting locals, continuing with anchor NPCs only.",
+      error,
+    );
+    return [];
+  }
 }
 
 function toTemplateRecord(template: Prisma.CharacterTemplateGetPayload<Record<string, never>>): CharacterTemplate {
@@ -134,11 +188,42 @@ function toItemInstanceRecord(
   };
 }
 
-function toPromptInventory(items: CharacterInstance["inventory"]): PromptInventoryItem[] {
-  return items.map((item) => ({
-    name: item.template.name,
-    description: item.template.description,
-  }));
+function toCommodityStackRecord(
+  stack: PrismaCommodityStackRecord,
+): CharacterInstance["commodityStacks"][number] {
+  return {
+    id: stack.id,
+    characterInstanceId: stack.characterInstanceId,
+    commodityId: stack.commodityId,
+    quantity: stack.quantity,
+    commodity: {
+      id: stack.commodity.id,
+      campaignId: stack.commodity.campaignId,
+      name: stack.commodity.name,
+      baseValue: stack.commodity.baseValue,
+      tags: [...stack.commodity.tags],
+    },
+  };
+}
+
+function toPromptInventory(character: CharacterInstance): PromptInventoryItem[] {
+  return [
+    ...character.inventory.map((item) => ({
+      kind: "item" as const,
+      id: item.id,
+      name: item.template.name,
+      description: item.template.description,
+    })),
+    ...character.commodityStacks
+      .filter((stack) => stack.quantity > 0)
+      .map((stack) => ({
+        kind: "commodity" as const,
+        id: stack.commodityId,
+        name: stack.commodity.name,
+        description: `Trade goods x${stack.quantity}`,
+        quantity: stack.quantity,
+      })),
+  ];
 }
 
 export async function ensureLocalUser() {
@@ -429,22 +514,20 @@ export async function generateCampaignOpeningDraftForUser(input: {
 async function createCampaignInTx(
   tx: Prisma.TransactionClient,
   input: {
+    campaignId: string;
     userId: string;
     module: Prisma.AdventureModuleGetPayload<Record<string, never>>;
     template: CharacterTemplate;
     entryPointId: string;
     opening: GeneratedCampaignOpening;
+    instancedWorld: GeneratedWorldModule;
+    instancedEntryPoint: GeneratedWorldModule["entryPoints"][number];
+    hydratedStartingNpcs: Array<Omit<GeneratedWorldModule["npcs"][number], "id">>;
   },
 ) {
-  const world = parseWorldTemplate(input.module.openWorldTemplateJson);
-  const moduleEntryPoint = world.entryPoints.find((entry) => entry.id === input.entryPointId);
-
-  if (!moduleEntryPoint) {
-    throw new Error("Entry point not found during campaign creation.");
-  }
-
   const campaign = await tx.campaign.create({
     data: {
+      id: input.campaignId,
       userId: input.userId,
       moduleId: input.module.id,
       templateId: input.template.id,
@@ -493,22 +576,16 @@ async function createCampaignInTx(
     throw new Error("Campaign initialization failed.");
   }
 
-  const { world: instancedWorld, entryPoint } = instanceWorldForCampaign(
-    campaign.id,
-    world,
-    input.entryPointId,
-  );
-
   const state: CampaignRuntimeState = {
-    currentLocationId: entryPoint.startLocationId,
+    currentLocationId: input.instancedEntryPoint.startLocationId,
     globalTime: 480,
     pendingTurnId: null,
     lastActionSummary: input.opening.activeThreat,
   };
 
-  if (instancedWorld.factions.length) {
+  if (input.instancedWorld.factions.length) {
     await tx.faction.createMany({
-      data: instancedWorld.factions.map((faction) => ({
+      data: input.instancedWorld.factions.map((faction) => ({
         id: faction.id,
         campaignId: campaign.id,
         name: faction.name,
@@ -521,9 +598,9 @@ async function createCampaignInTx(
     });
   }
 
-  if (instancedWorld.locations.length) {
+  if (input.instancedWorld.locations.length) {
     await tx.locationNode.createMany({
-      data: instancedWorld.locations.map((location) => ({
+      data: input.instancedWorld.locations.map((location) => ({
         id: location.id,
         campaignId: campaign.id,
         name: location.name,
@@ -537,9 +614,9 @@ async function createCampaignInTx(
     });
   }
 
-  if (instancedWorld.edges.length) {
+  if (input.instancedWorld.edges.length) {
     await tx.locationEdge.createMany({
-      data: instancedWorld.edges.map((edge) => ({
+      data: input.instancedWorld.edges.map((edge) => ({
         id: edge.id,
         campaignId: campaign.id,
         sourceId: edge.sourceId,
@@ -552,9 +629,9 @@ async function createCampaignInTx(
     });
   }
 
-  if (instancedWorld.factionRelations.length) {
+  if (input.instancedWorld.factionRelations.length) {
     await tx.factionRelation.createMany({
-      data: instancedWorld.factionRelations.map((relation) => ({
+      data: input.instancedWorld.factionRelations.map((relation) => ({
         id: relation.id,
         campaignId: campaign.id,
         factionAId: relation.factionAId,
@@ -564,26 +641,46 @@ async function createCampaignInTx(
     });
   }
 
-  if (instancedWorld.npcs.length) {
+  const hydratedStartingNpcRecords = input.hydratedStartingNpcs.map((npc) => ({
+    id: `npc_local_${randomUUID()}`,
+    campaignId: campaign.id,
+    name: npc.name,
+    role: npc.role,
+    summary: npc.summary,
+    description: npc.description,
+    factionId: npc.factionId,
+    currentLocationId: npc.currentLocationId,
+    approval: npc.approval,
+    isCompanion: false,
+    state: "active",
+    threatLevel: 1,
+  }));
+
+  if (input.instancedWorld.npcs.length || hydratedStartingNpcRecords.length) {
     await tx.nPC.createMany({
-      data: instancedWorld.npcs.map((npc) => ({
-        id: npc.id,
-        campaignId: campaign.id,
-        name: npc.name,
-        role: npc.role,
-        summary: npc.summary,
-        description: npc.description,
-        factionId: npc.factionId,
-        currentLocationId: npc.currentLocationId,
-        approval: npc.approval,
-        isCompanion: npc.isCompanion,
-      })),
+      data: [
+        ...input.instancedWorld.npcs.map((npc) => ({
+          id: npc.id,
+          campaignId: campaign.id,
+          name: npc.name,
+          role: npc.role,
+          summary: npc.summary,
+          description: npc.description,
+          factionId: npc.factionId,
+          currentLocationId: npc.currentLocationId,
+          approval: npc.approval,
+          isCompanion: npc.isCompanion,
+          state: "active",
+          threatLevel: 1,
+        })),
+        ...hydratedStartingNpcRecords,
+      ],
     });
   }
 
-  if (instancedWorld.information.length) {
+  if (input.instancedWorld.information.length) {
     await tx.information.createMany({
-      data: instancedWorld.information.map((information) => ({
+      data: input.instancedWorld.information.map((information) => ({
         id: information.id,
         campaignId: campaign.id,
         title: information.title,
@@ -594,15 +691,18 @@ async function createCampaignInTx(
         locationId: information.locationId,
         factionId: information.factionId,
         sourceNpcId: information.sourceNpcId,
-        isDiscovered: entryPoint.initialInformationIds.includes(information.id),
-        discoveredAtTurn: entryPoint.initialInformationIds.includes(information.id) ? 0 : null,
+        isDiscovered: input.instancedEntryPoint.initialInformationIds.includes(information.id),
+        discoveredAtTurn: input.instancedEntryPoint.initialInformationIds.includes(information.id)
+          ? 0
+          : null,
+        expiresAtTime: null,
       })),
     });
   }
 
-  if (instancedWorld.informationLinks.length) {
+  if (input.instancedWorld.informationLinks.length) {
     await tx.informationLink.createMany({
-      data: instancedWorld.informationLinks.map((link) => ({
+      data: input.instancedWorld.informationLinks.map((link) => ({
         id: link.id,
         campaignId: campaign.id,
         sourceId: link.sourceId,
@@ -612,9 +712,9 @@ async function createCampaignInTx(
     });
   }
 
-  if (instancedWorld.commodities.length) {
+  if (input.instancedWorld.commodities.length) {
     await tx.commodity.createMany({
-      data: instancedWorld.commodities.map((commodity) => ({
+      data: input.instancedWorld.commodities.map((commodity) => ({
         id: commodity.id,
         campaignId: campaign.id,
         name: commodity.name,
@@ -624,9 +724,9 @@ async function createCampaignInTx(
     });
   }
 
-  if (instancedWorld.marketPrices.length) {
+  if (input.instancedWorld.marketPrices.length) {
     await tx.marketPrice.createMany({
-      data: instancedWorld.marketPrices.map((price) => ({
+      data: input.instancedWorld.marketPrices.map((price) => ({
         id: price.id,
         campaignId: campaign.id,
         commodityId: price.commodityId,
@@ -635,6 +735,7 @@ async function createCampaignInTx(
         factionId: price.factionId,
         modifier: price.modifier,
         stock: price.stock,
+        restockTime: null,
         legalStatus: price.legalStatus,
       })),
     });
@@ -700,13 +801,30 @@ export async function createCampaignFromModuleForUser(input: {
       entryPoint,
     }));
 
+  const campaignId = `camp_${randomUUID()}`;
+  const { world: instancedWorld, entryPoint: instancedEntryPoint } = instanceWorldForCampaign(
+    campaignId,
+    world,
+    input.entryPointId,
+  );
+  const hydratedStartingNpcs = await generateStartingHydratedNpcs({
+    world: instancedWorld,
+    entryPoint: instancedEntryPoint,
+    template: templateRecord,
+    opening,
+  });
+
   const result = await prisma.$transaction((tx) =>
     createCampaignInTx(tx, {
+      campaignId,
       userId: user.id,
       module,
       template: templateRecord,
       entryPointId: input.entryPointId,
       opening,
+      instancedWorld,
+      instancedEntryPoint,
+      hydratedStartingNpcs,
     }),
   );
 
@@ -825,6 +943,8 @@ function toNpcSummary(
     currentLocationId: npc.currentLocationId,
     approval: npc.approval,
     isCompanion: npc.isCompanion,
+    state: npc.state as NpcSummary["state"],
+    threatLevel: npc.threatLevel,
   };
 }
 
@@ -857,6 +977,27 @@ function toInformationSummary(
     sourceNpcId: information.sourceNpcId,
     sourceNpcName: sourceNpc?.name ?? null,
     isDiscovered: information.isDiscovered,
+    expiresAtTime: information.expiresAtTime ?? null,
+  };
+}
+
+function toTemporaryActorSummary(
+  actor: Prisma.TemporaryActorGetPayload<Record<string, never>>,
+): TemporaryActorSummary {
+  return {
+    id: actor.id,
+    label: actor.label,
+    currentLocationId: actor.currentLocationId,
+    interactionCount: actor.interactionCount,
+    firstSeenAtTurn: actor.firstSeenAtTurn,
+    lastSeenAtTurn: actor.lastSeenAtTurn,
+    lastSeenAtTime: actor.lastSeenAtTime,
+    recentTopics: [...actor.recentTopics],
+    lastSummary: actor.lastSummary,
+    holdsInventory: actor.holdsInventory,
+    affectedWorldState: actor.affectedWorldState,
+    isInMemoryGraph: actor.isInMemoryGraph,
+    promotedNpcId: actor.promotedNpcId,
   };
 }
 
@@ -924,6 +1065,267 @@ function buildCrossLocationLeads(input: {
   return Array.from(leads.values()).sort((left, right) => left.depth - right.depth);
 }
 
+export async function fetchNpcDetail(campaignId: string, npcId: string): Promise<NpcDetail | null> {
+  const [npc, factions, information, memories, temporaryActor] = await Promise.all([
+    prisma.nPC.findFirst({
+      where: { id: npcId, campaignId },
+    }),
+    prisma.faction.findMany({
+      where: { campaignId },
+    }),
+    prisma.information.findMany({
+      where: {
+        campaignId,
+        OR: [{ sourceNpcId: npcId }, { isDiscovered: true }],
+      },
+      orderBy: { title: "asc" },
+      take: 12,
+    }),
+    prisma.memoryEntry.findMany({
+      where: {
+        campaignId,
+        summary: {
+          contains: npcId,
+          mode: "insensitive",
+        },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 8,
+    }),
+    prisma.temporaryActor.findFirst({
+      where: {
+        campaignId,
+        promotedNpcId: npcId,
+      },
+    }),
+  ]);
+
+  if (!npc) {
+    return null;
+  }
+
+  const locations = await prisma.locationNode.findMany({
+    where: { campaignId },
+  });
+  const npcs = await prisma.nPC.findMany({
+    where: { campaignId },
+  });
+
+  return {
+    ...toNpcSummary(npc, factions),
+    knownInformation: information.map((entry) =>
+      toInformationSummary(entry, locations, factions, npcs),
+    ),
+    relationshipHistory: memories.map((memory) => ({
+      id: memory.id,
+      type: memory.type,
+      summary: memory.summary,
+      createdAt: memory.createdAt.toISOString(),
+    })),
+    temporaryActorId: temporaryActor?.id ?? null,
+  };
+}
+
+export async function fetchMarketPrices(
+  campaignId: string,
+  locationId: string,
+): Promise<MarketPriceDetail[]> {
+  const [location, prices] = await Promise.all([
+    prisma.locationNode.findFirst({
+      where: { id: locationId, campaignId },
+      select: { id: true, name: true },
+    }),
+    prisma.marketPrice.findMany({
+      where: { campaignId, locationId },
+      include: {
+        commodity: true,
+        vendorNpc: true,
+      },
+      orderBy: [{ commodity: { name: "asc" } }, { createdAt: "asc" }],
+    }),
+  ]);
+
+  if (!location) {
+    return [];
+  }
+
+  return prices.map((price) => ({
+    marketPriceId: price.id,
+    commodityId: price.commodityId,
+    commodityName: price.commodity.name,
+    baseValue: price.commodity.baseValue,
+    modifier: price.modifier,
+    price: Math.max(1, Math.round(price.commodity.baseValue * price.modifier)),
+    stock: price.stock,
+    legalStatus: price.legalStatus,
+    vendorNpcId: price.vendorNpcId,
+    vendorNpcName: price.vendorNpc?.name ?? null,
+    locationId: location.id,
+    locationName: location.name,
+    restockTime: price.restockTime ?? null,
+  }));
+}
+
+export async function fetchFactionIntel(campaignId: string, factionId: string): Promise<FactionIntel | null> {
+  const [faction, factions, relations, moves, locations] = await Promise.all([
+    prisma.faction.findFirst({
+      where: { id: factionId, campaignId },
+    }),
+    prisma.faction.findMany({
+      where: { campaignId },
+    }),
+    prisma.factionRelation.findMany({
+      where: {
+        campaignId,
+        OR: [{ factionAId: factionId }, { factionBId: factionId }],
+      },
+      orderBy: { createdAt: "asc" },
+    }),
+    prisma.factionMove.findMany({
+      where: {
+        campaignId,
+        factionId,
+      },
+      orderBy: { scheduledAtTime: "asc" },
+      take: 8,
+    }),
+    prisma.locationNode.findMany({
+      where: {
+        campaignId,
+        controllingFactionId: factionId,
+      },
+      select: { id: true },
+    }),
+  ]);
+
+  if (!faction) {
+    return null;
+  }
+
+  return {
+    ...toFactionSummary(faction),
+    relations: relations.map((relation) => toFactionRelationSummary(relation, factions)),
+    visibleMoves: moves.map<FactionMoveSummary>((move) => ({
+      id: move.id,
+      description: move.description,
+      scheduledAtTime: move.scheduledAtTime,
+      isExecuted: move.isExecuted,
+      isCancelled: move.isCancelled,
+      cancellationReason: move.cancellationReason,
+    })),
+    controlledLocationIds: locations.map((location) => location.id),
+  };
+}
+
+export async function fetchInformationDetail(
+  campaignId: string,
+  informationId: string,
+): Promise<InformationDetail | null> {
+  const [information, locations, factions, npcs] = await Promise.all([
+    prisma.information.findFirst({
+      where: { id: informationId, campaignId, isDiscovered: true },
+    }),
+    prisma.locationNode.findMany({
+      where: { campaignId },
+    }),
+    prisma.faction.findMany({
+      where: { campaignId },
+    }),
+    prisma.nPC.findMany({
+      where: { campaignId },
+    }),
+  ]);
+
+  if (!information) {
+    return null;
+  }
+
+  return {
+    ...toInformationSummary(information, locations, factions, npcs),
+    content: information.content,
+  };
+}
+
+export async function fetchInformationConnections(
+  campaignId: string,
+  informationIds: string[],
+): Promise<CrossLocationLead[]> {
+  const [information, informationLinks, locations, factions, npcs] = await Promise.all([
+    prisma.information.findMany({
+      where: {
+        campaignId,
+      },
+      orderBy: { title: "asc" },
+    }),
+    prisma.informationLink.findMany({
+      where: {
+        campaignId,
+      },
+      orderBy: { createdAt: "asc" },
+    }),
+    prisma.locationNode.findMany({
+      where: { campaignId },
+    }),
+    prisma.faction.findMany({
+      where: { campaignId },
+    }),
+    prisma.nPC.findMany({
+      where: { campaignId },
+    }),
+  ]);
+
+  return buildCrossLocationLeads({
+    discoveredInformationIds: informationIds,
+    information,
+    informationLinks,
+    locations,
+    factions,
+    npcs,
+  });
+}
+
+export async function fetchRelationshipHistory(
+  campaignId: string,
+  npcId: string,
+): Promise<RelationshipHistory | null> {
+  const [npc, memories] = await Promise.all([
+    prisma.nPC.findFirst({
+      where: { id: npcId, campaignId },
+      select: { id: true, name: true },
+    }),
+    prisma.memoryEntry.findMany({
+      where: {
+        campaignId,
+        OR: [
+          {
+            summary: {
+              contains: npcId,
+              mode: "insensitive",
+            },
+          },
+        ],
+      },
+      orderBy: { createdAt: "desc" },
+      take: 10,
+    }),
+  ]);
+
+  if (!npc) {
+    return null;
+  }
+
+  return {
+    npcId: npc.id,
+    npcName: npc.name,
+    memories: memories.map((memory) => ({
+      id: memory.id,
+      type: memory.type,
+      summary: memory.summary,
+      createdAt: memory.createdAt.toISOString(),
+    })),
+  };
+}
+
 export async function getCampaignSnapshot(campaignId: string): Promise<CampaignSnapshot | null> {
   const campaign = await prisma.campaign.findUnique({
     where: { id: campaignId },
@@ -935,6 +1337,10 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
           inventory: {
             orderBy: { createdAt: "asc" },
             include: { template: true },
+          },
+          commodityStacks: {
+            orderBy: { createdAt: "asc" },
+            include: { commodity: true },
           },
         },
       },
@@ -972,6 +1378,22 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
       },
       informationLinks: {
         orderBy: { createdAt: "asc" },
+      },
+      worldEvents: {
+        orderBy: { triggerTime: "desc" },
+        take: 30,
+      },
+      temporaryActors: {
+        orderBy: [{ lastSeenAtTurn: "desc" }, { updatedAt: "desc" }],
+      },
+      turns: {
+        where: { status: "resolved" },
+        orderBy: { createdAt: "desc" },
+        take: 1,
+        select: {
+          id: true,
+          sessionId: true,
+        },
       },
     },
   });
@@ -1067,6 +1489,7 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     health: campaign.characterInstance.health,
     gold: campaign.characterInstance.gold,
     inventory: campaign.characterInstance.inventory.map(toItemInstanceRecord),
+    commodityStacks: campaign.characterInstance.commodityStacks.map(toCommodityStackRecord),
   };
 
   const character = toCampaignCharacter(toTemplateRecord(campaign.template), instance);
@@ -1092,6 +1515,12 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
           : null,
     }));
 
+  const temporaryActors = campaign.temporaryActors.map(toTemporaryActorSummary);
+  const canRetryLatestTurn =
+    env.enableTurnUndo &&
+    Boolean(campaign.turns[0]?.id) &&
+    campaign.turns[0]?.sessionId === session.id;
+
   return {
     campaignId: campaign.id,
     sessionId: session.id,
@@ -1115,9 +1544,10 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     localInformation,
     discoveredInformation,
     connectedLeads,
+    temporaryActors,
     memories,
     recentMessages,
-    canRetryLatestTurn: false,
+    canRetryLatestTurn,
   };
 }
 
@@ -1139,6 +1569,7 @@ export function toPlayerCampaignSnapshot(snapshot: CampaignSnapshot): PlayerCamp
     knownFactions: snapshot.knownFactions,
     localInformation: snapshot.localInformation,
     discoveredInformation: snapshot.discoveredInformation,
+    temporaryActors: snapshot.temporaryActors,
     memories: snapshot.memories,
     recentMessages: snapshot.recentMessages,
     canRetryLatestTurn: snapshot.canRetryLatestTurn,
@@ -1154,20 +1585,69 @@ function timeOfDay(globalTime: number) {
   return "night";
 }
 
+function buildRecentTurnLedger(snapshot: CampaignSnapshot) {
+  const recentEntries = snapshot.recentMessages.slice(-8);
+
+  return recentEntries.map((message) => {
+    const speaker =
+      message.role === "user" ? "You" : message.role === "assistant" ? "DM" : "System";
+    return `[${speaker}] ${message.content}`;
+  });
+}
+
 export async function getPromptContext(snapshot: CampaignSnapshot): Promise<SpatialPromptContext> {
+  const recentLocalEvents: RecentLocalEventSummary[] = [];
+  const now = snapshot.state.globalTime;
+  const worldEventRecords = await prisma.worldEvent.findMany({
+    where: {
+      campaignId: snapshot.campaignId,
+      locationId: snapshot.currentLocation.id,
+      triggerTime: {
+        lte: now,
+        gte: Math.max(0, now - 60),
+      },
+      isProcessed: true,
+      isCancelled: false,
+    },
+    orderBy: { triggerTime: "desc" },
+    take: 5,
+  });
+
+  for (const event of worldEventRecords) {
+    recentLocalEvents.push({
+      id: event.id,
+      description: event.description,
+      locationId: event.locationId,
+      triggerTime: event.triggerTime,
+      minutesAgo: Math.max(0, now - event.triggerTime),
+    });
+  }
+
   return {
-    currentLocation: snapshot.currentLocation,
+    currentLocation: {
+      id: snapshot.currentLocation.id,
+      name: snapshot.currentLocation.name,
+      type: snapshot.currentLocation.type,
+      summary: snapshot.currentLocation.summary,
+      state: snapshot.currentLocation.state,
+    },
     adjacentRoutes: snapshot.adjacentRoutes,
-    presentNpcs: snapshot.presentNpcs,
-    localInformation: snapshot.localInformation,
-    connectedLeads: snapshot.connectedLeads,
-    knownFactions: snapshot.knownFactions,
-    factionRelations: snapshot.factionRelations,
-    inventory: toPromptInventory(snapshot.character.inventory),
-    memories: snapshot.memories,
-    recentMessages: snapshot.recentMessages.slice(-8),
-    discoveredInformationIds: snapshot.discoveredInformation.map((information) => information.id),
+    presentNpcs: snapshot.presentNpcs.map((npc) => ({
+      id: npc.id,
+      name: npc.name,
+      role: npc.role,
+    })),
+    recentLocalEvents,
+    recentTurnLedger: buildRecentTurnLedger(snapshot),
+    discoveredInformation: snapshot.discoveredInformation.map((information) => ({
+      id: information.id,
+      title: information.title,
+      summary: information.summary,
+      truthfulness: information.truthfulness,
+    })),
+    inventory: toPromptInventory(snapshot.character),
     globalTime: snapshot.state.globalTime,
     timeOfDay: timeOfDay(snapshot.state.globalTime),
+    dayCount: Math.floor(snapshot.state.globalTime / 1440) + 1,
   };
 }

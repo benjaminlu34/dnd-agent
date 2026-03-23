@@ -2,10 +2,13 @@ import { rollCheck } from "@/lib/game/checks";
 import type {
   CampaignSnapshot,
   CitedEntities,
+  ExecuteCombatToolCall,
   ExecuteFreeformToolCall,
   TimeMode,
   TurnActionToolCall,
+  TurnFetchToolResult,
   ValidatedTurnCommand,
+  WorldFidelityIssue,
 } from "@/lib/game/types";
 
 export const TIME_MODE_BOUNDS: Record<TimeMode, { min: number; max: number }> = {
@@ -16,13 +19,25 @@ export const TIME_MODE_BOUNDS: Record<TimeMode, { min: number; max: number }> = 
   downtime: { min: 60, max: 2880 },
 };
 
+const REST_DURATIONS = {
+  light: 360,
+  full: 480,
+} as const;
+
 function normalizedSuggestedActions(actions: string[] | undefined) {
-  return Array.from(
-    new Set((actions ?? []).map((entry) => entry.trim()).filter(Boolean)),
-  ).slice(0, 4);
+  return Array.from(new Set((actions ?? []).map((entry) => entry.trim()).filter(Boolean))).slice(
+    0,
+    4,
+  );
 }
 
-function getAllowedEntities(snapshot: CampaignSnapshot) {
+function fetchedMarketPrices(fetchedFacts: TurnFetchToolResult[]) {
+  return fetchedFacts.flatMap((fact) =>
+    fact.type === "fetch_market_prices" ? fact.result : [],
+  );
+}
+
+function getAllowedEntities(snapshot: CampaignSnapshot, fetchedFacts: TurnFetchToolResult[]) {
   const locationIds = new Set<string>([
     snapshot.currentLocation.id,
     ...snapshot.adjacentRoutes.map((route) => route.targetLocationId),
@@ -35,16 +50,85 @@ function getAllowedEntities(snapshot: CampaignSnapshot) {
       .concat(snapshot.discoveredInformation.map((information) => information.id))
       .concat(snapshot.connectedLeads.map((lead) => lead.information.id)),
   );
+  const commodityIds = new Set<string>();
 
-  return { locationIds, npcIds, factionIds, informationIds };
+  for (const fact of fetchedFacts) {
+    if (fact.type === "fetch_npc_detail") {
+      npcIds.add(fact.result.id);
+      if (fact.result.currentLocationId) {
+        locationIds.add(fact.result.currentLocationId);
+      }
+      if (fact.result.factionId) {
+        factionIds.add(fact.result.factionId);
+      }
+      for (const information of fact.result.knownInformation) {
+        informationIds.add(information.id);
+      }
+    }
+
+    if (fact.type === "fetch_market_prices") {
+      for (const price of fact.result) {
+        commodityIds.add(price.commodityId);
+        locationIds.add(price.locationId);
+        if (price.vendorNpcId) {
+          npcIds.add(price.vendorNpcId);
+        }
+      }
+    }
+
+    if (fact.type === "fetch_faction_intel") {
+      factionIds.add(fact.result.id);
+      for (const relation of fact.result.relations) {
+        factionIds.add(relation.factionAId);
+        factionIds.add(relation.factionBId);
+      }
+      for (const locationId of fact.result.controlledLocationIds) {
+        locationIds.add(locationId);
+      }
+    }
+
+    if (fact.type === "fetch_information_detail") {
+      informationIds.add(fact.result.id);
+      if (fact.result.locationId) {
+        locationIds.add(fact.result.locationId);
+      }
+      if (fact.result.factionId) {
+        factionIds.add(fact.result.factionId);
+      }
+      if (fact.result.sourceNpcId) {
+        npcIds.add(fact.result.sourceNpcId);
+      }
+    }
+
+    if (fact.type === "fetch_information_connections") {
+      for (const lead of fact.result) {
+        informationIds.add(lead.information.id);
+        if (lead.information.locationId) {
+          locationIds.add(lead.information.locationId);
+        }
+        if (lead.information.factionId) {
+          factionIds.add(lead.information.factionId);
+        }
+        if (lead.information.sourceNpcId) {
+          npcIds.add(lead.information.sourceNpcId);
+        }
+      }
+    }
+
+    if (fact.type === "fetch_relationship_history") {
+      npcIds.add(fact.result.npcId);
+    }
+  }
+
+  return { locationIds, npcIds, factionIds, informationIds, commodityIds };
 }
 
 function assertCitedEntities(
   citedEntities: CitedEntities,
   snapshot: CampaignSnapshot,
-  warnings: string[],
+  fetchedFacts: TurnFetchToolResult[],
 ) {
-  const allowed = getAllowedEntities(snapshot);
+  const allowed = getAllowedEntities(snapshot, fetchedFacts);
 
   for (const npcId of citedEntities.npcIds) {
     if (!allowed.npcIds.has(npcId)) {
@@ -70,12 +154,17 @@ function assertCitedEntities(
     }
   }
 
-  if (citedEntities.commodityIds.length) {
-    warnings.push("Commodity citations are currently ignored because trading is deferred.");
+  for (const commodityId of citedEntities.commodityIds) {
+    if (!allowed.commodityIds.has(commodityId)) {
+      throw new Error(`Hallucinated commodity citation: ${commodityId}.`);
+    }
   }
 }
 
-function assertTime(command: Exclude<TurnActionToolCall, { type: "request_clarification" }>, snapshot: CampaignSnapshot) {
+function assertTime(
+  command: Exclude<TurnActionToolCall, { type: "request_clarification" }>,
+  snapshot: CampaignSnapshot,
+) {
   const bounds = TIME_MODE_BOUNDS[command.timeMode];
 
   if (!bounds) {
@@ -100,6 +189,18 @@ function assertTime(command: Exclude<TurnActionToolCall, { type: "request_clarif
     return;
   }
 
+  if (command.type === "execute_rest") {
+    const requiredDuration = REST_DURATIONS[command.restType];
+    if (command.timeElapsed !== requiredDuration) {
+      throw new Error(`Rest time must be engine-owned at ${requiredDuration} minutes.`);
+    }
+    return;
+  }
+
+  if (command.type === "execute_wait" && command.timeElapsed !== command.durationMinutes) {
+    throw new Error("Wait durationMinutes must match timeElapsed.");
+  }
+
   if (command.timeElapsed < bounds.min || command.timeElapsed > bounds.max) {
     throw new Error(
       `${command.type} produced ${command.timeElapsed} minutes, outside ${command.timeMode} bounds.`,
@@ -107,7 +208,27 @@ function assertTime(command: Exclude<TurnActionToolCall, { type: "request_clarif
   }
 }
 
-function validateInteractionTarget(snapshot: CampaignSnapshot, command: TurnActionToolCall) {
+function requireFetchedMarketPrice(command: {
+  marketPriceId: string;
+  commodityId: string;
+}, fetchedFacts: TurnFetchToolResult[]) {
+  const price = fetchedMarketPrices(fetchedFacts).find(
+    (entry) =>
+      entry.marketPriceId === command.marketPriceId && entry.commodityId === command.commodityId,
+  );
+
+  if (!price) {
+    throw new Error("Trading requires fetched market detail for the selected commodity.");
+  }
+
+  return price;
+}
+
+function validateInteractionTarget(
+  snapshot: CampaignSnapshot,
+  command: TurnActionToolCall,
+  fetchedFacts: TurnFetchToolResult[],
+) {
   if (command.type === "execute_converse") {
     if (command.npcId) {
       if (!snapshot.presentNpcs.some((npc) => npc.id === command.npcId)) {
@@ -127,6 +248,46 @@ function validateInteractionTarget(snapshot: CampaignSnapshot, command: TurnActi
   if (command.type === "execute_observe" && command.targetType === "npc") {
     if (!snapshot.presentNpcs.some((npc) => npc.id === command.targetId)) {
       throw new Error("Cannot observe an NPC who is not present.");
+    }
+  }
+
+  if (command.type === "execute_combat") {
+    const target = snapshot.presentNpcs.find((npc) => npc.id === command.targetNpcId);
+    if (!target) {
+      throw new Error("Combat target must be present.");
+    }
+    if (target.state === "dead") {
+      throw new Error("Combat target is already dead.");
+    }
+  }
+
+  if (command.type === "execute_trade") {
+    const price = requireFetchedMarketPrice(command, fetchedFacts);
+    if (price.locationId !== snapshot.currentLocation.id) {
+      throw new Error("Market price is not for the current location.");
+    }
+    if (!Number.isInteger(command.quantity) || command.quantity <= 0) {
+      throw new Error("Trade quantity must be a positive integer.");
+    }
+
+    if (command.action === "buy") {
+      const totalCost = price.price * command.quantity;
+      if (price.stock !== -1 && price.stock < command.quantity) {
+        throw new Error("Insufficient stock for requested trade quantity.");
+      }
+      if (snapshot.character.gold < totalCost) {
+        throw new Error("Insufficient gold for requested trade quantity.");
+      }
+    }
+
+    if (command.action === "sell") {
+      const owned = snapshot.character.commodityStacks.find(
+        (stack) => stack.commodityId === command.commodityId,
+      );
+
+      if (!owned || owned.quantity < command.quantity) {
+        throw new Error("Cannot sell more commodity than the player owns.");
+      }
     }
   }
 }
@@ -150,6 +311,13 @@ function validateInformationDiscoveries(snapshot: CampaignSnapshot, ids: string[
   }
 }
 
+function looksLikeTypedCombatOrTrade(text: string) {
+  const normalized = text.toLowerCase();
+  return /(buy|sell|barter|trade|price|stock|kill|slay|murder|stab|attack|subdue|assassinate|knock out)/.test(
+    normalized,
+  );
+}
+
 function validateFreeform(command: ExecuteFreeformToolCall) {
   if (!command.statToCheck) {
     throw new Error("execute_freeform requires statToCheck.");
@@ -160,15 +328,109 @@ function validateFreeform(command: ExecuteFreeformToolCall) {
   }
 
   if (command.estimatedTimeElapsedMinutes !== command.timeElapsed) {
-    throw new Error("execute_freeform estimatedTimeElapsedMinutes must match timeElapsed in pass 1.");
+    throw new Error("execute_freeform estimatedTimeElapsedMinutes must match timeElapsed.");
   }
+
+  if (looksLikeTypedCombatOrTrade(`${command.actionDescription} ${command.intendedMechanicalOutcome}`)) {
+    throw new Error("execute_freeform cannot replace typed combat or trade actions.");
+  }
+}
+
+function deriveCombatCheck(command: ExecuteCombatToolCall, snapshot: CampaignSnapshot) {
+  const target = snapshot.presentNpcs.find((npc) => npc.id === command.targetNpcId);
+  if (!target) {
+    throw new Error("Combat target must be present.");
+  }
+
+  const stat = command.approach === "assassinate" ? "dexterity" : "strength";
+  const dc = 7 + Math.max(1, target.threatLevel);
+
+  return rollCheck({
+    stat,
+    mode: "normal",
+    reason: `${command.approach} ${target.name}`,
+    character: snapshot.character,
+    dc,
+  });
+}
+
+function extractQuotedGoldAmounts(narration: string) {
+  return Array.from(narration.matchAll(/(\d+)\s+gold/gi)).map((match) => Number(match[1]));
+}
+
+function auditWorldFidelity(input: {
+  snapshot: CampaignSnapshot;
+  command: Exclude<TurnActionToolCall, { type: "request_clarification" }>;
+  fetchedFacts: TurnFetchToolResult[];
+}): WorldFidelityIssue[] {
+  const { snapshot, command, fetchedFacts } = input;
+  const issues: WorldFidelityIssue[] = [];
+
+  if (command.type === "execute_trade") {
+    const price = requireFetchedMarketPrice(command, fetchedFacts);
+    if (!command.citedEntities.commodityIds.includes(command.commodityId)) {
+      issues.push({
+        code: "uncited_mechanical_entity",
+        severity: "block",
+        evidence: "Trade commands must cite the traded commodity.",
+      });
+    }
+
+    const quotedGoldAmounts = extractQuotedGoldAmounts(command.narration);
+    const total = price.price * command.quantity;
+    if (quotedGoldAmounts.length > 0 && !quotedGoldAmounts.includes(total)) {
+      issues.push({
+        code: "invented_price",
+        severity: "block",
+        evidence: `Narration quoted a gold amount that did not match the authoritative total of ${total}.`,
+      });
+    }
+  }
+
+  if (command.type === "execute_combat" && !command.citedEntities.npcIds.includes(command.targetNpcId)) {
+    issues.push({
+      code: "uncited_mechanical_entity",
+      severity: "block",
+      evidence: "Combat commands must cite the target NPC.",
+    });
+  }
+
+  if (command.type === "execute_travel" && !command.citedEntities.locationIds.includes(command.targetLocationId)) {
+    issues.push({
+      code: "uncited_mechanical_entity",
+      severity: "block",
+      evidence: "Travel commands must cite the destination location.",
+    });
+  }
+
+  if (command.type === "execute_rest" && command.timeElapsed > 480) {
+    issues.push({
+      code: "temporal_inconsistency",
+      severity: "block",
+      evidence: "Rest duration exceeded the engine-owned maximum.",
+    });
+  }
+
+  if (command.type === "execute_trade") {
+    const price = requireFetchedMarketPrice(command, fetchedFacts);
+    if (price.locationId !== snapshot.currentLocation.id) {
+      issues.push({
+        code: "spatial_inconsistency",
+        severity: "block",
+        evidence: "Trade attempted against a market outside the current location.",
+      });
+    }
+  }
+
+  return issues;
 }
 
 export function validateTurnCommand(input: {
   snapshot: CampaignSnapshot;
   command: TurnActionToolCall;
+  fetchedFacts?: TurnFetchToolResult[];
 }): ValidatedTurnCommand {
-  const { snapshot, command } = input;
+  const { snapshot, command, fetchedFacts = [] } = input;
 
   if (command.type === "request_clarification") {
     return {
@@ -179,14 +441,42 @@ export function validateTurnCommand(input: {
   }
 
   const warnings: string[] = [];
-  validateInteractionTarget(snapshot, command);
-  validateInformationDiscoveries(snapshot, "discoverInformationIds" in command ? command.discoverInformationIds : undefined);
+  validateInteractionTarget(snapshot, command, fetchedFacts);
+  validateInformationDiscoveries(
+    snapshot,
+    "discoverInformationIds" in command ? command.discoverInformationIds : undefined,
+  );
   assertTime(command, snapshot);
-  assertCitedEntities(command.citedEntities, snapshot, warnings);
+  assertCitedEntities(command.citedEntities, snapshot, fetchedFacts);
+
+  const fidelityIssues = auditWorldFidelity({
+    snapshot,
+    command,
+    fetchedFacts,
+  });
+  const blockingIssue = fidelityIssues.find((issue) => issue.severity === "block");
+  if (blockingIssue) {
+    throw new Error(`${blockingIssue.code}: ${blockingIssue.evidence}`);
+  }
+
+  warnings.push(
+    ...fidelityIssues
+      .filter((issue) => issue.severity === "warn")
+      .map((issue) => `${issue.code}: ${issue.evidence}`),
+  );
 
   const suggestedActions = normalizedSuggestedActions(command.suggestedActions);
   if (!suggestedActions.length) {
     warnings.push("Tool call returned no suggested actions; engine provided none.");
+  }
+
+  if (command.type === "execute_combat") {
+    return {
+      ...command,
+      suggestedActions,
+      warnings,
+      checkResult: deriveCombatCheck(command, snapshot),
+    };
   }
 
   if (command.type === "execute_freeform") {
@@ -196,6 +486,7 @@ export function validateTurnCommand(input: {
       mode: "normal",
       reason: command.actionDescription,
       character: snapshot.character,
+      dc: command.dc,
     });
 
     return {

@@ -1,5 +1,7 @@
 # Open World Simulation Migration Plan v3 (Synthesized)
 
+`implementation-temp.md` was the working execution brief for the current runtime/simulation pass. This document remains the canonical long-lived plan and implementation ledger after that pass.
+
 ## Implementation Status
 
 ### Completed In Pass 1
@@ -15,18 +17,30 @@
 - [x] Strict `TIME_MODE_BOUNDS` validation and engine-owned travel-time enforcement
 - [x] Frontend spatial panels for local area, known factions, discovered information, and journal
 
-### Next For Future Agents
+### Completed In Pass 2
 
-- [ ] Implement `execute_combat`
-- [ ] Implement `execute_trade`
-- [ ] Implement `execute_rest`
-- [ ] Add typed `NpcRoutine.triggerCondition` evaluator
-- [ ] Build autonomous simulation tick
-- [ ] Schedule and cancel `FactionMove` reactions
-- [ ] Execute `WorldEvent` payloads
-- [ ] Add `SimulationInverse[]` rollback plumbing for simulation writes
-- [ ] Expand the world-fidelity audit beyond entity-membership validation
-- [ ] Add lazy deep-context fetch budgeting and performance optimization
+- [x] Implement `execute_combat`
+- [x] Implement `execute_trade`
+- [x] Implement `execute_rest`
+- [x] Add typed `NpcRoutine.triggerCondition` evaluation
+- [x] Build the autonomous simulation tick with sequential day-by-day generation for long skips
+- [x] Schedule, cancel, and react to `FactionMove` updates
+- [x] Execute typed `WorldEvent` payloads
+- [x] Add `SimulationInverse[]` rollback plumbing for simulation writes
+- [x] Add explicit information-expiry cascade handling and market restock timing
+- [x] Expand world-fidelity validation beyond entity-membership checks for combat, trade, rest, and freeform boundary policing
+- [x] Ship the bounded fetch-tool loop and slim the per-turn prompt payload to a thin base context
+- [x] Add campaign-start social hydration around the chosen entry region
+- [x] Add runtime unnamed-local tracking via `TemporaryActor`, including promotion to persistent `NPC` when recurrence or remembered-social-graph triggers are hit
+- [x] Add testing-only latest-turn undo behind `ENABLE_TURN_UNDO`
+
+### Still Deferred After This Pass
+
+- [ ] Full prompt-context assembly optimization that avoids loading the full campaign snapshot before composing the thin context
+- [ ] Exhaustive simulation/undo integration coverage beyond the current focused validation and parser tests
+- [ ] Polished-release removal or hard-disablement of player-accessible undo outside QA/testing builds
+- [ ] Full module-version migration workflow beyond the existing `schemaVersion` and `isLocked` fields
+- [ ] Phase 7 character depth as a complete feature
 
 `openWorldTemplateJson` is generation storage only. After campaign creation, runtime reads come from campaign relational tables and `CampaignRuntimeState`.
 

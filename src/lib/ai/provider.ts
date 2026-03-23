@@ -21,6 +21,7 @@ import type {
   CampaignCharacter,
   CharacterTemplate,
   CharacterTemplateDraft,
+  GeneratedDailySchedule,
   GeneratedCampaignOpening,
   GeneratedWorldModuleDraft,
   GeneratedWorldModule,
@@ -28,6 +29,10 @@ import type {
   OpenWorldEntryPoint,
   SpatialPromptContext,
   TurnActionToolCall,
+  TurnFetchToolCall,
+  TurnFetchToolResult,
+  TurnModelToolCall,
+  TurnResolution,
   WorldGenerationStageName,
 } from "@/lib/game/types";
 import {
@@ -56,10 +61,65 @@ type CampaignOpeningInput = {
   previousDraft?: GeneratedCampaignOpening;
 };
 
+type StartingLocalNpcDraft = Omit<GeneratedWorldModule["npcs"][number], "id">;
+
+type StartingLocalHydrationInput = {
+  module: GeneratedWorldModule;
+  character: CharacterTemplate;
+  entryPoint: OpenWorldEntryPoint;
+  opening: GeneratedCampaignOpening;
+  nearbyLocationIds: string[];
+};
+
 type TurnInput = {
   promptContext: SpatialPromptContext;
   character: CampaignCharacter;
   playerAction: string;
+  executeFetchTool: (call: TurnFetchToolCall) => Promise<TurnFetchToolResult>;
+};
+
+type DailyWorldScheduleInput = {
+  campaign: {
+    id: string;
+    title: string;
+    premise: string;
+    tone: string;
+    setting: string;
+    currentLocationId: string;
+    dayStartTime: number;
+    locations: Array<{
+      id: string;
+      name: string;
+      type: string;
+      state: string;
+      controllingFactionId: string | null;
+    }>;
+    factions: Array<{
+      id: string;
+      name: string;
+      type: string;
+      agenda: string;
+      pressureClock: number;
+      resources: unknown;
+    }>;
+    npcs: Array<{
+      id: string;
+      name: string;
+      role: string;
+      factionId: string | null;
+      currentLocationId: string | null;
+      state: string;
+      threatLevel: number;
+    }>;
+    discoveredInformation: Array<{
+      id: string;
+      title: string;
+      summary: string;
+      truthfulness: string;
+      locationId: string | null;
+      factionId: string | null;
+    }>;
+  };
 };
 
 function toFunctionTool(tool: {
@@ -1698,6 +1758,146 @@ const openingTool = {
   input_schema: z.toJSONSchema(generatedCampaignOpeningSchema),
 };
 
+const startingLocalNpcSchema = z.object({
+  name: z.string().trim().min(1),
+  role: z.string().trim().min(1),
+  summary: z.string().trim().min(1),
+  description: z.string().trim().min(1),
+  factionId: z.string().trim().min(1).nullable(),
+  currentLocationId: z.string().trim().min(1),
+  approval: z.number().int().min(-5).max(5),
+  isCompanion: z.literal(false).default(false),
+});
+
+const startingLocalHydrationSchema = z.object({
+  npcs: z.array(startingLocalNpcSchema).min(2).max(6),
+});
+
+const startingLocalHydrationTool = {
+  name: "generate_starting_local_npcs",
+  description: "Generate ordinary persistent locals around a campaign's starting region.",
+  input_schema: z.toJSONSchema(startingLocalHydrationSchema),
+};
+
+const dailyWorldScheduleSchema = z.object({
+  worldEvents: z.array(
+    z.object({
+      locationId: z.string().trim().min(1).nullable(),
+      triggerTime: z.number().int(),
+      description: z.string().trim().min(1),
+      triggerCondition: z.record(z.string(), z.unknown()).nullable().optional(),
+      payload: z.record(z.string(), z.unknown()),
+      cascadeDepth: z.number().int().min(0).max(3).optional(),
+    }),
+  ).max(12),
+  factionMoves: z.array(
+    z.object({
+      factionId: z.string().trim().min(1),
+      scheduledAtTime: z.number().int(),
+      description: z.string().trim().min(1),
+      payload: z.record(z.string(), z.unknown()),
+      cascadeDepth: z.number().int().min(0).max(3).optional(),
+    }),
+  ).max(8),
+});
+
+const dailyWorldScheduleTool = {
+  name: "generate_daily_world_schedule",
+  description: "Generate the next in-world day of world events and faction moves for the living world.",
+  input_schema: z.toJSONSchema(dailyWorldScheduleSchema),
+};
+
+const citedEntitiesInputSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    npcIds: { type: "array", items: { type: "string" } },
+    locationIds: { type: "array", items: { type: "string" } },
+    factionIds: { type: "array", items: { type: "string" } },
+    commodityIds: { type: "array", items: { type: "string" } },
+    informationIds: { type: "array", items: { type: "string" } },
+  },
+  required: ["npcIds", "locationIds", "factionIds", "commodityIds", "informationIds"],
+} satisfies Record<string, unknown>;
+
+const fetchTools = [
+  {
+    name: "fetch_npc_detail",
+    description: "Fetch deeper detail for a visible NPC before choosing the final action.",
+    input_schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        npcId: { type: "string" },
+      },
+      required: ["npcId"],
+    },
+  },
+  {
+    name: "fetch_market_prices",
+    description: "Fetch authoritative commodity prices, stock, and legality for a location before trading.",
+    input_schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        locationId: { type: "string" },
+      },
+      required: ["locationId"],
+    },
+  },
+  {
+    name: "fetch_faction_intel",
+    description: "Fetch faction relations, controlled locations, and visible scheduled moves.",
+    input_schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        factionId: { type: "string" },
+      },
+      required: ["factionId"],
+    },
+  },
+  {
+    name: "fetch_information_detail",
+    description: "Fetch the full content of already discovered information.",
+    input_schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        informationId: { type: "string" },
+      },
+      required: ["informationId"],
+    },
+  },
+  {
+    name: "fetch_information_connections",
+    description: "Follow known information links up to two hops without auto-discovering anything.",
+    input_schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        informationIds: {
+          type: "array",
+          items: { type: "string" },
+        },
+      },
+      required: ["informationIds"],
+    },
+  },
+  {
+    name: "fetch_relationship_history",
+    description: "Fetch the player's prior remembered relationship history with an NPC.",
+    input_schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        npcId: { type: "string" },
+      },
+      required: ["npcId"],
+    },
+  },
+] as const;
+
 const actionTools = [
   {
     name: "execute_travel",
@@ -1712,22 +1912,38 @@ const actionTools = [
         suggestedActions: { type: "array", items: { type: "string" } },
         timeMode: { type: "string", enum: ["travel"] },
         timeElapsed: { type: "number" },
-        citedEntities: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            npcIds: { type: "array", items: { type: "string" } },
-            locationIds: { type: "array", items: { type: "string" } },
-            factionIds: { type: "array", items: { type: "string" } },
-            commodityIds: { type: "array", items: { type: "string" } },
-            informationIds: { type: "array", items: { type: "string" } },
-          },
-          required: ["npcIds", "locationIds", "factionIds", "commodityIds", "informationIds"],
-        },
+        citedEntities: citedEntitiesInputSchema,
       },
       required: [
         "routeEdgeId",
         "targetLocationId",
+        "narration",
+        "suggestedActions",
+        "timeMode",
+        "timeElapsed",
+        "citedEntities",
+      ],
+    },
+  },
+  {
+    name: "execute_combat",
+    description: "Handle direct violence or subdual against a present NPC target.",
+    input_schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        targetNpcId: { type: "string" },
+        approach: { type: "string", enum: ["attack", "subdue", "assassinate"] },
+        memorySummary: { type: "string" },
+        narration: { type: "string" },
+        suggestedActions: { type: "array", items: { type: "string" } },
+        timeMode: { type: "string", enum: ["combat", "exploration"] },
+        timeElapsed: { type: "number" },
+        citedEntities: citedEntitiesInputSchema,
+      },
+      required: [
+        "targetNpcId",
+        "approach",
         "narration",
         "suggestedActions",
         "timeMode",
@@ -1756,18 +1972,7 @@ const actionTools = [
         suggestedActions: { type: "array", items: { type: "string" } },
         timeMode: { type: "string", enum: ["exploration", "downtime", "combat"] },
         timeElapsed: { type: "number" },
-        citedEntities: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            npcIds: { type: "array", items: { type: "string" } },
-            locationIds: { type: "array", items: { type: "string" } },
-            factionIds: { type: "array", items: { type: "string" } },
-            commodityIds: { type: "array", items: { type: "string" } },
-            informationIds: { type: "array", items: { type: "string" } },
-          },
-          required: ["npcIds", "locationIds", "factionIds", "commodityIds", "informationIds"],
-        },
+        citedEntities: citedEntitiesInputSchema,
       },
       required: ["interlocutor", "topic", "narration", "suggestedActions", "timeMode", "timeElapsed", "citedEntities"],
     },
@@ -1788,18 +1993,7 @@ const actionTools = [
         suggestedActions: { type: "array", items: { type: "string" } },
         timeMode: { type: "string", enum: ["exploration", "downtime", "combat"] },
         timeElapsed: { type: "number" },
-        citedEntities: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            npcIds: { type: "array", items: { type: "string" } },
-            locationIds: { type: "array", items: { type: "string" } },
-            factionIds: { type: "array", items: { type: "string" } },
-            commodityIds: { type: "array", items: { type: "string" } },
-            informationIds: { type: "array", items: { type: "string" } },
-          },
-          required: ["npcIds", "locationIds", "factionIds", "commodityIds", "informationIds"],
-        },
+        citedEntities: citedEntitiesInputSchema,
       },
       required: [
         "targetType",
@@ -1828,18 +2022,7 @@ const actionTools = [
         suggestedActions: { type: "array", items: { type: "string" } },
         timeMode: { type: "string", enum: ["exploration", "downtime", "combat"] },
         timeElapsed: { type: "number" },
-        citedEntities: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            npcIds: { type: "array", items: { type: "string" } },
-            locationIds: { type: "array", items: { type: "string" } },
-            factionIds: { type: "array", items: { type: "string" } },
-            commodityIds: { type: "array", items: { type: "string" } },
-            informationIds: { type: "array", items: { type: "string" } },
-          },
-          required: ["npcIds", "locationIds", "factionIds", "commodityIds", "informationIds"],
-        },
+        citedEntities: citedEntitiesInputSchema,
       },
       required: [
         "targetType",
@@ -1865,21 +2048,66 @@ const actionTools = [
         suggestedActions: { type: "array", items: { type: "string" } },
         timeMode: { type: "string", enum: ["exploration", "downtime"] },
         timeElapsed: { type: "number" },
-        citedEntities: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            npcIds: { type: "array", items: { type: "string" } },
-            locationIds: { type: "array", items: { type: "string" } },
-            factionIds: { type: "array", items: { type: "string" } },
-            commodityIds: { type: "array", items: { type: "string" } },
-            informationIds: { type: "array", items: { type: "string" } },
-          },
-          required: ["npcIds", "locationIds", "factionIds", "commodityIds", "informationIds"],
-        },
+        citedEntities: citedEntitiesInputSchema,
       },
       required: [
         "durationMinutes",
+        "narration",
+        "suggestedActions",
+        "timeMode",
+        "timeElapsed",
+        "citedEntities",
+      ],
+    },
+  },
+  {
+    name: "execute_trade",
+    description: "Buy or sell a commodity using an authoritative fetched market price record.",
+    input_schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        action: { type: "string", enum: ["buy", "sell"] },
+        marketPriceId: { type: "string" },
+        commodityId: { type: "string" },
+        quantity: { type: "number" },
+        memorySummary: { type: "string" },
+        narration: { type: "string" },
+        suggestedActions: { type: "array", items: { type: "string" } },
+        timeMode: { type: "string", enum: ["exploration", "downtime"] },
+        timeElapsed: { type: "number" },
+        citedEntities: citedEntitiesInputSchema,
+      },
+      required: [
+        "action",
+        "marketPriceId",
+        "commodityId",
+        "quantity",
+        "narration",
+        "suggestedActions",
+        "timeMode",
+        "timeElapsed",
+        "citedEntities",
+      ],
+    },
+  },
+  {
+    name: "execute_rest",
+    description: "Take a fixed engine-owned light or full rest.",
+    input_schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        restType: { type: "string", enum: ["light", "full"] },
+        memorySummary: { type: "string" },
+        narration: { type: "string" },
+        suggestedActions: { type: "array", items: { type: "string" } },
+        timeMode: { type: "string", enum: ["rest"] },
+        timeElapsed: { type: "number" },
+        citedEntities: citedEntitiesInputSchema,
+      },
+      required: [
+        "restType",
         "narration",
         "suggestedActions",
         "timeMode",
@@ -1909,18 +2137,7 @@ const actionTools = [
         memorySummary: { type: "string" },
         narration: { type: "string" },
         suggestedActions: { type: "array", items: { type: "string" } },
-        citedEntities: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            npcIds: { type: "array", items: { type: "string" } },
-            locationIds: { type: "array", items: { type: "string" } },
-            factionIds: { type: "array", items: { type: "string" } },
-            commodityIds: { type: "array", items: { type: "string" } },
-            informationIds: { type: "array", items: { type: "string" } },
-          },
-          required: ["npcIds", "locationIds", "factionIds", "commodityIds", "informationIds"],
-        },
+        citedEntities: citedEntitiesInputSchema,
       },
       required: [
         "actionDescription",
@@ -1952,6 +2169,8 @@ const actionTools = [
     },
   },
 ];
+
+const turnTools = [...fetchTools, ...actionTools];
 
 function extractToolInput(response: OpenAI.Chat.Completions.ChatCompletion) {
   const toolCall = response.choices[0]?.message?.tool_calls?.[0];
@@ -2002,6 +2221,51 @@ function extractToolInput(response: OpenAI.Chat.Completions.ChatCompletion) {
   };
 }
 
+function normalizeFetchToolCall(input: {
+  toolName: string | null;
+  payload: unknown;
+}): TurnFetchToolCall | null {
+  const { toolName, payload } = input;
+
+  if (!toolName || !payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+
+  const record = payload as Record<string, unknown>;
+
+  if (toolName === "fetch_npc_detail" && typeof record.npcId === "string") {
+    return { type: toolName, npcId: record.npcId.trim() };
+  }
+
+  if (toolName === "fetch_market_prices" && typeof record.locationId === "string") {
+    return { type: toolName, locationId: record.locationId.trim() };
+  }
+
+  if (toolName === "fetch_faction_intel" && typeof record.factionId === "string") {
+    return { type: toolName, factionId: record.factionId.trim() };
+  }
+
+  if (toolName === "fetch_information_detail" && typeof record.informationId === "string") {
+    return { type: toolName, informationId: record.informationId.trim() };
+  }
+
+  if (toolName === "fetch_information_connections" && Array.isArray(record.informationIds)) {
+    return {
+      type: toolName,
+      informationIds: record.informationIds
+        .filter((entry): entry is string => typeof entry === "string")
+        .map((entry) => entry.trim())
+        .filter(Boolean),
+    };
+  }
+
+  if (toolName === "fetch_relationship_history" && typeof record.npcId === "string") {
+    return { type: toolName, npcId: record.npcId.trim() };
+  }
+
+  return null;
+}
+
 function normalizeTurnToolCall(input: {
   toolName: string | null;
   payload: unknown;
@@ -2040,6 +2304,23 @@ function normalizeTurnToolCall(input: {
     type: toolName,
     ...record,
   } as TurnActionToolCall;
+}
+
+function normalizeModelToolCall(input: {
+  toolName: string | null;
+  payload: unknown;
+  promptContext: SpatialPromptContext;
+}): TurnModelToolCall | null {
+  const fetchToolCall = normalizeFetchToolCall({
+    toolName: input.toolName,
+    payload: input.payload,
+  });
+
+  if (fetchToolCall) {
+    return fetchToolCall;
+  }
+
+  return normalizeTurnToolCall(input);
 }
 
 async function runCompletion(options: {
@@ -3986,53 +4267,232 @@ class DungeonMasterClient {
     }
   }
 
-  async runTurn(input: TurnInput): Promise<TurnActionToolCall> {
+  async generateStartingLocalNpcs(
+    input: StartingLocalHydrationInput,
+  ): Promise<StartingLocalNpcDraft[]> {
+    const regionLocationIds = Array.from(
+      new Set([input.entryPoint.startLocationId, ...input.nearbyLocationIds]),
+    ).slice(0, 4);
+    const regionLocations = input.module.locations.filter((location) =>
+      regionLocationIds.includes(location.id),
+    );
+    const existingRegionNpcs = input.module.npcs.filter((npc) =>
+      regionLocationIds.includes(npc.currentLocationId),
+    );
+    const existingNpcNames = new Set(
+      input.module.npcs.map((npc) => npc.name.trim().toLowerCase()).filter(Boolean),
+    );
+    const anchoredFactionIds = new Set(
+      [
+        ...regionLocations
+          .map((location) => location.controllingFactionId)
+          .filter((factionId): factionId is string => Boolean(factionId)),
+        ...existingRegionNpcs
+          .map((npc) => npc.factionId)
+          .filter((factionId): factionId is string => Boolean(factionId)),
+      ].filter(Boolean),
+    );
+    const regionFactions = input.module.factions.filter((faction) => anchoredFactionIds.has(faction.id));
+    const targetCount = Math.min(6, Math.max(3, regionLocations.length + 1));
+
+    try {
+      const response = await runCompletion({
+        system: [
+          "Generate ordinary persistent locals for the starting region of an open-world solo RPG campaign.",
+          "These NPCs are not mythic movers, ornamental quest-givers, or quirky mascots. They are workers, wardens, clerks, haulers, brokers, patrols, repairers, vendors, and household-level operators who make the place feel inhabited.",
+          "Tie every NPC to the immediate social surface around the starting location and nearby hops.",
+          "Use only the exact provided location ids and faction ids.",
+          "Do not duplicate or rename any existing NPCs already present in the region.",
+          "At least one generated NPC must live at the starting location.",
+          "Keep summary and description to one tight sentence each.",
+          `Return exactly ${targetCount} NPCs.`,
+        ].join("\n"),
+        user: [
+          formatPromptBlock("module_summary", summarizeWorld(input.module)),
+          formatPromptBlock("entry_point", input.entryPoint),
+          formatPromptBlock("opening_scene", {
+            activeThreat: input.opening.activeThreat,
+            summary: input.opening.scene.summary,
+            suggestedActions: input.opening.scene.suggestedActions,
+          }),
+          formatPromptBlock(
+            "region_locations",
+            summarizeLocationRefs(regionLocations, { includeKey: false }),
+          ),
+          formatPromptBlock("existing_region_npcs", summarizeNpcRefs(existingRegionNpcs)),
+          formatPromptBlock("region_factions", summarizeFactionRefs(regionFactions, { includeKey: false })),
+          formatPromptBlock("character", {
+            name: input.character.name,
+            archetype: input.character.archetype,
+            backstory: input.character.backstory,
+          }),
+        ].join("\n\n"),
+        tools: [startingLocalHydrationTool],
+        maxTokens: 1400,
+      });
+
+      logOpenRouterResponse("starting_locals.raw_input", {
+        preview: toPreview(response?.input),
+      });
+
+      const parsed = startingLocalHydrationSchema.safeParse(response?.input);
+      if (!parsed.success) {
+        logOpenRouterResponse("starting_locals.schema_failure", {
+          issues: parsed.error.issues,
+          inputPreview: toPreview(response?.input),
+        });
+        throw new Error(`Starting local hydration returned invalid structured data: ${parsed.error.message}`);
+      }
+
+      const issues: string[] = [];
+      const seenNames = new Set<string>();
+      let startingLocationCount = 0;
+
+      for (const npc of parsed.data.npcs) {
+        const normalizedName = npc.name.trim().toLowerCase();
+        if (existingNpcNames.has(normalizedName)) {
+          issues.push(`Generated local ${npc.name} duplicates an existing NPC name.`);
+        }
+        if (seenNames.has(normalizedName)) {
+          issues.push(`Generated local ${npc.name} is duplicated within the hydration batch.`);
+        }
+        if (!regionLocationIds.includes(npc.currentLocationId)) {
+          issues.push(`Generated local ${npc.name} uses an out-of-region location id.`);
+        }
+        if (npc.factionId && !anchoredFactionIds.has(npc.factionId)) {
+          issues.push(`Generated local ${npc.name} uses an unknown region faction id.`);
+        }
+        if (npc.currentLocationId === input.entryPoint.startLocationId) {
+          startingLocationCount += 1;
+        }
+        seenNames.add(normalizedName);
+      }
+
+      if (parsed.data.npcs.length !== targetCount) {
+        issues.push(`Expected ${targetCount} starting locals but received ${parsed.data.npcs.length}.`);
+      }
+
+      if (startingLocationCount < 1) {
+        issues.push("At least one generated local must be anchored at the starting location.");
+      }
+
+      if (issues.length) {
+        logOpenRouterResponse("starting_locals.validation_failure", {
+          issues,
+          inputPreview: toPreview(parsed.data),
+        });
+        throw new Error(`Starting local hydration failed validation: ${issues.join("; ")}`);
+      }
+
+      return parsed.data.npcs.map((npc) => ({
+        ...npc,
+        isCompanion: false,
+      }));
+    } catch (error) {
+      logOpenRouterResponse("starting_locals.error", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      throw new Error(error instanceof Error ? error.message : "Starting local hydration failed.");
+    }
+  }
+
+  async generateDailyWorldSchedule(input: DailyWorldScheduleInput): Promise<GeneratedDailySchedule> {
+    try {
+      const response = await runCompletion({
+        system: [
+          "Generate the next in-world day of world events and faction moves for a living solo RPG campaign.",
+          "The world is alive, but outputs must stay compact and mechanically safe.",
+          "Return only events and faction moves for the next 24 hours, using concise descriptions and minimal payloads.",
+          "Favor reactions to current faction agendas, territory, NPC state, and already discovered player impact.",
+          "Do not invent unknown ids. Use only ids present in the provided campaign state.",
+          "Keep payloads small and typed.",
+        ].join("\n"),
+        user: formatPromptBlock("campaign_state", input.campaign),
+        tools: [dailyWorldScheduleTool],
+        maxTokens: 1800,
+      });
+
+      logOpenRouterResponse("daily_schedule.raw_input", {
+        preview: toPreview(response?.input),
+      });
+
+      const parsed = dailyWorldScheduleSchema.safeParse(response?.input);
+      if (!parsed.success) {
+        logOpenRouterResponse("daily_schedule.schema_failure", {
+          issues: parsed.error.issues,
+          inputPreview: toPreview(response?.input),
+        });
+        throw new Error(`Daily schedule generation returned invalid structured data: ${parsed.error.message}`);
+      }
+
+      return parsed.data as GeneratedDailySchedule;
+    } catch (error) {
+      logOpenRouterResponse("daily_schedule.error", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      throw new Error(error instanceof Error ? error.message : "Daily schedule generation failed.");
+    }
+  }
+
+  async runTurn(input: TurnInput): Promise<TurnResolution> {
     try {
       const baseSystem = [
         "You are the player's senses and action router in a simulated world.",
-        "Use exactly one tool and return only the tool call.",
+        "You may call up to 3 fetch tools before the final action tool.",
+        "After any fetches, end with exactly one action tool or request_clarification.",
         "Do not invent named mechanical entities outside the provided context.",
         "Keep payloads compact: narration should be 1-3 sentences, topic/method/actionDescription should be short phrases, memorySummary should be one short sentence, and suggestedActions should contain at most 3 short actions.",
         "Every executable tool call must include timeMode, timeElapsed, narration, suggestedActions, and citedEntities.",
         "If the player talks to an unnamed local person or bystander implied by the scene, use execute_converse with a short generic interlocutor label such as 'nearest harvester' and leave npcId empty.",
         "Do not redirect an unnamed bystander interaction to a named NPC unless the player's action clearly points to that NPC.",
+        "Use fetch_market_prices before any execute_trade.",
+        "Use execute_combat for attacks, subdual, or assassination attempts against NPCs. Do not hide those actions in execute_freeform.",
+        "Use execute_trade for buy, sell, barter, or price-negotiation actions that clearly trade commodities. Do not hide those actions in execute_freeform.",
+        "Use execute_rest for explicit light or full rest.",
         "Tool routing hierarchy:",
         "1. Use execute_travel when the player clearly moves to a known adjacent node or route.",
-        "2. Use execute_converse when the player addresses, questions, bargains with, or negotiates with a named NPC or an unnamed local speaker.",
-        "3. Use execute_investigate when the player searches, examines closely, tracks evidence, or tries to uncover hidden information.",
-        "4. Use execute_observe when the player is mainly looking, listening, waiting, or taking in the current scene.",
-        "5. Use execute_freeform for a concrete action that does not fit the other tools but can still be resolved safely.",
-        "6. Use request_clarification only if the action is too ambiguous, impossible to map, or missing a required target.",
+        "2. Use execute_combat when the player attacks, subdues, or assassinates a present NPC.",
+        "3. Use execute_trade when the player buys or sells commodities using fetched market data.",
+        "4. Use execute_converse when the player addresses, questions, bargains with, or negotiates with a named NPC or an unnamed local speaker.",
+        "5. Use execute_investigate when the player searches, examines closely, tracks evidence, or tries to uncover hidden information.",
+        "6. Use execute_observe when the player is mainly looking, listening, waiting, or taking in the current scene.",
+        "7. Use execute_rest for explicit light or full rest.",
+        "8. Use execute_freeform only for concrete actions that do not fit the typed tools and do not directly change combat, trade, faction resources, prices, or control.",
+        "9. Use request_clarification only if the action is too ambiguous, impossible to map, or missing a required target.",
       ].join("\n");
-      const user = [
-        formatPromptBlock("action", input.playerAction),
-        formatPromptBlock("context", input.promptContext),
-        formatPromptBlock("character", {
-          name: input.character.name,
-          archetype: input.character.archetype,
-          stats: input.character.stats,
-        }),
-      ].join("\n\n");
 
       let correctionNotes: string | null = null;
+      const fetchedFacts: TurnFetchToolResult[] = [];
 
-      for (let attempt = 1; attempt <= MAX_TURN_ATTEMPTS; attempt += 1) {
+      for (let attempt = 1; attempt <= MAX_TURN_ATTEMPTS + 3; attempt += 1) {
         logOpenRouterResponse("turn.attempt", {
           attempt,
-          maxAttempts: MAX_TURN_ATTEMPTS,
+          maxAttempts: MAX_TURN_ATTEMPTS + 3,
           correctionNotes,
         });
+
+        const user = [
+          formatPromptBlock("action", input.playerAction),
+          formatPromptBlock("context", input.promptContext),
+          formatPromptBlock("character", {
+            name: input.character.name,
+            archetype: input.character.archetype,
+            stats: input.character.stats,
+          }),
+          formatPromptBlock("fetched_facts", fetchedFacts),
+          formatPromptBlock("fetch_budget_remaining", Math.max(0, 3 - fetchedFacts.length)),
+        ].join("\n\n");
 
         const response = await runCompletion({
           system: correctionNotes ? `${baseSystem}\n${correctionNotes}` : baseSystem,
           user,
-          tools: actionTools,
-          maxTokens: 1400,
+          tools: turnTools,
+          maxTokens: 1500,
         });
 
         const toolName = response?.name;
         const inputPayload = response?.input;
-        const normalized = normalizeTurnToolCall({
+        const normalized = normalizeModelToolCall({
           toolName,
           payload: inputPayload,
           promptContext: input.promptContext,
@@ -4047,12 +4507,45 @@ class DungeonMasterClient {
         });
 
         if (normalized) {
+          if (
+            normalized.type === "fetch_npc_detail"
+            || normalized.type === "fetch_market_prices"
+            || normalized.type === "fetch_faction_intel"
+            || normalized.type === "fetch_information_detail"
+            || normalized.type === "fetch_information_connections"
+            || normalized.type === "fetch_relationship_history"
+          ) {
+            if (fetchedFacts.length >= 3) {
+              return {
+                command: {
+                  type: "request_clarification",
+                  question:
+                    "I need more authoritative detail than the current scene summary safely supports. What should I focus on first?",
+                  options: [
+                    "Ask about one NPC",
+                    "Check the market",
+                    "Investigate one clue",
+                    "Take a simpler action",
+                  ],
+                },
+                fetchedFacts,
+              };
+            }
+
+            fetchedFacts.push(await input.executeFetchTool(normalized));
+            correctionNotes = null;
+            continue;
+          }
+
           logOpenRouterResponse("turn.success", {
             attempt,
             toolName,
             inputPreview: toPreview(normalized),
           });
-          return normalized;
+          return {
+            command: normalized,
+            fetchedFacts,
+          };
         }
 
         correctionNotes = [

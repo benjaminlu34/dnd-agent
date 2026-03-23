@@ -88,6 +88,7 @@ model Campaign {
   npcRoutines         NpcRoutine[]
   factionMoves        FactionMove[]
   worldEvents         WorldEvent[]
+  temporaryActors     TemporaryActor[]
 }
 
 model CharacterInstance {
@@ -101,6 +102,22 @@ model CharacterInstance {
   campaign   Campaign          @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   template   CharacterTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
   inventory  ItemInstance[]
+  commodityStacks CharacterCommodityStack[]
+}
+
+model CharacterCommodityStack {
+  id                  String            @id @default(cuid())
+  characterInstanceId String
+  commodityId         String
+  quantity            Int               @default(0)
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+  characterInstance   CharacterInstance @relation(fields: [characterInstanceId], references: [id], onDelete: Cascade)
+  commodity           Commodity         @relation(fields: [commodityId], references: [id], onDelete: Cascade)
+
+  @@unique([characterInstanceId, commodityId])
+  @@index([characterInstanceId])
+  @@index([commodityId])
 }
 
 model ItemTemplate {
@@ -216,6 +233,7 @@ model LocationNode {
   marketPrices         MarketPrice[]
   worldEvents          WorldEvent[]
   npcRoutineTargets    NpcRoutine[]    @relation("NpcRoutineTarget")
+  temporaryActors      TemporaryActor[]
 
   @@index([campaignId])
   @@index([campaignId, controllingFactionId])
@@ -290,6 +308,8 @@ model NPC {
   currentLocationId String?
   approval          Int          @default(0)
   isCompanion       Boolean      @default(false)
+  state             String       @default("active")
+  threatLevel       Int          @default(1)
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
   campaign          Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
@@ -298,6 +318,7 @@ model NPC {
   information       Information[] @relation("InformationSourceNpc")
   marketPrices      MarketPrice[] @relation("VendorNpc")
   npcRoutines       NpcRoutine[]
+  promotedTemporaryActors TemporaryActor[]
 
   @@index([campaignId])
   @@index([campaignId, currentLocationId])
@@ -316,6 +337,7 @@ model Information {
   sourceNpcId      String?
   isDiscovered     Boolean           @default(false)
   discoveredAtTurn Int?
+  expiresAtTime    Int?
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
   campaign         Campaign          @relation(fields: [campaignId], references: [id], onDelete: Cascade)
@@ -327,6 +349,7 @@ model Information {
 
   @@index([campaignId])
   @@index([campaignId, locationId, isDiscovered])
+  @@index([campaignId, expiresAtTime])
 }
 
 model InformationLink {
@@ -355,6 +378,7 @@ model Commodity {
   updatedAt  DateTime      @updatedAt
   campaign   Campaign      @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   marketPrices MarketPrice[]
+  commodityStacks CharacterCommodityStack[]
 
   @@index([campaignId])
 }
@@ -368,6 +392,7 @@ model MarketPrice {
   factionId   String?
   modifier    Float        @default(1.0)
   stock       Int          @default(-1)
+  restockTime Int?
   legalStatus String       @default("legal")
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
@@ -379,6 +404,7 @@ model MarketPrice {
 
   @@unique([campaignId, commodityId, locationId, vendorNpcId])
   @@index([campaignId, locationId])
+  @@index([campaignId, restockTime])
 }
 
 model NpcRoutine {
@@ -397,6 +423,7 @@ model NpcRoutine {
   targetLocation     LocationNode @relation("NpcRoutineTarget", fields: [targetLocationId], references: [id], onDelete: Cascade)
 
   @@index([campaignId, npcId])
+  @@index([campaignId, triggerTimeMinutes])
 }
 
 model FactionMove {
@@ -408,6 +435,7 @@ model FactionMove {
   payload         Json
   isExecuted      Boolean  @default(false)
   isCancelled     Boolean  @default(false)
+  cancellationReason String?
   cascadeDepth    Int      @default(0)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -422,10 +450,12 @@ model WorldEvent {
   campaignId    String
   locationId    String?
   triggerTime   Int
+  triggerCondition Json?
   description   String
   payload       Json
   isProcessed   Boolean      @default(false)
   isCancelled   Boolean      @default(false)
+  cascadesFrom  String?
   cascadeDepth  Int          @default(0)
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
@@ -433,4 +463,30 @@ model WorldEvent {
   location      LocationNode? @relation(fields: [locationId], references: [id], onDelete: SetNull)
 
   @@index([campaignId, triggerTime, isProcessed, isCancelled])
+}
+
+model TemporaryActor {
+  id                  String       @id @default(cuid())
+  campaignId          String
+  label               String
+  currentLocationId   String
+  interactionCount    Int          @default(1)
+  firstSeenAtTurn     Int
+  lastSeenAtTurn      Int
+  lastSeenAtTime      Int
+  recentTopics        String[]     @default([])
+  lastSummary         String?
+  holdsInventory      Boolean      @default(false)
+  affectedWorldState  Boolean      @default(false)
+  isInMemoryGraph     Boolean      @default(false)
+  promotedNpcId       String?
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+  campaign            Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  currentLocation     LocationNode @relation(fields: [currentLocationId], references: [id], onDelete: Cascade)
+  promotedNpc         NPC?         @relation(fields: [promotedNpcId], references: [id], onDelete: SetNull)
+
+  @@index([campaignId, currentLocationId])
+  @@index([campaignId, lastSeenAtTurn])
+  @@unique([campaignId, currentLocationId, label])
 }
