@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type {
   CampaignSnapshot,
+  ExecuteCombatToolCall,
   ExecuteConverseToolCall,
   ExecuteFreeformToolCall,
+  ExecuteInvestigateToolCall,
   ExecuteRestToolCall,
   ExecuteTradeToolCall,
   ExecuteTravelToolCall,
@@ -62,6 +64,11 @@ function createSnapshot(): CampaignSnapshot {
       type: "district",
       summary: "Arrival district.",
       description: null,
+      localTexture: {
+        dominantActivities: ["gate inspections", "portering", "fish hauling"],
+        classTexture: "Rain-soaked laborers and tired watch patrols.",
+        publicHazards: ["slick stones", "crowded carts"],
+      },
       state: "active",
       controllingFactionId: "fac_watch",
       controllingFactionName: "Watch",
@@ -85,6 +92,8 @@ function createSnapshot(): CampaignSnapshot {
         role: "guide",
         summary: "Local guide.",
         description: "Quick-footed guide.",
+        socialLayer: "anchor",
+        isNarrativelyHydrated: true,
         factionId: null,
         factionName: null,
         currentLocationId: "loc_gate",
@@ -255,6 +264,140 @@ test("validateTurnCommand accepts converse actions aimed at an unnamed local", (
   assert.equal(validated.type, "execute_converse");
   assert.equal(validated.interlocutor, "nearest porter");
   assert.equal(validated.npcId, undefined);
+});
+
+test("validateTurnCommand rejects unnamed locals that collide with a present NPC name", () => {
+  const command: ExecuteConverseToolCall = {
+    type: "execute_converse",
+    interlocutor: "  tarin   ash ",
+    topic: "what happened at the gate",
+    narration: "You hail the same name without actually targeting the guide.",
+    suggestedActions: ["Be more specific"],
+    timeMode: "exploration",
+    timeElapsed: 5,
+    citedEntities: {
+      npcIds: [],
+      locationIds: ["loc_gate"],
+      factionIds: [],
+      commodityIds: [],
+      informationIds: [],
+    },
+  };
+
+  assert.throws(
+    () =>
+      validateTurnCommand({
+        snapshot: createSnapshot(),
+        command,
+      }),
+    /present NPC's name/,
+  );
+});
+
+test("validateTurnCommand rejects direct actions against pending promoted NPCs without fetched detail", () => {
+  const snapshot = createSnapshot();
+  snapshot.presentNpcs.push({
+    id: "npc_local_bartender",
+    name: "Dock Bartender",
+    role: "bartender",
+    summary: "A recurring local behind the dockside taproom.",
+    description: "A recurring local known as the bartender.",
+    socialLayer: "promoted_local",
+    isNarrativelyHydrated: false,
+    factionId: null,
+    factionName: null,
+    currentLocationId: "loc_gate",
+    approval: 0,
+    isCompanion: false,
+    state: "active",
+    threatLevel: 1,
+  });
+
+  const command: ExecuteCombatToolCall = {
+    type: "execute_combat",
+    targetNpcId: "npc_local_bartender",
+    approach: "subdue",
+    narration: "You lunge over the bar and try to pin the bartender down.",
+    suggestedActions: ["Demand answers"],
+    timeMode: "combat",
+    timeElapsed: 3,
+    citedEntities: {
+      npcIds: ["npc_local_bartender"],
+      locationIds: ["loc_gate"],
+      factionIds: [],
+      commodityIds: [],
+      informationIds: [],
+    },
+  };
+
+  assert.throws(
+    () =>
+      validateTurnCommand({
+        snapshot,
+        command,
+        fetchedFacts: [],
+      }),
+    /must be fetched/,
+  );
+});
+
+test("validateTurnCommand allows direct NPC actions after hydrated fetch detail", () => {
+  const snapshot = createSnapshot();
+  snapshot.presentNpcs.push({
+    id: "npc_local_bartender",
+    name: "Dock Bartender",
+    role: "bartender",
+    summary: "A recurring local behind the dockside taproom.",
+    description: "A recurring local known as the bartender.",
+    socialLayer: "promoted_local",
+    isNarrativelyHydrated: false,
+    factionId: null,
+    factionName: null,
+    currentLocationId: "loc_gate",
+    approval: 0,
+    isCompanion: false,
+    state: "active",
+    threatLevel: 1,
+  });
+
+  const command: ExecuteInvestigateToolCall = {
+    type: "execute_investigate",
+    targetType: "npc",
+    targetId: "npc_local_bartender",
+    method: "read his tells while he pours",
+    narration: "You study the bartender's reactions while he keeps his hands busy on the taps.",
+    suggestedActions: ["Press on the smuggling rumor"],
+    timeMode: "exploration",
+    timeElapsed: 5,
+    citedEntities: {
+      npcIds: ["npc_local_bartender"],
+      locationIds: ["loc_gate"],
+      factionIds: [],
+      commodityIds: [],
+      informationIds: [],
+    },
+  };
+  const fetchedFacts: TurnFetchToolResult[] = [
+    {
+      type: "fetch_npc_detail",
+      result: {
+        ...snapshot.presentNpcs[1],
+        isNarrativelyHydrated: true,
+        knownInformation: [],
+        relationshipHistory: [],
+        temporaryActorId: "temp_1",
+      },
+    },
+  ];
+
+  const validated = validateTurnCommand({
+    snapshot,
+    command,
+    fetchedFacts,
+  });
+
+  assert.equal(validated.type, "execute_investigate");
+  assert.equal(validated.targetId, "npc_local_bartender");
 });
 
 test("validateTurnCommand rejects converse actions without npcId or interlocutor", () => {

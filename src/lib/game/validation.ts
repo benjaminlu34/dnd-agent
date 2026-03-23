@@ -24,11 +24,62 @@ const REST_DURATIONS = {
   full: 480,
 } as const;
 
+function normalizeLooseText(value: string) {
+  return value.trim().replace(/\s+/g, " ");
+}
+
+function normalizedEntityId(value: string) {
+  const trimmed = value.trim();
+  const parts = trimmed.split(":");
+  return parts.length >= 3 ? parts.slice(2).join(":") : trimmed;
+}
+
+function idsReferToSameEntity(left: string | null | undefined, right: string | null | undefined) {
+  if (!left || !right) {
+    return false;
+  }
+
+  return left === right || normalizedEntityId(left) === normalizedEntityId(right);
+}
+
 function normalizedSuggestedActions(actions: string[] | undefined) {
   return Array.from(new Set((actions ?? []).map((entry) => entry.trim()).filter(Boolean))).slice(
     0,
     4,
   );
+}
+
+function findPresentNpc(snapshot: CampaignSnapshot, npcId: string) {
+  return snapshot.presentNpcs.find((npc) => idsReferToSameEntity(npc.id, npcId)) ?? null;
+}
+
+function npcRequiresDetailFetch(snapshot: CampaignSnapshot, npcId: string) {
+  const npc = findPresentNpc(snapshot, npcId);
+  if (!npc) {
+    return null;
+  }
+
+  return npc.socialLayer === "promoted_local" && !npc.isNarrativelyHydrated ? npc : null;
+}
+
+function hasHydratedNpcDetailFact(fetchedFacts: TurnFetchToolResult[], npcId: string) {
+  return fetchedFacts.some(
+    (fact) =>
+      fact.type === "fetch_npc_detail"
+      && idsReferToSameEntity(fact.result.id, npcId)
+      && fact.result.isNarrativelyHydrated,
+  );
+}
+
+function assertNpcDetailFetchedIfRequired(
+  snapshot: CampaignSnapshot,
+  npcId: string,
+  fetchedFacts: TurnFetchToolResult[],
+) {
+  const npc = npcRequiresDetailFetch(snapshot, npcId);
+  if (npc && !hasHydratedNpcDetailFact(fetchedFacts, npc.id)) {
+    throw new Error(`NPC detail must be fetched before acting on ${npc.name}.`);
+  }
 }
 
 function fetchedMarketPrices(fetchedFacts: TurnFetchToolResult[]) {
@@ -231,31 +282,44 @@ function validateInteractionTarget(
 ) {
   if (command.type === "execute_converse") {
     if (command.npcId) {
-      if (!snapshot.presentNpcs.some((npc) => npc.id === command.npcId)) {
+      if (!findPresentNpc(snapshot, command.npcId)) {
         throw new Error("Cannot converse with an NPC who is not present.");
       }
+      assertNpcDetailFetchedIfRequired(snapshot, command.npcId, fetchedFacts);
     } else if (!command.interlocutor.trim()) {
       throw new Error("Converse actions without npcId must name the local interlocutor.");
+    } else {
+      const interlocutor = normalizeLooseText(command.interlocutor).toLowerCase();
+      if (
+        snapshot.presentNpcs.some(
+          (npc) => normalizeLooseText(npc.name).toLowerCase() === interlocutor,
+        )
+      ) {
+        throw new Error("Unnamed local labels cannot reuse a present NPC's name.");
+      }
     }
   }
 
   if (command.type === "execute_investigate" && command.targetType === "npc") {
-    if (!snapshot.presentNpcs.some((npc) => npc.id === command.targetId)) {
+    if (!findPresentNpc(snapshot, command.targetId)) {
       throw new Error("Cannot investigate an NPC who is not present.");
     }
+    assertNpcDetailFetchedIfRequired(snapshot, command.targetId, fetchedFacts);
   }
 
   if (command.type === "execute_observe" && command.targetType === "npc") {
-    if (!snapshot.presentNpcs.some((npc) => npc.id === command.targetId)) {
+    if (!findPresentNpc(snapshot, command.targetId)) {
       throw new Error("Cannot observe an NPC who is not present.");
     }
+    assertNpcDetailFetchedIfRequired(snapshot, command.targetId, fetchedFacts);
   }
 
   if (command.type === "execute_combat") {
-    const target = snapshot.presentNpcs.find((npc) => npc.id === command.targetNpcId);
+    const target = findPresentNpc(snapshot, command.targetNpcId);
     if (!target) {
       throw new Error("Combat target must be present.");
     }
+    assertNpcDetailFetchedIfRequired(snapshot, command.targetNpcId, fetchedFacts);
     if (target.state === "dead") {
       throw new Error("Combat target is already dead.");
     }
@@ -337,7 +401,7 @@ function validateFreeform(command: ExecuteFreeformToolCall) {
 }
 
 function deriveCombatCheck(command: ExecuteCombatToolCall, snapshot: CampaignSnapshot) {
-  const target = snapshot.presentNpcs.find((npc) => npc.id === command.targetNpcId);
+  const target = findPresentNpc(snapshot, command.targetNpcId);
   if (!target) {
     throw new Error("Combat target must be present.");
   }

@@ -529,12 +529,19 @@ export type CampaignRuntimeState = {
   lastActionSummary: string | null;
 };
 
+export type LocalTextureSummary = {
+  dominantActivities: string[];
+  classTexture: string;
+  publicHazards: string[];
+};
+
 export type LocationSummary = {
   id: string;
   name: string;
   type: string;
   summary: string;
   description: string | null;
+  localTexture: LocalTextureSummary | null;
   state: string;
   controllingFactionId: string | null;
   controllingFactionName: string | null;
@@ -574,6 +581,8 @@ export type NpcSummary = {
   role: string;
   summary: string;
   description: string;
+  socialLayer: "anchor" | "starting_local" | "promoted_local";
+  isNarrativelyHydrated: boolean;
   factionId: string | null;
   factionName: string | null;
   currentLocationId: string | null;
@@ -629,7 +638,19 @@ export type RecentLocalEventSummary = {
   minutesAgo: number;
 };
 
-export type PromptNpcSummary = Pick<NpcSummary, "id" | "name" | "role">;
+export type RecentUnnamedLocalSummary = {
+  label: string;
+  interactionCount: number;
+  lastSummary: string | null;
+  lastSeenAtTurn: number;
+};
+
+export type PromptNpcSummary = {
+  id: string;
+  name: string;
+  role: string;
+  requiresDetailFetch: boolean;
+};
 
 export type PromptInformationSummary = Pick<
   InformationSummary,
@@ -715,10 +736,12 @@ export type SpatialPromptContext = {
   currentLocation: Pick<LocationSummary, "id" | "name" | "type" | "summary" | "state">;
   adjacentRoutes: RouteSummary[];
   presentNpcs: PromptNpcSummary[];
+  recentUnnamedLocals: RecentUnnamedLocalSummary[];
   recentLocalEvents: RecentLocalEventSummary[];
   recentTurnLedger: string[];
   discoveredInformation: PromptInformationSummary[];
   inventory: PromptInventoryItem[];
+  localTexture: LocalTextureSummary | null;
   globalTime: number;
   timeOfDay: string;
   dayCount: number;
@@ -789,6 +812,21 @@ export type NpcDetail = NpcSummary & {
   knownInformation: InformationSummary[];
   relationshipHistory: MemoryRecord[];
   temporaryActorId: string | null;
+};
+
+export type PromotedNpcHydrationDraft = {
+  summary: string;
+  description: string;
+  factionId: string | null;
+  information: Array<{
+    title: string;
+    summary: string;
+    content: string;
+    truthfulness: InformationSummary["truthfulness"];
+    accessibility: InformationAccessibility;
+    locationId: string | null;
+    factionId: string | null;
+  }>;
 };
 
 export type RequestClarificationToolCall = {

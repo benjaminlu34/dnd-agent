@@ -25,8 +25,10 @@ import type {
   GeneratedCampaignOpening,
   GeneratedWorldModuleDraft,
   GeneratedWorldModule,
+  LocalTextureSummary,
   OpenWorldGenerationArtifacts,
   OpenWorldEntryPoint,
+  PromotedNpcHydrationDraft,
   SpatialPromptContext,
   TurnActionToolCall,
   TurnFetchToolCall,
@@ -51,6 +53,7 @@ import {
   getWorldGenerationStageRunningMessage,
   type WorldGenerationProgressUpdate,
 } from "@/lib/game/world-generation-progress";
+import { FetchSynchronizationError } from "@/lib/game/errors";
 
 type CampaignOpeningInput = {
   module: GeneratedWorldModule;
@@ -69,6 +72,57 @@ type StartingLocalHydrationInput = {
   entryPoint: OpenWorldEntryPoint;
   opening: GeneratedCampaignOpening;
   nearbyLocationIds: string[];
+};
+
+type PromotedNpcHydrationInput = {
+  npc: {
+    id: string;
+    name: string;
+    role: string;
+    summary: string;
+    description: string;
+  };
+  location: {
+    id: string;
+    name: string;
+    type: string;
+    summary: string;
+    state: string;
+    localTexture: LocalTextureSummary | null;
+  };
+  localFactions: Array<{
+    id: string;
+    name: string;
+    type: string;
+    summary: string;
+    agenda: string;
+  }>;
+  localNpcs: Array<{
+    id: string;
+    name: string;
+    role: string;
+    factionId: string | null;
+  }>;
+  localInformation: Array<{
+    id: string;
+    title: string;
+    summary: string;
+    truthfulness: string;
+    accessibility: string;
+    factionId: string | null;
+  }>;
+  nearbyRoutes: Array<{
+    id: string;
+    targetLocationName: string;
+    travelTimeMinutes: number;
+    currentStatus: string;
+  }>;
+  temporaryActor: {
+    label: string;
+    interactionCount: number;
+    recentTopics: string[];
+    lastSummary: string | null;
+  };
 };
 
 type TurnInput = {
@@ -487,6 +541,7 @@ function missingAiConfigurationError() {
 
 const WORLD_GEN_LOG_DIR = path.resolve(process.cwd(), "world_gen_logs");
 const WORLD_GEN_LOG_FILE = path.join(WORLD_GEN_LOG_DIR, "latest.log");
+const NARRATION_LOG_FILE = path.join(WORLD_GEN_LOG_DIR, "narration.log");
 
 let activeWorldGenLogFile: string | null = null;
 let preferredOpenRouterKeyIndex = 0;
@@ -500,6 +555,15 @@ function appendWorldGenerationLog(message: string) {
     appendFileSync(activeWorldGenLogFile, `${message}\n`, "utf8");
   } catch {
     // Ignore log write failures so generation itself can continue.
+  }
+}
+
+function appendNarrationLog(message: string) {
+  try {
+    mkdirSync(WORLD_GEN_LOG_DIR, { recursive: true });
+    appendFileSync(NARRATION_LOG_FILE, `${message}\n`, "utf8");
+  } catch {
+    // Ignore log write failures so narration can continue.
   }
 }
 
@@ -563,6 +627,18 @@ function logOpenRouterResponse(stage: string, details: Record<string, unknown>) 
 
   console.info(message);
   appendWorldGenerationLog(message);
+}
+
+function logNarrationDebug(stage: string, details: Record<string, unknown>) {
+  const timestamp = new Date().toISOString();
+  const message = [
+    `[narration.debug] ${timestamp}`,
+    `stage=${stage}`,
+    JSON.stringify(details, null, 2),
+    "--- end ---",
+  ].join("\n");
+
+  appendNarrationLog(message);
 }
 
 function toPreview(value: unknown, maxLength = 1200) {
@@ -980,6 +1056,96 @@ function formatPromptBlock(tag: string, value: unknown) {
 function formatFinalInstruction(lines: string | string[]) {
   const instructionLines = Array.isArray(lines) ? lines : [lines];
   return ["---", ...instructionLines].join("\n");
+}
+
+function unscopedEntityId(value: string) {
+  const trimmed = value.trim();
+  const parts = trimmed.split(":");
+  return parts.length >= 3 ? parts.slice(2).join(":") : trimmed;
+}
+
+function normalizeScopedEntityId(value: string, entitySegment: string, entityPrefix: string) {
+  const trimmed = value.trim();
+
+  if (!trimmed) {
+    return trimmed;
+  }
+
+  const expectedSegment = `:${entitySegment}:`;
+  if (trimmed.includes(expectedSegment)) {
+    return trimmed;
+  }
+
+  const parts = trimmed.split(":");
+  if (parts.length === 2 && parts[1]?.startsWith(`${entityPrefix}_`)) {
+    return `${parts[0]}:${entitySegment}:${parts[1]}`;
+  }
+
+  return trimmed;
+}
+
+function idsReferToSameEntity(left: string | null | undefined, right: string | null | undefined) {
+  if (!left || !right) {
+    return false;
+  }
+
+  return left === right || unscopedEntityId(left) === unscopedEntityId(right);
+}
+
+function canonicalizeRecentUnnamedLocalLabel(
+  label: string,
+  promptContext: SpatialPromptContext,
+) {
+  const normalized = label.trim().replace(/\s+/g, " ");
+  if (!normalized) {
+    return normalized;
+  }
+
+  const match = promptContext.recentUnnamedLocals.find(
+    (entry) => entry.label.trim().toLowerCase() === normalized.toLowerCase(),
+  );
+
+  return match?.label ?? normalized;
+}
+
+function hasHydratedNpcDetailFact(
+  fetchedFacts: TurnFetchToolResult[],
+  npcId: string,
+) {
+  return fetchedFacts.some(
+    (fact) =>
+      fact.type === "fetch_npc_detail"
+      && idsReferToSameEntity(fact.result.id, npcId)
+      && fact.result.isNarrativelyHydrated,
+  );
+}
+
+function findNpcRequiringDetailFetch(
+  command: TurnActionToolCall,
+  promptContext: SpatialPromptContext,
+) {
+  const findPresentNpc = (npcId: string) =>
+    promptContext.presentNpcs.find((npc) => idsReferToSameEntity(npc.id, npcId)) ?? null;
+
+  if (command.type === "execute_converse" && command.npcId) {
+    const npc = findPresentNpc(command.npcId);
+    return npc?.requiresDetailFetch ? npc : null;
+  }
+
+  if (command.type === "execute_combat") {
+    const npc = findPresentNpc(command.targetNpcId);
+    return npc?.requiresDetailFetch ? npc : null;
+  }
+
+  if (
+    (command.type === "execute_investigate" || command.type === "execute_observe")
+    && command.targetType === "npc"
+  ) {
+    const npc = findPresentNpc(command.targetId);
+    return npc?.requiresDetailFetch ? npc : null;
+  }
+
+  return null;
 }
 
 function formatCorrectionNotes(stage: WorldGenerationStageName, category: StageValidation["category"], issues: string[]) {
@@ -1758,6 +1924,29 @@ const openingTool = {
   input_schema: z.toJSONSchema(generatedCampaignOpeningSchema),
 };
 
+const promotedNpcHydrationSchema = z.object({
+  summary: z.string().trim().min(1),
+  description: z.string().trim().min(1),
+  factionId: z.string().trim().min(1).nullable(),
+  information: z.array(
+    z.object({
+      title: z.string().trim().min(1),
+      summary: z.string().trim().min(1),
+      content: z.string().trim().min(1),
+      truthfulness: z.enum(["true", "partial", "false", "outdated"]),
+      accessibility: z.enum(["public", "guarded", "secret"]),
+      locationId: z.string().trim().min(1).nullable(),
+      factionId: z.string().trim().min(1).nullable(),
+    }),
+  ).max(2),
+});
+
+const promotedNpcHydrationTool = {
+  name: "hydrate_promoted_npc",
+  description: "Hydrate a promoted local NPC with grounded summary, description, and optional local leads.",
+  input_schema: z.toJSONSchema(promotedNpcHydrationSchema),
+};
+
 const startingLocalNpcSchema = z.object({
   name: z.string().trim().min(1),
   role: z.string().trim().min(1),
@@ -2234,19 +2423,31 @@ function normalizeFetchToolCall(input: {
   const record = payload as Record<string, unknown>;
 
   if (toolName === "fetch_npc_detail" && typeof record.npcId === "string") {
-    return { type: toolName, npcId: record.npcId.trim() };
+    return {
+      type: toolName,
+      npcId: normalizeScopedEntityId(record.npcId, "npc", "npc"),
+    };
   }
 
   if (toolName === "fetch_market_prices" && typeof record.locationId === "string") {
-    return { type: toolName, locationId: record.locationId.trim() };
+    return {
+      type: toolName,
+      locationId: normalizeScopedEntityId(record.locationId, "location", "loc"),
+    };
   }
 
   if (toolName === "fetch_faction_intel" && typeof record.factionId === "string") {
-    return { type: toolName, factionId: record.factionId.trim() };
+    return {
+      type: toolName,
+      factionId: normalizeScopedEntityId(record.factionId, "faction", "fac"),
+    };
   }
 
   if (toolName === "fetch_information_detail" && typeof record.informationId === "string") {
-    return { type: toolName, informationId: record.informationId.trim() };
+    return {
+      type: toolName,
+      informationId: normalizeScopedEntityId(record.informationId, "information", "info"),
+    };
   }
 
   if (toolName === "fetch_information_connections" && Array.isArray(record.informationIds)) {
@@ -2254,13 +2455,16 @@ function normalizeFetchToolCall(input: {
       type: toolName,
       informationIds: record.informationIds
         .filter((entry): entry is string => typeof entry === "string")
-        .map((entry) => entry.trim())
+        .map((entry) => normalizeScopedEntityId(entry, "information", "info"))
         .filter(Boolean),
     };
   }
 
   if (toolName === "fetch_relationship_history" && typeof record.npcId === "string") {
-    return { type: toolName, npcId: record.npcId.trim() };
+    return {
+      type: toolName,
+      npcId: normalizeScopedEntityId(record.npcId, "npc", "npc"),
+    };
   }
 
   return null;
@@ -2281,14 +2485,17 @@ function normalizeTurnToolCall(input: {
 
   if (toolName === "execute_converse") {
     const npcId =
-      typeof record.npcId === "string" && record.npcId.trim() ? record.npcId.trim() : undefined;
+      typeof record.npcId === "string" && record.npcId.trim()
+        ? normalizeScopedEntityId(record.npcId, "npc", "npc")
+        : undefined;
     const namedNpc = npcId
-      ? promptContext.presentNpcs.find((npc) => npc.id === npcId) ?? null
+      ? promptContext.presentNpcs.find((npc) => idsReferToSameEntity(npc.id, npcId)) ?? null
       : null;
-    const interlocutor =
-      typeof record.interlocutor === "string" && record.interlocutor.trim()
-        ? record.interlocutor.trim()
-        : namedNpc?.name ?? "unnamed local";
+    const interlocutor = npcId
+      ? namedNpc?.name ?? "unnamed local"
+      : typeof record.interlocutor === "string" && record.interlocutor.trim()
+        ? canonicalizeRecentUnnamedLocalLabel(record.interlocutor, promptContext)
+        : "unnamed local";
 
     return {
       type: toolName,
@@ -2297,6 +2504,64 @@ function normalizeTurnToolCall(input: {
       npcId,
       approvalDelta:
         npcId && typeof record.approvalDelta === "number" ? record.approvalDelta : undefined,
+    } as TurnActionToolCall;
+  }
+
+  if (toolName === "execute_combat" && typeof record.targetNpcId === "string") {
+    return {
+      type: toolName,
+      ...record,
+      targetNpcId: normalizeScopedEntityId(record.targetNpcId, "npc", "npc"),
+    } as TurnActionToolCall;
+  }
+
+  if (toolName === "execute_travel" && typeof record.targetLocationId === "string") {
+    return {
+      type: toolName,
+      ...record,
+      targetLocationId: normalizeScopedEntityId(record.targetLocationId, "location", "loc"),
+    } as TurnActionToolCall;
+  }
+
+  if (
+    toolName === "execute_investigate"
+    && typeof record.targetType === "string"
+    && typeof record.targetId === "string"
+  ) {
+    const targetId =
+      record.targetType === "npc"
+        ? normalizeScopedEntityId(record.targetId, "npc", "npc")
+        : record.targetType === "location"
+          ? normalizeScopedEntityId(record.targetId, "location", "loc")
+          : record.targetType === "information"
+            ? normalizeScopedEntityId(record.targetId, "information", "info")
+            : record.targetId.trim();
+
+    return {
+      type: toolName,
+      ...record,
+      targetId,
+    } as TurnActionToolCall;
+  }
+
+  if (
+    toolName === "execute_observe"
+    && typeof record.targetType === "string"
+    && typeof record.targetId === "string"
+  ) {
+    const targetId =
+      record.targetType === "npc"
+        ? normalizeScopedEntityId(record.targetId, "npc", "npc")
+        : record.targetType === "location"
+          ? normalizeScopedEntityId(record.targetId, "location", "loc")
+          : record.targetType === "faction"
+            ? normalizeScopedEntityId(record.targetId, "faction", "fac")
+            : record.targetId.trim();
+
+    return {
+      type: toolName,
+      ...record,
+      targetId,
     } as TurnActionToolCall;
   }
 
@@ -4188,57 +4453,68 @@ class DungeonMasterClient {
     const seededInformation = input.module.information.filter((info) =>
       input.entryPoint.initialInformationIds.includes(info.id),
     );
+    const system = [
+      "Write the opening scene for a chosen entry point in an open-world solo RPG.",
+      "Stay inside the selected entry-point bubble and do not invent off-screen mechanical facts.",
+      "Open on immediate pressure, sensory detail, and a situation a normal person can act on right now.",
+      "Avoid prophecy, trailer voiceover, destiny framing, and broad setting-summary prose.",
+      "Scene summary must be 40 words or fewer.",
+      "Return narration, an active threat, a scene summary, and exact ids for the starting location, present NPCs, and cited information via the provided tool schema.",
+    ].join("\n");
+    const user = [
+      formatPromptBlock("module_summary", summarizeWorld(input.module)),
+      formatPromptBlock(
+        "generation_artifacts",
+        input.artifacts
+            ? {
+              worldBible: {
+                worldOverview: input.artifacts.worldBible.worldOverview,
+                immersionAnchors: input.artifacts.worldBible.immersionAnchors,
+                competingExplanations: input.artifacts.worldBible.explanationThreads,
+              },
+              regionalLife: input.artifacts.regionalLife.locations.filter(
+                (entry) => idsReferToSameEntity(entry.locationId, input.entryPoint.startLocationId),
+              ),
+              entryContext: input.artifacts.entryContexts.entryPoints.find(
+                (entry) => entry.id === input.entryPoint.id,
+              ),
+            }
+          : null,
+      ),
+      formatPromptBlock("entry_point", input.entryPoint),
+      formatPromptBlock("start_location", location),
+      formatPromptBlock("present_npcs", presentNpcs),
+      formatPromptBlock(
+        "seeded_information",
+        seededInformation.map((entry) => ({
+          id: entry.id,
+          title: entry.title,
+          summary: entry.summary,
+        })),
+      ),
+      formatPromptBlock("character", {
+        name: input.character.name,
+        archetype: input.character.archetype,
+        backstory: input.character.backstory,
+      }),
+      formatPromptBlock("prompt", input.prompt ?? null),
+      formatPromptBlock("previous_draft", input.previousDraft ?? null),
+    ].join("\n\n");
 
     try {
+      logNarrationDebug("opening.request", {
+        system,
+        user,
+      });
+
       const response = await runCompletion({
-        system: [
-          "Write the opening scene for a chosen entry point in an open-world solo RPG.",
-          "Stay inside the selected entry-point bubble and do not invent off-screen mechanical facts.",
-          "Open on immediate pressure, sensory detail, and a situation a normal person can act on right now.",
-          "Avoid prophecy, trailer voiceover, destiny framing, and broad setting-summary prose.",
-          "Scene summary must be 40 words or fewer.",
-          "Return narration, an active threat, a scene summary, and exact ids for the starting location, present NPCs, and cited information via the provided tool schema.",
-        ].join("\n"),
-        user: [
-          formatPromptBlock("module_summary", summarizeWorld(input.module)),
-          formatPromptBlock(
-            "generation_artifacts",
-            input.artifacts
-                ? {
-                  worldBible: {
-                    worldOverview: input.artifacts.worldBible.worldOverview,
-                    immersionAnchors: input.artifacts.worldBible.immersionAnchors,
-                    competingExplanations: input.artifacts.worldBible.explanationThreads,
-                  },
-                  regionalLife: input.artifacts.regionalLife.locations.filter(
-                    (entry) => entry.locationId === input.entryPoint.startLocationId,
-                  ),
-                  entryContext: input.artifacts.entryContexts.entryPoints.find(
-                    (entry) => entry.id === input.entryPoint.id,
-                  ),
-                }
-              : null,
-          ),
-          formatPromptBlock("entry_point", input.entryPoint),
-          formatPromptBlock("start_location", location),
-          formatPromptBlock("present_npcs", presentNpcs),
-          formatPromptBlock(
-            "seeded_information",
-            seededInformation.map((entry) => ({
-              id: entry.id,
-              title: entry.title,
-              summary: entry.summary,
-            })),
-          ),
-          formatPromptBlock("character", {
-            name: input.character.name,
-            archetype: input.character.archetype,
-            backstory: input.character.backstory,
-          }),
-          formatPromptBlock("prompt", input.prompt ?? null),
-          formatPromptBlock("previous_draft", input.previousDraft ?? null),
-        ].join("\n\n"),
+        system,
+        user,
         tools: [openingTool],
+      });
+
+      logNarrationDebug("opening.raw_input", {
+        preview: toPreview(response?.input),
       });
 
       logOpenRouterResponse("opening.raw_input", {
@@ -4257,10 +4533,16 @@ class DungeonMasterClient {
       logOpenRouterResponse("opening.success", {
         preview: toPreview(parsed.data),
       });
+      logNarrationDebug("opening.success", {
+        preview: toPreview(parsed.data),
+      });
 
       return parsed.data;
     } catch (error) {
       logOpenRouterResponse("opening.error", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      logNarrationDebug("opening.error", {
         message: error instanceof Error ? error.message : String(error),
       });
       throw new Error(error instanceof Error ? error.message : "Opening generation failed.");
@@ -4303,7 +4585,7 @@ class DungeonMasterClient {
           "Tie every NPC to the immediate social surface around the starting location and nearby hops.",
           "Use only the exact provided location ids and faction ids.",
           "Do not duplicate or rename any existing NPCs already present in the region.",
-          "At least one generated NPC must live at the starting location.",
+          "At least two generated NPCs must live at the starting location.",
           "Keep summary and description to one tight sentence each.",
           `Return exactly ${targetCount} NPCs.`,
         ].join("\n"),
@@ -4372,8 +4654,8 @@ class DungeonMasterClient {
         issues.push(`Expected ${targetCount} starting locals but received ${parsed.data.npcs.length}.`);
       }
 
-      if (startingLocationCount < 1) {
-        issues.push("At least one generated local must be anchored at the starting location.");
+      if (startingLocationCount < 2) {
+        issues.push("At least two generated locals must be anchored at the starting location.");
       }
 
       if (issues.length) {
@@ -4393,6 +4675,55 @@ class DungeonMasterClient {
         message: error instanceof Error ? error.message : String(error),
       });
       throw new Error(error instanceof Error ? error.message : "Starting local hydration failed.");
+    }
+  }
+
+  async hydratePromotedNpc(input: PromotedNpcHydrationInput): Promise<PromotedNpcHydrationDraft> {
+    try {
+      const response = await runCompletion({
+        system: [
+          "Hydrate a promoted recurring local in an open-world solo RPG.",
+          "This NPC is already mechanically real. Your job is to make them narratively grounded without inventing new world entities.",
+          "Treat npc.role, npc.summary, npc.description, temporary_actor_memory.label, temporary_actor_memory.recentTopics, and temporary_actor_memory.lastSummary as prior facts from earlier play.",
+          "Refine and deepen those prior facts. Do not replace the NPC with a different occupation, social niche, or implied personality.",
+          "If the label and prior summaries imply a specific kind of local, preserve that identity and make it feel more concrete rather than recasting them.",
+          "Use only the provided location id, local faction ids, nearby route names, and referenced local NPCs/information.",
+          "Keep the NPC ordinary and socially legible: worker, fixer, clerk, guard, hauler, repairer, vendor, lookout, or another believable local role.",
+          "Let the NPC's current concern grow naturally from the prior interaction topics or the local texture whenever possible.",
+          "Write one tight summary sentence and one tight description paragraph that bakes in the NPC's current concern and how the player already crosses paths with them.",
+          "If no listed faction fits naturally, return factionId as null.",
+          "Return 0 to 2 information leads. These leads must stay local, grounded, and actionable.",
+          "Do not invent new named factions, locations, commodities, or personal names beyond the provided NPC.",
+        ].join("\n"),
+        user: [
+          formatPromptBlock("npc", input.npc),
+          formatPromptBlock("identity_seed", {
+            priorRole: input.npc.role,
+            priorSummary: input.npc.summary,
+            priorDescription: input.npc.description,
+            originalLabel: input.temporaryActor.label,
+            priorTopics: input.temporaryActor.recentTopics,
+            priorLastSummary: input.temporaryActor.lastSummary,
+          }),
+          formatPromptBlock("location", input.location),
+          formatPromptBlock("local_factions", input.localFactions),
+          formatPromptBlock("local_npcs", input.localNpcs),
+          formatPromptBlock("local_information", input.localInformation),
+          formatPromptBlock("nearby_routes", input.nearbyRoutes),
+          formatPromptBlock("temporary_actor_memory", input.temporaryActor),
+        ].join("\n\n"),
+        tools: [promotedNpcHydrationTool],
+        maxTokens: 1200,
+      });
+
+      const parsed = promotedNpcHydrationSchema.safeParse(response?.input);
+      if (!parsed.success) {
+        throw new Error(`Promoted NPC hydration returned invalid structured data: ${parsed.error.message}`);
+      }
+
+      return parsed.data;
+    } catch (error) {
+      throw new Error(error instanceof Error ? error.message : "Promoted NPC hydration failed.");
     }
   }
 
@@ -4443,8 +4774,11 @@ class DungeonMasterClient {
         "Do not invent named mechanical entities outside the provided context.",
         "Keep payloads compact: narration should be 1-3 sentences, topic/method/actionDescription should be short phrases, memorySummary should be one short sentence, and suggestedActions should contain at most 3 short actions.",
         "Every executable tool call must include timeMode, timeElapsed, narration, suggestedActions, and citedEntities.",
-        "If the player talks to an unnamed local person or bystander implied by the scene, use execute_converse with a short generic interlocutor label such as 'nearest harvester' and leave npcId empty.",
+        "If the player talks to an unnamed local person or bystander implied by the scene, use execute_converse with a short lower-case descriptive role label and leave npcId empty.",
+        "If the player continues a conversation with an unnamed local from recentUnnamedLocals, reuse that exact label and still leave npcId empty.",
         "Do not redirect an unnamed bystander interaction to a named NPC unless the player's action clearly points to that NPC.",
+        "When inventing a brand-new unnamed local, make the label and implied role plausible for localTexture. Do not invent scene actors with no basis in that local texture.",
+        "If a present NPC has requiresDetailFetch=true, call fetch_npc_detail for that NPC before any detailed interaction, investigation, observation, or combat targeting that NPC.",
         "Use fetch_market_prices before any execute_trade.",
         "Use execute_combat for attacks, subdual, or assassination attempts against NPCs. Do not hide those actions in execute_freeform.",
         "Use execute_trade for buy, sell, barter, or price-negotiation actions that clearly trade commodities. Do not hide those actions in execute_freeform.",
@@ -4482,9 +4816,17 @@ class DungeonMasterClient {
           formatPromptBlock("fetched_facts", fetchedFacts),
           formatPromptBlock("fetch_budget_remaining", Math.max(0, 3 - fetchedFacts.length)),
         ].join("\n\n");
+        const system = correctionNotes ? `${baseSystem}\n${correctionNotes}` : baseSystem;
+
+        logNarrationDebug("turn.request", {
+          attempt,
+          correctionNotes,
+          system,
+          user,
+        });
 
         const response = await runCompletion({
-          system: correctionNotes ? `${baseSystem}\n${correctionNotes}` : baseSystem,
+          system,
           user,
           tools: turnTools,
           maxTokens: 1500,
@@ -4505,6 +4847,13 @@ class DungeonMasterClient {
           likelyTruncated: response?.likelyTruncated ?? false,
           inputPreview: toPreview(inputPayload),
         });
+        logNarrationDebug("turn.raw_input", {
+          attempt,
+          toolName,
+          finishReason: response?.finishReason ?? null,
+          likelyTruncated: response?.likelyTruncated ?? false,
+          inputPreview: toPreview(inputPayload),
+        });
 
         if (normalized) {
           if (
@@ -4516,6 +4865,10 @@ class DungeonMasterClient {
             || normalized.type === "fetch_relationship_history"
           ) {
             if (fetchedFacts.length >= 3) {
+              logNarrationDebug("turn.fetch_budget_exceeded", {
+                attempt,
+                fetchedFactsPreview: toPreview(fetchedFacts),
+              });
               return {
                 command: {
                   type: "request_clarification",
@@ -4532,8 +4885,52 @@ class DungeonMasterClient {
               };
             }
 
-            fetchedFacts.push(await input.executeFetchTool(normalized));
+            let fetchedResult: TurnFetchToolResult;
+            try {
+              fetchedResult = await input.executeFetchTool(normalized);
+            } catch (error) {
+              if (
+                error instanceof FetchSynchronizationError
+                || (error instanceof Error && error.name === "FetchSynchronizationError")
+              ) {
+                logNarrationDebug("turn.fetch_sync_conflict", {
+                  attempt,
+                  toolName: normalized.type,
+                  npcId: normalized.type === "fetch_npc_detail" ? normalized.npcId : null,
+                  message: error instanceof Error ? error.message : String(error),
+                });
+
+                return {
+                  command: {
+                    type: "request_clarification",
+                    question:
+                      "That person's details are still loading into the world. Do you want to try again in a moment or do something else first?",
+                    options: ["Try again", "Wait a moment", "Do something else"],
+                  },
+                  fetchedFacts,
+                };
+              }
+
+              throw error;
+            }
+            fetchedFacts.push(fetchedResult);
+            logNarrationDebug("turn.fetch", {
+              attempt,
+              toolName: normalized.type,
+              fetchedCount: fetchedFacts.length,
+              resultPreview: toPreview(fetchedResult),
+            });
             correctionNotes = null;
+            continue;
+          }
+
+          const requiredFetchNpc = findNpcRequiringDetailFetch(normalized, input.promptContext);
+          if (requiredFetchNpc && !hasHydratedNpcDetailFact(fetchedFacts, requiredFetchNpc.id)) {
+            correctionNotes = [
+              `The NPC ${requiredFetchNpc.name} requires authoritative detail before that action.`,
+              `Call fetch_npc_detail for npcId ${requiredFetchNpc.id} first, then return the final action.`,
+              "Do not pick a different target unless the player explicitly changes intent.",
+            ].join("\n");
             continue;
           }
 
@@ -4541,6 +4938,12 @@ class DungeonMasterClient {
             attempt,
             toolName,
             inputPreview: toPreview(normalized),
+          });
+          logNarrationDebug("turn.success", {
+            attempt,
+            toolName,
+            inputPreview: toPreview(normalized),
+            fetchedFactsPreview: toPreview(fetchedFacts),
           });
           return {
             command: normalized,
@@ -4554,13 +4957,16 @@ class DungeonMasterClient {
             ? "The previous payload was cut off. Return a complete replacement payload with much shorter narration."
             : "Return a complete replacement payload that exactly matches one tool schema.",
           "Do not include assistant prose before the tool call.",
-          "If using execute_converse for an unnamed local, fill interlocutor with a short generic label and omit npcId.",
+          "If using execute_converse for an unnamed local, fill interlocutor with a short lower-case descriptive role label and omit npcId.",
         ].join("\n");
       }
 
       throw new Error("Turn generation did not return a valid tool call after retries.");
     } catch (error) {
       logOpenRouterResponse("turn.error", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      logNarrationDebug("turn.error", {
         message: error instanceof Error ? error.message : String(error),
       });
       throw new Error(error instanceof Error ? error.message : "Turn generation failed.");
@@ -4579,5 +4985,6 @@ class DungeonMasterClient {
 export const dmClient = new DungeonMasterClient();
 export const aiProviderTestUtils = {
   extractToolInput,
+  normalizeModelToolCall,
   normalizeTurnToolCall,
 };

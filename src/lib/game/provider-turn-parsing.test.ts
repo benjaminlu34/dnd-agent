@@ -28,6 +28,15 @@ function createPromptContext(): SpatialPromptContext {
         id: "npc_guide",
         name: "Tarin Ash",
         role: "guide",
+        requiresDetailFetch: false,
+      },
+    ],
+    recentUnnamedLocals: [
+      {
+        label: "nearest harvester",
+        interactionCount: 2,
+        lastSummary: "A soaked harvester who keeps watch on the tide line.",
+        lastSeenAtTurn: 3,
       },
     ],
     recentLocalEvents: [
@@ -51,6 +60,11 @@ function createPromptContext(): SpatialPromptContext {
       },
     ],
     inventory: [],
+    localTexture: {
+      dominantActivities: ["barge loading", "watch patrols", "fish sorting"],
+      classTexture: "Wet, crowded labor traffic under watch scrutiny.",
+      publicHazards: ["slick cobbles", "pushy port traffic"],
+    },
     globalTime: 480,
     timeOfDay: "morning",
     dayCount: 1,
@@ -116,4 +130,45 @@ test("normalizeTurnToolCall preserves an unnamed local interlocutor", () => {
   assert.equal(normalized?.type, "execute_converse");
   assert.equal(normalized?.interlocutor, "nearest harvester");
   assert.equal(normalized?.npcId, undefined);
+});
+
+test("normalizeTurnToolCall canonicalizes recent unnamed local labels", () => {
+  const normalized = aiProviderTestUtils.normalizeTurnToolCall({
+    toolName: "execute_converse",
+    payload: {
+      interlocutor: "  Nearest   Harvester  ",
+      topic: "leviathan sightings",
+      narration: "The same soaked worker jerks a thumb toward the outer pens.",
+      suggestedActions: ["Ask what changed at dawn"],
+      timeMode: "exploration",
+      timeElapsed: 5,
+      citedEntities: {
+        npcIds: [],
+        locationIds: ["loc_gate"],
+        factionIds: [],
+        commodityIds: [],
+        informationIds: [],
+      },
+    },
+    promptContext: createPromptContext(),
+  });
+
+  assert.equal(normalized?.type, "execute_converse");
+  assert.equal(normalized?.interlocutor, "nearest harvester");
+  assert.equal(normalized?.npcId, undefined);
+});
+
+test("normalizeFetchToolCall repairs scoped fetch ids that drop the entity namespace segment", () => {
+  const normalized = aiProviderTestUtils.normalizeModelToolCall({
+    toolName: "fetch_npc_detail",
+    payload: {
+      npcId: "camp_94e2310a-8216-465e-b794-c51343e4eea1:npc_joren_kelp_market_overse",
+    },
+    promptContext: createPromptContext(),
+  });
+
+  assert.deepEqual(normalized, {
+    type: "fetch_npc_detail",
+    npcId: "camp_94e2310a-8216-465e-b794-c51343e4eea1:npc:npc_joren_kelp_market_overse",
+  });
 });

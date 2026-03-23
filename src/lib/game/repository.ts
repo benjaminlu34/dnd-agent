@@ -28,6 +28,7 @@ import type {
   GeneratedWorldModule,
   InformationDetail,
   InformationSummary,
+  LocalTextureSummary,
   LocationSummary,
   MarketPriceDetail,
   MemoryRecord,
@@ -102,6 +103,91 @@ function collectNearbyLocationIds(world: GeneratedWorldModule, startLocationId: 
   }
 
   return Array.from(nearby).slice(0, 3);
+}
+
+function scopeEntityId(scopeId: string, entityType: string, id: string) {
+  return `${scopeId}:${entityType}:${id}`;
+}
+
+function toPrismaJsonValue(value: unknown): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
+}
+
+function toLocalTextureSummary(value: unknown): LocalTextureSummary | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const dominantActivities = Array.isArray(record.dominantActivities)
+    ? record.dominantActivities.filter((entry): entry is string => typeof entry === "string").slice(0, 3)
+    : [];
+  const publicHazards = Array.isArray(record.publicHazards)
+    ? record.publicHazards.filter((entry): entry is string => typeof entry === "string").slice(0, 2)
+    : [];
+  const classTexture = typeof record.classTexture === "string" ? record.classTexture.trim() : "";
+
+  if (!dominantActivities.length || !classTexture) {
+    return null;
+  }
+
+  return {
+    dominantActivities,
+    classTexture,
+    publicHazards,
+  };
+}
+
+function buildLocationTextureMap(
+  artifacts: OpenWorldGenerationArtifacts | null,
+  campaignId: string,
+): Map<string, LocalTextureSummary> {
+  const textures = new Map<string, LocalTextureSummary>();
+
+  if (!artifacts) {
+    return textures;
+  }
+
+  for (const location of artifacts.regionalLife.locations) {
+    textures.set(scopeEntityId(campaignId, "location", location.locationId), {
+      dominantActivities: location.dominantActivities.slice(0, 3),
+      classTexture: location.classTexture,
+      publicHazards: location.publicHazards.slice(0, 2),
+    });
+  }
+
+  return textures;
+}
+
+function assignStartingLocalNpcIds(
+  campaignId: string,
+  npcs: Array<Omit<GeneratedWorldModule["npcs"][number], "id">>,
+): GeneratedWorldModule["npcs"] {
+  return npcs.map((npc, index) => ({
+    ...npc,
+    id: scopeEntityId(campaignId, "npc", `npc_local_${index + 1}_${randomUUID()}`),
+  }));
+}
+
+function buildOpeningWorldWithStartingLocals(input: {
+  module: GeneratedWorldModule;
+  entryPoint: GeneratedWorldModule["entryPoints"][number];
+  startingLocals: GeneratedWorldModule["npcs"];
+}) {
+  const startLocationNpcIds = input.startingLocals
+    .filter((npc) => npc.currentLocationId === input.entryPoint.startLocationId)
+    .map((npc) => npc.id);
+
+  return {
+    module: {
+      ...input.module,
+      npcs: [...input.module.npcs, ...input.startingLocals],
+    },
+    entryPoint: {
+      ...input.entryPoint,
+      presentNpcIds: Array.from(new Set([...input.entryPoint.presentNpcIds, ...startLocationNpcIds])),
+    },
+  };
 }
 
 async function generateStartingHydratedNpcs(input: {
@@ -499,13 +585,42 @@ export async function generateCampaignOpeningDraftForUser(input: {
     throw new Error("Entry point not found on selected module.");
   }
 
-  const draft = await dmClient.generateCampaignOpening({
-    module: world,
-    character: toTemplateRecord(template),
-    entryPoint,
+  const previewCampaignId = `preview_${randomUUID()}`;
+  const { world: previewWorld, entryPoint: previewEntryPoint } = instanceWorldForCampaign(
+    previewCampaignId,
+    world,
+    input.entryPointId,
+  );
+  const character = toTemplateRecord(template);
+  const preliminaryOpening = await dmClient.generateCampaignOpening({
+    module: previewWorld,
+    character,
+    entryPoint: previewEntryPoint,
     artifacts: generationArtifacts,
     prompt: input.prompt,
     previousDraft: input.previousDraft,
+  });
+  const hydratedStartingNpcs = assignStartingLocalNpcIds(
+    previewCampaignId,
+    await generateStartingHydratedNpcs({
+      world: previewWorld,
+      entryPoint: previewEntryPoint,
+      template: character,
+      opening: preliminaryOpening,
+    }),
+  );
+  const openingInput = buildOpeningWorldWithStartingLocals({
+    module: previewWorld,
+    entryPoint: previewEntryPoint,
+    startingLocals: hydratedStartingNpcs,
+  });
+  const draft = await dmClient.generateCampaignOpening({
+    module: openingInput.module,
+    character,
+    entryPoint: openingInput.entryPoint,
+    artifacts: generationArtifacts,
+    prompt: input.prompt,
+    previousDraft: preliminaryOpening,
   });
 
   return { draft };
@@ -522,7 +637,8 @@ async function createCampaignInTx(
     opening: GeneratedCampaignOpening;
     instancedWorld: GeneratedWorldModule;
     instancedEntryPoint: GeneratedWorldModule["entryPoints"][number];
-    hydratedStartingNpcs: Array<Omit<GeneratedWorldModule["npcs"][number], "id">>;
+    hydratedStartingNpcs: GeneratedWorldModule["npcs"];
+    locationTextures: Map<string, LocalTextureSummary>;
   },
 ) {
   const campaign = await tx.campaign.create({
@@ -607,6 +723,9 @@ async function createCampaignInTx(
         type: location.type,
         summary: location.summary,
         description: location.description,
+        localTextureJson: input.locationTextures.has(location.id)
+          ? toPrismaJsonValue(input.locationTextures.get(location.id))
+          : Prisma.JsonNull,
         state: location.state,
         controllingFactionId: location.controllingFactionId,
         tags: location.tags,
@@ -642,7 +761,7 @@ async function createCampaignInTx(
   }
 
   const hydratedStartingNpcRecords = input.hydratedStartingNpcs.map((npc) => ({
-    id: `npc_local_${randomUUID()}`,
+    id: npc.id,
     campaignId: campaign.id,
     name: npc.name,
     role: npc.role,
@@ -652,6 +771,9 @@ async function createCampaignInTx(
     currentLocationId: npc.currentLocationId,
     approval: npc.approval,
     isCompanion: false,
+    socialLayer: "starting_local",
+    isNarrativelyHydrated: true,
+    hydrationClaimedAt: null,
     state: "active",
     threatLevel: 1,
   }));
@@ -666,6 +788,9 @@ async function createCampaignInTx(
           role: npc.role,
           summary: npc.summary,
           description: npc.description,
+          socialLayer: "anchor",
+          isNarrativelyHydrated: true,
+          hydrationClaimedAt: null,
           factionId: npc.factionId,
           currentLocationId: npc.currentLocationId,
           approval: npc.approval,
@@ -787,32 +912,49 @@ export async function createCampaignFromModuleForUser(input: {
   }
 
   const world = parseWorldTemplate(module.openWorldTemplateJson);
+  const generationArtifacts = parseOpenWorldGenerationArtifacts(module.openWorldGenerationArtifactsJson);
   const entryPoint = world.entryPoints.find((entry) => entry.id === input.entryPointId);
   if (!entryPoint) {
     throw new Error("Selected entry point was not found.");
   }
 
   const templateRecord = toTemplateRecord(template);
-  const opening =
-    input.opening ??
-    (await dmClient.generateCampaignOpening({
-      module: world,
-      character: templateRecord,
-      entryPoint,
-    }));
-
   const campaignId = `camp_${randomUUID()}`;
   const { world: instancedWorld, entryPoint: instancedEntryPoint } = instanceWorldForCampaign(
     campaignId,
     world,
     input.entryPointId,
   );
-  const hydratedStartingNpcs = await generateStartingHydratedNpcs({
-    world: instancedWorld,
+  const preliminaryOpening =
+    input.opening ??
+    (await dmClient.generateCampaignOpening({
+      module: instancedWorld,
+      character: templateRecord,
+      entryPoint: instancedEntryPoint,
+      artifacts: generationArtifacts,
+    }));
+  const hydratedStartingNpcs = assignStartingLocalNpcIds(
+    campaignId,
+    await generateStartingHydratedNpcs({
+      world: instancedWorld,
+      entryPoint: instancedEntryPoint,
+      template: templateRecord,
+      opening: preliminaryOpening,
+    }),
+  );
+  const openingInput = buildOpeningWorldWithStartingLocals({
+    module: instancedWorld,
     entryPoint: instancedEntryPoint,
-    template: templateRecord,
-    opening,
+    startingLocals: hydratedStartingNpcs,
   });
+  const opening = await dmClient.generateCampaignOpening({
+    module: openingInput.module,
+    character: templateRecord,
+    entryPoint: openingInput.entryPoint,
+    artifacts: generationArtifacts,
+    previousDraft: input.opening ?? preliminaryOpening,
+  });
+  const locationTextures = buildLocationTextureMap(generationArtifacts, campaignId);
 
   const result = await prisma.$transaction((tx) =>
     createCampaignInTx(tx, {
@@ -825,6 +967,7 @@ export async function createCampaignFromModuleForUser(input: {
       instancedWorld,
       instancedEntryPoint,
       hydratedStartingNpcs,
+      locationTextures,
     }),
   );
 
@@ -890,6 +1033,7 @@ function toLocationSummary(
     type: location.type,
     summary: location.summary,
     description: location.description,
+    localTexture: toLocalTextureSummary(location.localTextureJson),
     state: location.state,
     controllingFactionId: location.controllingFactionId,
     controllingFactionName: controller?.name ?? null,
@@ -938,6 +1082,8 @@ function toNpcSummary(
     role: npc.role,
     summary: npc.summary,
     description: npc.description,
+    socialLayer: npc.socialLayer as NpcSummary["socialLayer"],
+    isNarrativelyHydrated: npc.isNarrativelyHydrated,
     factionId: npc.factionId,
     factionName: faction?.name ?? null,
     currentLocationId: npc.currentLocationId,
@@ -1385,6 +1531,7 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
       },
       temporaryActors: {
         orderBy: [{ lastSeenAtTurn: "desc" }, { updatedAt: "desc" }],
+        take: 20,
       },
       turns: {
         where: { status: "resolved" },
@@ -1636,7 +1783,21 @@ export async function getPromptContext(snapshot: CampaignSnapshot): Promise<Spat
       id: npc.id,
       name: npc.name,
       role: npc.role,
+      requiresDetailFetch: npc.socialLayer === "promoted_local" && !npc.isNarrativelyHydrated,
     })),
+    recentUnnamedLocals: snapshot.temporaryActors
+      .filter(
+        (actor) =>
+          actor.currentLocationId === snapshot.currentLocation.id
+          && actor.promotedNpcId == null,
+      )
+      .slice(0, 5)
+      .map((actor) => ({
+        label: actor.label,
+        interactionCount: actor.interactionCount,
+        lastSummary: actor.lastSummary,
+        lastSeenAtTurn: actor.lastSeenAtTurn,
+      })),
     recentLocalEvents,
     recentTurnLedger: buildRecentTurnLedger(snapshot),
     discoveredInformation: snapshot.discoveredInformation.map((information) => ({
@@ -1646,6 +1807,7 @@ export async function getPromptContext(snapshot: CampaignSnapshot): Promise<Spat
       truthfulness: information.truthfulness,
     })),
     inventory: toPromptInventory(snapshot.character),
+    localTexture: snapshot.currentLocation.localTexture,
     globalTime: snapshot.state.globalTime,
     timeOfDay: timeOfDay(snapshot.state.globalTime),
     dayCount: Math.floor(snapshot.state.globalTime / 1440) + 1,

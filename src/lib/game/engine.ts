@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { dmClient } from "@/lib/ai/provider";
+import { FetchSynchronizationError } from "@/lib/game/errors";
 import {
   fetchFactionIntel,
   fetchInformationConnections,
@@ -23,6 +24,8 @@ import type {
   CampaignRuntimeState,
   CampaignSnapshot,
   CheckResult,
+  LocalTextureSummary,
+  PromotedNpcHydrationDraft,
   RequestClarificationToolCall,
   TurnFetchToolCall,
   TurnFetchToolResult,
@@ -46,22 +49,48 @@ function normalizeTemporaryActorLabel(label: string) {
   return label.trim().replace(/\s+/g, " ");
 }
 
-function toPromotedTemporaryActorName(label: string) {
+function toPromotedTemporaryActorDescriptor(label: string) {
   const cleaned = normalizeTemporaryActorLabel(label)
-    .replace(/^(the|a|an)\s+/i, "")
-    .replace(/\b(this|that)\b/gi, "")
+    .replace(/^(the same|the|a|an|this|that|nearest|nearby|local|same)\s+/i, "")
+    .replace(/\b(?:near|by|at|outside|inside|behind|beside|under|over|around|from)\b.*$/i, "")
+    .replace(/[.,;:!?]+$/g, "")
     .trim();
-  const value = cleaned || "unnamed local";
+
+  return cleaned || "unnamed local";
+}
+
+function toPromotedTemporaryActorName(label: string) {
+  const value = toPromotedTemporaryActorDescriptor(label);
   return value.replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
 function toPromotedTemporaryActorRole(label: string) {
-  const cleaned = normalizeTemporaryActorLabel(label)
-    .replace(/^(the|a|an|nearest|nearby|local)\s+/i, "")
-    .trim()
-    .toLowerCase();
-  const words = cleaned.split(/\s+/).filter(Boolean);
-  return words.at(-1) ?? "local";
+  return toPromotedTemporaryActorDescriptor(label).toLowerCase();
+}
+
+function buildPromotedTemporaryActorSeedText(input: {
+  actor: {
+    label: string;
+    recentTopics: string[];
+    lastSummary: string | null;
+  };
+  role: string;
+  locationName: string;
+}) {
+  const topicTrail = dedupeStrings(input.actor.recentTopics).slice(-2);
+  const topicPhrase = topicTrail.length
+    ? ` The player has already spoken with them about ${topicTrail.join(" and ")}.`
+    : "";
+  const fallbackBase =
+    `A recurring ${input.role} around ${input.locationName}, known in play as ${input.actor.label}.`;
+
+  return {
+    summary: input.actor.lastSummary?.trim() || fallbackBase,
+    description:
+      input.actor.lastSummary?.trim()
+        ? `${input.actor.lastSummary.trim()}${topicPhrase}`
+        : `${fallbackBase}${topicPhrase}`,
+  };
 }
 
 function shouldPromoteTemporaryActor(input: {
@@ -146,6 +175,335 @@ function emptyRollback(snapshot: CampaignSnapshot): TurnRollbackData {
 
 function toPrismaJsonValue(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
+}
+
+function toLocalTextureSummary(value: Prisma.JsonValue | null): LocalTextureSummary | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const dominantActivities = Array.isArray(record.dominantActivities)
+    ? record.dominantActivities
+        .filter((entry): entry is string => typeof entry === "string")
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+        .slice(0, 3)
+    : [];
+  const publicHazards = Array.isArray(record.publicHazards)
+    ? record.publicHazards
+        .filter((entry): entry is string => typeof entry === "string")
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+        .slice(0, 2)
+    : [];
+  const classTexture = typeof record.classTexture === "string" ? record.classTexture.trim() : "";
+
+  if (!dominantActivities.length || !classTexture) {
+    return null;
+  }
+
+  return {
+    dominantActivities,
+    classTexture,
+    publicHazards,
+  };
+}
+
+function trimToNull(value: string | null | undefined) {
+  const normalized = value?.trim();
+  return normalized ? normalized : null;
+}
+
+function sanitizePromotedNpcHydrationDraft(input: {
+  draft: PromotedNpcHydrationDraft;
+  currentLocationId: string;
+  localFactionIds: Set<string>;
+  fallbackSummary: string;
+  fallbackDescription: string;
+}) {
+  const summary = trimToNull(input.draft.summary) ?? input.fallbackSummary;
+  const description = trimToNull(input.draft.description) ?? input.fallbackDescription;
+  const factionId =
+    input.draft.factionId && input.localFactionIds.has(input.draft.factionId)
+      ? input.draft.factionId
+      : null;
+  const information = input.draft.information.slice(0, 2).flatMap((lead) => {
+    const title = trimToNull(lead.title);
+    const summaryText = trimToNull(lead.summary);
+    const content = trimToNull(lead.content);
+
+    if (!title || !summaryText || !content) {
+      return [];
+    }
+
+    if (lead.locationId && lead.locationId !== input.currentLocationId) {
+      return [];
+    }
+
+    return [
+      {
+        title,
+        summary: summaryText,
+        content,
+        truthfulness: lead.truthfulness,
+        accessibility: lead.accessibility,
+        locationId: input.currentLocationId,
+        factionId:
+          lead.factionId && input.localFactionIds.has(lead.factionId) ? lead.factionId : null,
+      },
+    ];
+  });
+
+  return {
+    summary,
+    description,
+    factionId,
+    information,
+  };
+}
+
+async function hydratePromotedNpcRecord(input: {
+  campaignId: string;
+  npcId: string;
+}) {
+  const npc = await prisma.nPC.findFirst({
+    where: { id: input.npcId, campaignId: input.campaignId },
+    select: {
+      id: true,
+      campaignId: true,
+      name: true,
+      role: true,
+      summary: true,
+      description: true,
+      factionId: true,
+      currentLocationId: true,
+      isNarrativelyHydrated: true,
+      hydrationClaimedAt: true,
+      socialLayer: true,
+    },
+  });
+
+  if (!npc) {
+    throw new Error("Promoted NPC not found.");
+  }
+
+  if (npc.isNarrativelyHydrated) {
+    return;
+  }
+
+  if (!npc.currentLocationId) {
+    throw new Error("Promoted NPC has no current location for hydration.");
+  }
+
+  const [location, localNpcs, localInformation, temporaryActor, nearbyEdges] = await Promise.all([
+    prisma.locationNode.findFirst({
+      where: { id: npc.currentLocationId, campaignId: input.campaignId },
+      select: {
+        id: true,
+        name: true,
+        type: true,
+        summary: true,
+        state: true,
+        controllingFactionId: true,
+        localTextureJson: true,
+      },
+    }),
+    prisma.nPC.findMany({
+      where: {
+        campaignId: input.campaignId,
+        currentLocationId: npc.currentLocationId,
+      },
+      orderBy: { name: "asc" },
+      select: {
+        id: true,
+        name: true,
+        role: true,
+        factionId: true,
+      },
+      take: 8,
+    }),
+    prisma.information.findMany({
+      where: {
+        campaignId: input.campaignId,
+        locationId: npc.currentLocationId,
+      },
+      orderBy: { updatedAt: "desc" },
+      select: {
+        id: true,
+        title: true,
+        summary: true,
+        truthfulness: true,
+        accessibility: true,
+        factionId: true,
+      },
+      take: 8,
+    }),
+    prisma.temporaryActor.findFirst({
+      where: {
+        campaignId: input.campaignId,
+        promotedNpcId: npc.id,
+      },
+      select: {
+        label: true,
+        interactionCount: true,
+        recentTopics: true,
+        lastSummary: true,
+      },
+    }),
+    prisma.locationEdge.findMany({
+      where: {
+        campaignId: input.campaignId,
+        OR: [{ sourceId: npc.currentLocationId }, { targetId: npc.currentLocationId }],
+      },
+      include: {
+        source: {
+          select: {
+            id: true,
+            name: true,
+          },
+        },
+        target: {
+          select: {
+            id: true,
+            name: true,
+          },
+        },
+      },
+      orderBy: [{ travelTimeMinutes: "asc" }, { dangerLevel: "asc" }],
+      take: 6,
+    }),
+  ]);
+
+  if (!location) {
+    throw new Error("Promoted NPC location not found.");
+  }
+
+  const localFactionIds = new Set<string>();
+  if (location.controllingFactionId) {
+    localFactionIds.add(location.controllingFactionId);
+  }
+  for (const localNpc of localNpcs) {
+    if (localNpc.factionId) {
+      localFactionIds.add(localNpc.factionId);
+    }
+  }
+  for (const information of localInformation) {
+    if (information.factionId) {
+      localFactionIds.add(information.factionId);
+    }
+  }
+
+  const localFactions = localFactionIds.size
+    ? await prisma.faction.findMany({
+        where: {
+          campaignId: input.campaignId,
+          id: {
+            in: Array.from(localFactionIds),
+          },
+        },
+        orderBy: { name: "asc" },
+        select: {
+          id: true,
+          name: true,
+          type: true,
+          summary: true,
+          agenda: true,
+        },
+      })
+    : [];
+
+  const draft = sanitizePromotedNpcHydrationDraft({
+    draft: await dmClient.hydratePromotedNpc({
+      npc: {
+        id: npc.id,
+        name: npc.name,
+        role: npc.role,
+        summary: npc.summary,
+        description: npc.description,
+      },
+      location: {
+        id: location.id,
+        name: location.name,
+        type: location.type,
+        summary: location.summary,
+        state: location.state,
+        localTexture: toLocalTextureSummary(location.localTextureJson),
+      },
+      localFactions: localFactions.map((faction) => ({
+        id: faction.id,
+        name: faction.name,
+        type: faction.type,
+        summary: faction.summary,
+        agenda: faction.agenda,
+      })),
+      localNpcs: localNpcs
+        .filter((localNpc) => localNpc.id !== npc.id)
+        .map((localNpc) => ({
+          id: localNpc.id,
+          name: localNpc.name,
+          role: localNpc.role,
+          factionId: localNpc.factionId,
+        })),
+      localInformation: localInformation.map((information) => ({
+        id: information.id,
+        title: information.title,
+        summary: information.summary,
+        truthfulness: information.truthfulness,
+        accessibility: information.accessibility,
+        factionId: information.factionId,
+      })),
+      nearbyRoutes: nearbyEdges.map((edge) => {
+        const target = edge.sourceId === npc.currentLocationId ? edge.target : edge.source;
+        return {
+          id: edge.id,
+          targetLocationName: target.name,
+          travelTimeMinutes: edge.travelTimeMinutes,
+          currentStatus: edge.currentStatus,
+        };
+      }),
+      temporaryActor: {
+        label: temporaryActor?.label ?? npc.role,
+        interactionCount: temporaryActor?.interactionCount ?? 0,
+        recentTopics: temporaryActor?.recentTopics ?? [],
+        lastSummary: temporaryActor?.lastSummary ?? npc.summary,
+      },
+    }),
+    currentLocationId: location.id,
+    localFactionIds,
+    fallbackSummary: npc.summary,
+    fallbackDescription: npc.description,
+  });
+
+  await prisma.$transaction(async (tx) => {
+    await tx.nPC.update({
+      where: { id: npc.id },
+      data: {
+        summary: draft.summary,
+        description: draft.description,
+        factionId: draft.factionId,
+        isNarrativelyHydrated: true,
+        hydrationClaimedAt: null,
+      },
+    });
+
+    if (draft.information.length) {
+      await tx.information.createMany({
+        data: draft.information.map((lead) => ({
+          id: `info_${randomUUID()}`,
+          campaignId: input.campaignId,
+          title: lead.title,
+          summary: lead.summary,
+          content: lead.content,
+          truthfulness: lead.truthfulness,
+          accessibility: lead.accessibility,
+          locationId: lead.locationId,
+          factionId: lead.factionId,
+          sourceNpcId: npc.id,
+        })),
+      });
+    }
+  });
 }
 
 function findFetchedMarketPrice(
@@ -298,14 +656,23 @@ async function trackUnnamedLocalInteraction(input: {
   }
 
   const promotedNpcId = `npc_local_${randomUUID()}`;
+  const promotedRole = toPromotedTemporaryActorRole(actor.label);
+  const promotedSeed = buildPromotedTemporaryActorSeedText({
+    actor,
+    role: promotedRole,
+    locationName: input.snapshot.currentLocation.name,
+  });
   await input.tx.nPC.create({
     data: {
       id: promotedNpcId,
       campaignId: input.snapshot.campaignId,
       name: toPromotedTemporaryActorName(actor.label),
-      role: toPromotedTemporaryActorRole(actor.label),
-      summary: actor.lastSummary ?? `A recurring local known as ${actor.label}.`,
-      description: actor.lastSummary ?? `A recurring local known as ${actor.label}.`,
+      role: promotedRole,
+      summary: promotedSeed.summary,
+      description: promotedSeed.description,
+      socialLayer: "promoted_local",
+      isNarrativelyHydrated: false,
+      hydrationClaimedAt: null,
       factionId: null,
       currentLocationId: actor.currentLocationId,
       approval: 0,
@@ -1038,6 +1405,63 @@ async function executeFetchTool(
     if (!result) {
       throw new Error("NPC detail not found.");
     }
+
+    if (result.socialLayer === "promoted_local" && !result.isNarrativelyHydrated) {
+      const lockExpiry = new Date(Date.now() - 2 * 60 * 1000);
+      const claimAttempt = await prisma.nPC.updateMany({
+        where: {
+          id: result.id,
+          campaignId: snapshot.campaignId,
+          socialLayer: "promoted_local",
+          isNarrativelyHydrated: false,
+          OR: [{ hydrationClaimedAt: null }, { hydrationClaimedAt: { lt: lockExpiry } }],
+        },
+        data: {
+          hydrationClaimedAt: new Date(),
+        },
+      });
+
+      if (claimAttempt.count === 1) {
+        try {
+          await hydratePromotedNpcRecord({
+            campaignId: snapshot.campaignId,
+            npcId: result.id,
+          });
+        } catch (error) {
+          await prisma.nPC.updateMany({
+            where: {
+              id: result.id,
+              campaignId: snapshot.campaignId,
+              isNarrativelyHydrated: false,
+            },
+            data: {
+              hydrationClaimedAt: null,
+            },
+          });
+          throw error;
+        }
+
+        const hydratedResult = await fetchNpcDetail(snapshot.campaignId, result.id);
+        if (!hydratedResult) {
+          throw new Error("Hydrated NPC detail not found.");
+        }
+
+        return { type: call.type, result: hydratedResult };
+      }
+
+      const refreshed = await fetchNpcDetail(snapshot.campaignId, result.id);
+      if (!refreshed) {
+        throw new Error("NPC detail not found.");
+      }
+      if (!refreshed.isNarrativelyHydrated) {
+        throw new FetchSynchronizationError(
+          `${refreshed.name} is still synchronizing promoted NPC detail.`,
+        );
+      }
+
+      return { type: call.type, result: refreshed };
+    }
+
     return { type: call.type, result };
   }
 
@@ -1079,6 +1503,11 @@ async function executeFetchTool(
 }
 
 export { TIME_MODE_BOUNDS };
+export const engineTestUtils = {
+  toPromotedTemporaryActorDescriptor,
+  toPromotedTemporaryActorName,
+  toPromotedTemporaryActorRole,
+};
 
 export async function triageTurn(input: {
   campaignId: string;

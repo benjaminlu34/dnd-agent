@@ -109,20 +109,6 @@ function isEquipmentItem(item: InventoryItem) {
   return EQUIPMENT_KEYWORDS.some((keyword) => haystack.includes(keyword));
 }
 
-function buildRollPrompt(currentAction: string) {
-  const trimmed = currentAction.trim();
-
-  if (!trimmed) {
-    return "Roll 1d20.";
-  }
-
-  if (trimmed.toLowerCase().includes("1d20")) {
-    return trimmed;
-  }
-
-  return `${trimmed}\nRoll 1d20.`;
-}
-
 export function AdventureApp({
   initialCampaignId = null,
 }: {
@@ -500,13 +486,6 @@ export function AdventureApp({
                   </div>
 
                   <div className="mt-5 flex flex-wrap items-center gap-3">
-                    <button
-                      type="button"
-                      className="button-press rounded-2xl border border-amber-700/40 bg-amber-950/60 px-4 py-3 text-sm font-semibold text-amber-100 transition hover:bg-amber-900/70"
-                      onClick={() => setAction((current) => buildRollPrompt(current))}
-                    >
-                      Roll 1d20
-                    </button>
                     <button
                       type="button"
                       className="button-press rounded-2xl bg-zinc-100 px-5 py-3 text-sm font-semibold text-zinc-950 transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"

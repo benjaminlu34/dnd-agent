@@ -219,6 +219,7 @@ model LocationNode {
   type                 String
   summary              String
   description          String?
+  localTextureJson     Json?
   state                String          @default("active")
   controllingFactionId String?
   tags                 String[]        @default([])
@@ -304,6 +305,9 @@ model NPC {
   role              String
   summary           String
   description       String
+  socialLayer       String       @default("anchor")
+  isNarrativelyHydrated Boolean  @default(true)
+  hydrationClaimedAt DateTime?
   factionId         String?
   currentLocationId String?
   approval          Int          @default(0)
