@@ -115,6 +115,16 @@ function hasTextualFactionFootprint(module: GeneratedWorldModule, factionName: s
   });
 }
 
+function hasTextualEconomicIdentity(location: GeneratedWorldModule["locations"][number]) {
+  const haystack = `${location.summary} ${location.description}`.toLowerCase();
+
+  return (
+    haystack.includes("trade identity:") ||
+    haystack.includes("street economy:") ||
+    haystack.includes("no settled signature goods")
+  );
+}
+
 export function validateWorldBible(
   bible: GeneratedWorldBible,
   options: WorldBibleValidationOptions = {},
@@ -627,13 +637,36 @@ export function validateWorldModulePlayability(module: GeneratedWorldModule): Va
   };
 }
 
+export function validateFactionFootprints(module: GeneratedWorldModule): ValidationReport {
+  const issues: string[] = [];
+
+  for (const faction of module.factions) {
+    const visibleFootprint =
+      module.locations.some((location) => location.controllingFactionId === faction.id) ||
+      module.npcs.some((npc) => npc.factionId === faction.id) ||
+      module.information.some((information) => information.factionId === faction.id) ||
+      hasTextualFactionFootprint(module, faction.name);
+
+    if (!visibleFootprint) {
+      issues.push(`Faction ${faction.name} needs a visible mark on the world.`);
+    }
+  }
+
+  return {
+    ok: issues.length === 0,
+    issues,
+  };
+}
+
 export function validateWorldModuleImmersion(module: GeneratedWorldModule): ValidationReport {
   const issues: string[] = [];
 
   for (const location of module.locations) {
     const hasNpc = module.npcs.some((npc) => npc.currentLocationId === location.id);
     const hasInformation = module.information.some((information) => information.locationId === location.id);
-    const hasEconomy = module.marketPrices.some((price) => price.locationId === location.id);
+    const hasEconomy =
+      module.marketPrices.some((price) => price.locationId === location.id) ||
+      hasTextualEconomicIdentity(location);
     const hasFactionFootprint =
       location.controllingFactionId != null ||
       module.npcs.some((npc) => npc.currentLocationId === location.id && npc.factionId != null);
@@ -651,17 +684,7 @@ export function validateWorldModuleImmersion(module: GeneratedWorldModule): Vali
     }
   }
 
-  for (const faction of module.factions) {
-    const visibleFootprint =
-      module.locations.some((location) => location.controllingFactionId === faction.id) ||
-      module.npcs.some((npc) => npc.factionId === faction.id) ||
-      module.information.some((information) => information.factionId === faction.id) ||
-      hasTextualFactionFootprint(module, faction.name);
-
-    if (!visibleFootprint) {
-      issues.push(`Faction ${faction.name} needs a visible mark on the world.`);
-    }
-  }
+  issues.push(...validateFactionFootprints(module).issues);
 
   return {
     ok: issues.length === 0,

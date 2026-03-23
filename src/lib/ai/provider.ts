@@ -1,3 +1,5 @@
+import { appendFileSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
+import path from "node:path";
 import OpenAI from "openai";
 import { z } from "zod";
 import { env } from "@/lib/env";
@@ -30,6 +32,7 @@ import type {
 } from "@/lib/game/types";
 import {
   validateEntryContexts,
+  validateFactionFootprints,
   validateKnowledgeEconomy,
   validateRegionalLife,
   validateSocialLayer,
@@ -362,6 +365,50 @@ function missingAiConfigurationError() {
   );
 }
 
+const WORLD_GEN_LOG_DIR = path.resolve(process.cwd(), "world_gen_logs");
+const WORLD_GEN_LOG_FILE = path.join(WORLD_GEN_LOG_DIR, "latest.log");
+
+let activeWorldGenLogFile: string | null = null;
+let preferredOpenRouterKeyIndex = 0;
+
+function appendWorldGenerationLog(message: string) {
+  if (!activeWorldGenLogFile) {
+    return;
+  }
+
+  try {
+    appendFileSync(activeWorldGenLogFile, `${message}\n`, "utf8");
+  } catch {
+    // Ignore log write failures so generation itself can continue.
+  }
+}
+
+function startWorldGenerationLog() {
+  mkdirSync(WORLD_GEN_LOG_DIR, { recursive: true });
+
+  if (existsSync(WORLD_GEN_LOG_FILE)) {
+    unlinkSync(WORLD_GEN_LOG_FILE);
+  }
+
+  activeWorldGenLogFile = WORLD_GEN_LOG_FILE;
+}
+
+function stopWorldGenerationLog() {
+  activeWorldGenLogFile = null;
+}
+
+function logWorldGenerationProgress(update: WorldGenerationProgressUpdate) {
+  const timestamp = new Date().toISOString();
+  const message = [
+    `[world.progress] ${timestamp}`,
+    JSON.stringify(update, null, 2),
+    "--- end ---",
+  ].join("\n");
+
+  console.info(message);
+  appendWorldGenerationLog(message);
+}
+
 function logOpenRouterRequest(options: {
   model: string;
   system: string;
@@ -370,32 +417,32 @@ function logOpenRouterRequest(options: {
 }) {
   const timestamp = new Date().toISOString();
   const toolNames = (options.tools ?? []).map((tool) => tool.name);
+  const message = [
+    `[openrouter.request] ${timestamp}`,
+    `model=${options.model}`,
+    `tools=${toolNames.length ? toolNames.join(", ") : "none"}`,
+    "--- system ---",
+    options.system,
+    "--- user ---",
+    options.user,
+    "--- end ---",
+  ].join("\n");
 
-  console.info(
-    [
-      `[openrouter.request] ${timestamp}`,
-      `model=${options.model}`,
-      `tools=${toolNames.length ? toolNames.join(", ") : "none"}`,
-      "--- system ---",
-      options.system,
-      "--- user ---",
-      options.user,
-      "--- end ---",
-    ].join("\n"),
-  );
+  console.info(message);
+  appendWorldGenerationLog(message);
 }
 
 function logOpenRouterResponse(stage: string, details: Record<string, unknown>) {
   const timestamp = new Date().toISOString();
+  const message = [
+    `[openrouter.response] ${timestamp}`,
+    `stage=${stage}`,
+    JSON.stringify(details, null, 2),
+    "--- end ---",
+  ].join("\n");
 
-  console.info(
-    [
-      `[openrouter.response] ${timestamp}`,
-      `stage=${stage}`,
-      JSON.stringify(details, null, 2),
-      "--- end ---",
-    ].join("\n"),
-  );
+  console.info(message);
+  appendWorldGenerationLog(message);
 }
 
 function toPreview(value: unknown, maxLength = 1200) {
@@ -923,6 +970,28 @@ function summarizeInformationRefs(
   );
 }
 
+function summarizeKnowledgeThreadInformationRefs(
+  information: Array<{
+    key: string;
+    accessibility: string;
+    locationId: string | null;
+    factionId: string | null;
+    knowledgeThread: string | null;
+  }>,
+) {
+  return information.map((entry) =>
+    [
+      `key=${entry.key}`,
+      `access=${entry.accessibility}`,
+      entry.locationId ? `loc=${entry.locationId}` : "",
+      entry.factionId ? `faction=${entry.factionId}` : "",
+      entry.knowledgeThread ? `thread=${entry.knowledgeThread}` : "",
+    ]
+      .filter(Boolean)
+      .join(" | "),
+  );
+}
+
 function summarizeRegionalLifeRefs(regionalLife: RegionalLifeDraft) {
   return regionalLife.locations.map((location) =>
     [
@@ -961,7 +1030,11 @@ const WORLD_GEN_PRINCIPLES = [
   "You are a simulation-first worldbuilder designing a reusable solo RPG setting.",
   "Prioritize concrete survival, work, trade, territory, debt, weather, and social obligations over abstract lore.",
   "Prefer political, economic, environmental, and territorial pressure over cosmic destiny.",
+  "When the setting includes unusual infrastructure, ecology, or magic, define the upkeep, intake, repair burden, and failure modes only insofar as they shape daily life.",
   "Make every major detail usable at the table by tying it to a place, institution, job, route, resource, or conflict.",
+  "Tie grand history, myth, and doctrine to present-day tolls, shortages, debts, hazards, monopolies, or chokepoints the player can actually touch.",
+  "Give factions dependencies, internal strain, and vulnerabilities so no group feels perfectly unified or theatrically pure.",
+  "Leave procedural gaps for play: mysteries should reveal the next clue, leverage point, or practical advantage, not a total authorial answer.",
   "Be concise. Every sentence should imply at least one playable cost, risk, opportunity, contact, or obstacle.",
   "Preserve the prompt's distinctive nouns, imagery, and social texture instead of replacing them with generic genre substitutes.",
   "Reuse exact nouns or noun phrases from the prompt whenever possible instead of renaming the setting into a new generic brand.",
@@ -972,6 +1045,9 @@ const WORLD_GEN_ANTI_PATTERNS = [
   "Do not create ornamental NPCs, empty postcard locations, or generic stock-setting filler.",
   "Do not solve missing structure by inventing extra ids, keys, factions, or locations outside the provided context.",
   "Do not use vague phrases when a concrete profession, shortage, hazard, patrol, debt, toll, or route problem would be clearer.",
+  "Do not spend precious detail budget on orbital mechanics, tectonics, cosmology, or other deep realism unless it visibly changes work, travel, supply, safety, or politics.",
+  "Do not present factions as morally monolithic or internally unanimous.",
+  "Do not over-explain mysteries into dead canon when uncertainty would create stronger actionable leads.",
   "Translate the prompt into concrete systemic pressures; if it implies magic, myth, technology, or politics, express those through lived constraints, hazards, institutions, shortages, and conflicts rather than forcing a genre-mismatched trope layer.",
 ];
 
@@ -999,6 +1075,33 @@ function buildWorldGenerationBasePrompt(input: {
   ]
     .filter(Boolean)
     .join("\n\n");
+}
+
+function buildWorldBibleOutputBudget(minimumExplanationThreads: number) {
+  return {
+    title: "2 to 5 words",
+    premise: "1 to 2 short sentences",
+    tone: "2 to 5 words",
+    setting: "3 to 8 words",
+    worldOverview: "3 to 4 short sentences max",
+    systemicPressures: "at least 5 short phrases; add more only if each adds a distinct pressure",
+    historicalFractures: "at least 5 short phrases; add more only if each adds a distinct fracture",
+    immersionAnchors: "at least 6 short sensory anchors; avoid filler",
+    explanationThreads: {
+      count: `at least ${minimumExplanationThreads}; add more only if the setting genuinely needs them`,
+      phenomenon: "2 to 6 words",
+      prevailingTheories: "2 short sentences or clauses per thread",
+      actionableSecret: "1 to 2 short sentences",
+    },
+    everydayLife: {
+      survival: "1 to 2 short sentences",
+      institutions: "at least 4 items, each 2 to 5 words",
+      fears: "at least 3 items, each 2 to 5 words",
+      wants: "at least 3 items, each 2 to 5 words",
+      trade: "at least 3 items, each 2 to 5 words",
+      gossip: "at least 3 items, each 4 to 10 words",
+    },
+  };
 }
 
 function normalizeEntryContextsInput(input: unknown) {
@@ -1224,6 +1327,18 @@ async function runStructuredStage<T>({
         "Return a complete replacement payload.",
         "Use shorter descriptions so the full JSON fits in one response.",
         "If the stage uses keys, keep every key under 40 characters.",
+        ...(stage === "world_bible"
+          ? [
+              "For world_bible, meet the schema minimums, keep list items short, and keep prose fields within the stated output budget.",
+            ]
+          : []),
+        ...(stage === "knowledge_web"
+          ? [
+              "For knowledge_web, return the minimum viable payload: one information node per location, no extras unless required to fix a cited issue.",
+              "Keep title, summary, content, actionLead, and discoverHow to very short phrases.",
+              "Keep information links sparse.",
+            ]
+          : []),
       ];
 
       validationReports.push({
@@ -1349,6 +1464,29 @@ function enrichLocationDescription(
     `Everyday life here turns around ${regionalLife.publicActivity.toLowerCase()}.`,
     `The local pressure is ${regionalLife.localPressure.toLowerCase()}.`,
     `Ordinary residents know ${regionalLife.ordinaryKnowledge[0]?.toLowerCase() ?? "more than they admit"}.`,
+  ].join(" ");
+}
+
+function appendLocationTradeIdentity(
+  description: string,
+  tradeIdentity:
+    | OpenWorldGenerationArtifacts["knowledgeEconomy"]["locationTradeIdentity"][number]
+    | undefined,
+) {
+  if (!tradeIdentity) {
+    return description;
+  }
+
+  const signatureGoods =
+    tradeIdentity.signatureGoods.length > 0
+      ? tradeIdentity.signatureGoods.join(", ").toLowerCase()
+      : "no settled signature goods";
+
+  return [
+    description,
+    `Trade identity: ${signatureGoods}.`,
+    `Scarcity: ${tradeIdentity.scarcityNotes.toLowerCase()}.`,
+    `Street economy: ${tradeIdentity.streetLevelEconomy.toLowerCase()}.`,
   ].join(" ");
 }
 
@@ -1812,8 +1950,16 @@ async function runCompletion(options: {
   }
 
   let lastError: unknown = null;
+  const normalizedPreferredIndex = preferredOpenRouterKeyIndex % apiKeys.length;
+  const orderedApiKeys = apiKeys.map((_, offset) => {
+    const index = (normalizedPreferredIndex + offset) % apiKeys.length;
+    return {
+      apiKey: apiKeys[index],
+      keyIndex: index,
+    };
+  });
 
-  for (const [index, apiKey] of apiKeys.entries()) {
+  for (const [attemptIndex, { apiKey, keyIndex }] of orderedApiKeys.entries()) {
     const client = createClient(apiKey);
 
     logOpenRouterRequest({
@@ -1836,9 +1982,11 @@ async function runCompletion(options: {
         tool_choice: options.tools?.length ? "auto" : undefined,
       });
 
-      if (index > 0) {
+      preferredOpenRouterKeyIndex = keyIndex;
+
+      if (attemptIndex > 0) {
         logOpenRouterResponse("completion.key_success", {
-          keySlot: index + 1,
+          keySlot: keyIndex + 1,
           message: "Completion succeeded after failing over to a secondary OpenRouter API key.",
         });
       }
@@ -1848,10 +1996,10 @@ async function runCompletion(options: {
       lastError = error;
       const errorRecord = error as Record<string, unknown>;
       const status = typeof errorRecord.status === "number" ? errorRecord.status : null;
-      const canFailOver = status === 429 && index < apiKeys.length - 1;
+      const canFailOver = status === 429 && attemptIndex < orderedApiKeys.length - 1;
 
       logOpenRouterResponse("completion.error", {
-        keySlot: index + 1,
+        keySlot: keyIndex + 1,
         message: error instanceof Error ? error.message : String(error),
         name: error instanceof Error ? error.name : null,
         status,
@@ -1865,9 +2013,10 @@ async function runCompletion(options: {
       });
 
       if (canFailOver) {
+        preferredOpenRouterKeyIndex = orderedApiKeys[attemptIndex + 1]?.keyIndex ?? preferredOpenRouterKeyIndex;
         logOpenRouterResponse("completion.key_failover", {
-          fromKeySlot: index + 1,
-          toKeySlot: index + 2,
+          fromKeySlot: keyIndex + 1,
+          toKeySlot: orderedApiKeys[attemptIndex + 1].keyIndex + 1,
           reason: "Received HTTP 429 from OpenRouter.",
         });
         continue;
@@ -1932,12 +2081,15 @@ class DungeonMasterClient {
     previousDraft?: GeneratedWorldModule;
     onProgress?: (update: WorldGenerationProgressUpdate) => void;
   }): Promise<GeneratedWorldModuleDraft> {
+    startWorldGenerationLog();
+
     try {
       const attempts: OpenWorldGenerationArtifacts["attempts"] = [];
       const validationReports: OpenWorldGenerationArtifacts["validationReports"] = [];
       const stageSummaries: OpenWorldGenerationArtifacts["stageSummaries"] = {};
       const worldPromptProfile = inferWorldPromptProfile(input.prompt);
       const notifyProgress = (update: WorldGenerationProgressUpdate) => {
+        logWorldGenerationProgress(update);
         input.onProgress?.(update);
       };
 
@@ -1950,9 +2102,11 @@ class DungeonMasterClient {
         stage: "world_bible",
         system: buildWorldGenSystemPrompt([
           "Generate a foundational world bible for an open-world solo campaign module.",
-          `Provide as many systemic pressures, historical fractures, immersion anchors, and competing explanation threads as the setting needs, while still covering at least 5 pressures, 5 fractures, 6 anchors, and ${worldPromptProfile.minimumExplanationThreads} explanation threads.`,
+          `Cover the required pressures, fractures, anchors, and explanation threads, but add more only when each addition introduces genuinely new texture, conflict, or contradiction.`,
           "Systemic pressures must affect mundane survival, travel, work, shelter, communication, maintenance, law, debt, or access.",
+          "If the prompt implies unusual habitats, vehicles, climate, industry, or magic, show what keeps them running and what residents fear will fail first.",
           "Historical fractures should be political, technological, territorial, or resource-driven.",
+          "Historical fractures should cash out into current shortages, tolls, feuds, damaged infrastructure, legal burdens, or dangerous routes people deal with today.",
           "Use the explanationThreads field for competing explanations, beliefs, doctrines, rumors, theories, or myths as appropriate to the prompt.",
           worldPromptProfile.explanationStyle === "folkloric"
             ? "Let explanationThreads lean folkloric or religious when the prompt clearly invites that, but keep each one tied to lived institutions, places, or risks."
@@ -1960,7 +2114,10 @@ class DungeonMasterClient {
               ? "If the setting leans speculative or technological, let explanationThreads hold rival theories, doctrines, or official explanations instead of forcing folklore."
               : "If the setting leans practical or political, let explanationThreads hold rival beliefs, rumors, doctrines, or institutional explanations instead of forcing mythic lore.",
           "Each explanationThreads entry should name a phenomenon, show several prevailing theories, and point to an actionable secret.",
+          "An actionable secret should open a next investigation step, bargaining edge, route, cache, ledger, witness, or practical advantage instead of fully solving the setting's deepest mystery.",
           "Everyday life must explain how ordinary people get food, water, safety, and social protection.",
+          "Keep list fields terse, but allow worldOverview, survival, and actionableSecret enough room to feel evocative within the stated output budget.",
+          "Avoid decorative filler; spend prose budget on usable atmosphere and concrete pressure.",
           "Do not genericize the setting title, premise nouns, or signature images from the prompt.",
           "If the prompt does not name the world explicitly, derive an understated title from prompt language rather than inventing melodramatic branding.",
         ]),
@@ -1971,8 +2128,15 @@ class DungeonMasterClient {
               previousDraft: input.previousDraft,
               correctionNotes,
             }),
+            formatPromptBlock(
+              "output_budget",
+              buildWorldBibleOutputBudget(worldPromptProfile.minimumExplanationThreads),
+            ),
             formatFinalInstruction([
               "Return the world bible only.",
+              `Meet the schema minimums for systemicPressures, historicalFractures, immersionAnchors, explanationThreads, institutions, fears, wants, trade, and gossip.`,
+              "Add more items only when they introduce genuinely new texture, pressure, or contradiction.",
+              "Keep list items as short phrases, but let worldOverview, survival, and actionableSecret use brief evocative prose within the output budget.",
               "Do not generate locations, NPCs, commodities, or entry points yet.",
             ]),
           ].join("\n\n"),
@@ -2010,6 +2174,8 @@ class DungeonMasterClient {
         system: buildWorldGenSystemPrompt([
           "Generate factions only.",
           "Every faction must have a visible agenda, a public footprint, and pressure that affects ordinary people.",
+          "Every faction should depend on a local resource, route, labor pool, permit system, repair capacity, or information source it cannot fully secure alone.",
+          "Assume internal disagreement, brittle coalition management, or competing methods inside each faction rather than perfect unity.",
           "Favor territorial, commercial, legal, religious, labor, corporate, civic, military, or salvage conflicts over destiny framing.",
           "Use concise lowercase underscore keys because the engine will assign canonical ids later.",
           "Every generated key must be 40 characters or fewer.",
@@ -2118,6 +2284,7 @@ class DungeonMasterClient {
           system: buildWorldGenSystemPrompt([
             "Generate locations only for this batch.",
             "Locations must feel distinct because of work, terrain, law, trade, hazard, or ritual, not vague grandeur.",
+            "For unusual settlements or sites, imply what keeps the place supplied, repaired, guarded, or habitable and what breaks when that system slips.",
             "Use only the provided faction keys when naming a controlling faction.",
             "Each controlled location must visibly express who profits, patrols, or governs there.",
             `This world should finish with ${worldSpineLocationTarget} total locations, returned in batches of ${WORLD_SPINE_LOCATION_BATCH_SIZE}.`,
@@ -2254,7 +2421,7 @@ class DungeonMasterClient {
           "Prefer loops, alternate routes, and a few connective hubs over long linear chains.",
           "Important civic hubs, markets, harbors, and major routes should help players branch into the wider map within a few moves.",
           "Indirect reachability is enough: locations can connect through intermediate routes, and hidden or remote places do not need direct links to every major hub.",
-          "Every edge must include a physical travel constraint, danger, patrol, toll, weather issue, or territorial pressure.",
+          "Every edge must include a physical travel constraint, danger, patrol, toll, weather issue, supply bottleneck, maintenance problem, or territorial pressure.",
           "Use only the provided location keys.",
           "Use concise lowercase underscore keys and keep the network compact enough for a small open world.",
           "Always use very short edge keys such as route_1, route_2, route_3; do not build keys from full location names.",
@@ -2365,8 +2532,8 @@ class DungeonMasterClient {
         stage: "world_spine",
         system: buildWorldGenSystemPrompt([
           "Generate only faction relations.",
-          "Relations must reflect trade dependence, territorial disputes, labor leverage, doctrine clashes, or naval rivalry.",
-          `Return exactly ${targetWorldSpineRelations} faction relations, not a full pair-by-pair matrix.`,
+          "Relations must reflect trade dependence, territorial disputes, labor leverage, doctrine clashes, repair dependence, permit control, or naval rivalry.",
+          `Return only the important faction relations needed to understand the political map; avoid padding and do not produce a full pair-by-pair matrix.`,
           "Choose only the most important relationships needed to understand the political map.",
           "Use only the provided faction keys.",
           "Use concise lowercase underscore keys and keep the political map readable.",
@@ -2395,7 +2562,7 @@ class DungeonMasterClient {
               ),
             ),
             formatFinalInstruction(
-              `Generate exactly ${targetWorldSpineRelations} faction relations using only the provided faction keys. Do not generate a full pair-by-pair matrix.`,
+              `Generate only the most important faction relations using the provided faction keys. Aim for roughly ${targetWorldSpineRelations} if the setting supports it, but prefer fewer over padding and do not generate a full pair-by-pair matrix.`,
             ),
           ].join("\n\n"),
         schema: worldSpineRelationsOnlySchema,
@@ -2506,7 +2673,8 @@ class DungeonMasterClient {
           system: buildWorldGenSystemPrompt([
             "Generate the lived-in regional layer for each locked location in this batch.",
             "Each location needs public activity, local pressure, everyday texture, hazards, ordinary knowledge, and reasons a resident stays or leaves.",
-            "Focus on workers, routines, institutions, rot, shortages, tolls, patrols, and weather exposure.",
+            "Focus on workers, routines, institutions, rot, shortages, tolls, patrols, weather exposure, quotas, and upkeep burdens.",
+            "If the world has grand history or myth, cash it out here as something residents pay, dodge, repair, fear, exploit, or gossip about today.",
             "dominantActivities, publicHazards, ordinaryKnowledge, institutions, gossip, reasonsToLinger, routineSeeds, and eventSeeds must all be arrays of short strings.",
             `Return exactly ${locationBatch.length} records, one per location id in the batch.`,
           ]),
@@ -2607,10 +2775,11 @@ class DungeonMasterClient {
           system: buildWorldGenSystemPrompt([
             "Generate systemic NPCs for this world map batch.",
             "Every NPC must have a mundane routine, a current concern tied to a local hazard, faction pressure, or commodity shortage, and a transactional or territorial reason to cross paths with the player.",
+            "Current concerns should usually arise from a dependency, bottleneck, debt, quota, inspection, repair burden, permit, or local rivalry instead of free-floating angst.",
             "Favor workers, pilots, wardens, clerks, brokers, crew leads, and other routine social roles over colorful eccentrics.",
             "Use highly varied first-name sounds and syllable patterns so the cast does not cluster around a few repeated drowned-world name shapes.",
             "Every NPC's first name must be unique across the whole world.",
-            "playerCrossPath should describe an ordinary deal, toll, patrol, dispute, inspection, delivery, rumor, or work dependency instead of a cinematic mission pitch.",
+            "playerCrossPath should describe an ordinary deal, toll, patrol, dispute, inspection, delivery, rumor, work dependency, or bureaucratic snag instead of a cinematic mission pitch.",
             "Use only the exact provided ids in factionId, currentLocationId, ties.locationIds, bridgeLocationIds, and bridgeFactionIds; never use faction keys, location keys, or names in those fields.",
             "Every factionId and bridgeFactionId must match a provided fac_* id exactly.",
             "Keep summary, description, currentConcern, and playerCrossPath to one tight sentence each.",
@@ -2800,6 +2969,19 @@ class DungeonMasterClient {
         factionId: npc.factionId,
       }));
       const targetInformationNodeCount = Math.min(lockedLocations.length + 3, 18);
+      const initiallyAnchoredFactionIds = new Set<string>([
+        ...worldSpine.locations
+          .map((location) =>
+            location.controllingFactionKey ? idMaps.factions[location.controllingFactionKey] : null,
+          )
+          .filter((factionId): factionId is string => Boolean(factionId)),
+        ...socialLayer.npcs
+          .map((npc) => npc.factionId)
+          .filter((factionId): factionId is string => Boolean(factionId)),
+      ]);
+      const unanchoredFactionsForKnowledge = lockedFactions.filter(
+        (faction) => !initiallyAnchoredFactionIds.has(faction.id),
+      );
 
       notifyProgress({
         stage: "knowledge_web",
@@ -2810,13 +2992,17 @@ class DungeonMasterClient {
         stage: "knowledge_web",
         system: buildWorldGenSystemPrompt([
           "Generate the playable information web for the locked world.",
+          "Tie every information node to a present-day cost, hazard, dependency, witness, route, record, object, or local dispute rather than remote lore for its own sake.",
           "Public information must provide a physical location, route, object, document, or NPC lead.",
           "Guarded information must imply what leverage, payment, status, or relationship is required to obtain it.",
           "Secrets should resolve to concrete places, ledgers, caches, devices, routes, or hidden actors rather than pure metaphysics.",
-          "Keep every field concise: summary, content, actionLead, and discoverHow should each be one tight sentence.",
+          "actionLead and discoverHow should move play to the next clue or leverage point, not deliver a complete final answer.",
+          "Keep every field concise: title, summary, content, actionLead, and discoverHow should all be short phrases or one tight sentence at most.",
           "Return at least one actionable information node for each locked location.",
           "Some locations may surface public leads while others rely on guarded leads; choose what fits the place instead of forcing the same access level everywhere.",
-          "Keep the network compact: return no more than 18 information nodes and no more than 24 information links.",
+          "Keep the network compact: cover every location, build a genuinely connected web, and stay under 18 information nodes and 24 information links.",
+          "Prefer one information node per location unless an extra node adds clear value.",
+          "If any factions are listed as currently unanchored, use information nodes to give them a visible public role, dispute, permit system, repair burden, ritual presence, market function, or territorial pressure in the world.",
         ]),
         buildUser: (correctionNotes) =>
           [
@@ -2834,12 +3020,35 @@ class DungeonMasterClient {
               "locked_factions",
               summarizeFactionRefs(lockedFactions, { includeKey: false }),
             ),
+            ...(unanchoredFactionsForKnowledge.length > 0
+              ? [
+                  formatPromptBlock(
+                    "currently_unanchored_factions",
+                    summarizeFactionRefs(unanchoredFactionsForKnowledge, { includeKey: false }),
+                  ),
+                ]
+              : []),
             formatPromptBlock("locked_npcs", summarizeNpcRefs(lockedNpcs)),
             formatPromptBlock("regional_life_digest", summarizeRegionalLifeRefs(regionalLife)),
+            ...(correctionNotes
+              ? [
+                  formatPromptBlock("retry_budget", [
+                    "Return the minimum viable payload.",
+                    "Use exactly one information node per location unless a cited correction requires more.",
+                    "Keep title, summary, content, actionLead, and discoverHow extremely short.",
+                    `Keep information links sparse and no higher than ${Math.min(lockedLocations.length + 2, 16)} total.`,
+                  ]),
+                ]
+              : []),
             formatFinalInstruction([
               "Use only the provided ids for locations, factions, and NPCs.",
               "Use unique keys for information nodes and information links.",
-              `Return exactly ${targetInformationNodeCount} information nodes and 12 to 24 information links.`,
+              `Give every location at least one actionable information node. Keep the total compact and no higher than ${targetInformationNodeCount} information nodes or 24 information links.`,
+              ...(unanchoredFactionsForKnowledge.length > 0
+                ? [
+                    "At least one information node must use each currently_unanchored_factions factionId so every faction leaves a visible mark on the world.",
+                  ]
+                : []),
             ]),
           ].join("\n\n"),
         schema: generatedKnowledgeWebInputSchema,
@@ -2886,7 +3095,85 @@ class DungeonMasterClient {
             }
           }
 
-          return [{ category: "playability", issues }];
+          const provisionalKnowledgeLayer = {
+            information: parsed.information.map((information) => ({
+              id: idMaps.information[information.key],
+              title: information.title,
+              summary: information.summary,
+              content: `${information.content} Lead: ${information.actionLead}. Discovery path: ${information.discoverHow}.`,
+              truthfulness: information.truthfulness,
+              accessibility: information.accessibility,
+              locationId: information.locationId,
+              factionId: information.factionId,
+              sourceNpcId: information.sourceNpcId,
+            })),
+            informationLinks: parsed.informationLinks.map((link) => ({
+              id: `link_validation_${link.key}`,
+              sourceId: idMaps.information[link.sourceKey],
+              targetId: idMaps.information[link.targetKey],
+              linkType: link.linkType,
+            })),
+          };
+
+          const provisionalModule: GeneratedWorldModule = {
+            title: worldBible.title,
+            premise: worldBible.premise,
+            tone: worldBible.tone,
+            setting: worldBible.setting,
+            locations: worldSpine.locations.map((location) => ({
+              id: idMaps.locations[location.key],
+              name: location.name,
+              type: location.type,
+              summary: location.summary,
+              description: enrichLocationDescription(
+                `${location.description} ${location.localIdentity}`,
+                regionalLife.locations.find((entry) => entry.locationId === idMaps.locations[location.key]),
+              ),
+              state: location.state,
+              controllingFactionId: location.controllingFactionKey
+                ? idMaps.factions[location.controllingFactionKey]
+                : null,
+              tags: uniqueNames([...location.tags, location.controlStatus]),
+            })),
+            edges: worldSpine.edges.map((edge) => ({
+              id: idMaps.edges[edge.key],
+              sourceId: idMaps.locations[edge.sourceKey],
+              targetId: idMaps.locations[edge.targetKey],
+              travelTimeMinutes: edge.travelTimeMinutes,
+              dangerLevel: edge.dangerLevel,
+              currentStatus: edge.currentStatus,
+              description: edge.description,
+            })),
+            factions: worldSpine.factions.map((faction) => ({
+              id: idMaps.factions[faction.key],
+              name: faction.name,
+              type: faction.type,
+              summary: `${faction.summary} ${faction.publicFootprint}`,
+              agenda: faction.agenda,
+              resources: faction.resources,
+              pressureClock: faction.pressureClock,
+            })),
+            factionRelations: worldSpine.factionRelations.map((relation) => ({
+              id: idMaps.factionRelations[relation.key],
+              factionAId: idMaps.factions[relation.factionAKey],
+              factionBId: idMaps.factions[relation.factionBKey],
+              stance: relation.stance,
+            })),
+            npcs: socialLayer.npcs,
+            information: provisionalKnowledgeLayer.information,
+            informationLinks: provisionalKnowledgeLayer.informationLinks,
+            commodities: [],
+            marketPrices: [],
+            entryPoints: [],
+          };
+
+          return [
+            { category: "playability", issues },
+            {
+              category: "immersion",
+              issues: validateFactionFootprints(provisionalModule).issues,
+            },
+          ];
         },
         summarize: (parsed) =>
           `${parsed.information.length} information nodes with ${parsed.informationLinks.length} links.`,
@@ -2907,18 +3194,23 @@ class DungeonMasterClient {
         system: buildWorldGenSystemPrompt([
           "Generate a compact worldview-and-pressure layer using the existing information web.",
           "Use knowledgeNetworks for compact clusters of public beliefs, competing explanations, rumors, doctrines, theories, or myths that connect back to the existing information web instead of inventing new lore objects.",
+          "For linkedInformationKeys, copy only exact information_web keys; never use human-readable titles or world-bible explanation labels.",
           "Pressure seeds should name a locked location or faction and describe a near-term pressure that can move play.",
+          "Keep hiddenTruths partial enough to preserve uncertainty; they should sharpen direction and stakes without mathematically closing the world's deepest mysteries.",
           "Keep hiddenTruth and pressure text to one tight sentence each.",
-          "Return 2 to 4 worldview clusters and 3 to 6 pressure seeds.",
+          "Keep it compact. Return only the major worldview clusters and the most actionable near-term pressures; do not pad.",
         ]),
-        buildUser: (correctionNotes) =>
-          [
+        buildUser: (correctionNotes) => {
+          const { competingExplanations: _competingExplanations, ...knowledgeThreadsWorldContext } =
+            worldPromptContext;
+
+          return [
             buildWorldGenerationBasePrompt({
               prompt: input.prompt,
               previousDraft: input.previousDraft,
               correctionNotes,
             }),
-            formatPromptBlock("world_context", worldPromptContext),
+            formatPromptBlock("world_context", knowledgeThreadsWorldContext),
             formatPromptBlock(
               "locked_locations",
               summarizeLocationRefs(lockedLocations, { includeKey: false }),
@@ -2929,25 +3221,17 @@ class DungeonMasterClient {
             ),
             formatPromptBlock(
               "information_web",
-              knowledgeWebInput.information.map((information) =>
-                [
-                  information.key,
-                  information.title,
-                  `access=${information.accessibility}`,
-                  information.locationId ? `loc=${information.locationId}` : "",
-                  information.factionId ? `faction=${information.factionId}` : "",
-                  information.knowledgeThread ? `thread=${information.knowledgeThread}` : "",
-                ]
-                  .filter(Boolean)
-                  .join(" | "),
-              ),
+              summarizeKnowledgeThreadInformationRefs(knowledgeWebInput.information),
             ),
             formatFinalInstruction([
+              "CRITICAL: For linkedInformationKeys, use ONLY the exact lowercase underscore keys from key=... in information_web.",
+              "Do not use capitalized titles, and do not use keys from world-context competing explanations or myths.",
               "Use only existing information keys and the provided location and faction ids.",
               "Use knowledgeNetworks for belief, rumor, doctrine, theory, or myth clusters as appropriate to the setting.",
-              "Return exactly 3 knowledgeNetworks and 4 pressure seeds unless the correction notes require otherwise.",
+              "Return only as many knowledgeNetworks and pressureSeeds as the world genuinely needs while staying compact and within schema bounds.",
             ]),
-          ].join("\n\n"),
+          ].join("\n\n");
+        },
         schema: generatedKnowledgeThreadsInputSchema,
         tool: knowledgeThreadsTool,
         attempts,
@@ -2958,13 +3242,23 @@ class DungeonMasterClient {
           const informationKeys = new Set(knowledgeWebInput.information.map((information) => information.key));
           const locationIds = new Set(lockedLocations.map((location) => location.id));
           const factionIds = new Set(lockedFactions.map((faction) => faction.id));
+          const invalidInformationKeys = new Set<string>();
 
           for (const cluster of parsed.knowledgeNetworks) {
             for (const informationKey of cluster.linkedInformationKeys) {
               if (!informationKeys.has(informationKey)) {
-                issues.push(`Worldview cluster ${cluster.theme} references unknown information ${informationKey}.`);
+                invalidInformationKeys.add(informationKey);
               }
             }
+          }
+
+          if (invalidInformationKeys.size > 0) {
+            issues.push(
+              `linkedInformationKeys must use only information_web keys. Invalid values: ${[...invalidInformationKeys].join(", ")}.`,
+            );
+            issues.push(
+              `Allowed information_web keys: ${[...informationKeys].join(", ")}.`,
+            );
           }
 
           for (const seed of parsed.pressureSeeds) {
@@ -3026,6 +3320,58 @@ class DungeonMasterClient {
         pressureSeeds: knowledgeThreadsInput.pressureSeeds,
       };
 
+      const baseWorldModule: GeneratedWorldModule = {
+        title: worldBible.title,
+        premise: worldBible.premise,
+        tone: worldBible.tone,
+        setting: worldBible.setting,
+        locations: worldSpine.locations.map((location) => ({
+          id: idMaps.locations[location.key],
+          name: location.name,
+          type: location.type,
+          summary: location.summary,
+          description: enrichLocationDescription(
+            `${location.description} ${location.localIdentity}`,
+            regionalLife.locations.find((entry) => entry.locationId === idMaps.locations[location.key]),
+          ),
+          state: location.state,
+          controllingFactionId: location.controllingFactionKey
+            ? idMaps.factions[location.controllingFactionKey]
+            : null,
+          tags: uniqueNames([...location.tags, location.controlStatus]),
+        })),
+        edges: worldSpine.edges.map((edge) => ({
+          id: idMaps.edges[edge.key],
+          sourceId: idMaps.locations[edge.sourceKey],
+          targetId: idMaps.locations[edge.targetKey],
+          travelTimeMinutes: edge.travelTimeMinutes,
+          dangerLevel: edge.dangerLevel,
+          currentStatus: edge.currentStatus,
+          description: edge.description,
+        })),
+        factions: worldSpine.factions.map((faction) => ({
+          id: idMaps.factions[faction.key],
+          name: faction.name,
+          type: faction.type,
+          summary: `${faction.summary} ${faction.publicFootprint}`,
+          agenda: faction.agenda,
+          resources: faction.resources,
+          pressureClock: faction.pressureClock,
+        })),
+        factionRelations: worldSpine.factionRelations.map((relation) => ({
+          id: idMaps.factionRelations[relation.key],
+          factionAId: idMaps.factions[relation.factionAKey],
+          factionBId: idMaps.factions[relation.factionBKey],
+          stance: relation.stance,
+        })),
+        npcs: socialLayer.npcs,
+        information: knowledgeLayer.information,
+        informationLinks: knowledgeLayer.informationLinks,
+        commodities: [],
+        marketPrices: [],
+        entryPoints: [],
+      };
+
       notifyProgress({
         stage: "economy_material_life",
         status: "running",
@@ -3037,11 +3383,12 @@ class DungeonMasterClient {
         stage: "economy_material_life",
         system: buildWorldGenSystemPrompt([
           "Generate commodities, market prices, and location-level material life for the locked world.",
-          `Return exactly ${targetCommodityCount} commodities and exactly ${targetMarketPriceCount} market prices.`,
+          `Keep the economy compact: no more than ${targetCommodityCount} commodities and no more than ${targetMarketPriceCount} market prices.`,
           `Return one locationTradeIdentity entry for every locked location (${lockedLocations.length} total).`,
           "Include staple goods, raw materials, and at least one controlled or illicit trade pressure.",
           "No generic treasure filler or ornamental adventuring gear; focus on bulk goods, infrastructure, consumables, and daily necessities.",
-          "Every commodity should imply scarcity, transport strain, monopoly pressure, hazard, or spoilage.",
+          "Every commodity should imply scarcity, transport strain, monopoly pressure, hazard, spoilage, upkeep demand, or harvest quota.",
+          "Let market presence reveal who maintains critical systems, who pays the hidden costs, and where supply lines are brittle.",
           "Every major location should have a trade identity or a deliberate reason for lacking one.",
           "Keep every field terse: one short sentence or short phrase, not a paragraph.",
         ]),
@@ -3064,7 +3411,7 @@ class DungeonMasterClient {
             formatPromptBlock("locked_npcs", summarizeNpcRefs(lockedNpcs)),
             formatPromptBlock("regional_life_digest", summarizeRegionalLifeRefs(regionalLife)),
             formatFinalInstruction(
-              `Use only the provided location ids, faction ids, and NPC ids. Use unique commodity keys. Return exactly ${targetCommodityCount} commodities, exactly ${targetMarketPriceCount} marketPrices, and exactly ${lockedLocations.length} locationTradeIdentity entries.`,
+              `Use only the provided location ids, faction ids, and NPC ids. Use unique commodity keys. Return one locationTradeIdentity entry per locked location, and keep the total no higher than ${targetCommodityCount} commodities and ${targetMarketPriceCount} marketPrices.`,
             ),
           ].join("\n\n"),
         schema: generatedEconomyMaterialLifeInputSchema,
@@ -3150,55 +3497,18 @@ class DungeonMasterClient {
       };
 
       const spineModule: GeneratedWorldModule = {
-        title: worldBible.title,
-        premise: worldBible.premise,
-        tone: worldBible.tone,
-        setting: worldBible.setting,
-        locations: worldSpine.locations.map((location) => ({
-          id: idMaps.locations[location.key],
-          name: location.name,
-          type: location.type,
-          summary: location.summary,
-          description: enrichLocationDescription(
-            `${location.description} ${location.localIdentity}`,
-            regionalLife.locations.find((entry) => entry.locationId === idMaps.locations[location.key]),
+        ...baseWorldModule,
+        locations: baseWorldModule.locations.map((location) => ({
+          ...location,
+          description: appendLocationTradeIdentity(
+            location.description,
+            knowledgeEconomy.locationTradeIdentity.find((identity) => identity.locationId === location.id),
           ),
-          state: location.state,
-          controllingFactionId: location.controllingFactionKey
-            ? idMaps.factions[location.controllingFactionKey]
-            : null,
-          tags: uniqueNames([...location.tags, location.controlStatus]),
         })),
-        edges: worldSpine.edges.map((edge) => ({
-          id: idMaps.edges[edge.key],
-          sourceId: idMaps.locations[edge.sourceKey],
-          targetId: idMaps.locations[edge.targetKey],
-          travelTimeMinutes: edge.travelTimeMinutes,
-          dangerLevel: edge.dangerLevel,
-          currentStatus: edge.currentStatus,
-          description: edge.description,
-        })),
-        factions: worldSpine.factions.map((faction) => ({
-          id: idMaps.factions[faction.key],
-          name: faction.name,
-          type: faction.type,
-          summary: `${faction.summary} ${faction.publicFootprint}`,
-          agenda: faction.agenda,
-          resources: faction.resources,
-          pressureClock: faction.pressureClock,
-        })),
-        factionRelations: worldSpine.factionRelations.map((relation) => ({
-          id: idMaps.factionRelations[relation.key],
-          factionAId: idMaps.factions[relation.factionAKey],
-          factionBId: idMaps.factions[relation.factionBKey],
-          stance: relation.stance,
-        })),
-        npcs: socialLayer.npcs,
         information: knowledgeEconomy.information,
         informationLinks: knowledgeEconomy.informationLinks,
         commodities: knowledgeEconomy.commodities,
         marketPrices: knowledgeEconomy.marketPrices,
-        entryPoints: [],
       };
 
       const knowledgeEconomyValidation = validateKnowledgeEconomy(
@@ -3241,8 +3551,10 @@ class DungeonMasterClient {
         system: buildWorldGenSystemPrompt([
           "Generate exactly 3 grounded entry contexts for the completed world.",
           "Each entry should begin with minor but immediate personal, commercial, legal, territorial, or administrative pressure.",
+          "Let that immediate pressure be the local face of a bigger system: a shortage, fee, delayed repair, permit demand, labor dispute, patrol crack-down, or contested supply line.",
           "The player should arrive as another person navigating an ongoing society, not as a chosen savior.",
           "Public leads should point to someone, somewhere, or something the player can pursue immediately.",
+          "mundaneActionPath should offer a practical next step through local people, work, routes, payments, or paperwork rather than a dramatic destiny hook.",
           "Prefer starting locations that connect to several nearby places within a few hops, so each opening has room to branch into the wider world.",
           "Avoid using only isolated edge locations as opening starts unless they still sit near multiple practical follow-up destinations.",
           "EVERY entry must include the evidenceWorldAlreadyMoving field.",
@@ -3479,6 +3791,8 @@ class DungeonMasterClient {
         message: error instanceof Error ? error.message : String(error),
       });
       throw new Error(error instanceof Error ? error.message : "World generation failed.");
+    } finally {
+      stopWorldGenerationLog();
     }
   }
 

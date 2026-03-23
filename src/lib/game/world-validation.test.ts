@@ -3,6 +3,7 @@ import test from "node:test";
 import type { GeneratedKnowledgeEconomy, GeneratedWorldModule } from "./types";
 import {
   validateEntryContexts,
+  validateFactionFootprints,
   validateKnowledgeEconomy,
   validateRegionalLife,
   validateSocialLayer,
@@ -555,6 +556,19 @@ test("world immersion validation rejects empty locations", () => {
   assert.match(report.issues.join("\n"), /economic identity/);
 });
 
+test("world immersion validation accepts textual economic identity without market prices", () => {
+  const world = createWorld();
+  world.marketPrices = [];
+  world.locations[1] = {
+    ...world.locations[1],
+    description: `${world.locations[1].description} Trade identity: lamp oil, brine fish. Scarcity: fuel boats are arriving late. Street economy: dock crews barter for lamp time after dark.`,
+  };
+
+  const report = validateWorldModuleImmersion(world);
+
+  assert.doesNotMatch(report.issues.join("\n"), /Location Market needs an economic identity/);
+});
+
 test("world immersion validation accepts a textual faction footprint", () => {
   const world = createWorld();
   world.factions.push({
@@ -575,6 +589,24 @@ test("world immersion validation accepts a textual faction footprint", () => {
   const report = validateWorldModuleImmersion(world);
 
   assert.doesNotMatch(report.issues.join("\n"), /Whimsical Creature Clans needs a visible mark on the world/);
+});
+
+test("faction footprint validation rejects factions with no visible presence", () => {
+  const world = createWorld();
+  world.factions.push({
+    id: "fac_ghost",
+    name: "Quiet Ledger Circle",
+    type: "mercantile",
+    summary: "An off-book accounting ring.",
+    agenda: "Hide debt trails.",
+    resources: { gold: 3, military: 0, influence: 4, information: 6 },
+    pressureClock: 3,
+  });
+
+  const report = validateFactionFootprints(world);
+
+  assert.equal(report.ok, false);
+  assert.match(report.issues.join("\n"), /Quiet Ledger Circle needs a visible mark on the world/);
 });
 
 test("regional life validation requires coverage for every location", () => {

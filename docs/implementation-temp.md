@@ -9,7 +9,8 @@ Implementation order:
 2. Simulation core and rollback
 3. Daily scheduling and event generation
 4. Context slimming, deep-fetch tools, and fidelity audit
-5. Performance hardening and tests
+5. Campaign-start social hydration and runtime locals
+6. Performance hardening and tests
 
 ## Key Changes
 
@@ -77,7 +78,21 @@ Implementation order:
 - Enforce a hard budget of 3 pre-action fetches per turn.
 - Treat budget overflow as a base-context design problem; log it and fail the turn with clarification rather than silently allowing unbounded fetches.
 
-### 5. Expand world-fidelity validation from citation membership to factual consistency
+### 5. Add campaign-start social hydration and on-demand local population
+- Keep module-generation NPC output intentionally sparse. The module should carry anchor NPCs, not the full day-to-day population of every settlement.
+- During campaign creation, hydrate the selected entry point and nearby hops with additional talkable locals tied to the starting social surface:
+  - innkeepers, quartermasters, vendors, tavern staff, clerks, patrols, guides, repair workers, brokers, and other ordinary contacts
+- Treat these campaign-stage locals as the first "thickening" pass for the world:
+  - world module = backbone
+  - campaign generation = starting-region cast
+  - runtime = scene-by-scene extras
+- At runtime, support lightweight on-demand locals when the player asks for a plausible ordinary contact not already in the persistent cast.
+- Only promote an on-demand local into a persistent NPC record if they become mechanically important, recur across turns, hold inventory, affect faction state, or become part of the player's remembered social graph.
+- This split should preserve two goals at once:
+  - world generation stays compact, stable, and cheaper to regenerate
+  - inhabited locations still feel socially alive once a campaign actually begins
+
+### 6. Expand world-fidelity validation from citation membership to factual consistency
 - Keep `citedEntities`, but strengthen validation by mode:
   - exploration, conversation, observation, trade, rest: run world-fidelity audit
   - combat and freeform: keep existing narration checks plus world-fidelity checks for named facts
@@ -91,7 +106,7 @@ Implementation order:
 - Use fetched context plus base context as the allowed fact set for that turn.
 - Make commodity citations mandatory once `execute_trade` ships; remove the current “ignored because trading is deferred” warning path.
 
-### 6. Performance hardening
+### 7. Performance hardening
 - Add the planned indexes that support NPC location lookup, event scheduling, faction-move scheduling, market lookups, information lookups, and routine time queries.
 - Stop building the full campaign snapshot for every turn when only prompt context is needed; split snapshot loading from prompt-context loading.
 - Benchmark base context assembly against a large seeded world and target `<150ms` before shipping the thin-context path.
@@ -135,4 +150,5 @@ Implementation order:
 - Combat is intentionally lightweight v1 and does not introduce a full tactical battle subsystem.
 - Traded goods are stored separately from generic inventory items to avoid overloading item-instance semantics.
 - Rollback metadata lives on `Turn.resultJson` rather than in a new table.
+- Campaign-start social hydration should add density around the entry area without forcing the world module itself to pre-author every ordinary local contact.
 - Phase 7 character-depth work is out of scope for this pass because it is not part of the unchecked “next” items and is not required to complete the runtime/simulation rehaul.

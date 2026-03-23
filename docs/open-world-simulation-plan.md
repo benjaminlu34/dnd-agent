@@ -639,13 +639,23 @@ No upfront timeline generation. Only spatial layout and starting conditions. The
 
 **Stage 2 — Factions:** 3-6 factions. At least one that could be a player ally. Symmetric relationships. 0 scheduled moves at generation — the daily JIT tick generates moves reactively.
 
-**Stage 3 — NPCs:** 10-20 named NPCs. Typed routines. NPC distribution validated against playability concentration rule.
+**Stage 3 — NPCs:** 10-20 named anchor NPCs. Typed routines. NPC distribution validated against playability concentration rule.
 
 **Stage 4 — Knowledge Web:** Information nodes linked to NPCs and locations. At least 30% publicly accessible. All `InformationLink` targets exist in the same generation batch.
 
 **Stage 5 — Economy:** Commodities, market prices per location, initial vendor assignments.
 
 **Stage 6 — Entry Points:** 3-5 entry contexts. Starting location reachable to all others within 4 hops. Initial information IDs validated against Stage 4.
+
+### 2A. Social Density By Layer
+
+Keep social density split across three layers instead of forcing the world module to carry every talkable person up front:
+
+- **Module generation:** create the persistent backbone only. These NPCs are anchors: officials, workers, brokers, guides, crew leads, and other people who make a place legible and keep factions visible.
+- **Campaign generation:** hydrate the chosen starting area with additional talkable locals for the entry location and nearby hops. This is where innkeepers, stall owners, shift foremen, patrol sergeants, local fixers, and similar everyday contacts should appear.
+- **Runtime / scene generation:** allow ephemeral locals to be introduced on demand when the player looks for "a blacksmith," "someone who repairs air tanks," or another ordinary contact not worth pre-authoring globally.
+
+This keeps the module compact and coherent while still allowing towns and hubs to feel socially populated once play begins.
 
 ### 3. Incremental Regeneration (FM-5)
 
