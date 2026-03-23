@@ -32,6 +32,12 @@ export default function Home() {
           >
             Manage Characters
           </Link>
+          <Link
+            href="/campaigns"
+            className="rounded-full border border-zinc-800 px-6 py-3 text-sm font-semibold text-zinc-300 transition-colors hover:bg-zinc-900 hover:text-white"
+          >
+            View Campaigns
+          </Link>
         </div>
 
         <div className="mt-24 grid w-full max-w-5xl grid-cols-1 gap-6 md:grid-cols-3">

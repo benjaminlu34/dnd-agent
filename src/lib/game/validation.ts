@@ -109,8 +109,12 @@ function assertTime(command: Exclude<TurnActionToolCall, { type: "request_clarif
 
 function validateInteractionTarget(snapshot: CampaignSnapshot, command: TurnActionToolCall) {
   if (command.type === "execute_converse") {
-    if (!snapshot.presentNpcs.some((npc) => npc.id === command.npcId)) {
-      throw new Error("Cannot converse with an NPC who is not present.");
+    if (command.npcId) {
+      if (!snapshot.presentNpcs.some((npc) => npc.id === command.npcId)) {
+        throw new Error("Cannot converse with an NPC who is not present.");
+      }
+    } else if (!command.interlocutor.trim()) {
+      throw new Error("Converse actions without npcId must name the local interlocutor.");
     }
   }
 

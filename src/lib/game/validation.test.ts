@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type {
   CampaignSnapshot,
+  ExecuteConverseToolCall,
   ExecuteFreeformToolCall,
   ExecuteTravelToolCall,
 } from "./types";
@@ -191,5 +192,61 @@ test("validateTurnCommand rejects freeform without intendedMechanicalOutcome", (
         command,
       }),
     /intendedMechanicalOutcome/,
+  );
+});
+
+test("validateTurnCommand accepts converse actions aimed at an unnamed local", () => {
+  const command: ExecuteConverseToolCall = {
+    type: "execute_converse",
+    interlocutor: "nearest porter",
+    topic: "what happened at the gate",
+    narration: "A nearby porter lowers his voice and tells you the watch has been overwhelmed since dawn.",
+    suggestedActions: ["Ask who started the trouble"],
+    timeMode: "exploration",
+    timeElapsed: 5,
+    citedEntities: {
+      npcIds: [],
+      locationIds: ["loc_gate"],
+      factionIds: ["fac_watch"],
+      commodityIds: [],
+      informationIds: ["info_1"],
+    },
+  };
+
+  const validated = validateTurnCommand({
+    snapshot: createSnapshot(),
+    command,
+  });
+
+  assert.equal(validated.type, "execute_converse");
+  assert.equal(validated.interlocutor, "nearest porter");
+  assert.equal(validated.npcId, undefined);
+});
+
+test("validateTurnCommand rejects converse actions without npcId or interlocutor", () => {
+  const command: ExecuteConverseToolCall = {
+    type: "execute_converse",
+    interlocutor: "   ",
+    topic: "what happened at the gate",
+    narration: "Silence follows your question.",
+    suggestedActions: ["Ask someone else"],
+    timeMode: "exploration",
+    timeElapsed: 5,
+    citedEntities: {
+      npcIds: [],
+      locationIds: ["loc_gate"],
+      factionIds: [],
+      commodityIds: [],
+      informationIds: [],
+    },
+  };
+
+  assert.throws(
+    () =>
+      validateTurnCommand({
+        snapshot: createSnapshot(),
+        command,
+      }),
+    /interlocutor/,
   );
 });

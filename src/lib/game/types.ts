@@ -698,7 +698,8 @@ export type ExecuteTravelToolCall = {
 
 export type ExecuteConverseToolCall = {
   type: "execute_converse";
-  npcId: string;
+  interlocutor: string;
+  npcId?: string;
   topic: string;
   narration: string;
   suggestedActions: string[];

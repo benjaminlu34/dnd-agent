@@ -54,7 +54,7 @@ async function commitResolvedTurn(input: {
       },
     });
 
-    if (command.type === "execute_converse" && typeof command.approvalDelta === "number") {
+    if (command.type === "execute_converse" && command.npcId && typeof command.approvalDelta === "number") {
       await tx.nPC.update({
         where: { id: command.npcId },
         data: {

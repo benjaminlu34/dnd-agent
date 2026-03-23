@@ -144,6 +144,62 @@ function safeParseJson(value: unknown): unknown {
 
   const stripTrailingCommas = (candidate: string) => candidate.replace(/,\s*([}\]])/g, "$1");
 
+  const closeUnclosedJsonStructures = (candidate: string) => {
+    const stack: string[] = [];
+    let inString = false;
+    let escaped = false;
+
+    for (const char of candidate) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+
+      if (char === '"') {
+        inString = !inString;
+        continue;
+      }
+
+      if (inString) {
+        continue;
+      }
+
+      if (char === "{" || char === "[") {
+        stack.push(char);
+        continue;
+      }
+
+      if (char === "}" && stack.at(-1) === "{") {
+        stack.pop();
+        continue;
+      }
+
+      if (char === "]" && stack.at(-1) === "[") {
+        stack.pop();
+      }
+    }
+
+    let repaired = candidate;
+    if (escaped) {
+      repaired += "\\";
+    }
+    if (inString) {
+      repaired += '"';
+    }
+
+    while (stack.length) {
+      const opener = stack.pop();
+      repaired += opener === "{" ? "}" : "]";
+    }
+
+    return repaired === candidate ? null : repaired;
+  };
+
   const extractBalancedJsonCandidates = (candidate: string) => {
     const results: string[] = [];
     const stack: string[] = [];
@@ -201,9 +257,13 @@ function safeParseJson(value: unknown): unknown {
     normalizeLiteralControlChars(trimmed),
     stripTrailingCommas(trimmed),
     stripTrailingCommas(normalizeLiteralControlChars(trimmed)),
+    closeUnclosedJsonStructures(trimmed),
+    closeUnclosedJsonStructures(normalizeLiteralControlChars(trimmed)),
+    closeUnclosedJsonStructures(stripTrailingCommas(trimmed)),
+    closeUnclosedJsonStructures(stripTrailingCommas(normalizeLiteralControlChars(trimmed))),
     ...extractBalancedJsonCandidates(trimmed),
     ...extractBalancedJsonCandidates(normalizeLiteralControlChars(trimmed)),
-  ];
+  ].filter((candidate): candidate is string => Boolean(candidate));
 
   for (const candidate of candidates) {
     const parsed =
@@ -526,6 +586,7 @@ type StageValidation = {
 };
 
 const MAX_WORLD_STAGE_ATTEMPTS = 3;
+const MAX_TURN_ATTEMPTS = 3;
 const WORLD_SPINE_LOCATION_BATCH_SIZE = 3;
 const REGIONAL_LIFE_BATCH_SIZE = 3;
 const SOCIAL_CAST_BATCH_SIZE = 3;
@@ -1677,11 +1738,15 @@ const actionTools = [
   },
   {
     name: "execute_converse",
-    description: "Speak with a present NPC about a specific topic.",
+    description: "Speak with a named present NPC or an unnamed local person in the current scene about a specific topic.",
     input_schema: {
       type: "object",
       additionalProperties: false,
       properties: {
+        interlocutor: {
+          type: "string",
+          description: "Short label for who answers, such as a present NPC name or an unnamed local like 'nearest harvester'.",
+        },
         npcId: { type: "string" },
         topic: { type: "string" },
         approvalDelta: { type: "number" },
@@ -1704,7 +1769,7 @@ const actionTools = [
           required: ["npcIds", "locationIds", "factionIds", "commodityIds", "informationIds"],
         },
       },
-      required: ["npcId", "topic", "narration", "suggestedActions", "timeMode", "timeElapsed", "citedEntities"],
+      required: ["interlocutor", "topic", "narration", "suggestedActions", "timeMode", "timeElapsed", "citedEntities"],
     },
   },
   {
@@ -1935,6 +2000,46 @@ function extractToolInput(response: OpenAI.Chat.Completions.ChatCompletion) {
     finishReason,
     likelyTruncated,
   };
+}
+
+function normalizeTurnToolCall(input: {
+  toolName: string | null;
+  payload: unknown;
+  promptContext: SpatialPromptContext;
+}): TurnActionToolCall | null {
+  const { toolName, payload, promptContext } = input;
+
+  if (!toolName || !payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+
+  const record = payload as Record<string, unknown>;
+
+  if (toolName === "execute_converse") {
+    const npcId =
+      typeof record.npcId === "string" && record.npcId.trim() ? record.npcId.trim() : undefined;
+    const namedNpc = npcId
+      ? promptContext.presentNpcs.find((npc) => npc.id === npcId) ?? null
+      : null;
+    const interlocutor =
+      typeof record.interlocutor === "string" && record.interlocutor.trim()
+        ? record.interlocutor.trim()
+        : namedNpc?.name ?? "unnamed local";
+
+    return {
+      type: toolName,
+      ...record,
+      interlocutor,
+      npcId,
+      approvalDelta:
+        npcId && typeof record.approvalDelta === "number" ? record.approvalDelta : undefined,
+    } as TurnActionToolCall;
+  }
+
+  return {
+    type: toolName,
+    ...record,
+  } as TurnActionToolCall;
 }
 
 async function runCompletion(options: {
@@ -3883,52 +3988,84 @@ class DungeonMasterClient {
 
   async runTurn(input: TurnInput): Promise<TurnActionToolCall> {
     try {
-      const response = await runCompletion({
-        system: [
-          "You are the player's senses and action router in a simulated world.",
-          "Use exactly one tool.",
-          "Do not invent named mechanical entities outside the provided context.",
-          "Every executable tool call must include timeMode, timeElapsed, narration, suggestedActions, and citedEntities.",
-          "Tool routing hierarchy:",
-          "1. Use execute_travel when the player clearly moves to a known adjacent node or route.",
-          "2. Use execute_converse when the player addresses or negotiates with a named or clearly described NPC.",
-          "3. Use execute_investigate when the player searches, examines closely, tracks evidence, or tries to uncover hidden information.",
-          "4. Use execute_observe when the player is mainly looking, listening, waiting, or taking in the current scene.",
-          "5. Use execute_freeform for a concrete action that does not fit the other tools but can still be resolved safely.",
-          "6. Use request_clarification if the action is too ambiguous, impossible to map, or missing a required target.",
-        ].join("\n"),
-        user: [
-          formatPromptBlock("action", input.playerAction),
-          formatPromptBlock("context", input.promptContext),
-          formatPromptBlock("character", {
-            name: input.character.name,
-            archetype: input.character.archetype,
-            stats: input.character.stats,
-          }),
-        ].join("\n\n"),
-        tools: actionTools,
-      });
+      const baseSystem = [
+        "You are the player's senses and action router in a simulated world.",
+        "Use exactly one tool and return only the tool call.",
+        "Do not invent named mechanical entities outside the provided context.",
+        "Keep payloads compact: narration should be 1-3 sentences, topic/method/actionDescription should be short phrases, memorySummary should be one short sentence, and suggestedActions should contain at most 3 short actions.",
+        "Every executable tool call must include timeMode, timeElapsed, narration, suggestedActions, and citedEntities.",
+        "If the player talks to an unnamed local person or bystander implied by the scene, use execute_converse with a short generic interlocutor label such as 'nearest harvester' and leave npcId empty.",
+        "Do not redirect an unnamed bystander interaction to a named NPC unless the player's action clearly points to that NPC.",
+        "Tool routing hierarchy:",
+        "1. Use execute_travel when the player clearly moves to a known adjacent node or route.",
+        "2. Use execute_converse when the player addresses, questions, bargains with, or negotiates with a named NPC or an unnamed local speaker.",
+        "3. Use execute_investigate when the player searches, examines closely, tracks evidence, or tries to uncover hidden information.",
+        "4. Use execute_observe when the player is mainly looking, listening, waiting, or taking in the current scene.",
+        "5. Use execute_freeform for a concrete action that does not fit the other tools but can still be resolved safely.",
+        "6. Use request_clarification only if the action is too ambiguous, impossible to map, or missing a required target.",
+      ].join("\n");
+      const user = [
+        formatPromptBlock("action", input.playerAction),
+        formatPromptBlock("context", input.promptContext),
+        formatPromptBlock("character", {
+          name: input.character.name,
+          archetype: input.character.archetype,
+          stats: input.character.stats,
+        }),
+      ].join("\n\n");
 
-      const toolName = response?.name;
-      const inputPayload = response?.input;
+      let correctionNotes: string | null = null;
 
-      logOpenRouterResponse("turn.raw_input", {
-        toolName,
-        inputPreview: toPreview(inputPayload),
-      });
+      for (let attempt = 1; attempt <= MAX_TURN_ATTEMPTS; attempt += 1) {
+        logOpenRouterResponse("turn.attempt", {
+          attempt,
+          maxAttempts: MAX_TURN_ATTEMPTS,
+          correctionNotes,
+        });
 
-      if (toolName && inputPayload && typeof inputPayload === "object") {
-        logOpenRouterResponse("turn.success", {
+        const response = await runCompletion({
+          system: correctionNotes ? `${baseSystem}\n${correctionNotes}` : baseSystem,
+          user,
+          tools: actionTools,
+          maxTokens: 1400,
+        });
+
+        const toolName = response?.name;
+        const inputPayload = response?.input;
+        const normalized = normalizeTurnToolCall({
           toolName,
+          payload: inputPayload,
+          promptContext: input.promptContext,
+        });
+
+        logOpenRouterResponse("turn.raw_input", {
+          attempt,
+          toolName,
+          finishReason: response?.finishReason ?? null,
+          likelyTruncated: response?.likelyTruncated ?? false,
           inputPreview: toPreview(inputPayload),
         });
-        return {
-          type: toolName,
-          ...(inputPayload as Record<string, unknown>),
-        } as TurnActionToolCall;
+
+        if (normalized) {
+          logOpenRouterResponse("turn.success", {
+            attempt,
+            toolName,
+            inputPreview: toPreview(normalized),
+          });
+          return normalized;
+        }
+
+        correctionNotes = [
+          "Your previous reply did not produce a complete valid tool payload.",
+          response?.likelyTruncated
+            ? "The previous payload was cut off. Return a complete replacement payload with much shorter narration."
+            : "Return a complete replacement payload that exactly matches one tool schema.",
+          "Do not include assistant prose before the tool call.",
+          "If using execute_converse for an unnamed local, fill interlocutor with a short generic label and omit npcId.",
+        ].join("\n");
       }
 
-      throw new Error("Turn generation did not return a valid tool call.");
+      throw new Error("Turn generation did not return a valid tool call after retries.");
     } catch (error) {
       logOpenRouterResponse("turn.error", {
         message: error instanceof Error ? error.message : String(error),
@@ -3947,3 +4084,7 @@ class DungeonMasterClient {
 }
 
 export const dmClient = new DungeonMasterClient();
+export const aiProviderTestUtils = {
+  extractToolInput,
+  normalizeTurnToolCall,
+};
