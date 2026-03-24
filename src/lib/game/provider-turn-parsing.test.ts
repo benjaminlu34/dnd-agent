@@ -175,3 +175,80 @@ test("normalizeFetchToolCall repairs scoped fetch ids that drop the entity names
     npcId: "camp_94e2310a-8216-465e-b794-c51343e4eea1:npc:npc_joren_kelp_market_overse",
   });
 });
+
+test("buildTurnSystemPrompt hard-locks observe mode to passive tools", () => {
+  const prompt = aiProviderTestUtils.buildTurnSystemPrompt("observe");
+
+  assert.match(prompt, /MUST invoke exactly one of execute_observe or execute_wait/);
+  assert.match(prompt, /STRICTLY FORBIDDEN from invoking execute_combat, execute_converse, execute_trade, execute_freeform, execute_travel, execute_investigate, or execute_rest/);
+  assert.match(prompt, /player character takes no chosen action and speaks no dialogue/);
+  assert.match(prompt, /at most 4 short actions/);
+});
+
+test("observe mode only permits observe, wait, or clarification as final tools", () => {
+  assert.equal(
+    aiProviderTestUtils.isObservePermittedFinalTool({
+      type: "execute_observe",
+      targetType: "location",
+      targetId: "loc_gate",
+      narration: "You watch the gate traffic bunch and loosen.",
+      suggestedActions: ["Ask the guide what changed"],
+      timeMode: "exploration",
+      citedEntities: {
+        npcIds: [],
+        locationIds: ["loc_gate"],
+        factionIds: [],
+        commodityIds: [],
+        informationIds: [],
+      },
+    }),
+    true,
+  );
+
+  assert.equal(
+    aiProviderTestUtils.isObservePermittedFinalTool({
+      type: "execute_wait",
+      durationMinutes: 10,
+      narration: "You wait while the patrol rotation changes.",
+      suggestedActions: ["Follow the new patrol"],
+      timeMode: "exploration",
+      citedEntities: {
+        npcIds: [],
+        locationIds: ["loc_gate"],
+        factionIds: [],
+        commodityIds: [],
+        informationIds: [],
+      },
+    }),
+    true,
+  );
+
+  assert.equal(
+    aiProviderTestUtils.isObservePermittedFinalTool({
+      type: "request_clarification",
+      question: "What should I passively focus on first?",
+      options: ["The crowd", "The patrol", "The weather"],
+    }),
+    true,
+  );
+
+  assert.equal(
+    aiProviderTestUtils.isObservePermittedFinalTool({
+      type: "execute_freeform",
+      actionDescription: "Climb onto a crate for a better view",
+      timeMode: "exploration",
+      challengeApproach: "notice",
+      intendedMechanicalOutcome: "Spot the signal runner",
+      narration: "You scramble up for a better view.",
+      suggestedActions: ["Jump down"],
+      citedEntities: {
+        npcIds: [],
+        locationIds: ["loc_gate"],
+        factionIds: [],
+        commodityIds: [],
+        informationIds: [],
+      },
+    }),
+    false,
+  );
+});

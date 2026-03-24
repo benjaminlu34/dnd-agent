@@ -11,6 +11,7 @@ export type Stat = (typeof STATS)[number];
 export type CheckMode = "normal" | "advantage" | "disadvantage";
 export type CheckOutcome = "success" | "partial" | "failure";
 export type TimeMode = "combat" | "exploration" | "travel" | "rest" | "downtime";
+export type TurnMode = "player_input" | "observe";
 export type NpcState = "active" | "wounded" | "incapacitated" | "dead";
 export type CombatApproach = "attack" | "subdue" | "assassinate";
 export type TradeAction = "buy" | "sell";
@@ -1015,6 +1016,7 @@ export type TurnSubmissionRequest = {
   requestId: string;
   expectedStateVersion: number;
   action: string;
+  mode?: "observe";
 };
 
 export type StateConflictResponse = {

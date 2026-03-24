@@ -342,20 +342,48 @@ test("campaign launch request schemas enforce strict XOR for entry selection", (
   );
 });
 
-test("custom resolved launch entry draft schema requires presentNpcIds and localContactNpcId", () => {
+test("custom resolved launch entry draft schema allows solitary openings without local contacts", () => {
   const parsed = customResolvedLaunchEntryDraftSchema.safeParse({
-    title: "Courier at Dawn",
-    summary: "Slip through the gate under borrowed authority.",
-    startLocationId: "loc_gate",
+    title: "At Home Before Dawn",
+    summary: "Wake, dress, and prepare for another ordinary day before anyone else is up.",
+    startLocationId: "loc_market",
+    presentNpcIds: [],
     initialInformationIds: ["info_2"],
-    immediatePressure: "Inspections are tightening.",
-    publicLead: "The guide is already scanning the line.",
-    mundaneActionPath: "Join the queue and stay in character.",
-    evidenceWorldAlreadyMoving: "The district is already tense.",
+    immediatePressure: "Rain is starting and the shutters need securing before you leave.",
+    publicLead: "Vendors are already rolling carts into the square below.",
+    localContactNpcId: null,
+    localContactTemporaryActorLabel: null,
+    temporaryLocalActors: [],
+    mundaneActionPath: "Dress, pack the stall cloth, and decide how quickly to head downstairs.",
+    evidenceWorldAlreadyMoving: "Wheel-rattle and shouted prices are already carrying up from the street.",
+  });
+
+  assert.equal(parsed.success, true);
+});
+
+test("custom resolved launch entry draft schema rejects simultaneous named and temporary contacts", () => {
+  const parsed = customResolvedLaunchEntryDraftSchema.safeParse({
+    title: "Busy Market Morning",
+    summary: "Open the stall while the market swells around you.",
+    startLocationId: "loc_market",
+    presentNpcIds: ["npc_4"],
+    initialInformationIds: ["info_2"],
+    immediatePressure: "A surprise inspection is working its way down the lane.",
+    publicLead: "A runner nearby is already whispering about which booths to avoid.",
+    localContactNpcId: "npc_4",
+    localContactTemporaryActorLabel: "runner",
+    temporaryLocalActors: [
+      {
+        label: "runner",
+        summary: "A quick-footed local errand runner weaving between stalls.",
+      },
+    ],
+    mundaneActionPath: "Unpack the morning stock and keep your head down.",
+    evidenceWorldAlreadyMoving: "Tarps are snapping overhead while merchants argue over space.",
   });
 
   assert.equal(parsed.success, false);
-  assert.match(JSON.stringify(parsed.error?.flatten()), /presentNpcIds|localContactNpcId/);
+  assert.match(JSON.stringify(parsed.error?.flatten()), /named and temporary local contact anchors/);
 });
 
 test("validateResolvedLaunchEntryAgainstWorld rejects NPC/location mismatch and secret starting information", () => {

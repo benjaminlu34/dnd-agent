@@ -44,6 +44,7 @@ import type {
   TurnCausalityCode,
   TurnFetchToolCall,
   TurnFetchToolResult,
+  TurnMode,
   TurnResolution,
   TurnRollbackData,
   TurnResultPayload,
@@ -74,6 +75,7 @@ function requestHashForSubmission(input: {
   sessionId: string;
   expectedStateVersion: number;
   playerAction: string;
+  turnMode: TurnMode;
 }) {
   return createHash("sha256")
     .update(
@@ -82,6 +84,7 @@ function requestHashForSubmission(input: {
         sessionId: input.sessionId,
         expectedStateVersion: input.expectedStateVersion,
         action: input.playerAction.trim(),
+        turnMode: input.turnMode,
       }),
     )
     .digest("hex");
@@ -1915,10 +1918,21 @@ async function commitResolvedTurn(input: {
   requestId: string;
   expectedStateVersion: number;
   playerAction: string;
+  turnMode: TurnMode;
   command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
   fetchedFacts: TurnFetchToolResult[];
 }) {
-  const { snapshot, sessionId, turnId, requestId, expectedStateVersion, playerAction, command, fetchedFacts } = input;
+  const {
+    snapshot,
+    sessionId,
+    turnId,
+    requestId,
+    expectedStateVersion,
+    playerAction,
+    turnMode,
+    command,
+    fetchedFacts,
+  } = input;
   const nextTurnCount = snapshot.sessionTurnCount + 1;
   const rollback = emptyRollback(snapshot);
   let resultPayload: TurnResultPayload | null = null;
@@ -2000,6 +2014,10 @@ async function commitResolvedTurn(input: {
       role: "user",
       kind: "action",
       content: playerAction,
+      payload:
+        turnMode === "observe"
+          ? ({ turnMode: "observe" } as Prisma.JsonObject)
+          : undefined,
       rollback,
     });
 
@@ -2479,11 +2497,13 @@ export async function triageTurn(input: TurnSubmissionRequest & {
   stream?: TurnStream;
 }) {
   const playerAction = input.action.trim();
+  const turnMode: TurnMode = input.mode === "observe" ? "observe" : "player_input";
   const requestHash = requestHashForSubmission({
     campaignId: input.campaignId,
     sessionId: input.sessionId,
     expectedStateVersion: input.expectedStateVersion,
     playerAction,
+    turnMode,
   });
   const existingTurn = await prisma.turn.findUnique({
     where: {
@@ -2637,6 +2657,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       promptContext,
       character: snapshot.character,
       playerAction: narrationOverride.playerActionForModel,
+      turnMode,
       executeFetchTool: (call) => executeFetchTool(snapshot, call),
       signal: abortController.signal,
     });
@@ -2710,6 +2731,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       requestId: input.requestId,
       expectedStateVersion: input.expectedStateVersion,
       playerAction,
+      turnMode,
       command: committedCommand,
       fetchedFacts: resolution.fetchedFacts,
     });

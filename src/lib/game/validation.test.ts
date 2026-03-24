@@ -6,6 +6,7 @@ import type {
   ExecuteConverseToolCall,
   ExecuteFreeformToolCall,
   ExecuteInvestigateToolCall,
+  ExecuteObserveToolCall,
   ExecuteRestToolCall,
   ExecuteTradeToolCall,
   ExecuteTravelToolCall,
@@ -588,4 +589,41 @@ test("validateTurnCommand rejects freeform calls that are really typed trade or 
       }),
     /cannot replace typed combat or trade actions/,
   );
+});
+
+test("validateTurnCommand caps suggested actions at four items", () => {
+  const command: ExecuteObserveToolCall = {
+    type: "execute_observe",
+    targetType: "location",
+    targetId: "loc_gate",
+    narration: "You watch the gate traffic shift under the rain.",
+    suggestedActions: [
+      "Ask Tarin what changed",
+      "Watch the carts longer",
+      "Follow the next patrol",
+      "Check the market road",
+      "Count the signal fires",
+    ],
+    timeMode: "exploration",
+    citedEntities: {
+      npcIds: [],
+      locationIds: ["loc_gate"],
+      factionIds: [],
+      commodityIds: [],
+      informationIds: [],
+    },
+  };
+
+  const validated = validateTurnCommand({
+    snapshot: createSnapshot(),
+    command,
+  });
+
+  assert.equal(validated.suggestedActions.length, 4);
+  assert.deepEqual(validated.suggestedActions, [
+    "Ask Tarin what changed",
+    "Watch the carts longer",
+    "Follow the next patrol",
+    "Check the market road",
+  ]);
 });

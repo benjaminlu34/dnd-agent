@@ -34,6 +34,7 @@ test("request hash includes session and version so request identity matches the 
     sessionId: "sess_1",
     expectedStateVersion: 7,
     playerAction: "Wait here for an hour",
+    turnMode: "player_input",
   });
 
   assert.notEqual(
@@ -43,6 +44,7 @@ test("request hash includes session and version so request identity matches the 
       sessionId: "sess_2",
       expectedStateVersion: 7,
       playerAction: "Wait here for an hour",
+      turnMode: "player_input",
     }),
   );
 
@@ -53,6 +55,27 @@ test("request hash includes session and version so request identity matches the 
       sessionId: "sess_1",
       expectedStateVersion: 8,
       playerAction: "Wait here for an hour",
+      turnMode: "player_input",
     }),
   );
+});
+
+test("request hash changes when observe mode changes the submission identity", () => {
+  const playerInputHash = engineTestUtils.requestHashForSubmission({
+    campaignId: "camp_1",
+    sessionId: "sess_1",
+    expectedStateVersion: 7,
+    playerAction: "Observe",
+    turnMode: "player_input",
+  });
+
+  const observeHash = engineTestUtils.requestHashForSubmission({
+    campaignId: "camp_1",
+    sessionId: "sess_1",
+    expectedStateVersion: 7,
+    playerAction: "Observe",
+    turnMode: "observe",
+  });
+
+  assert.notEqual(playerInputHash, observeHash);
 });

@@ -16,6 +16,7 @@ export async function GET() {
 
 export async function POST(request: Request) {
   const body = (await request.json()) as Partial<TurnSubmissionRequest>;
+  const mode = body.mode;
 
   if (
     !body.campaignId
@@ -26,6 +27,13 @@ export async function POST(request: Request) {
   ) {
     return NextResponse.json(
       { error: "campaignId, sessionId, requestId, expectedStateVersion, and action are required." },
+      { status: 400 },
+    );
+  }
+
+  if (mode !== undefined && mode !== "observe") {
+    return NextResponse.json(
+      { error: "mode must be omitted or set to 'observe'." },
       { status: 400 },
     );
   }
@@ -44,6 +52,7 @@ export async function POST(request: Request) {
       requestId,
       expectedStateVersion,
       action,
+      mode,
       stream: {
         narration: (chunk) => bufferedNarration.push(chunk),
       },

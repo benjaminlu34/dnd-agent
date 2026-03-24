@@ -7,6 +7,7 @@ import type {
   CheckResult,
   PlayerCampaignSnapshot,
   StoryMessage,
+  TurnSubmissionRequest,
   TurnDigest,
 } from "@/lib/game/types";
 
@@ -60,9 +61,22 @@ async function consumeNdjson(
 }
 
 function formatMessageKicker(message: StoryMessage) {
+  if (message.role === "user" && message.payload?.turnMode === "observe") return "Observe";
   if (message.role === "user") return "You";
   if (message.role === "system") return "System";
   return "Dungeon Master";
+}
+
+function extractSuggestedActions(snapshot: PlayerCampaignSnapshot | null) {
+  if (!snapshot) {
+    return [];
+  }
+
+  const latestNarration = [...snapshot.recentMessages]
+    .reverse()
+    .find((entry) => entry.role === "assistant" && entry.kind === "narration");
+  const value = latestNarration?.payload?.suggestedActions;
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
 }
 
 const EQUIPMENT_KEYWORDS = [
@@ -201,7 +215,7 @@ export function AdventureApp({
         }
 
         setSnapshot(data.snapshot);
-        setSuggestedActions(data.snapshot.recentMessages.at(-1)?.payload?.suggestedActions as string[] ?? []);
+        setSuggestedActions(extractSuggestedActions(data.snapshot));
         setMissedTurnDigests([]);
       } catch (error) {
         if (active) {
@@ -246,7 +260,7 @@ export function AdventureApp({
     return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
   }, [latestNarrationPayload]);
 
-  async function submitTurn(nextAction: string) {
+  async function submitTurn(nextAction: string, mode?: TurnSubmissionRequest["mode"]) {
     if (!campaignId || !sessionId || !nextAction.trim() || submitting) {
       return;
     }
@@ -258,18 +272,21 @@ export function AdventureApp({
     setLatestCheck(null);
 
     try {
+      const body: TurnSubmissionRequest = {
+        campaignId,
+        sessionId,
+        requestId: crypto.randomUUID(),
+        expectedStateVersion: snapshot?.stateVersion ?? 0,
+        action: nextAction.trim(),
+        ...(mode ? { mode } : {}),
+      };
+
       const response = await fetch("/api/turns", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          campaignId,
-          sessionId,
-          requestId: crypto.randomUUID(),
-          expectedStateVersion: snapshot?.stateVersion ?? 0,
-          action: nextAction.trim(),
-        }),
+        body: JSON.stringify(body),
       });
 
       if (!response.ok) {
@@ -292,9 +309,7 @@ export function AdventureApp({
         if (response.status === 409 && data?.error === "state_conflict" && data.latestSnapshot) {
           setSnapshot(data.latestSnapshot);
           setMissedTurnDigests(data.missedTurnDigests ?? []);
-          setSuggestedActions(
-            (data.latestSnapshot.recentMessages.at(-1)?.payload?.suggestedActions as string[] | undefined) ?? [],
-          );
+          setSuggestedActions(extractSuggestedActions(data.latestSnapshot));
           setAction("");
           setTurnError("The world advanced before this action could commit. Review the missed outcome and choose a new action.");
           return;
@@ -311,9 +326,7 @@ export function AdventureApp({
         if (response.status === 400 && data?.error === "invalid_expected_state_version") {
           if (data.latestSnapshot) {
             setSnapshot(data.latestSnapshot);
-            setSuggestedActions(
-              (data.latestSnapshot.recentMessages.at(-1)?.payload?.suggestedActions as string[] | undefined) ?? [],
-            );
+            setSuggestedActions(extractSuggestedActions(data.latestSnapshot));
           }
           setTurnError(
             data.message
@@ -583,25 +596,28 @@ export function AdventureApp({
                     </h2>
                   </div>
 
+                  {suggestedActions.length ? (
+                    <div className="mt-5 flex flex-wrap gap-2">
+                      {suggestedActions.map((suggestedAction) => (
+                        <button
+                          key={suggestedAction}
+                          type="button"
+                          className="button-press rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-50 transition hover:border-amber-400/60 hover:bg-amber-400/15"
+                          onClick={() => void submitTurn(suggestedAction)}
+                          disabled={submitting}
+                        >
+                          {suggestedAction}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+
                   <textarea
                     className="mt-5 min-h-32 w-full resize-y rounded-2xl border border-zinc-800 bg-zinc-900 px-4 py-3 text-sm leading-relaxed text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-amber-400/50 focus:ring-2 focus:ring-amber-400/20"
                     value={action}
                     onChange={(event) => setAction(event.target.value)}
-                    placeholder="Describe what you do next..."
+                    placeholder="What do you do, say, or think next?"
                   />
-
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    {suggestedActions.map((suggestedAction) => (
-                      <button
-                        key={suggestedAction}
-                        type="button"
-                        className="button-press rounded-full border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-200 transition hover:border-zinc-500 hover:bg-zinc-800"
-                        onClick={() => setAction(suggestedAction)}
-                      >
-                        {suggestedAction}
-                      </button>
-                    ))}
-                  </div>
 
                   <div className="mt-5 flex flex-wrap items-center gap-3">
                     <button
@@ -610,7 +626,15 @@ export function AdventureApp({
                       onClick={() => void submitTurn(action)}
                       disabled={!action.trim() || submitting}
                     >
-                      {submitting ? "Resolving..." : "Submit"}
+                      {submitting ? "Resolving..." : "Submit turn"}
+                    </button>
+                    <button
+                      type="button"
+                      className="button-press rounded-2xl border border-zinc-700 bg-zinc-900 px-5 py-3 text-sm font-semibold text-zinc-100 transition hover:border-zinc-500 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-60"
+                      onClick={() => void submitTurn("Observe", "observe")}
+                      disabled={submitting || !snapshot || Boolean(action.trim())}
+                    >
+                      Observe
                     </button>
                   </div>
 

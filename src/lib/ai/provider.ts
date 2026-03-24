@@ -34,6 +34,7 @@ import type {
   TurnActionToolCall,
   TurnFetchToolCall,
   TurnFetchToolResult,
+  TurnMode,
   TurnModelToolCall,
   TurnResolution,
   WorldGenerationStageName,
@@ -136,6 +137,7 @@ type TurnInput = {
   promptContext: SpatialPromptContext;
   character: CampaignCharacter;
   playerAction: string;
+  turnMode: TurnMode;
   executeFetchTool: (call: TurnFetchToolCall) => Promise<TurnFetchToolResult>;
   signal?: AbortSignal;
 };
@@ -2668,6 +2670,62 @@ function normalizeModelToolCall(input: {
   return normalizeTurnToolCall(input);
 }
 
+function isObservePermittedFinalTool(command: TurnModelToolCall | null) {
+  return (
+    command?.type === "execute_observe"
+    || command?.type === "execute_wait"
+    || command?.type === "request_clarification"
+  );
+}
+
+function buildTurnSystemPrompt(turnMode: TurnMode) {
+  return turnMode === "observe"
+    ? [
+        "You are the player's senses and passive scene router in a simulated world.",
+        "The player character takes no chosen action and speaks no dialogue in this turn.",
+        "You may call up to 3 fetch tools before the final action tool.",
+        "After any fetches, end with exactly one action tool or request_clarification.",
+        "Do not invent named mechanical entities outside the provided context.",
+        "Keep payloads compact: narration should be 1-3 sentences, topic/method/actionDescription should be short phrases, memorySummary should be one short sentence, and suggestedActions should contain at most 4 short actions.",
+        "Every executable tool call must include timeMode, narration, suggestedActions, and citedEntities.",
+        "Use durationMagnitude only as a bounded hint when the action is not travel or fixed rest.",
+        "Advance the scene or world only through passive observation or waiting.",
+        "Describe only what the player character notices, what changes around them, or what unfolds without player initiative.",
+        "You MUST invoke exactly one of execute_observe or execute_wait.",
+        "You are STRICTLY FORBIDDEN from invoking execute_combat, execute_converse, execute_trade, execute_freeform, execute_travel, execute_investigate, or execute_rest.",
+        "Use request_clarification only if the world state is too invalid to produce any passive progression.",
+      ].join("\n")
+    : [
+        "You are the player's senses and action router in a simulated world.",
+        "You may call up to 3 fetch tools before the final action tool.",
+        "After any fetches, end with exactly one action tool or request_clarification.",
+        "Do not invent named mechanical entities outside the provided context.",
+        "Keep payloads compact: narration should be 1-3 sentences, topic/method/actionDescription should be short phrases, memorySummary should be one short sentence, and suggestedActions should contain at most 4 short actions.",
+        "Every executable tool call must include timeMode, narration, suggestedActions, and citedEntities.",
+        "Use durationMagnitude only as a bounded hint when the action is not travel or fixed rest.",
+        "If the player talks to an unnamed local person or bystander implied by the scene, use execute_converse with a short lower-case descriptive role label and leave npcId empty.",
+        "If the player continues a conversation with an unnamed local from recentUnnamedLocals, reuse that exact label and still leave npcId empty.",
+        "Do not redirect an unnamed bystander interaction to a named NPC unless the player's action clearly points to that NPC.",
+        "When inventing a brand-new unnamed local, make the label and implied role plausible for localTexture. Do not invent scene actors with no basis in that local texture.",
+        "If a present NPC has requiresDetailFetch=true, call fetch_npc_detail for that NPC before any detailed interaction, investigation, observation, or combat targeting that NPC.",
+        "Use fetch_market_prices before any execute_trade.",
+        "Use execute_combat for attacks, subdual, or assassination attempts against NPCs. Do not hide those actions in execute_freeform.",
+        "Use execute_trade for buy, sell, barter, or price-negotiation actions that clearly trade commodities. Do not hide those actions in execute_freeform.",
+        "Use execute_rest for explicit light or full rest.",
+        "Tool routing hierarchy:",
+        "1. Use execute_travel when the player clearly moves to a known adjacent node or route.",
+        "2. Use execute_combat when the player attacks, subdues, or assassinates a present NPC.",
+        "3. Use execute_trade when the player buys or sells commodities using fetched market data.",
+        "4. Use execute_converse when the player addresses, questions, bargains with, or negotiates with a named NPC or an unnamed local speaker.",
+        "5. Use execute_investigate when the player searches, examines closely, tracks evidence, or tries to uncover hidden information.",
+        "6. Use execute_observe when the player is mainly looking, listening, waiting, or taking in the current scene.",
+        "7. Use execute_rest for explicit light or full rest.",
+        "8. Use execute_freeform only for concrete actions that do not fit the typed tools and do not directly change combat, trade, faction resources, prices, or control.",
+        "9. Do not choose stats, DCs, approval numbers, discovery ids, or exact elapsed minutes. The engine owns those mechanics.",
+        "10. Use request_clarification only if the action is too ambiguous, impossible to map, or missing a required target.",
+      ].join("\n");
+}
+
 async function runCompletion(options: {
   system: string;
   user: string;
@@ -4702,6 +4760,7 @@ class DungeonMasterClient {
           "Do not move NPCs from their authored currentLocationId.",
           "Choose present NPCs only from the selected start location.",
           "If no suitable named local is needed, you may leave presentNpcIds empty and instead seed temporary unnamed locals.",
+          "If the opening is solitary or private, you may leave presentNpcIds empty and set both localContactNpcId and localContactTemporaryActorLabel to null.",
           "Use localContactNpcId only when the opening should hinge on a named NPC already authored in the world.",
           "Use localContactTemporaryActorLabel and temporaryLocalActors when the opening should hinge on unnamed locals or ordinary roles already implied by the place.",
           "If localContactNpcId is null, localContactTemporaryActorLabel must match one temporaryLocalActors label.",
@@ -4956,35 +5015,7 @@ class DungeonMasterClient {
 
   async runTurn(input: TurnInput): Promise<TurnResolution> {
     try {
-      const baseSystem = [
-        "You are the player's senses and action router in a simulated world.",
-        "You may call up to 3 fetch tools before the final action tool.",
-        "After any fetches, end with exactly one action tool or request_clarification.",
-        "Do not invent named mechanical entities outside the provided context.",
-        "Keep payloads compact: narration should be 1-3 sentences, topic/method/actionDescription should be short phrases, memorySummary should be one short sentence, and suggestedActions should contain at most 3 short actions.",
-        "Every executable tool call must include timeMode, narration, suggestedActions, and citedEntities.",
-        "Use durationMagnitude only as a bounded hint when the action is not travel or fixed rest.",
-        "If the player talks to an unnamed local person or bystander implied by the scene, use execute_converse with a short lower-case descriptive role label and leave npcId empty.",
-        "If the player continues a conversation with an unnamed local from recentUnnamedLocals, reuse that exact label and still leave npcId empty.",
-        "Do not redirect an unnamed bystander interaction to a named NPC unless the player's action clearly points to that NPC.",
-        "When inventing a brand-new unnamed local, make the label and implied role plausible for localTexture. Do not invent scene actors with no basis in that local texture.",
-        "If a present NPC has requiresDetailFetch=true, call fetch_npc_detail for that NPC before any detailed interaction, investigation, observation, or combat targeting that NPC.",
-        "Use fetch_market_prices before any execute_trade.",
-        "Use execute_combat for attacks, subdual, or assassination attempts against NPCs. Do not hide those actions in execute_freeform.",
-        "Use execute_trade for buy, sell, barter, or price-negotiation actions that clearly trade commodities. Do not hide those actions in execute_freeform.",
-        "Use execute_rest for explicit light or full rest.",
-        "Tool routing hierarchy:",
-        "1. Use execute_travel when the player clearly moves to a known adjacent node or route.",
-        "2. Use execute_combat when the player attacks, subdues, or assassinates a present NPC.",
-        "3. Use execute_trade when the player buys or sells commodities using fetched market data.",
-        "4. Use execute_converse when the player addresses, questions, bargains with, or negotiates with a named NPC or an unnamed local speaker.",
-        "5. Use execute_investigate when the player searches, examines closely, tracks evidence, or tries to uncover hidden information.",
-        "6. Use execute_observe when the player is mainly looking, listening, waiting, or taking in the current scene.",
-        "7. Use execute_rest for explicit light or full rest.",
-        "8. Use execute_freeform only for concrete actions that do not fit the typed tools and do not directly change combat, trade, faction resources, prices, or control.",
-        "9. Do not choose stats, DCs, approval numbers, discovery ids, or exact elapsed minutes. The engine owns those mechanics.",
-        "10. Use request_clarification only if the action is too ambiguous, impossible to map, or missing a required target.",
-      ].join("\n");
+      const baseSystem = buildTurnSystemPrompt(input.turnMode);
 
       let correctionNotes: string | null = null;
       const fetchedFacts: TurnFetchToolResult[] = [];
@@ -5116,6 +5147,17 @@ class DungeonMasterClient {
             continue;
           }
 
+          if (input.turnMode === "observe" && !isObservePermittedFinalTool(normalized)) {
+            correctionNotes = [
+              "Observe mode is active.",
+              "Return exactly one final action tool call using execute_observe or execute_wait only.",
+              "Use request_clarification only if the world state is too invalid to produce passive progression.",
+              "Do not invoke execute_combat, execute_converse, execute_trade, execute_freeform, execute_travel, execute_investigate, or execute_rest.",
+              "Do not give the player character dialogue or chosen actions.",
+            ].join("\n");
+            continue;
+          }
+
           const requiredFetchNpc = findNpcRequiringDetailFetch(normalized, input.promptContext);
           if (requiredFetchNpc && !hasHydratedNpcDetailFact(fetchedFacts, requiredFetchNpc.id)) {
             correctionNotes = [
@@ -5176,7 +5218,9 @@ class DungeonMasterClient {
 
 export const dmClient = new DungeonMasterClient();
 export const aiProviderTestUtils = {
+  buildTurnSystemPrompt,
   extractToolInput,
+  isObservePermittedFinalTool,
   normalizeSocialCastInput,
   normalizeModelToolCall,
   normalizeTurnToolCall,

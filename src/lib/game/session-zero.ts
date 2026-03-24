@@ -165,11 +165,11 @@ function refineResolvedLaunchEntryShape(
   const hasNamedContact = Boolean(entryPoint.localContactNpcId);
   const hasTemporaryContact = Boolean(entryPoint.localContactTemporaryActorLabel);
 
-  if (hasNamedContact === hasTemporaryContact) {
+  if (hasNamedContact && hasTemporaryContact) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["localContactNpcId"],
-      message: "Resolved launch entries must use exactly one local contact anchor.",
+      message: "Resolved launch entries may not use both named and temporary local contact anchors.",
     });
   }
 
@@ -202,13 +202,6 @@ function refineResolvedLaunchEntryShape(
     }
   }
 
-  if (!entryPoint.localContactNpcId && entryPoint.temporaryLocalActors.length === 0) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["temporaryLocalActors"],
-      message: "Unnamed-contact launch entries must seed at least one temporary local actor.",
-    });
-  }
 }
 
 export const resolvedLaunchEntryContextSchema = resolvedLaunchEntryContextSchemaBase.superRefine(
