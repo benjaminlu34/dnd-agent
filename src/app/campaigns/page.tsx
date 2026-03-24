@@ -1,12 +1,18 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export default function CampaignsPage() {
-  const [campaigns, setCampaigns] = useState<Array<{ id: string; name: string; description?: string }>>([]);
+  const [campaigns, setCampaigns] = useState<Array<{ id: string; title: string; description?: string }>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [editingCampaign, setEditingCampaign] = useState<{ id: string; title: string } | null>(null);
+  const [renamingCampaignId, setRenamingCampaignId] = useState<string | null>(null);
+  const [deletingCampaignId, setDeletingCampaignId] = useState<string | null>(null);
+  const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const previousEditingCampaignIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     async function fetchCampaigns() {
@@ -15,8 +21,8 @@ export default function CampaignsPage() {
         if (!res.ok) {
           throw new Error(`Failed to fetch: ${res.statusText}`);
         }
-        const data = await res.json();
-        setCampaigns(data.campaigns || []);
+      const data = await res.json();
+      setCampaigns(data.campaigns || []);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Unknown error");
       } finally {
@@ -27,21 +33,74 @@ export default function CampaignsPage() {
     fetchCampaigns();
   }, []);
 
+  useEffect(() => {
+    if (editingCampaign && previousEditingCampaignIdRef.current !== editingCampaign.id) {
+      renameInputRef.current?.focus();
+    }
+
+    previousEditingCampaignIdRef.current = editingCampaign?.id ?? null;
+  }, [editingCampaign]);
+
+  const handleDelete = async (id: string) => {
+    setDeletingCampaignId(id);
+    try {
+      const res = await fetch(`/api/campaigns/${id}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        throw new Error(`Failed to delete: ${res.statusText}`);
+      }
+      setCampaigns(prev => prev.filter(campaign => campaign.id !== id));
+      setError(null);
+      return true;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unknown error");
+      return false;
+    } finally {
+      setDeletingCampaignId(null);
+    }
+  };
+
+  const handleRename = async (id: string, title: string) => {
+    const trimmedTitle = title.trim();
+
+    if (!trimmedTitle) {
+      setError("Campaign name cannot be empty.");
+      return false;
+    }
+
+    setRenamingCampaignId(id);
+    try {
+      const res = await fetch(`/api/campaigns/${id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ title: trimmedTitle }),
+      });
+      if (!res.ok) {
+        throw new Error(`Failed to rename: ${res.statusText}`);
+      }
+      const data = await res.json();
+      setCampaigns(prev =>
+        prev.map(campaign =>
+          campaign.id === id ? { ...campaign, title: data.title } : campaign
+        ),
+      );
+      setError(null);
+      return true;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unknown error");
+      return false;
+    } finally {
+      setRenamingCampaignId(null);
+    }
+  };
+
   if (loading) {
     return (
       <main className="min-h-screen bg-black flex flex-col items-center justify-center p-6 text-zinc-100">
         <p className="text-zinc-400">Loading campaigns...</p>
-      </main>
-    );
-  }
-
-  if (error) {
-    return (
-      <main className="min-h-screen bg-black flex flex-col items-center justify-center p-6 text-zinc-100">
-        <p className="text-red-400">Error: {error}</p>
-        <Link href="/" className="mt-4 rounded-full border border-zinc-800 px-4 py-2 text-sm font-semibold text-zinc-300 transition-colors hover:bg-zinc-900 hover:text-white">
-          Return Home
-        </Link>
       </main>
     );
   }
@@ -59,26 +118,144 @@ export default function CampaignsPage() {
           Available Campaigns
         </h1>
 
+        {error ? (
+          <div className="mb-6 w-full max-w-2xl rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+            {error}
+          </div>
+        ) : null}
+
         {campaigns.length === 0 ? (
           <p className="text-zinc-400">No campaigns available. <Link href="/campaigns/new" className="underline">Create one</Link> to get started.</p>
         ) : (
           <div className="space-y-4 w-full max-w-2xl">
             {campaigns.map((campaign) => (
-              <Link
-                key={campaign.id}
-                href={`/play/${campaign.id}`}
-                className="block rounded-xl border border-zinc-800 bg-zinc-950/50 p-4 hover:bg-zinc-900 transition-colors"
-              >
-                <div className="flex flex-col">
-                  <h2 className="mb-2 text-xl font-medium tracking-tight text-zinc-100">
-                    {campaign.name || "Unnamed Campaign"}
-                  </h2>
-                  {campaign.description && (
-                    <p className="text-sm text-zinc-400 line-clamp-2">{campaign.description}</p>
-                  )}
+              <div key={campaign.id} className="block rounded-xl border border-zinc-800 bg-zinc-950/50 p-4 hover:bg-zinc-900 transition-colors relative">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="min-w-0 flex-1">
+                    {editingCampaign?.id === campaign.id ? (
+                      <div>
+                        <label htmlFor={`campaign-name-${campaign.id}`} className="mb-2 block text-[10px] font-medium uppercase tracking-widest text-zinc-500">
+                          Campaign Name
+                        </label>
+                        <input
+                          ref={renameInputRef}
+                          id={`campaign-name-${campaign.id}`}
+                          type="text"
+                          value={editingCampaign.title}
+                          onChange={(event) =>
+                            setEditingCampaign((prev) => (prev ? { ...prev, title: event.target.value } : null))
+                          }
+                          disabled={renamingCampaignId === campaign.id}
+                          className="w-full rounded-lg border border-zinc-700 bg-black/60 px-3 py-2 text-base font-medium tracking-tight text-zinc-100 outline-none transition focus:border-zinc-500"
+                          onKeyDown={async (event) => {
+                            if (event.key === "Escape") {
+                              setEditingCampaign(null);
+                              return;
+                            }
+
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              const didRename = await handleRename(campaign.id, editingCampaign.title);
+                              if (didRename) {
+                                setEditingCampaign(null);
+                              }
+                            }
+                          }}
+                        />
+                      </div>
+                    ) : (
+                      <h2 className="mb-2 text-xl font-medium tracking-tight text-zinc-100">
+                        {campaign.title || "Unnamed Campaign"}
+                      </h2>
+                    )}
+                    {campaign.description && (
+                      <p className="text-sm text-zinc-400 line-clamp-2">{campaign.description}</p>
+                    )}
+                  </div>
+                  <div className="flex shrink-0 gap-2 self-start">
+                    {editingCampaign?.id === campaign.id ? (
+                      <>
+                        <button
+                          onClick={() => {
+                            setError(null);
+                            setEditingCampaign(null);
+                          }}
+                          disabled={renamingCampaignId === campaign.id}
+                          className="rounded border border-zinc-700 px-2 py-1 text-xs font-semibold text-zinc-300 hover:bg-zinc-800 transition-colors disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          onClick={async () => {
+                            const didRename = await handleRename(campaign.id, editingCampaign.title);
+                            if (didRename) {
+                              setEditingCampaign(null);
+                            }
+                          }}
+                          disabled={renamingCampaignId === campaign.id}
+                          className="rounded border border-zinc-700 bg-white px-2 py-1 text-xs font-semibold text-black hover:bg-zinc-200 transition-colors disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {renamingCampaignId === campaign.id ? "Saving..." : "Save"}
+                        </button>
+                      </>
+                    ) : !deleteConfirmId ? (
+                      <>
+                        <button
+                          onClick={() => {
+                            setError(null);
+                            setEditingCampaign({ id: campaign.id, title: campaign.title || "" });
+                          }}
+                          className="rounded border border-zinc-700 px-2 py-1 text-xs font-semibold text-zinc-300 hover:bg-zinc-800 transition-colors"
+                        >
+                          Rename
+                        </button>
+                        <button
+                          onClick={() => setDeleteConfirmId(campaign.id)}
+                          className="rounded border border-red-600 px-2 py-1 text-xs font-semibold text-red-300 hover:bg-red-800/20 transition-colors"
+                        >
+                          Delete
+                        </button>
+                      </>
+                    ) : null}
+                  </div>
                 </div>
-              </Link>
+              </div>
             ))}
+          </div>
+        )}
+
+        {deleteConfirmId && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-6 backdrop-blur-sm">
+            <div className="w-full max-w-md rounded-[1.75rem] border border-zinc-800 bg-zinc-950/95 p-6 shadow-2xl shadow-black/30 backdrop-blur">
+              <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-500">
+                Campaign Archive
+              </p>
+              <h3 className="mt-3 text-2xl font-medium tracking-tight text-zinc-100">Delete Campaign</h3>
+              <p className="mt-3 text-sm leading-relaxed text-zinc-400">
+                Are you sure you want to delete this campaign? This action cannot be undone.
+              </p>
+              <div className="mt-6 flex justify-end gap-3">
+                <button
+                  onClick={() => setDeleteConfirmId(null)}
+                  disabled={Boolean(deletingCampaignId)}
+                  className="rounded-md border border-zinc-800 px-4 py-2 text-sm font-medium text-zinc-300 transition-colors hover:bg-zinc-900 hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={async () => {
+                    const didDelete = await handleDelete(deleteConfirmId);
+                    if (didDelete) {
+                      setDeleteConfirmId(null);
+                    }
+                  }}
+                  disabled={Boolean(deletingCampaignId)}
+                  className="rounded-md border border-zinc-700 bg-zinc-100 px-4 py-2 text-sm font-medium text-black transition-colors hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {deletingCampaignId ? "Deleting..." : "Delete"}
+                </button>
+              </div>
+            </div>
           </div>
         )}
 

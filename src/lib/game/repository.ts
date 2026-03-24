@@ -975,49 +975,94 @@ export async function createCampaignFromModuleForUser(input: {
 }
 
 export async function listCampaigns(): Promise<CampaignListItem[]> {
-  const campaigns = await prisma.campaign.findMany({
-    orderBy: { updatedAt: "desc" },
-    include: {
-      module: true,
-      template: true,
-    },
-  });
+   const campaigns = await prisma.campaign.findMany({
+     orderBy: { updatedAt: "desc" },
+     include: {
+       module: true,
+       template: true,
+     },
+   });
 
-  if (!campaigns.length) {
-    return [];
-  }
+   if (!campaigns.length) {
+     return [];
+   }
 
-  const locationRecords = await prisma.locationNode.findMany({
-    where: {
-      OR: campaigns.map((campaign) => ({
-        campaignId: campaign.id,
-        id: (campaign.stateJson as CampaignRuntimeState).currentLocationId,
-      })),
-    },
-    select: {
-      campaignId: true,
-      name: true,
-    },
-  });
-  const currentLocationNameByCampaignId = new Map(
-    locationRecords.map((location) => [location.campaignId, location.name]),
-  );
+   const locationRecords = await prisma.locationNode.findMany({
+     where: {
+       OR: campaigns.map((campaign) => ({
+         campaignId: campaign.id,
+         id: (campaign.stateJson as CampaignRuntimeState).currentLocationId,
+       })),
+     },
+     select: {
+       campaignId: true,
+       name: true,
+     },
+   });
+   const currentLocationNameByCampaignId = new Map(
+     locationRecords.map((location) => [location.campaignId, location.name]),
+   );
 
-  return campaigns.map((campaign) => {
-    return {
-      id: campaign.id,
-      title: campaign.module.title,
-      premise: campaign.module.premise,
-      setting: campaign.module.setting,
-      tone: campaign.module.tone,
-      characterName: campaign.template.name,
-      characterArchetype: campaign.template.archetype,
-      currentLocationName: currentLocationNameByCampaignId.get(campaign.id) ?? "Unknown location",
-      updatedAt: campaign.updatedAt.toISOString(),
-      createdAt: campaign.createdAt.toISOString(),
-    };
-  });
-}
+    return campaigns.map((campaign) => {
+      const state = campaign.stateJson as unknown as { customTitle?: string };
+      const title = state.customTitle ?? campaign.module.title;
+      return {
+        id: campaign.id,
+        title,
+        premise: campaign.module.premise,
+        setting: campaign.module.setting,
+        tone: campaign.module.tone,
+        characterName: campaign.template.name,
+        characterArchetype: campaign.template.archetype,
+        currentLocationName: currentLocationNameByCampaignId.get(campaign.id) ?? "Unknown location",
+        updatedAt: campaign.updatedAt.toISOString(),
+        createdAt: campaign.createdAt.toISOString(),
+      };
+    });
+ }
+
+export async function deleteCampaignForUser(campaignId: string): Promise<{ campaignId: string } | null> {
+   const user = await ensureLocalUser();
+   const campaign = await prisma.campaign.findFirst({
+     where: { id: campaignId, userId: user.id },
+   });
+
+   if (!campaign) {
+     return null;
+   }
+
+   await prisma.campaign.delete({
+     where: { id: campaign.id },
+   });
+
+   return { campaignId: campaign.id };
+ }
+
+export async function renameCampaignForUser(campaignId: string, title: string): Promise<{ campaignId: string; title: string } | null> {
+   const user = await ensureLocalUser();
+   const campaign = await prisma.campaign.findFirst({
+     where: { id: campaignId, userId: user.id },
+   });
+
+   if (!campaign) {
+     return null;
+   }
+
+   const updatedCampaign = await prisma.campaign.update({
+     where: { id: campaign.id },
+     data: {
+       stateJson: {
+         ...(campaign.stateJson as unknown as Record<string, unknown>),
+         customTitle: title,
+       },
+     },
+   });
+
+   return {
+     campaignId: updatedCampaign.id,
+     title: title,
+   };
+ }
 
 function toLocationSummary(
   location: Prisma.LocationNodeGetPayload<Record<string, never>>,
@@ -1549,7 +1594,9 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     return null;
   }
 
-  const state = campaign.stateJson as unknown as CampaignRuntimeState;
+  const state = campaign.stateJson as unknown as CampaignRuntimeState & {
+    customTitle?: string;
+  };
   const session = campaign.sessions[0];
   const currentLocationRecord = campaign.locationNodes.find((location) => location.id === state.currentLocationId);
   if (!currentLocationRecord) {
@@ -1674,7 +1721,7 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     sessionTurnCount: session.turnCount,
     moduleId: campaign.moduleId,
     selectedEntryPointId: campaign.selectedEntryPointId,
-    title: campaign.module.title,
+    title: state.customTitle ?? campaign.module.title,
     premise: campaign.module.premise,
     tone: campaign.module.tone,
     setting: campaign.module.setting,
