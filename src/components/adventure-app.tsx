@@ -7,6 +7,7 @@ import type {
   CheckResult,
   PlayerCampaignSnapshot,
   StoryMessage,
+  TurnDigest,
 } from "@/lib/game/types";
 
 type TurnStreamEvent =
@@ -130,6 +131,7 @@ export function AdventureApp({
   const [warnings, setWarnings] = useState<string[]>([]);
   const [latestCheck, setLatestCheck] = useState<CheckResult | null>(null);
   const [suggestedActions, setSuggestedActions] = useState<string[]>([]);
+  const [missedTurnDigests, setMissedTurnDigests] = useState<TurnDigest[]>([]);
 
   useEffect(() => {
     let active = true;
@@ -200,6 +202,7 @@ export function AdventureApp({
 
         setSnapshot(data.snapshot);
         setSuggestedActions(data.snapshot.recentMessages.at(-1)?.payload?.suggestedActions as string[] ?? []);
+        setMissedTurnDigests([]);
       } catch (error) {
         if (active) {
           setTurnError(error instanceof Error ? error.message : "Failed to load campaign.");
@@ -228,6 +231,20 @@ export function AdventureApp({
     () => snapshot?.character.inventory.filter((item) => !isEquipmentItem(item)) ?? [],
     [snapshot],
   );
+  const latestNarrationPayload = useMemo(() => {
+    const message = [...recentMessages]
+      .reverse()
+      .find((entry) => entry.role === "assistant" && entry.kind === "narration");
+    return message?.payload ?? null;
+  }, [recentMessages]);
+  const latestWhatChanged = useMemo(() => {
+    const value = latestNarrationPayload?.whatChanged;
+    return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+  }, [latestNarrationPayload]);
+  const latestWhy = useMemo(() => {
+    const value = latestNarrationPayload?.why;
+    return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+  }, [latestNarrationPayload]);
 
   async function submitTurn(nextAction: string) {
     if (!campaignId || !sessionId || !nextAction.trim() || submitting) {
@@ -249,12 +266,62 @@ export function AdventureApp({
         body: JSON.stringify({
           campaignId,
           sessionId,
+          requestId: crypto.randomUUID(),
+          expectedStateVersion: snapshot?.stateVersion ?? 0,
           action: nextAction.trim(),
         }),
       });
 
       if (!response.ok) {
-        const data = (await response.json().catch(() => null)) as { error?: string } | null;
+        const data = (await response.json().catch(() => null)) as
+          | {
+              error?: string;
+              latestSnapshot?: PlayerCampaignSnapshot;
+              latestStateVersion?: number;
+              missedTurnDigests?: TurnDigest[];
+              retryWithNewRequestId?: boolean;
+              message?: string;
+              result?: {
+                error?: {
+                  message?: string;
+                } | null;
+              } | null;
+            }
+          | null;
+
+        if (response.status === 409 && data?.error === "state_conflict" && data.latestSnapshot) {
+          setSnapshot(data.latestSnapshot);
+          setMissedTurnDigests(data.missedTurnDigests ?? []);
+          setSuggestedActions(
+            (data.latestSnapshot.recentMessages.at(-1)?.payload?.suggestedActions as string[] | undefined) ?? [],
+          );
+          setAction("");
+          setTurnError("The world advanced before this action could commit. Review the missed outcome and choose a new action.");
+          return;
+        }
+
+        if (response.status === 409 && data?.error === "retry_with_new_request_id") {
+          setTurnError(
+            data.result?.error?.message
+            ?? "That request already ended in a retryable failure state. Submit the action again to create a fresh attempt.",
+          );
+          return;
+        }
+
+        if (response.status === 400 && data?.error === "invalid_expected_state_version") {
+          if (data.latestSnapshot) {
+            setSnapshot(data.latestSnapshot);
+            setSuggestedActions(
+              (data.latestSnapshot.recentMessages.at(-1)?.payload?.suggestedActions as string[] | undefined) ?? [],
+            );
+          }
+          setTurnError(
+            data.message
+            ?? "The client state version was ahead of the campaign. Review the current state and choose a fresh action.",
+          );
+          return;
+        }
+
         throw new Error(data?.error ?? "Turn submission failed.");
       }
 
@@ -286,6 +353,7 @@ export function AdventureApp({
 
       setWarnings(nextWarnings);
       setSuggestedActions(nextActions);
+      setMissedTurnDigests([]);
       setAction("");
     } catch (error) {
       setTurnError(error instanceof Error ? error.message : "Turn submission failed.");
@@ -440,6 +508,56 @@ export function AdventureApp({
                 </header>
 
                 <div className="mt-8 space-y-6">
+                  {missedTurnDigests.length ? (
+                    <section className="rounded-3xl border border-amber-700/40 bg-amber-950/20 p-6">
+                      <p className="text-[0.68rem] uppercase tracking-[0.22em] text-amber-300/70">
+                        Missed Outcome
+                      </p>
+                      <div className="mt-4 space-y-4">
+                        {missedTurnDigests.map((digest) => (
+                          <article key={digest.turnId} className="rounded-2xl border border-amber-900/50 bg-zinc-950/60 p-4">
+                            {digest.whatChanged.length ? (
+                              <p className="text-sm leading-relaxed text-zinc-200">
+                                {digest.whatChanged.join(" ")}
+                              </p>
+                            ) : null}
+                            {digest.why.length ? (
+                              <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+                                {digest.why.join(" ")}
+                              </p>
+                            ) : null}
+                          </article>
+                        ))}
+                      </div>
+                    </section>
+                  ) : null}
+
+                  {latestWhatChanged.length || latestWhy.length ? (
+                    <section className="rounded-3xl border border-zinc-800 bg-zinc-950/70 p-6">
+                      <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">
+                        Latest Outcome
+                      </p>
+                      {latestWhatChanged.length ? (
+                        <div className="mt-4 space-y-2">
+                          {latestWhatChanged.map((line) => (
+                            <p key={line} className="text-sm leading-relaxed text-zinc-200">
+                              {line}
+                            </p>
+                          ))}
+                        </div>
+                      ) : null}
+                      {latestWhy.length ? (
+                        <div className="mt-4 space-y-2 border-t border-zinc-800 pt-4">
+                          {latestWhy.map((line) => (
+                            <p key={line} className="text-xs leading-relaxed text-zinc-400">
+                              {line}
+                            </p>
+                          ))}
+                        </div>
+                      ) : null}
+                    </section>
+                  ) : null}
+
                   {recentMessages.map((message) => (
                     <article
                       key={message.id}

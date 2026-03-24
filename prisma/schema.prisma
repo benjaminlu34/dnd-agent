@@ -65,6 +65,13 @@ model Campaign {
   templateId          String
   moduleSchemaVersion Int                @default(1)
   selectedEntryPointId String
+  turnLockRequestId   String?
+  turnLockSessionId   String?
+  turnLockExpiresAt   DateTime?
+  stateVersion        Int                @default(0)
+  generatedThroughDay Int                @default(0)
+  infrastructureFailureCode String?
+  degradedAt          DateTime?
   stateJson           Json
   createdAt           DateTime           @default(now())
   updatedAt           DateTime           @updatedAt
@@ -89,6 +96,11 @@ model Campaign {
   factionMoves        FactionMove[]
   worldEvents         WorldEvent[]
   temporaryActors     TemporaryActor[]
+  npcKnowledge        NpcKnowledge[]
+  factionKnowledge    FactionKnowledge[]
+  locationKnowledge   LocationKnowledge[]
+  scheduleGenerationJobs ScheduleGenerationJob[]
+  memoryEntityLinks   MemoryEntityLink[]
 }
 
 model CharacterInstance {
@@ -174,16 +186,24 @@ model Turn {
   id         String   @id @default(cuid())
   campaignId String
   sessionId  String
+  requestId  String   @default(cuid())
+  requestHash String  @default("")
   playerAction String
   status     String
   toolCallJson Json?
   resultJson Json?
+  stateVersionAfter Int?
+  infrastructureFailureCode String?
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
   campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   session    Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  memoryEntries MemoryEntry[]
+  scheduledJobs ScheduleGenerationJob[]
 
   @@index([campaignId, createdAt])
+  @@index([campaignId, stateVersionAfter])
+  @@unique([campaignId, requestId])
 }
 
 model Message {
@@ -203,11 +223,18 @@ model MemoryEntry {
   id         String   @id @default(cuid())
   campaignId String
   sessionId  String?
+  turnId     String?
   type       String
+  memoryKind String   @default("world_change")
+  isLongArcCandidate Boolean @default(false)
   summary    String
+  summarySource String @default("model")
+  narrativeNote String?
   createdAt  DateTime @default(now())
   campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   session    Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  turn       Turn?    @relation(fields: [turnId], references: [id], onDelete: SetNull)
+  entityLinks MemoryEntityLink[]
 
   @@index([campaignId, createdAt])
 }
@@ -231,6 +258,7 @@ model LocationNode {
   edgesTo              LocationEdge[]  @relation("EdgeTarget")
   npcs                 NPC[]
   information          Information[]
+  knowledge            LocationKnowledge[]
   marketPrices         MarketPrice[]
   worldEvents          WorldEvent[]
   npcRoutineTargets    NpcRoutine[]    @relation("NpcRoutineTarget")
@@ -278,6 +306,7 @@ model Faction {
   factionMoves       FactionMove[]
   relationsFrom      FactionRelation[] @relation("FactionRelationSource")
   relationsTo        FactionRelation[] @relation("FactionRelationTarget")
+  knowledge          FactionKnowledge[]
 
   @@index([campaignId])
 }
@@ -307,7 +336,8 @@ model NPC {
   description       String
   socialLayer       String       @default("anchor")
   isNarrativelyHydrated Boolean  @default(true)
-  hydrationClaimedAt DateTime?
+  hydrationClaimRequestId String?
+  hydrationClaimExpiresAt DateTime?
   factionId         String?
   currentLocationId String?
   approval          Int          @default(0)
@@ -323,6 +353,7 @@ model NPC {
   marketPrices      MarketPrice[] @relation("VendorNpc")
   npcRoutines       NpcRoutine[]
   promotedTemporaryActors TemporaryActor[]
+  knowledge         NpcKnowledge[]
 
   @@index([campaignId])
   @@index([campaignId, currentLocationId])
@@ -350,10 +381,62 @@ model Information {
   sourceNpc        NPC?              @relation("InformationSourceNpc", fields: [sourceNpcId], references: [id], onDelete: SetNull)
   sourceLinks      InformationLink[] @relation("InformationLinkSource")
   targetLinks      InformationLink[] @relation("InformationLinkTarget")
+  npcKnowledge     NpcKnowledge[]
+  factionKnowledge FactionKnowledge[]
+  locationKnowledge LocationKnowledge[]
 
   @@index([campaignId])
   @@index([campaignId, locationId, isDiscovered])
   @@index([campaignId, expiresAtTime])
+}
+
+model NpcKnowledge {
+  id            String      @id @default(cuid())
+  campaignId    String
+  npcId         String
+  informationId String
+  shareability  String      @default("private")
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  campaign      Campaign    @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  npc           NPC         @relation(fields: [npcId], references: [id], onDelete: Cascade)
+  information   Information @relation(fields: [informationId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, npcId, informationId])
+  @@index([campaignId, npcId])
+  @@index([campaignId, informationId])
+}
+
+model FactionKnowledge {
+  id            String      @id @default(cuid())
+  campaignId    String
+  factionId     String
+  informationId String
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  campaign      Campaign    @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  faction       Faction     @relation(fields: [factionId], references: [id], onDelete: Cascade)
+  information   Information @relation(fields: [informationId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, factionId, informationId])
+  @@index([campaignId, factionId])
+  @@index([campaignId, informationId])
+}
+
+model LocationKnowledge {
+  id            String       @id @default(cuid())
+  campaignId    String
+  locationId    String
+  informationId String
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  campaign      Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  location      LocationNode @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  information   Information  @relation(fields: [informationId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, locationId, informationId])
+  @@index([campaignId, locationId])
+  @@index([campaignId, informationId])
 }
 
 model InformationLink {
@@ -459,6 +542,7 @@ model WorldEvent {
   payload       Json
   isProcessed   Boolean      @default(false)
   isCancelled   Boolean      @default(false)
+  cancellationReason String?
   cascadesFrom  String?
   cascadeDepth  Int          @default(0)
   createdAt     DateTime     @default(now())
@@ -493,4 +577,42 @@ model TemporaryActor {
   @@index([campaignId, currentLocationId])
   @@index([campaignId, lastSeenAtTurn])
   @@unique([campaignId, currentLocationId, label])
+}
+
+model ScheduleGenerationJob {
+  id            String   @id @default(cuid())
+  campaignId    String
+  queuedByTurnId String?
+  dayNumber     Int
+  dayStartTime  Int
+  status        String   @default("pending")
+  attempts      Int      @default(0)
+  leaseOwnerId  String?
+  leaseExpiresAt DateTime?
+  lastError     String?
+  infrastructureFailureCode String?
+  completedAt   DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  campaign      Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  queuedByTurn  Turn?    @relation(fields: [queuedByTurnId], references: [id], onDelete: SetNull)
+
+  @@unique([campaignId, dayNumber])
+  @@index([campaignId, status])
+  @@index([status, leaseExpiresAt])
+}
+
+model MemoryEntityLink {
+  id         String      @id @default(cuid())
+  memoryId   String
+  campaignId String
+  entityType String
+  entityId   String
+  isPrimary  Boolean     @default(false)
+  createdAt  DateTime    @default(now())
+  memory     MemoryEntry @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  campaign   Campaign    @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, entityType, entityId])
+  @@index([memoryId])
 }

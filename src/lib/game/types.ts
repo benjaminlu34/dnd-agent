@@ -15,6 +15,77 @@ export type NpcState = "active" | "wounded" | "incapacitated" | "dead";
 export type CombatApproach = "attack" | "subdue" | "assassinate";
 export type TradeAction = "buy" | "sell";
 export type RestType = "light" | "full";
+export type ApprovalBand = "hostile" | "cold" | "neutral" | "warm" | "trusted";
+export type DurationMagnitude = "instant" | "brief" | "standard" | "extended" | "long";
+export type RelationshipMove = "worsen" | "slip" | "steady" | "warm" | "bond";
+export type DiscoveryIntent = "none" | "surface" | "focused" | "deep";
+export type ChallengeApproach = "force" | "finesse" | "endure" | "analyze" | "notice" | "influence";
+export type MemoryKind =
+  | "conflict"
+  | "promise"
+  | "relationship_shift"
+  | "world_change"
+  | "discovery"
+  | "injury"
+  | "travel"
+  | "trade";
+export type MemorySummarySource = "model" | "system_fallback";
+export type InfrastructureFailureCode =
+  | "SCHEDULE_JOB_EXHAUSTED"
+  | "TURN_LOCK_CONFLICT"
+  | "TURN_DEADLINE_EXCEEDED"
+  | "TURN_CANCELLED"
+  | "MODEL_ERROR"
+  | "VALIDATION_ERROR"
+  | "INFRASTRUCTURE_ERROR";
+export type TurnCodeEntityType =
+  | "campaign"
+  | "character"
+  | "session"
+  | "location"
+  | "route"
+  | "npc"
+  | "faction"
+  | "information"
+  | "commodity"
+  | "world_event"
+  | "faction_move"
+  | "schedule_job"
+  | "memory";
+
+export type TurnCausalityCodeName =
+  | "TIME_ADVANCED"
+  | "LOCATION_CHANGED"
+  | "NPC_APPROVAL_CHANGED"
+  | "INFORMATION_DISCOVERED"
+  | "NPC_STATE_CHANGED"
+  | "CHARACTER_HEALTH_CHANGED"
+  | "ROUTE_STATUS_CHANGED"
+  | "LOCATION_STATE_CHANGED"
+  | "LOCATION_CONTROL_CHANGED"
+  | "FACTION_RESOURCES_CHANGED"
+  | "WORLD_EVENT_CANCELLED"
+  | "WORLD_EVENT_PROCESSED"
+  | "FACTION_MOVE_CANCELLED"
+  | "FACTION_MOVE_EXECUTED"
+  | "MARKET_PRICE_CHANGED"
+  | "MEMORY_RECORDED"
+  | "SCHEDULE_JOB_ENQUEUED"
+  | "PLAYER_ACTION"
+  | "PLAYER_TRAVEL"
+  | "PLAYER_WAIT"
+  | "PLAYER_REST"
+  | "PLAYER_TRADE"
+  | "PLAYER_COMBAT"
+  | "PLAYER_CONVERSATION"
+  | "PLAYER_INVESTIGATION"
+  | "PLAYER_OBSERVATION"
+  | "MODEL_DISCOVERY_INTENT"
+  | "RELATIONSHIP_SHIFT"
+  | "SIMULATION_TICK"
+  | "HORIZON_CAP"
+  | "SCHEDULE_BUFFER_ROLLED"
+  | "INVALIDATED_EVENT";
 
 export const STAT_LABELS: Record<Stat, string> = {
   strength: "Strength",
@@ -527,6 +598,7 @@ export type CampaignRuntimeState = {
   globalTime: number;
   pendingTurnId: string | null;
   lastActionSummary: string | null;
+  customTitle?: string | null;
 };
 
 export type LocalTextureSummary = {
@@ -587,6 +659,7 @@ export type NpcSummary = {
   factionName: string | null;
   currentLocationId: string | null;
   approval: number;
+  approvalBand: ApprovalBand;
   isCompanion: boolean;
   state: NpcState;
   threatLevel: number;
@@ -673,17 +746,101 @@ export type StoryMessage = {
   payload?: Record<string, unknown> | null;
 };
 
+export type TurnCausalityCode = {
+  code: TurnCausalityCodeName;
+  entityType: TurnCodeEntityType;
+  targetId: string | null;
+  delta?: number | null;
+  minutes?: number | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type TurnNarrationBounds = {
+  requestedAdvanceMinutes: number | null;
+  committedAdvanceMinutes: number;
+  availableAdvanceMinutes: number;
+  wasCapped: boolean;
+  overrideText: string | null;
+};
+
 export type MemoryRecord = {
   id: string;
   type: string;
+  turnId: string | null;
+  memoryKind: MemoryKind;
+  isLongArcCandidate: boolean;
   summary: string;
+  summarySource: MemorySummarySource;
+  narrativeNote: string | null;
   createdAt: string;
+};
+
+export type MemoryEntityLinkRecord = {
+  memoryId: string;
+  entityType: TurnCodeEntityType;
+  entityId: string;
+  isPrimary: boolean;
+};
+
+export type TurnDigest = {
+  turnId: string;
+  requestId: string;
+  status: string;
+  stateVersionAfter: number | null;
+  narration: string | null;
+  whatChanged: string[];
+  why: string[];
+  createdAt: string;
+};
+
+export type ActivePressureSummary = {
+  entityType: TurnCodeEntityType;
+  entityId: string;
+  label: string;
+  summary: string;
+};
+
+export type WorldShiftSummary = {
+  turnId: string;
+  summary: string;
+  changeCodes: TurnCausalityCode[];
+};
+
+export type ActiveThreadSummary = {
+  memoryId: string;
+  memoryKind: MemoryKind;
+  summary: string;
+  isLongArcCandidate: boolean;
+  primaryEntityType: TurnCodeEntityType | null;
+  primaryEntityId: string | null;
+};
+
+export type TurnResultPayload = {
+  stateVersionAfter: number | null;
+  changeCodes: TurnCausalityCode[];
+  reasonCodes: TurnCausalityCode[];
+  whatChanged: string[];
+  why: string[];
+  warnings: string[];
+  narrationBounds?: TurnNarrationBounds | null;
+  checkResult?: CheckResult | null;
+  rollback?: TurnRollbackData | null;
+  clarification?: {
+    question: string;
+    options: string[];
+  } | null;
+  error?: {
+    message: string;
+    code: string;
+  } | null;
 };
 
 export type CampaignSnapshot = {
   campaignId: string;
   sessionId: string;
   sessionTurnCount: number;
+  stateVersion: number;
+  generatedThroughDay: number;
   moduleId: string;
   selectedEntryPointId: string;
   title: string;
@@ -702,6 +859,9 @@ export type CampaignSnapshot = {
   connectedLeads: CrossLocationLead[];
   temporaryActors: TemporaryActorSummary[];
   memories: MemoryRecord[];
+  activePressures: ActivePressureSummary[];
+  recentWorldShifts: WorldShiftSummary[];
+  activeThreads: ActiveThreadSummary[];
   recentMessages: StoryMessage[];
   canRetryLatestTurn: boolean;
 };
@@ -740,6 +900,9 @@ export type SpatialPromptContext = {
   recentLocalEvents: RecentLocalEventSummary[];
   recentTurnLedger: string[];
   discoveredInformation: PromptInformationSummary[];
+  activePressures: ActivePressureSummary[];
+  recentWorldShifts: WorldShiftSummary[];
+  activeThreads: ActiveThreadSummary[];
   inventory: PromptInventoryItem[];
   localTexture: LocalTextureSummary | null;
   globalTime: number;
@@ -829,6 +992,35 @@ export type PromotedNpcHydrationDraft = {
   }>;
 };
 
+export type TurnSubmissionRequest = {
+  campaignId: string;
+  sessionId: string;
+  requestId: string;
+  expectedStateVersion: number;
+  action: string;
+};
+
+export type StateConflictResponse = {
+  error: "state_conflict";
+  latestSnapshot: PlayerCampaignSnapshot;
+  latestStateVersion: number;
+  missedTurnDigests: TurnDigest[];
+};
+
+export type RetryRequiredResponse = {
+  error: "retry_with_new_request_id";
+  retryWithNewRequestId: true;
+  turnId: string;
+  previousStatus: string;
+  result: TurnResultPayload;
+};
+
+export type TurnLockCancelRequest = {
+  campaignId: string;
+  sessionId: string;
+  requestId: string;
+};
+
 export type RequestClarificationToolCall = {
   type: "request_clarification";
   question: string;
@@ -906,7 +1098,6 @@ export type ExecuteTravelToolCall = {
   narration: string;
   suggestedActions: string[];
   timeMode: "travel";
-  timeElapsed: number;
   citedEntities: CitedEntities;
 };
 
@@ -914,10 +1105,11 @@ export type ExecuteCombatToolCall = {
   type: "execute_combat";
   targetNpcId: string;
   approach: CombatApproach;
+  durationMagnitude?: DurationMagnitude;
+  challengeApproach?: ChallengeApproach;
   narration: string;
   suggestedActions: string[];
   timeMode: "combat" | "exploration";
-  timeElapsed: number;
   citedEntities: CitedEntities;
   memorySummary?: string;
 };
@@ -930,10 +1122,10 @@ export type ExecuteConverseToolCall = {
   narration: string;
   suggestedActions: string[];
   timeMode: Exclude<TimeMode, "travel" | "rest">;
-  timeElapsed: number;
+  durationMagnitude?: DurationMagnitude;
   citedEntities: CitedEntities;
-  approvalDelta?: number;
-  discoverInformationIds?: string[];
+  relationshipMove?: RelationshipMove;
+  discoveryIntent?: DiscoveryIntent;
   memorySummary?: string;
 };
 
@@ -945,9 +1137,9 @@ export type ExecuteInvestigateToolCall = {
   narration: string;
   suggestedActions: string[];
   timeMode: Exclude<TimeMode, "travel" | "rest">;
-  timeElapsed: number;
+  durationMagnitude?: DurationMagnitude;
   citedEntities: CitedEntities;
-  discoverInformationIds?: string[];
+  discoveryIntent?: DiscoveryIntent;
   memorySummary?: string;
 };
 
@@ -958,9 +1150,9 @@ export type ExecuteObserveToolCall = {
   narration: string;
   suggestedActions: string[];
   timeMode: Exclude<TimeMode, "travel" | "rest">;
-  timeElapsed: number;
+  durationMagnitude?: DurationMagnitude;
   citedEntities: CitedEntities;
-  discoverInformationIds?: string[];
+  discoveryIntent?: DiscoveryIntent;
   memorySummary?: string;
 };
 
@@ -970,7 +1162,7 @@ export type ExecuteWaitToolCall = {
   narration: string;
   suggestedActions: string[];
   timeMode: "exploration" | "downtime";
-  timeElapsed: number;
+  durationMagnitude?: DurationMagnitude;
   citedEntities: CitedEntities;
   memorySummary?: string;
 };
@@ -984,7 +1176,7 @@ export type ExecuteTradeToolCall = {
   narration: string;
   suggestedActions: string[];
   timeMode: "exploration" | "downtime";
-  timeElapsed: number;
+  durationMagnitude?: DurationMagnitude;
   citedEntities: CitedEntities;
   memorySummary?: string;
 };
@@ -995,7 +1187,6 @@ export type ExecuteRestToolCall = {
   narration: string;
   suggestedActions: string[];
   timeMode: "rest";
-  timeElapsed: number;
   citedEntities: CitedEntities;
   memorySummary?: string;
 };
@@ -1003,12 +1194,10 @@ export type ExecuteRestToolCall = {
 export type ExecuteFreeformToolCall = {
   type: "execute_freeform";
   actionDescription: string;
-  statToCheck: Stat;
   timeMode: Exclude<TimeMode, "travel" | "rest">;
-  estimatedTimeElapsedMinutes: number;
-  timeElapsed: number;
+  durationMagnitude?: DurationMagnitude;
   intendedMechanicalOutcome: string;
-  dc?: number;
+  challengeApproach: ChallengeApproach;
   failureConsequence?: string;
   narration: string;
   suggestedActions: string[];
@@ -1039,6 +1228,10 @@ export type ValidatedTurnCommand =
   | RequestClarificationToolCall
   | (Exclude<TurnActionToolCall, RequestClarificationToolCall> & {
       warnings: string[];
+      timeElapsed: number;
+      relationshipDelta?: number;
+      discoverInformationIds?: string[];
+      narrationBounds?: TurnNarrationBounds | null;
       checkResult?: CheckResult;
     });
 
@@ -1109,6 +1302,20 @@ export type GeneratedDailySchedule = {
   }>;
 };
 
+export type ScheduleGenerationJobRecord = {
+  id: string;
+  campaignId: string;
+  dayNumber: number;
+  dayStartTime: number;
+  status: string;
+  attempts: number;
+  leaseOwnerId: string | null;
+  leaseExpiresAt: string | null;
+  lastError: string | null;
+  infrastructureFailureCode: InfrastructureFailureCode | null;
+  completedAt: string | null;
+};
+
 export type WorldFidelityIssue = {
   code:
     | "hallucinated_entity"
@@ -1134,6 +1341,7 @@ export type TurnRollbackData = {
   previousSessionTurnCount: number;
   createdMessageIds: string[];
   createdMemoryIds: string[];
+  createdMemoryLinkIds: string[];
   discoveredInformation: Array<{
     id: string;
     previousIsDiscovered: boolean;
@@ -1144,6 +1352,7 @@ export type TurnRollbackData = {
   cancelledMoveIds: string[];
   createdWorldEventIds: string[];
   createdFactionMoveIds: string[];
+  createdScheduleJobIds: string[];
   createdTemporaryActorIds: string[];
   createdCommodityStackIds: string[];
 };

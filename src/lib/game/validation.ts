@@ -2,8 +2,11 @@ import { rollCheck } from "@/lib/game/checks";
 import type {
   CampaignSnapshot,
   CitedEntities,
+  ChallengeApproach,
+  DiscoveryIntent,
   ExecuteCombatToolCall,
   ExecuteFreeformToolCall,
+  RelationshipMove,
   TimeMode,
   TurnActionToolCall,
   TurnFetchToolResult,
@@ -23,6 +26,33 @@ const REST_DURATIONS = {
   light: 360,
   full: 480,
 } as const;
+
+const DURATION_MAGNITUDE_MINUTES: Record<
+  Exclude<TimeMode, "travel" | "rest">,
+  Record<string, number>
+> = {
+  combat: {
+    instant: 1,
+    brief: 3,
+    standard: 5,
+    extended: 8,
+    long: 10,
+  },
+  exploration: {
+    instant: 5,
+    brief: 10,
+    standard: 20,
+    extended: 45,
+    long: 90,
+  },
+  downtime: {
+    instant: 60,
+    brief: 120,
+    standard: 240,
+    extended: 480,
+    long: 720,
+  },
+};
 
 function normalizeLooseText(value: string) {
   return value.trim().replace(/\s+/g, " ");
@@ -212,16 +242,10 @@ function assertCitedEntities(
   }
 }
 
-function assertTime(
+function deriveTimeElapsed(
   command: Exclude<TurnActionToolCall, { type: "request_clarification" }>,
   snapshot: CampaignSnapshot,
 ) {
-  const bounds = TIME_MODE_BOUNDS[command.timeMode];
-
-  if (!bounds) {
-    throw new Error(`Unknown time mode: ${String(command.timeMode)}.`);
-  }
-
   if (command.type === "execute_travel") {
     const route = snapshot.adjacentRoutes.find((entry) => entry.id === command.routeEdgeId);
 
@@ -233,30 +257,54 @@ function assertTime(
       throw new Error("Travel target does not match the selected route.");
     }
 
-    if (command.timeElapsed !== route.travelTimeMinutes) {
-      throw new Error("Travel time must be derived from the route travelTimeMinutes.");
+    const explicitTimeElapsed =
+      "timeElapsed" in command && typeof command.timeElapsed === "number"
+        ? command.timeElapsed
+        : null;
+    if (explicitTimeElapsed != null && explicitTimeElapsed !== route.travelTimeMinutes) {
+      throw new Error("Travel time must match the authoritative route time.");
     }
 
-    return;
+    return route.travelTimeMinutes;
   }
 
   if (command.type === "execute_rest") {
-    const requiredDuration = REST_DURATIONS[command.restType];
-    if (command.timeElapsed !== requiredDuration) {
-      throw new Error(`Rest time must be engine-owned at ${requiredDuration} minutes.`);
+    const explicitTimeElapsed =
+      "timeElapsed" in command && typeof command.timeElapsed === "number"
+        ? command.timeElapsed
+        : null;
+    if (explicitTimeElapsed != null && explicitTimeElapsed !== REST_DURATIONS[command.restType]) {
+      throw new Error("Rest time must be engine-owned.");
     }
-    return;
+
+    return REST_DURATIONS[command.restType];
   }
 
-  if (command.type === "execute_wait" && command.timeElapsed !== command.durationMinutes) {
-    throw new Error("Wait durationMinutes must match timeElapsed.");
+  if (command.type === "execute_wait") {
+    if (!Number.isInteger(command.durationMinutes) || command.durationMinutes <= 0) {
+      throw new Error("Wait durationMinutes must be a positive integer.");
+    }
+    return command.durationMinutes;
   }
 
-  if (command.timeElapsed < bounds.min || command.timeElapsed > bounds.max) {
+  const bounds = TIME_MODE_BOUNDS[command.timeMode];
+  if (!bounds) {
+    throw new Error(`Unknown time mode: ${String(command.timeMode)}.`);
+  }
+
+  const magnitude = command.durationMagnitude ?? "standard";
+  const minutes = DURATION_MAGNITUDE_MINUTES[command.timeMode]?.[magnitude];
+  if (!minutes) {
+    throw new Error(`Unknown duration magnitude ${magnitude} for ${command.timeMode}.`);
+  }
+
+  if (minutes < bounds.min || minutes > bounds.max) {
     throw new Error(
-      `${command.type} produced ${command.timeElapsed} minutes, outside ${command.timeMode} bounds.`,
+      `${command.type} produced ${minutes} minutes, outside ${command.timeMode} bounds.`,
     );
   }
+
+  return minutes;
 }
 
 function requireFetchedMarketPrice(command: {
@@ -356,25 +404,6 @@ function validateInteractionTarget(
   }
 }
 
-function validateInformationDiscoveries(snapshot: CampaignSnapshot, ids: string[] | undefined) {
-  if (!ids?.length) {
-    return;
-  }
-
-  const accessibleIds = new Set(
-    snapshot.localInformation.map((entry) => entry.id).concat(
-      snapshot.discoveredInformation.map((entry) => entry.id),
-      snapshot.connectedLeads.map((lead) => lead.information.id),
-    ),
-  );
-
-  for (const id of ids) {
-    if (!accessibleIds.has(id)) {
-      throw new Error(`Information ${id} is outside the local/discovered bubble.`);
-    }
-  }
-}
-
 function looksLikeTypedCombatOrTrade(text: string) {
   const normalized = text.toLowerCase();
   return /(buy|sell|barter|trade|price|stock|kill|slay|murder|stab|attack|subdue|assassinate|knock out)/.test(
@@ -383,16 +412,8 @@ function looksLikeTypedCombatOrTrade(text: string) {
 }
 
 function validateFreeform(command: ExecuteFreeformToolCall) {
-  if (!command.statToCheck) {
-    throw new Error("execute_freeform requires statToCheck.");
-  }
-
   if (!command.intendedMechanicalOutcome.trim()) {
     throw new Error("execute_freeform requires intendedMechanicalOutcome.");
-  }
-
-  if (command.estimatedTimeElapsedMinutes !== command.timeElapsed) {
-    throw new Error("execute_freeform estimatedTimeElapsedMinutes must match timeElapsed.");
   }
 
   if (looksLikeTypedCombatOrTrade(`${command.actionDescription} ${command.intendedMechanicalOutcome}`)) {
@@ -418,13 +439,80 @@ function deriveCombatCheck(command: ExecuteCombatToolCall, snapshot: CampaignSna
   });
 }
 
+function statForChallengeApproach(challengeApproach: ChallengeApproach) {
+  switch (challengeApproach) {
+    case "force":
+      return "strength";
+    case "finesse":
+      return "dexterity";
+    case "endure":
+      return "constitution";
+    case "analyze":
+      return "intelligence";
+    case "notice":
+      return "wisdom";
+    case "influence":
+      return "charisma";
+  }
+}
+
+function deriveRelationshipDelta(move: RelationshipMove | undefined) {
+  switch (move) {
+    case "worsen":
+      return -2;
+    case "slip":
+      return -1;
+    case "warm":
+      return 1;
+    case "bond":
+      return 2;
+    default:
+      return 0;
+  }
+}
+
+function deriveDiscoveryIntent(
+  command: Exclude<TurnActionToolCall, { type: "request_clarification" }>,
+): DiscoveryIntent {
+  if ("discoveryIntent" in command && command.discoveryIntent) {
+    return command.discoveryIntent;
+  }
+
+  if (command.type === "execute_investigate") {
+    return "focused";
+  }
+
+  return "none";
+}
+
+function deriveFreeformCheck(command: ExecuteFreeformToolCall, snapshot: CampaignSnapshot) {
+  const citedNpcId = command.citedEntities.npcIds.find((npcId) => findPresentNpc(snapshot, npcId));
+  const citedNpc = citedNpcId ? findPresentNpc(snapshot, citedNpcId) : null;
+  const dc =
+    citedNpc
+      ? 7 + Math.max(1, citedNpc.threatLevel)
+      : command.timeMode === "combat"
+        ? 9
+        : command.challengeApproach === "analyze" || command.challengeApproach === "notice"
+          ? 8
+          : 7;
+
+  return rollCheck({
+    stat: statForChallengeApproach(command.challengeApproach),
+    mode: "normal",
+    reason: command.actionDescription,
+    character: snapshot.character,
+    dc,
+  });
+}
+
 function extractQuotedGoldAmounts(narration: string) {
   return Array.from(narration.matchAll(/(\d+)\s+gold/gi)).map((match) => Number(match[1]));
 }
 
 function auditWorldFidelity(input: {
   snapshot: CampaignSnapshot;
-  command: Exclude<TurnActionToolCall, { type: "request_clarification" }>;
+  command: Exclude<TurnActionToolCall, { type: "request_clarification" }> & { timeElapsed: number };
   fetchedFacts: TurnFetchToolResult[];
 }): WorldFidelityIssue[] {
   const { snapshot, command, fetchedFacts } = input;
@@ -505,17 +593,18 @@ export function validateTurnCommand(input: {
   }
 
   const warnings: string[] = [];
+  const timeElapsed = deriveTimeElapsed(command, snapshot);
   validateInteractionTarget(snapshot, command, fetchedFacts);
-  validateInformationDiscoveries(
-    snapshot,
-    "discoverInformationIds" in command ? command.discoverInformationIds : undefined,
-  );
-  assertTime(command, snapshot);
   assertCitedEntities(command.citedEntities, snapshot, fetchedFacts);
+
+  const commandWithMechanics = {
+    ...command,
+    timeElapsed,
+  } as Exclude<ValidatedTurnCommand, { type: "request_clarification" }>;
 
   const fidelityIssues = auditWorldFidelity({
     snapshot,
-    command,
+    command: commandWithMechanics,
     fetchedFacts,
   });
   const blockingIssue = fidelityIssues.find((issue) => issue.severity === "block");
@@ -536,7 +625,7 @@ export function validateTurnCommand(input: {
 
   if (command.type === "execute_combat") {
     return {
-      ...command,
+      ...commandWithMechanics,
       suggestedActions,
       warnings,
       checkResult: deriveCombatCheck(command, snapshot),
@@ -545,16 +634,10 @@ export function validateTurnCommand(input: {
 
   if (command.type === "execute_freeform") {
     validateFreeform(command);
-    const checkResult = rollCheck({
-      stat: command.statToCheck,
-      mode: "normal",
-      reason: command.actionDescription,
-      character: snapshot.character,
-      dc: command.dc,
-    });
+    const checkResult = deriveFreeformCheck(command, snapshot);
 
     return {
-      ...command,
+      ...commandWithMechanics,
       suggestedActions,
       warnings,
       checkResult,
@@ -562,8 +645,12 @@ export function validateTurnCommand(input: {
   }
 
   return {
-    ...command,
+    ...commandWithMechanics,
     suggestedActions,
     warnings,
+    relationshipDelta:
+      command.type === "execute_converse" ? deriveRelationshipDelta(command.relationshipMove) : undefined,
+    discoverInformationIds:
+      deriveDiscoveryIntent(command) === "none" ? [] : undefined,
   };
 }

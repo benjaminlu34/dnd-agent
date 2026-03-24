@@ -59,6 +59,9 @@ function createPromptContext(): SpatialPromptContext {
         truthfulness: "true",
       },
     ],
+    activePressures: [],
+    recentWorldShifts: [],
+    activeThreads: [],
     inventory: [],
     localTexture: {
       dominantActivities: ["barge loading", "watch patrols", "fish sorting"],
@@ -83,7 +86,7 @@ test("extractToolInput repairs a clipped tool payload well enough to normalize t
               function: {
                 name: "execute_converse",
                 arguments:
-                  "{\"npcId\":\"npc_guide\",\"topic\":\"gate trouble\",\"narration\":\"Tarin points toward the market and mutters that the watch is overwhelmed.\",\"suggestedActions\":[\"Ask who is in charge\"],\"timeMode\":\"exploration\",\"timeElapsed\":5,\"citedEntities\":{\"npcIds\":[\"npc_guide\"],\"locationIds\":[\"loc_gate\"],\"factionIds\":[\"fac_watch\"],\"commodityIds\":[],\"informationIds\":[\"info_1\"]}",
+                  "{\"npcId\":\"npc_guide\",\"topic\":\"gate trouble\",\"narration\":\"Tarin points toward the market and mutters that the watch is overwhelmed.\",\"suggestedActions\":[\"Ask who is in charge\"],\"timeMode\":\"exploration\",\"durationMagnitude\":\"brief\",\"citedEntities\":{\"npcIds\":[\"npc_guide\"],\"locationIds\":[\"loc_gate\"],\"factionIds\":[\"fac_watch\"],\"commodityIds\":[],\"informationIds\":[\"info_1\"]}",
               },
             },
           ],
@@ -115,7 +118,7 @@ test("normalizeTurnToolCall preserves an unnamed local interlocutor", () => {
       narration: "A soaked harvester says the shadows passed under the rafts at first light.",
       suggestedActions: ["Ask where the shadows went"],
       timeMode: "exploration",
-      timeElapsed: 5,
+      durationMagnitude: "brief",
       citedEntities: {
         npcIds: [],
         locationIds: ["loc_gate"],
@@ -141,7 +144,7 @@ test("normalizeTurnToolCall canonicalizes recent unnamed local labels", () => {
       narration: "The same soaked worker jerks a thumb toward the outer pens.",
       suggestedActions: ["Ask what changed at dawn"],
       timeMode: "exploration",
-      timeElapsed: 5,
+      durationMagnitude: "brief",
       citedEntities: {
         npcIds: [],
         locationIds: ["loc_gate"],

@@ -18,6 +18,8 @@ function createSnapshot(): CampaignSnapshot {
     campaignId: "camp_1",
     sessionId: "sess_1",
     sessionTurnCount: 0,
+    stateVersion: 0,
+    generatedThroughDay: 2,
     moduleId: "mod_1",
     selectedEntryPointId: "entry_1",
     title: "Harbor of Knives",
@@ -98,6 +100,7 @@ function createSnapshot(): CampaignSnapshot {
         factionName: null,
         currentLocationId: "loc_gate",
         approval: 2,
+        approvalBand: "warm",
         isCompanion: true,
         state: "active",
         threatLevel: 1,
@@ -151,6 +154,9 @@ function createSnapshot(): CampaignSnapshot {
     connectedLeads: [],
     temporaryActors: [],
     memories: [],
+    activePressures: [],
+    recentWorldShifts: [],
+    activeThreads: [],
     recentMessages: [],
     canRetryLatestTurn: false,
   };
@@ -189,7 +195,6 @@ test("validateTurnCommand enforces travel adjacency and exact route time", () =>
     narration: "You head to the market.",
     suggestedActions: ["Observe the market"],
     timeMode: "travel",
-    timeElapsed: 15,
     citedEntities: {
       npcIds: [],
       locationIds: ["loc_gate", "loc_market"],
@@ -212,10 +217,9 @@ test("validateTurnCommand rejects freeform without intendedMechanicalOutcome", (
   const command: ExecuteFreeformToolCall = {
     type: "execute_freeform",
     actionDescription: "Kick the brazier into the alley",
-    statToCheck: "strength",
     timeMode: "exploration",
-    estimatedTimeElapsedMinutes: 10,
-    timeElapsed: 10,
+    challengeApproach: "force",
+    durationMagnitude: "brief",
     intendedMechanicalOutcome: "",
     narration: "You lunge for the brazier.",
     suggestedActions: ["Press forward"],
@@ -246,7 +250,7 @@ test("validateTurnCommand accepts converse actions aimed at an unnamed local", (
     narration: "A nearby porter lowers his voice and tells you the watch has been overwhelmed since dawn.",
     suggestedActions: ["Ask who started the trouble"],
     timeMode: "exploration",
-    timeElapsed: 5,
+    durationMagnitude: "brief",
     citedEntities: {
       npcIds: [],
       locationIds: ["loc_gate"],
@@ -274,7 +278,7 @@ test("validateTurnCommand rejects unnamed locals that collide with a present NPC
     narration: "You hail the same name without actually targeting the guide.",
     suggestedActions: ["Be more specific"],
     timeMode: "exploration",
-    timeElapsed: 5,
+    durationMagnitude: "brief",
     citedEntities: {
       npcIds: [],
       locationIds: ["loc_gate"],
@@ -308,6 +312,7 @@ test("validateTurnCommand rejects direct actions against pending promoted NPCs w
     factionName: null,
     currentLocationId: "loc_gate",
     approval: 0,
+    approvalBand: "neutral",
     isCompanion: false,
     state: "active",
     threatLevel: 1,
@@ -320,7 +325,7 @@ test("validateTurnCommand rejects direct actions against pending promoted NPCs w
     narration: "You lunge over the bar and try to pin the bartender down.",
     suggestedActions: ["Demand answers"],
     timeMode: "combat",
-    timeElapsed: 3,
+    durationMagnitude: "brief",
     citedEntities: {
       npcIds: ["npc_local_bartender"],
       locationIds: ["loc_gate"],
@@ -355,6 +360,7 @@ test("validateTurnCommand allows direct NPC actions after hydrated fetch detail"
     factionName: null,
     currentLocationId: "loc_gate",
     approval: 0,
+    approvalBand: "neutral",
     isCompanion: false,
     state: "active",
     threatLevel: 1,
@@ -368,7 +374,7 @@ test("validateTurnCommand allows direct NPC actions after hydrated fetch detail"
     narration: "You study the bartender's reactions while he keeps his hands busy on the taps.",
     suggestedActions: ["Press on the smuggling rumor"],
     timeMode: "exploration",
-    timeElapsed: 5,
+    durationMagnitude: "brief",
     citedEntities: {
       npcIds: ["npc_local_bartender"],
       locationIds: ["loc_gate"],
@@ -408,7 +414,7 @@ test("validateTurnCommand rejects converse actions without npcId or interlocutor
     narration: "Silence follows your question.",
     suggestedActions: ["Ask someone else"],
     timeMode: "exploration",
-    timeElapsed: 5,
+    durationMagnitude: "brief",
     citedEntities: {
       npcIds: [],
       locationIds: ["loc_gate"],
@@ -428,8 +434,8 @@ test("validateTurnCommand rejects converse actions without npcId or interlocutor
   );
 });
 
-test("validateTurnCommand rejects rest durations that are not engine-owned", () => {
-  const command: ExecuteRestToolCall = {
+test("validateTurnCommand enforces engine-owned rest duration even if a payload smuggles its own minutes", () => {
+  const command = {
     type: "execute_rest",
     restType: "light",
     narration: "You try to squeeze in a short rest.",
@@ -443,7 +449,7 @@ test("validateTurnCommand rejects rest durations that are not engine-owned", () 
       commodityIds: [],
       informationIds: [],
     },
-  };
+  } as ExecuteRestToolCall & { timeElapsed: number };
 
   assert.throws(
     () =>
@@ -468,7 +474,7 @@ test("validateTurnCommand rejects trade without fetched market detail", () => {
     narration: "You buy two spice sacks for 10 gold.",
     suggestedActions: ["Ask who else is buying spice"],
     timeMode: "exploration",
-    timeElapsed: 5,
+    durationMagnitude: "brief",
     citedEntities: {
       npcIds: [],
       locationIds: ["loc_gate"],
@@ -501,7 +507,7 @@ test("validateTurnCommand rejects trade commands that omit the traded commodity 
     narration: "You buy two spice sacks for 10 gold.",
     suggestedActions: ["Ask who else is buying spice"],
     timeMode: "exploration",
-    timeElapsed: 5,
+    durationMagnitude: "brief",
     citedEntities: {
       npcIds: [],
       locationIds: ["loc_gate"],
@@ -535,7 +541,7 @@ test("validateTurnCommand accepts trade commands when market facts and commodity
     narration: "You buy two spice sacks for 10 gold.",
     suggestedActions: ["Ask who else is buying spice"],
     timeMode: "exploration",
-    timeElapsed: 5,
+    durationMagnitude: "brief",
     citedEntities: {
       npcIds: [],
       locationIds: ["loc_gate"],
@@ -559,10 +565,9 @@ test("validateTurnCommand rejects freeform calls that are really typed trade or 
   const command: ExecuteFreeformToolCall = {
     type: "execute_freeform",
     actionDescription: "Buy the spice sacks from the stall",
-    statToCheck: "charisma",
     timeMode: "exploration",
-    estimatedTimeElapsedMinutes: 10,
-    timeElapsed: 10,
+    challengeApproach: "influence",
+    durationMagnitude: "brief",
     intendedMechanicalOutcome: "Purchase the spice and leave with the goods.",
     narration: "You start haggling for the spice sacks.",
     suggestedActions: ["Try a formal trade instead"],

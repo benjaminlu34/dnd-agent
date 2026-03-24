@@ -1,8 +1,16 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { dmClient } from "@/lib/ai/provider";
-import { FetchSynchronizationError } from "@/lib/game/errors";
+import { renderWhatChanged, renderWhy } from "@/lib/game/causality";
+import { parseTurnResultPayloadJson, toCampaignRuntimeStateJson, toTurnResultPayloadJson } from "@/lib/game/json-contracts";
+import {
+  FetchSynchronizationError,
+  InvalidExpectedStateVersionError,
+  StateConflictError,
+  TurnAbandonedError,
+  TurnLockedError,
+} from "@/lib/game/errors";
 import {
   fetchFactionIntel,
   fetchInformationConnections,
@@ -10,9 +18,12 @@ import {
   fetchMarketPrices,
   fetchNpcDetail,
   fetchRelationshipHistory,
-  getCampaignSnapshot,
+  getMissedTurnDigests,
   getPromptContext,
+  getTurnSnapshot,
+  toPlayerCampaignSnapshot,
 } from "@/lib/game/repository";
+import { wakeScheduleGenerationJobs } from "@/lib/game/schedule-jobs";
 import {
   MAX_CASCADE_DEPTH,
   applySimulationInverse,
@@ -24,13 +35,19 @@ import type {
   CampaignRuntimeState,
   CampaignSnapshot,
   CheckResult,
+  InfrastructureFailureCode,
   LocalTextureSummary,
   PromotedNpcHydrationDraft,
   RequestClarificationToolCall,
+  RetryRequiredResponse,
+  StateConflictResponse,
+  TurnCausalityCode,
   TurnFetchToolCall,
   TurnFetchToolResult,
   TurnResolution,
   TurnRollbackData,
+  TurnResultPayload,
+  TurnSubmissionRequest,
   ValidatedTurnCommand,
 } from "@/lib/game/types";
 import { validateTurnCommand, TIME_MODE_BOUNDS } from "@/lib/game/validation";
@@ -41,8 +58,198 @@ type TurnStream = {
   checkResult?: (result: CheckResult) => void;
 };
 
+const TURN_LOCK_TTL_MS = 120_000;
+const TURN_INTERNAL_DEADLINE_MS = 115_000;
+const HYDRATION_CLAIM_TTL_MS = 120_000;
+
+const activeTurnControllers = new Map<string, AbortController>();
+const activeCommitTurnKeys = new Set<string>();
+
+function activeTurnKey(campaignId: string, requestId: string) {
+  return `${campaignId}:${requestId}`;
+}
+
+function requestHashForSubmission(input: {
+  campaignId: string;
+  sessionId: string;
+  expectedStateVersion: number;
+  playerAction: string;
+}) {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        campaignId: input.campaignId,
+        sessionId: input.sessionId,
+        expectedStateVersion: input.expectedStateVersion,
+        action: input.playerAction.trim(),
+      }),
+    )
+    .digest("hex");
+}
+
 function dedupeStrings(values: string[]) {
   return Array.from(new Set(values.map((entry) => entry.trim()).filter(Boolean)));
+}
+
+function dayNumberForTime(globalTime: number) {
+  return Math.floor(globalTime / 1440) + 1;
+}
+
+function safeCommittedWindowEnd(snapshot: CampaignSnapshot) {
+  return snapshot.generatedThroughDay * 1440 - 1;
+}
+
+function availableAdvanceMinutes(snapshot: CampaignSnapshot) {
+  return Math.max(0, safeCommittedWindowEnd(snapshot) - snapshot.state.globalTime);
+}
+
+function extractRequestedAdvanceMinutes(playerAction: string) {
+  const normalized = playerAction.toLowerCase();
+  const match = normalized.match(/(\d+)\s*(minute|minutes|hour|hours|day|days)/);
+  if (!match) {
+    if (/\buntil (dawn|morning)\b/.test(normalized)) {
+      return 480;
+    }
+    if (/\buntil (evening|night)\b/.test(normalized)) {
+      return 720;
+    }
+    return null;
+  }
+
+  const value = Number(match[1]);
+  if (!Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+
+  switch (match[2]) {
+    case "minute":
+    case "minutes":
+      return value;
+    case "hour":
+    case "hours":
+      return value * 60;
+    case "day":
+    case "days":
+      return value * 1440;
+    default:
+      return null;
+  }
+}
+
+function buildNarrationOverride(input: {
+  playerAction: string;
+  snapshot: CampaignSnapshot;
+}) {
+  const requestedAdvanceMinutes = extractRequestedAdvanceMinutes(input.playerAction);
+  const availableMinutes = availableAdvanceMinutes(input.snapshot);
+  if (requestedAdvanceMinutes == null || requestedAdvanceMinutes <= availableMinutes) {
+    return {
+      playerActionForModel: input.playerAction,
+      overrideText: null,
+      requestedAdvanceMinutes,
+      availableAdvanceMinutes: availableMinutes,
+    };
+  }
+
+  const overrideText =
+    `System override: if this action becomes a wait, sleep, rest, or other time skip, the narration may cover at most ${availableMinutes} minutes because the world is only committed through minute ${safeCommittedWindowEnd(input.snapshot)}.`;
+
+  return {
+    playerActionForModel: `${input.playerAction}\n\n${overrideText}`,
+    overrideText,
+    requestedAdvanceMinutes,
+    availableAdvanceMinutes: availableMinutes,
+  };
+}
+
+function applyCommittedTimeWindow(input: {
+  snapshot: CampaignSnapshot;
+  command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
+  overrideText: string | null;
+  requestedAdvanceMinutes: number | null;
+}) {
+  const availableMinutes = availableAdvanceMinutes(input.snapshot);
+  const committedAdvanceMinutes = Math.min(input.command.timeElapsed, availableMinutes);
+
+  return {
+    ...input.command,
+    timeElapsed: committedAdvanceMinutes,
+    narrationBounds: {
+      requestedAdvanceMinutes: input.requestedAdvanceMinutes ?? input.command.timeElapsed,
+      committedAdvanceMinutes,
+      availableAdvanceMinutes: availableMinutes,
+      wasCapped: committedAdvanceMinutes < input.command.timeElapsed,
+      overrideText: input.overrideText,
+    },
+  } satisfies Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
+}
+
+async function cleanupTurnLock(input: {
+  campaignId: string;
+  requestId: string;
+}) {
+  await prisma.campaign.updateMany({
+    where: {
+      id: input.campaignId,
+      turnLockRequestId: input.requestId,
+    },
+    data: {
+      turnLockRequestId: null,
+      turnLockSessionId: null,
+      turnLockExpiresAt: null,
+    },
+  });
+}
+
+async function enqueueFutureScheduleBuffer(input: {
+  tx: Prisma.TransactionClient;
+  snapshot: CampaignSnapshot;
+  nextState: CampaignRuntimeState;
+  turnId: string;
+  rollback: TurnRollbackData;
+}) {
+  const previousDay = dayNumberForTime(input.snapshot.state.globalTime);
+  const nextDay = dayNumberForTime(input.nextState.globalTime);
+  if (nextDay <= previousDay) {
+    return [];
+  }
+
+  const queuedDay = nextDay + 1;
+  const existing = await input.tx.scheduleGenerationJob.findUnique({
+    where: {
+      campaignId_dayNumber: {
+        campaignId: input.snapshot.campaignId,
+        dayNumber: queuedDay,
+      },
+    },
+    select: { id: true },
+  });
+
+  if (existing) {
+    return [];
+  }
+
+  const job = await input.tx.scheduleGenerationJob.create({
+    data: {
+      campaignId: input.snapshot.campaignId,
+      queuedByTurnId: input.turnId,
+      dayNumber: queuedDay,
+      dayStartTime: (queuedDay - 1) * 1440,
+      status: "pending",
+      attempts: 0,
+    },
+  });
+  input.rollback.createdScheduleJobIds.push(job.id);
+  recordCreated(input.rollback, "scheduleGenerationJob", job.id);
+
+  return [
+    {
+      code: "SCHEDULE_JOB_ENQUEUED",
+      entityType: "schedule_job",
+      targetId: job.id,
+      metadata: { dayNumber: queuedDay, label: `Day ${queuedDay}` },
+    } satisfies TurnCausalityCode,
+  ];
 }
 
 function normalizeTemporaryActorLabel(label: string) {
@@ -162,12 +369,14 @@ function emptyRollback(snapshot: CampaignSnapshot): TurnRollbackData {
     previousSessionTurnCount: snapshot.sessionTurnCount,
     createdMessageIds: [],
     createdMemoryIds: [],
+    createdMemoryLinkIds: [],
     discoveredInformation: [],
     simulationInverses: [],
     processedEventIds: [],
     cancelledMoveIds: [],
     createdWorldEventIds: [],
     createdFactionMoveIds: [],
+    createdScheduleJobIds: [],
     createdTemporaryActorIds: [],
     createdCommodityStackIds: [],
   };
@@ -266,6 +475,7 @@ function sanitizePromotedNpcHydrationDraft(input: {
 async function hydratePromotedNpcRecord(input: {
   campaignId: string;
   npcId: string;
+  claimRequestId: string;
 }) {
   const npc = await prisma.nPC.findFirst({
     where: { id: input.npcId, campaignId: input.campaignId },
@@ -279,7 +489,8 @@ async function hydratePromotedNpcRecord(input: {
       factionId: true,
       currentLocationId: true,
       isNarrativelyHydrated: true,
-      hydrationClaimedAt: true,
+      hydrationClaimRequestId: true,
+      hydrationClaimExpiresAt: true,
       socialLayer: true,
     },
   });
@@ -476,32 +687,24 @@ async function hydratePromotedNpcRecord(input: {
   });
 
   await prisma.$transaction(async (tx) => {
-    await tx.nPC.update({
-      where: { id: npc.id },
+    const finalized = await tx.nPC.updateMany({
+      where: {
+        id: npc.id,
+        campaignId: input.campaignId,
+        isNarrativelyHydrated: false,
+        hydrationClaimRequestId: input.claimRequestId,
+      },
       data: {
         summary: draft.summary,
         description: draft.description,
         factionId: draft.factionId,
         isNarrativelyHydrated: true,
-        hydrationClaimedAt: null,
+        hydrationClaimRequestId: null,
+        hydrationClaimExpiresAt: null,
       },
     });
-
-    if (draft.information.length) {
-      await tx.information.createMany({
-        data: draft.information.map((lead) => ({
-          id: `info_${randomUUID()}`,
-          campaignId: input.campaignId,
-          title: lead.title,
-          summary: lead.summary,
-          content: lead.content,
-          truthfulness: lead.truthfulness,
-          accessibility: lead.accessibility,
-          locationId: lead.locationId,
-          factionId: lead.factionId,
-          sourceNpcId: npc.id,
-        })),
-      });
+    if (finalized.count === 0) {
+      return;
     }
   });
 }
@@ -672,7 +875,8 @@ async function trackUnnamedLocalInteraction(input: {
       description: promotedSeed.description,
       socialLayer: "promoted_local",
       isNarrativelyHydrated: false,
-      hydrationClaimedAt: null,
+      hydrationClaimRequestId: null,
+      hydrationClaimExpiresAt: null,
       factionId: null,
       currentLocationId: actor.currentLocationId,
       approval: 0,
@@ -947,6 +1151,11 @@ async function applyRestEffects(input: {
   command: Extract<ValidatedTurnCommand, { type: "execute_rest" }>;
   rollback: TurnRollbackData;
 }) {
+  const requiredDuration = input.command.restType === "full" ? 480 : 360;
+  if (input.command.timeElapsed < requiredDuration) {
+    return;
+  }
+
   const characterInstance = await input.tx.characterInstance.findUnique({
     where: { campaignId: input.snapshot.campaignId },
     select: { id: true, health: true },
@@ -975,6 +1184,124 @@ async function applyRestEffects(input: {
   });
 }
 
+async function resolveDiscoveryIds(input: {
+  tx: Prisma.TransactionClient;
+  snapshot: CampaignSnapshot;
+  command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
+}) {
+  const discoveryIntent =
+    "discoveryIntent" in input.command && input.command.discoveryIntent
+      ? input.command.discoveryIntent
+      : "none";
+
+  if (discoveryIntent === "none") {
+    return [];
+  }
+
+  const locationIds = new Set<string>([input.snapshot.currentLocation.id]);
+  const factionIds = new Set<string>();
+  const npcIds = new Set<string>();
+
+  if (input.command.type === "execute_converse" && input.command.npcId) {
+    npcIds.add(input.command.npcId);
+  }
+  if (input.command.type === "execute_investigate" && input.command.targetType === "npc") {
+    npcIds.add(input.command.targetId);
+  }
+  if (input.command.type === "execute_observe" && input.command.targetType === "npc") {
+    npcIds.add(input.command.targetId);
+  }
+  if (input.command.type === "execute_observe" && input.command.targetType === "faction") {
+    factionIds.add(input.command.targetId);
+  }
+  if (input.command.type === "execute_investigate" && input.command.targetType === "location") {
+    locationIds.add(input.command.targetId);
+  }
+
+  for (const npc of input.snapshot.presentNpcs) {
+    if (npc.factionId) {
+      factionIds.add(npc.factionId);
+    }
+  }
+  if (input.snapshot.currentLocation.controllingFactionId) {
+    factionIds.add(input.snapshot.currentLocation.controllingFactionId);
+  }
+
+  const [locationKnowledge, factionKnowledge, npcKnowledge] = await Promise.all([
+    input.tx.locationKnowledge.findMany({
+      where: {
+        campaignId: input.snapshot.campaignId,
+        locationId: {
+          in: Array.from(locationIds),
+        },
+      },
+      select: { informationId: true },
+    }),
+    input.tx.factionKnowledge.findMany({
+      where: {
+        campaignId: input.snapshot.campaignId,
+        factionId: {
+          in: Array.from(factionIds),
+        },
+      },
+      select: { informationId: true },
+    }),
+    input.tx.npcKnowledge.findMany({
+      where: {
+        campaignId: input.snapshot.campaignId,
+        npcId: {
+          in: Array.from(npcIds),
+        },
+        ...(discoveryIntent === "deep"
+          ? {}
+          : {
+              shareability: {
+                not: "private",
+              },
+            }),
+      },
+      select: { informationId: true },
+    }),
+  ]);
+
+  const candidateIds = Array.from(
+    new Set(
+      [...locationKnowledge, ...factionKnowledge, ...npcKnowledge].map(
+        (entry) => entry.informationId,
+      ),
+    ),
+  );
+  if (!candidateIds.length) {
+    return [];
+  }
+
+  const candidates = await input.tx.information.findMany({
+    where: {
+      campaignId: input.snapshot.campaignId,
+      id: {
+        in: candidateIds,
+      },
+      isDiscovered: false,
+    },
+    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+  });
+
+  const maxDiscoveries = discoveryIntent === "surface" ? 1 : 2;
+
+  return candidates
+    .filter((information) => {
+      if (information.accessibility === "public") {
+        return true;
+      }
+      if (information.accessibility === "guarded") {
+        return true;
+      }
+      return discoveryIntent === "deep" || input.command.type === "execute_investigate";
+    })
+    .slice(0, maxDiscoveries)
+    .map((information) => information.id);
+}
+
 async function applyPlayerActionEffects(input: {
   tx: Prisma.TransactionClient;
   snapshot: CampaignSnapshot;
@@ -985,7 +1312,7 @@ async function applyPlayerActionEffects(input: {
 }) {
   const affectedFactionIds = new Set<string>();
 
-  if (input.command.type === "execute_converse" && input.command.npcId && typeof input.command.approvalDelta === "number") {
+  if (input.command.type === "execute_converse" && input.command.npcId && typeof input.command.relationshipDelta === "number") {
     const npc = await input.tx.nPC.findUnique({
       where: { id: input.command.npcId },
       select: { id: true, approval: true, factionId: true },
@@ -997,7 +1324,7 @@ async function applyPlayerActionEffects(input: {
         where: { id: npc.id },
         data: {
           approval: {
-            increment: input.command.approvalDelta,
+            increment: input.command.relationshipDelta,
           },
         },
       });
@@ -1007,11 +1334,17 @@ async function applyPlayerActionEffects(input: {
     }
   }
 
-  if ("discoverInformationIds" in input.command) {
+  const discoverInformationIds = await resolveDiscoveryIds({
+    tx: input.tx,
+    snapshot: input.snapshot,
+    command: input.command,
+  });
+
+  if (discoverInformationIds.length) {
     await applyInformationDiscoveries({
       tx: input.tx,
       snapshot: input.snapshot,
-      ids: input.command.discoverInformationIds,
+      ids: discoverInformationIds,
       nextTurnCount: input.nextTurnCount,
       rollback: input.rollback,
     });
@@ -1055,7 +1388,10 @@ async function applyPlayerActionEffects(input: {
     });
   }
 
-  return Array.from(affectedFactionIds);
+  return {
+    affectedFactionIds: Array.from(affectedFactionIds),
+    discoveredInformationIds: discoverInformationIds,
+  };
 }
 
 async function createMessage(input: {
@@ -1231,20 +1567,9 @@ async function runTemporalSimulation(input: {
   initialAffectedFactionIds: string[];
 }) {
   let windowStart = input.snapshot.state.globalTime;
-  let generatedDays = 0;
   let firstWindow = true;
 
   while (windowStart < input.nextState.globalTime) {
-    if (!firstWindow && windowStart % 1440 === 0 && generatedDays < 7) {
-      await ensureDailyScheduleGenerated({
-        tx: input.tx,
-        snapshot: input.snapshot,
-        dayStartTime: windowStart,
-        rollback: input.rollback,
-      });
-      generatedDays += 1;
-    }
-
     const chunkEnd = Math.min(
       input.nextState.globalTime,
       (Math.floor(windowStart / 1440) + 1) * 1440,
@@ -1272,21 +1597,334 @@ async function runTemporalSimulation(input: {
   }
 }
 
+function determineMemoryKind(command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>) {
+  if (command.type === "execute_combat") {
+    return "conflict" as const;
+  }
+  if (command.type === "execute_trade") {
+    return "trade" as const;
+  }
+  if (command.type === "execute_travel") {
+    return "travel" as const;
+  }
+  if ("discoverInformationIds" in command && command.discoverInformationIds?.length) {
+    return "discovery" as const;
+  }
+  if (command.type === "execute_converse" && (command.relationshipDelta ?? 0) !== 0) {
+    return "relationship_shift" as const;
+  }
+
+  const promiseText = [
+    "memorySummary" in command ? command.memorySummary : null,
+    command.narration,
+  ]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join(" ")
+    .toLowerCase();
+  if (/\b(promise|promised|swear|swore|vow|vowed|agree|agreed|deal|owed|owe|return with|meet again)\b/.test(promiseText)) {
+    return "promise" as const;
+  }
+
+  return "world_change" as const;
+}
+
+function normalizeMemorySummary(value: string | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.trim().replace(/\s+/g, " ");
+  if (normalized.length < 8 || normalized.length > 240) {
+    return null;
+  }
+
+  return normalized;
+}
+
+function isSalientMemory(input: {
+  command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
+  memoryKind: ReturnType<typeof determineMemoryKind>;
+  discoveredInformationIds: string[];
+  scheduleChangeCodes: TurnCausalityCode[];
+}) {
+  if (input.memoryKind !== "world_change") {
+    return true;
+  }
+
+  return (
+    input.discoveredInformationIds.length > 0
+    || input.scheduleChangeCodes.length > 0
+    || input.command.narrationBounds?.wasCapped === true
+    || input.command.checkResult?.outcome === "failure"
+  );
+}
+
+function buildSystemFallbackMemorySummary(input: {
+  snapshot: CampaignSnapshot;
+  command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
+  memoryKind: ReturnType<typeof determineMemoryKind>;
+  discoveredInformationIds: string[];
+}) {
+  const locationName = input.snapshot.currentLocation.name;
+
+  switch (input.memoryKind) {
+    case "conflict":
+      return input.command.type === "execute_combat"
+        ? `Violence broke out with ${input.command.targetNpcId} in ${locationName}.`
+        : `Conflict erupted in ${locationName}.`;
+    case "promise":
+      return `A new obligation took shape in ${locationName}.`;
+    case "relationship_shift":
+      return input.command.type === "execute_converse" && input.command.npcId
+        ? `Your exchange with ${input.command.npcId} shifted the relationship in ${locationName}.`
+        : `A relationship shifted in ${locationName}.`;
+    case "discovery":
+      return input.discoveredInformationIds.length === 1
+        ? `You uncovered a new lead in ${locationName}.`
+        : `You uncovered new information in ${locationName}.`;
+    case "travel":
+      return input.command.type === "execute_travel"
+        ? `You traveled from ${locationName} to ${input.command.targetLocationId}.`
+        : `You traveled onward from ${locationName}.`;
+    case "trade":
+      return input.command.type === "execute_trade"
+        ? `You completed a trade involving ${input.command.commodityId} in ${locationName}.`
+        : `Trade shifted the scene in ${locationName}.`;
+    case "world_change":
+      if (input.command.narrationBounds?.wasCapped) {
+        return `Time advanced only to the edge of the committed world window in ${locationName}.`;
+      }
+      return `The situation changed in ${locationName}.`;
+  }
+}
+
+function collectMemoryEntityLinks(input: {
+  snapshot: CampaignSnapshot;
+  command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
+  changeCodes: TurnCausalityCode[];
+  reasonCodes: TurnCausalityCode[];
+  affectedFactionIds: string[];
+  discoveredInformationIds: string[];
+}) {
+  const keys: string[] = [];
+  const pushKey = (entityType: string, entityId: string | null | undefined) => {
+    if (entityId) {
+      keys.push(`${entityType}:${entityId}`);
+    }
+  };
+
+  if (input.command.type === "execute_travel") {
+    pushKey("location", input.command.targetLocationId);
+    pushKey("route", input.command.routeEdgeId);
+  } else {
+    pushKey("location", input.snapshot.currentLocation.id);
+  }
+
+  if (input.command.type === "execute_converse" && input.command.npcId) {
+    pushKey("npc", input.command.npcId);
+  }
+  if (input.command.type === "execute_combat") {
+    pushKey("npc", input.command.targetNpcId);
+  }
+  if (input.command.type === "execute_trade") {
+    pushKey("commodity", input.command.commodityId);
+  }
+  if (input.command.type === "execute_investigate" || input.command.type === "execute_observe") {
+    pushKey(input.command.targetType === "route" ? "route" : input.command.targetType, input.command.targetId);
+  }
+
+  for (const factionId of input.affectedFactionIds) {
+    pushKey("faction", factionId);
+  }
+  for (const informationId of input.discoveredInformationIds) {
+    pushKey("information", informationId);
+  }
+  for (const code of [...input.changeCodes, ...input.reasonCodes]) {
+    pushKey(code.entityType, code.targetId);
+  }
+
+  return dedupeStrings(keys).map((entry) => {
+    const [entityType, ...entityIdParts] = entry.split(":");
+    return {
+      entityType,
+      entityId: entityIdParts.join(":"),
+    };
+  });
+}
+
+function buildTurnCausality(input: {
+  snapshot: CampaignSnapshot;
+  command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
+  discoveredInformationIds: string[];
+  scheduleChangeCodes: TurnCausalityCode[];
+}) {
+  const nextState = nextStateFromCommand(input.snapshot, input.command);
+  const changeCodes: TurnCausalityCode[] = [
+    {
+      code: "TIME_ADVANCED",
+      entityType: "campaign",
+      targetId: input.snapshot.campaignId,
+      minutes: input.command.timeElapsed,
+      metadata: null,
+    },
+  ];
+  const reasonCodes: TurnCausalityCode[] = [];
+
+  if (nextState.currentLocationId !== input.snapshot.state.currentLocationId) {
+    changeCodes.push({
+      code: "LOCATION_CHANGED",
+      entityType: "location",
+      targetId: nextState.currentLocationId,
+      metadata: { label: nextState.currentLocationId },
+    });
+    reasonCodes.push({
+      code: "PLAYER_TRAVEL",
+      entityType: "location",
+      targetId: nextState.currentLocationId,
+      metadata: null,
+    });
+  }
+
+  if (input.command.type === "execute_converse" && input.command.npcId && (input.command.relationshipDelta ?? 0) !== 0) {
+    changeCodes.push({
+      code: "NPC_APPROVAL_CHANGED",
+      entityType: "npc",
+      targetId: input.command.npcId,
+      delta: input.command.relationshipDelta ?? 0,
+      metadata: { label: input.command.interlocutor },
+    });
+    reasonCodes.push({
+      code: "PLAYER_CONVERSATION",
+      entityType: "npc",
+      targetId: input.command.npcId,
+      metadata: { label: input.command.interlocutor },
+    });
+  }
+
+  if (input.command.type === "execute_combat") {
+    reasonCodes.push({
+      code: "PLAYER_COMBAT",
+      entityType: "npc",
+      targetId: input.command.targetNpcId,
+      metadata: null,
+    });
+    changeCodes.push({
+      code: "NPC_STATE_CHANGED",
+      entityType: "npc",
+      targetId: input.command.targetNpcId,
+      metadata: null,
+    });
+  }
+
+  if (input.command.type === "execute_trade") {
+    reasonCodes.push({
+      code: "PLAYER_TRADE",
+      entityType: "commodity",
+      targetId: input.command.commodityId,
+      metadata: null,
+    });
+  }
+
+  if (input.command.type === "execute_rest") {
+    reasonCodes.push({
+      code: "PLAYER_REST",
+      entityType: "character",
+      targetId: input.snapshot.character.id,
+      minutes: input.command.timeElapsed,
+      metadata: null,
+    });
+  }
+
+  if (input.command.type === "execute_wait") {
+    reasonCodes.push({
+      code: "PLAYER_WAIT",
+      entityType: "campaign",
+      targetId: input.snapshot.campaignId,
+      minutes: input.command.timeElapsed,
+      metadata: null,
+    });
+  }
+
+  if (input.command.type === "execute_investigate") {
+    reasonCodes.push({
+      code: "PLAYER_INVESTIGATION",
+      entityType: input.command.targetType === "route" ? "route" : input.command.targetType,
+      targetId: input.command.targetId,
+      metadata: null,
+    });
+  }
+
+  if (input.command.type === "execute_observe") {
+    reasonCodes.push({
+      code: "PLAYER_OBSERVATION",
+      entityType: input.command.targetType === "route" ? "route" : input.command.targetType,
+      targetId: input.command.targetId,
+      metadata: null,
+    });
+  }
+
+  for (const informationId of input.discoveredInformationIds) {
+    changeCodes.push({
+      code: "INFORMATION_DISCOVERED",
+      entityType: "information",
+      targetId: informationId,
+      metadata: { label: informationId },
+    });
+  }
+
+  if (input.command.narrationBounds?.wasCapped) {
+    reasonCodes.push({
+      code: "HORIZON_CAP",
+      entityType: "campaign",
+      targetId: input.snapshot.campaignId,
+      minutes: input.command.narrationBounds.committedAdvanceMinutes,
+      metadata: null,
+    });
+  }
+
+  changeCodes.push(...input.scheduleChangeCodes);
+  if (input.scheduleChangeCodes.length) {
+    reasonCodes.push({
+      code: "SCHEDULE_BUFFER_ROLLED",
+      entityType: "campaign",
+      targetId: input.snapshot.campaignId,
+      metadata: null,
+    });
+  }
+
+  if (!reasonCodes.length) {
+    reasonCodes.push({
+      code: "PLAYER_ACTION",
+      entityType: "campaign",
+      targetId: input.snapshot.campaignId,
+      metadata: null,
+    });
+  }
+
+  return {
+    nextState,
+    changeCodes,
+    reasonCodes,
+  };
+}
+
 async function commitResolvedTurn(input: {
   snapshot: CampaignSnapshot;
   sessionId: string;
   turnId: string;
+  requestId: string;
+  expectedStateVersion: number;
   playerAction: string;
   command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
   fetchedFacts: TurnFetchToolResult[];
 }) {
-  const { snapshot, sessionId, turnId, playerAction, command, fetchedFacts } = input;
-  const nextState = nextStateFromCommand(snapshot, command);
+  const { snapshot, sessionId, turnId, requestId, expectedStateVersion, playerAction, command, fetchedFacts } = input;
   const nextTurnCount = snapshot.sessionTurnCount + 1;
   const rollback = emptyRollback(snapshot);
+  let resultPayload: TurnResultPayload | null = null;
 
   await prisma.$transaction(async (tx) => {
-    const initialAffectedFactionIds = await applyPlayerActionEffects({
+    const actionEffects = await applyPlayerActionEffects({
       tx,
       snapshot,
       command,
@@ -1295,20 +1933,57 @@ async function commitResolvedTurn(input: {
       nextTurnCount,
     });
 
+    const causality = buildTurnCausality({
+      snapshot,
+      command,
+      discoveredInformationIds: actionEffects.discoveredInformationIds,
+      scheduleChangeCodes: [],
+    });
+    const nextState = causality.nextState;
+
     await runTemporalSimulation({
       tx,
       snapshot,
       nextState,
       rollback,
-      initialAffectedFactionIds,
+      initialAffectedFactionIds: actionEffects.affectedFactionIds,
     });
 
-    await tx.campaign.update({
-      where: { id: snapshot.campaignId },
+    const scheduleChangeCodes = await enqueueFutureScheduleBuffer({
+      tx,
+      snapshot,
+      nextState,
+      turnId,
+      rollback,
+    });
+
+    const finalCausality = buildTurnCausality({
+      snapshot,
+      command,
+      discoveredInformationIds: actionEffects.discoveredInformationIds,
+      scheduleChangeCodes,
+    });
+
+    const campaignUpdate = await tx.campaign.updateMany({
+      where: {
+        id: snapshot.campaignId,
+        stateVersion: expectedStateVersion,
+        turnLockRequestId: requestId,
+      },
       data: {
-        stateJson: nextState,
+        stateVersion: {
+          increment: 1,
+        },
+        stateJson: toCampaignRuntimeStateJson(nextState),
+        turnLockRequestId: null,
+        turnLockSessionId: null,
+        turnLockExpiresAt: null,
       },
     });
+
+    if (campaignUpdate.count === 0) {
+      throw new StateConflictError("Campaign state changed before the turn could commit.", expectedStateVersion);
+    }
 
     await tx.session.update({
       where: { id: sessionId },
@@ -1353,6 +2028,8 @@ async function commitResolvedTurn(input: {
         suggestedActions: command.suggestedActions,
         fetchedFacts,
         checkResult: command.checkResult ?? null,
+        whatChanged: renderWhatChanged(finalCausality.changeCodes),
+        why: renderWhy(finalCausality.reasonCodes),
       } as unknown as Prisma.JsonObject,
       rollback,
     });
@@ -1368,32 +2045,99 @@ async function commitResolvedTurn(input: {
       });
     }
 
-    if ("memorySummary" in command && command.memorySummary?.trim()) {
+    const memoryKind = determineMemoryKind(command);
+    const modelMemorySummary = "memorySummary" in command
+      ? normalizeMemorySummary(command.memorySummary)
+      : null;
+    const shouldRecordMemory = modelMemorySummary != null || isSalientMemory({
+      command,
+      memoryKind,
+      discoveredInformationIds: actionEffects.discoveredInformationIds,
+      scheduleChangeCodes,
+    });
+
+    if (shouldRecordMemory) {
+      const memorySummary = modelMemorySummary ?? buildSystemFallbackMemorySummary({
+        snapshot,
+        command,
+        memoryKind,
+        discoveredInformationIds: actionEffects.discoveredInformationIds,
+      });
+      const memoryEntityLinks = collectMemoryEntityLinks({
+        snapshot,
+        command,
+        changeCodes: finalCausality.changeCodes,
+        reasonCodes: finalCausality.reasonCodes,
+        affectedFactionIds: actionEffects.affectedFactionIds,
+        discoveredInformationIds: actionEffects.discoveredInformationIds,
+      });
+
+      if (!memorySummary) {
+        throw new Error("A salient memory was selected without a usable summary.");
+      }
+
       const memory = await tx.memoryEntry.create({
         data: {
           campaignId: snapshot.campaignId,
           sessionId,
+          turnId,
           type: "turn_memory",
-          summary: command.memorySummary.trim(),
+          memoryKind,
+          isLongArcCandidate:
+            memoryKind === "conflict"
+            || memoryKind === "promise"
+            || memoryKind === "relationship_shift",
+          summary: memorySummary,
+          summarySource: modelMemorySummary ? "model" : "system_fallback",
+          narrativeNote: command.narration,
         },
       });
       rollback.createdMemoryIds.push(memory.id);
+
+      for (const [index, entityLink] of memoryEntityLinks.entries()) {
+        const link = await tx.memoryEntityLink.create({
+          data: {
+            memoryId: memory.id,
+            campaignId: snapshot.campaignId,
+            entityType: entityLink.entityType,
+            entityId: entityLink.entityId,
+            isPrimary: index === 0,
+          },
+        });
+        rollback.createdMemoryLinkIds.push(link.id);
+      }
     }
+
+    resultPayload = {
+      stateVersionAfter: expectedStateVersion + 1,
+      changeCodes: finalCausality.changeCodes,
+      reasonCodes: finalCausality.reasonCodes,
+      whatChanged: renderWhatChanged(finalCausality.changeCodes),
+      why: renderWhy(finalCausality.reasonCodes),
+      warnings: command.warnings,
+      narrationBounds: command.narrationBounds ?? null,
+      checkResult: command.checkResult ?? null,
+      rollback,
+      clarification: null,
+      error: null,
+    };
 
     await tx.turn.update({
       where: { id: turnId },
       data: {
         status: "resolved",
+        stateVersionAfter: expectedStateVersion + 1,
         toolCallJson: toPrismaJsonValue(command),
-        resultJson: toPrismaJsonValue({
-          state: nextState,
-          warnings: command.warnings,
-          checkResult: command.checkResult ?? null,
-          rollback,
-        }),
+        resultJson: toPrismaJsonValue(toTurnResultPayloadJson(resultPayload)),
       },
     });
   });
+
+  if (!resultPayload) {
+    throw new Error("Resolved turn commit did not produce a result payload.");
+  }
+
+  return resultPayload;
 }
 
 async function executeFetchTool(
@@ -1407,17 +2151,22 @@ async function executeFetchTool(
     }
 
     if (result.socialLayer === "promoted_local" && !result.isNarrativelyHydrated) {
-      const lockExpiry = new Date(Date.now() - 2 * 60 * 1000);
+      const claimRequestId = `hydrate_${randomUUID()}`;
+      const claimExpiry = new Date(Date.now() + HYDRATION_CLAIM_TTL_MS);
       const claimAttempt = await prisma.nPC.updateMany({
         where: {
           id: result.id,
           campaignId: snapshot.campaignId,
           socialLayer: "promoted_local",
           isNarrativelyHydrated: false,
-          OR: [{ hydrationClaimedAt: null }, { hydrationClaimedAt: { lt: lockExpiry } }],
+          OR: [
+            { hydrationClaimRequestId: null },
+            { hydrationClaimExpiresAt: { lt: new Date() } },
+          ],
         },
         data: {
-          hydrationClaimedAt: new Date(),
+          hydrationClaimRequestId: claimRequestId,
+          hydrationClaimExpiresAt: claimExpiry,
         },
       });
 
@@ -1426,6 +2175,7 @@ async function executeFetchTool(
           await hydratePromotedNpcRecord({
             campaignId: snapshot.campaignId,
             npcId: result.id,
+            claimRequestId,
           });
         } catch (error) {
           await prisma.nPC.updateMany({
@@ -1433,9 +2183,11 @@ async function executeFetchTool(
               id: result.id,
               campaignId: snapshot.campaignId,
               isNarrativelyHydrated: false,
+              hydrationClaimRequestId: claimRequestId,
             },
             data: {
-              hydrationClaimedAt: null,
+              hydrationClaimRequestId: null,
+              hydrationClaimExpiresAt: null,
             },
           });
           throw error;
@@ -1507,83 +2259,567 @@ export const engineTestUtils = {
   toPromotedTemporaryActorDescriptor,
   toPromotedTemporaryActorName,
   toPromotedTemporaryActorRole,
+  requestHashForSubmission,
 };
 
-export async function triageTurn(input: {
+async function buildStateConflictPayload(input: {
   campaignId: string;
   sessionId: string;
-  playerAction: string;
-  stream?: TurnStream;
-}) {
-  const snapshot = await getCampaignSnapshot(input.campaignId);
-
-  if (!snapshot) {
+  expectedStateVersion: number;
+}): Promise<StateConflictResponse> {
+  const latestSnapshot = await getTurnSnapshot(input.campaignId, input.sessionId);
+  if (!latestSnapshot) {
     throw new Error("Campaign not found.");
   }
 
-  const promptContext = await getPromptContext(snapshot);
-  const turn = await prisma.turn.create({
+  return {
+    error: "state_conflict",
+    latestSnapshot: toPlayerCampaignSnapshot(latestSnapshot),
+    latestStateVersion: latestSnapshot.stateVersion,
+    missedTurnDigests: await getMissedTurnDigests(input.campaignId, input.expectedStateVersion),
+  };
+}
+
+async function markTurnFailure(input: {
+  turnId: string;
+  status: string;
+  infrastructureFailureCode?: InfrastructureFailureCode | null;
+  message: string;
+}) {
+  await prisma.turn.update({
+    where: { id: input.turnId },
     data: {
-      campaignId: snapshot.campaignId,
-      sessionId: input.sessionId,
-      playerAction: input.playerAction,
-      status: "processing",
+      status: input.status,
+      infrastructureFailureCode: input.infrastructureFailureCode ?? null,
+      resultJson: toPrismaJsonValue(toTurnResultPayloadJson({
+        stateVersionAfter: null,
+        changeCodes: [],
+        reasonCodes: [],
+        whatChanged: [],
+        why: [],
+        warnings: [],
+        narrationBounds: null,
+        checkResult: null,
+        rollback: null,
+        clarification: null,
+        error: {
+          message: input.message,
+          code: input.infrastructureFailureCode ?? input.status,
+        },
+      })),
+    },
+  });
+}
+
+async function abandonTurnRequest(input: {
+  campaignId: string;
+  requestId: string;
+  turnId: string;
+  status: "timed_out" | "abandoned";
+  infrastructureFailureCode: InfrastructureFailureCode;
+  message: string;
+}) {
+  await markTurnFailure({
+    turnId: input.turnId,
+    status: input.status,
+    infrastructureFailureCode: input.infrastructureFailureCode,
+    message: input.message,
+  });
+  await cleanupTurnLock({
+    campaignId: input.campaignId,
+    requestId: input.requestId,
+  });
+}
+
+async function abandonCancelledTurnIfOwned(input: {
+  campaignId: string;
+  sessionId: string;
+  requestId: string;
+  turnId: string;
+  message: string;
+}) {
+  const campaign = await prisma.campaign.findUnique({
+    where: { id: input.campaignId },
+    select: {
+      turnLockRequestId: true,
+      turnLockSessionId: true,
     },
   });
 
-  const resolution: TurnResolution = await dmClient.runTurn({
-    promptContext,
-    character: snapshot.character,
-    playerAction: input.playerAction,
-    executeFetchTool: (call) => executeFetchTool(snapshot, call),
+  if (
+    !campaign
+    || campaign.turnLockRequestId !== input.requestId
+    || campaign.turnLockSessionId !== input.sessionId
+  ) {
+    return;
+  }
+
+  const abandoned = await prisma.turn.updateMany({
+    where: {
+      id: input.turnId,
+      campaignId: input.campaignId,
+      sessionId: input.sessionId,
+      requestId: input.requestId,
+      status: "processing",
+    },
+    data: {
+      status: "abandoned",
+      infrastructureFailureCode: "TURN_CANCELLED",
+      resultJson: toPrismaJsonValue(toTurnResultPayloadJson({
+        stateVersionAfter: null,
+        changeCodes: [],
+        reasonCodes: [],
+        whatChanged: [],
+        why: [],
+        warnings: [],
+        narrationBounds: null,
+        checkResult: null,
+        rollback: null,
+        clarification: null,
+        error: {
+          message: input.message,
+          code: "TURN_CANCELLED",
+        },
+      })),
+    },
   });
 
-  const validated = validateTurnCommand({
-    snapshot,
-    command: resolution.command,
-    fetchedFacts: resolution.fetchedFacts,
-  });
-
-  if (validated.type === "request_clarification") {
-    await prisma.turn.update({
-      where: { id: turn.id },
-      data: {
-        status: "clarification_requested",
-        toolCallJson: validated as unknown as Prisma.JsonObject,
-      },
+  if (abandoned.count === 1) {
+    await cleanupTurnLock({
+      campaignId: input.campaignId,
+      requestId: input.requestId,
     });
+  }
+}
 
+async function replayExistingTurn(input: {
+  turn: Prisma.TurnGetPayload<Record<string, never>>;
+  campaignId: string;
+}) {
+  const result = parseTurnResultPayloadJson(input.turn.resultJson);
+
+  if (input.turn.status === "clarification_requested" && result?.clarification) {
     return {
       type: "clarification" as const,
-      turnId: turn.id,
-      question: validated.question,
-      options: validated.options,
-      warnings: [],
+      turnId: input.turn.id,
+      question: result.clarification.question,
+      options: result.clarification.options,
+      warnings: result.warnings,
     };
   }
 
-  input.stream?.narration?.(validated.narration);
-  if (validated.checkResult) {
-    input.stream?.checkResult?.(validated.checkResult);
+  if (input.turn.status === "conflicted") {
+    return {
+      type: "state_conflict" as const,
+      payload: await buildStateConflictPayload({
+        campaignId: input.campaignId,
+        sessionId: input.turn.sessionId,
+        expectedStateVersion: input.turn.stateVersionAfter ?? 0,
+      }),
+    };
   }
 
-  await commitResolvedTurn({
-    snapshot,
-    sessionId: input.sessionId,
-    turnId: turn.id,
-    playerAction: input.playerAction,
-    command: validated,
-    fetchedFacts: resolution.fetchedFacts,
-  });
+  if (input.turn.status === "resolved") {
+    return {
+      type: "resolved" as const,
+      turnId: input.turn.id,
+      narration: "",
+      suggestedActions: [],
+      warnings: result?.warnings ?? [],
+      checkResult: result?.checkResult ?? undefined,
+      result: result ?? {
+        stateVersionAfter: input.turn.stateVersionAfter ?? null,
+        changeCodes: [],
+        reasonCodes: [],
+        whatChanged: [],
+        why: [],
+        warnings: [],
+        narrationBounds: null,
+        checkResult: null,
+        rollback: null,
+        clarification: null,
+        error: null,
+      },
+    };
+  }
+
+  return null;
+}
+
+function retryRequiredResultForTurn(
+  turn: Prisma.TurnGetPayload<Record<string, never>>,
+): RetryRequiredResponse {
+  const result = parseTurnResultPayloadJson(turn.resultJson) ?? {
+    stateVersionAfter: turn.stateVersionAfter ?? null,
+    changeCodes: [],
+    reasonCodes: [],
+    whatChanged: [],
+    why: [],
+    warnings: [],
+    narrationBounds: null,
+    checkResult: null,
+    rollback: null,
+    clarification: null,
+    error: {
+      message: "This request previously ended in a retryable terminal state.",
+      code: turn.status,
+    },
+  };
 
   return {
-    type: "resolved" as const,
+    error: "retry_with_new_request_id",
+    retryWithNewRequestId: true,
     turnId: turn.id,
-    narration: validated.narration,
-    suggestedActions: dedupeStrings(validated.suggestedActions),
-    warnings: validated.warnings,
-    checkResult: validated.checkResult,
+    previousStatus: turn.status,
+    result,
   };
+}
+
+export async function triageTurn(input: TurnSubmissionRequest & {
+  stream?: TurnStream;
+}) {
+  const playerAction = input.action.trim();
+  const requestHash = requestHashForSubmission({
+    campaignId: input.campaignId,
+    sessionId: input.sessionId,
+    expectedStateVersion: input.expectedStateVersion,
+    playerAction,
+  });
+  const existingTurn = await prisma.turn.findUnique({
+    where: {
+      campaignId_requestId: {
+        campaignId: input.campaignId,
+        requestId: input.requestId,
+      },
+    },
+  });
+
+  if (existingTurn) {
+    if (existingTurn.requestHash && existingTurn.requestHash !== requestHash) {
+      throw new Error("requestId was reused with a different action payload.");
+    }
+
+    if (["resolved", "clarification_requested", "conflicted"].includes(existingTurn.status)) {
+      const replay = await replayExistingTurn({
+        turn: existingTurn,
+        campaignId: input.campaignId,
+      });
+      if (replay) {
+        return replay;
+      }
+    }
+
+    if (
+      [
+        "timed_out",
+        "failed_model",
+        "failed_validation",
+        "failed_infrastructure",
+        "abandoned",
+      ].includes(existingTurn.status)
+    ) {
+      return {
+        type: "retry_required" as const,
+        payload: retryRequiredResultForTurn(existingTurn),
+      };
+    }
+  }
+
+  const campaign = await prisma.campaign.findUnique({
+    where: { id: input.campaignId },
+    select: {
+      id: true,
+      stateVersion: true,
+    },
+  });
+
+  if (!campaign) {
+    throw new Error("Campaign not found.");
+  }
+
+  if (input.expectedStateVersion < campaign.stateVersion) {
+    return {
+      type: "state_conflict" as const,
+      payload: await buildStateConflictPayload({
+        campaignId: input.campaignId,
+        sessionId: input.sessionId,
+        expectedStateVersion: input.expectedStateVersion,
+      }),
+    };
+  }
+
+  if (input.expectedStateVersion > campaign.stateVersion) {
+    throw new InvalidExpectedStateVersionError(
+      `expectedStateVersion ${input.expectedStateVersion} is ahead of the campaign state ${campaign.stateVersion}.`,
+      campaign.stateVersion,
+    );
+  }
+
+  const lockClaim = await prisma.campaign.updateMany({
+    where: {
+      id: input.campaignId,
+      stateVersion: input.expectedStateVersion,
+      OR: [
+        { turnLockRequestId: null },
+        { turnLockRequestId: input.requestId },
+        { turnLockExpiresAt: { lt: new Date() } },
+      ],
+    },
+    data: {
+      turnLockRequestId: input.requestId,
+      turnLockSessionId: input.sessionId,
+      turnLockExpiresAt: new Date(Date.now() + TURN_LOCK_TTL_MS),
+    },
+  });
+
+  if (lockClaim.count === 0) {
+    const latest = await prisma.campaign.findUnique({
+      where: { id: input.campaignId },
+      select: { stateVersion: true },
+    });
+    if (latest && latest.stateVersion > input.expectedStateVersion) {
+      return {
+        type: "state_conflict" as const,
+        payload: await buildStateConflictPayload({
+          campaignId: input.campaignId,
+          sessionId: input.sessionId,
+          expectedStateVersion: input.expectedStateVersion,
+        }),
+      };
+    }
+    throw new TurnLockedError("Another turn already owns the campaign lock.");
+  }
+
+  const turn = existingTurn
+    ? await prisma.turn.update({
+        where: { id: existingTurn.id },
+        data: {
+          status: "processing",
+          playerAction,
+          requestHash,
+          infrastructureFailureCode: null,
+          resultJson: Prisma.JsonNull,
+          toolCallJson: Prisma.JsonNull,
+          stateVersionAfter: null,
+        },
+      })
+    : await prisma.turn.create({
+        data: {
+          campaignId: input.campaignId,
+          sessionId: input.sessionId,
+          requestId: input.requestId,
+          requestHash,
+          playerAction,
+          status: "processing",
+        },
+      });
+
+  const abortController = new AbortController();
+  const turnKey = activeTurnKey(input.campaignId, input.requestId);
+  activeTurnControllers.set(turnKey, abortController);
+  const timeout = setTimeout(() => {
+    abortController.abort("deadline_exceeded");
+  }, TURN_INTERNAL_DEADLINE_MS);
+  let commitStarted = false;
+
+  try {
+    const snapshot = await getTurnSnapshot(input.campaignId, input.sessionId);
+    if (!snapshot) {
+      throw new Error("Campaign session not found.");
+    }
+
+    const promptContext = await getPromptContext(snapshot);
+    const narrationOverride = buildNarrationOverride({
+      playerAction,
+      snapshot,
+    });
+    const resolution: TurnResolution = await dmClient.runTurn({
+      promptContext,
+      character: snapshot.character,
+      playerAction: narrationOverride.playerActionForModel,
+      executeFetchTool: (call) => executeFetchTool(snapshot, call),
+      signal: abortController.signal,
+    });
+
+    if (abortController.signal.aborted && !commitStarted) {
+      throw new TurnAbandonedError("Turn resolution was aborted before commit.");
+    }
+
+    const validated = validateTurnCommand({
+      snapshot,
+      command: resolution.command,
+      fetchedFacts: resolution.fetchedFacts,
+    });
+
+    if (validated.type === "request_clarification") {
+      await prisma.turn.update({
+        where: { id: turn.id },
+        data: {
+          status: "clarification_requested",
+          toolCallJson: toPrismaJsonValue(validated),
+          resultJson: toPrismaJsonValue(toTurnResultPayloadJson({
+            stateVersionAfter: snapshot.stateVersion,
+            changeCodes: [],
+            reasonCodes: [],
+            whatChanged: [],
+            why: [],
+            warnings: [],
+            narrationBounds: null,
+            checkResult: null,
+            rollback: null,
+            clarification: {
+              question: validated.question,
+              options: validated.options,
+            },
+            error: null,
+          })),
+        },
+      });
+      await cleanupTurnLock({
+        campaignId: input.campaignId,
+        requestId: input.requestId,
+      });
+
+      return {
+        type: "clarification" as const,
+        turnId: turn.id,
+        question: validated.question,
+        options: validated.options,
+        warnings: [],
+      };
+    }
+
+    const committedCommand = applyCommittedTimeWindow({
+      snapshot,
+      command: validated,
+      overrideText: narrationOverride.overrideText,
+      requestedAdvanceMinutes: narrationOverride.requestedAdvanceMinutes,
+    });
+
+    input.stream?.narration?.(committedCommand.narration);
+    if (committedCommand.checkResult) {
+      input.stream?.checkResult?.(committedCommand.checkResult);
+    }
+
+    commitStarted = true;
+    activeCommitTurnKeys.add(turnKey);
+    const resultPayload = await commitResolvedTurn({
+      snapshot,
+      sessionId: input.sessionId,
+      turnId: turn.id,
+      requestId: input.requestId,
+      expectedStateVersion: input.expectedStateVersion,
+      playerAction,
+      command: committedCommand,
+      fetchedFacts: resolution.fetchedFacts,
+    });
+    commitStarted = false;
+    activeCommitTurnKeys.delete(turnKey);
+    void wakeScheduleGenerationJobs().catch((error) => {
+      console.error("[schedule-jobs] Wake failed after commit.", error);
+    });
+
+    return {
+      type: "resolved" as const,
+      turnId: turn.id,
+      narration: committedCommand.narration,
+      suggestedActions: dedupeStrings(committedCommand.suggestedActions),
+      warnings: committedCommand.warnings,
+      checkResult: committedCommand.checkResult,
+      result: resultPayload,
+    };
+  } catch (error) {
+    if (error instanceof StateConflictError) {
+      await prisma.turn.update({
+        where: { id: turn.id },
+        data: {
+          status: "conflicted",
+          stateVersionAfter: input.expectedStateVersion,
+          resultJson: toPrismaJsonValue(toTurnResultPayloadJson({
+            stateVersionAfter: null,
+            changeCodes: [],
+            reasonCodes: [],
+            whatChanged: [],
+            why: [],
+            warnings: [],
+            narrationBounds: null,
+            checkResult: null,
+            rollback: null,
+            clarification: null,
+            error: {
+              message: error.message,
+              code: "state_conflict",
+            },
+          })),
+        },
+      });
+      await cleanupTurnLock({
+        campaignId: input.campaignId,
+        requestId: input.requestId,
+      });
+
+      return {
+        type: "state_conflict" as const,
+        payload: await buildStateConflictPayload({
+          campaignId: input.campaignId,
+          sessionId: input.sessionId,
+          expectedStateVersion: input.expectedStateVersion,
+        }),
+      };
+    }
+
+    if (abortController.signal.aborted && !commitStarted) {
+      if (abortController.signal.reason === "deadline_exceeded") {
+        await abandonTurnRequest({
+          campaignId: input.campaignId,
+          requestId: input.requestId,
+          turnId: turn.id,
+          status: "timed_out",
+          infrastructureFailureCode: "TURN_DEADLINE_EXCEEDED",
+          message: "Turn resolution exceeded the internal deadline before commit.",
+        });
+      } else {
+        await abandonCancelledTurnIfOwned({
+          campaignId: input.campaignId,
+          sessionId: input.sessionId,
+          requestId: input.requestId,
+          turnId: turn.id,
+          message: "The turn request was cancelled before commit.",
+        });
+      }
+      throw error;
+    }
+
+    const infrastructureFailureCode: InfrastructureFailureCode =
+      error instanceof TurnLockedError
+        ? "TURN_LOCK_CONFLICT"
+        : error instanceof Error && /validation/i.test(error.message)
+          ? "VALIDATION_ERROR"
+          : error instanceof Error && /tool call|turn generation|completion/i.test(error.message)
+            ? "MODEL_ERROR"
+            : "INFRASTRUCTURE_ERROR";
+
+    await markTurnFailure({
+      turnId: turn.id,
+      status:
+        infrastructureFailureCode === "MODEL_ERROR"
+          ? "failed_model"
+          : infrastructureFailureCode === "VALIDATION_ERROR"
+            ? "failed_validation"
+            : "failed_infrastructure",
+      infrastructureFailureCode,
+      message: error instanceof Error ? error.message : "Turn processing failed.",
+    });
+    await cleanupTurnLock({
+      campaignId: input.campaignId,
+      requestId: input.requestId,
+    });
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    activeCommitTurnKeys.delete(turnKey);
+    activeTurnControllers.delete(turnKey);
+  }
 }
 
 export async function summarizeSession(sessionId: string) {
@@ -1635,8 +2871,116 @@ export async function maybeGeneratePreviouslyOn() {
   return null;
 }
 
+export async function cancelTurnRequest(input: {
+  campaignId: string;
+  sessionId: string;
+  requestId: string;
+}) {
+  const turn = await prisma.turn.findUnique({
+    where: {
+      campaignId_requestId: {
+        campaignId: input.campaignId,
+        requestId: input.requestId,
+      },
+    },
+  });
+
+  if (!turn) {
+    return { ok: true };
+  }
+
+  if (turn.sessionId !== input.sessionId) {
+    return { ok: true };
+  }
+
+  if (
+    [
+      "resolved",
+      "clarification_requested",
+      "conflicted",
+      "timed_out",
+      "failed_model",
+      "failed_validation",
+      "failed_infrastructure",
+      "abandoned",
+    ].includes(turn.status)
+  ) {
+    return { ok: true };
+  }
+
+  if (turn.status !== "processing") {
+    return { ok: true };
+  }
+
+  if (activeCommitTurnKeys.has(activeTurnKey(input.campaignId, input.requestId))) {
+    return { ok: true };
+  }
+
+  const controller = activeTurnControllers.get(activeTurnKey(input.campaignId, input.requestId));
+  if (!controller) {
+    return { ok: true };
+  }
+
+  controller.abort("cancelled");
+
+  const campaign = await prisma.campaign.findUnique({
+    where: { id: input.campaignId },
+    select: {
+      turnLockRequestId: true,
+      turnLockSessionId: true,
+    },
+  });
+
+  if (
+    !campaign
+    || campaign.turnLockRequestId !== input.requestId
+    || campaign.turnLockSessionId !== input.sessionId
+  ) {
+    return { ok: true };
+  }
+
+  const abandoned = await prisma.turn.updateMany({
+    where: {
+      id: turn.id,
+      campaignId: input.campaignId,
+      sessionId: input.sessionId,
+      requestId: input.requestId,
+      status: "processing",
+    },
+    data: {
+      status: "abandoned",
+      infrastructureFailureCode: "TURN_CANCELLED",
+      resultJson: toPrismaJsonValue(toTurnResultPayloadJson({
+        stateVersionAfter: null,
+        changeCodes: [],
+        reasonCodes: [],
+        whatChanged: [],
+        why: [],
+        warnings: [],
+        narrationBounds: null,
+        checkResult: null,
+        rollback: null,
+        clarification: null,
+        error: {
+          message: "The turn request was cancelled.",
+          code: "TURN_CANCELLED",
+        },
+      })),
+    },
+  });
+
+  if (abandoned.count === 1) {
+    await cleanupTurnLock({
+      campaignId: input.campaignId,
+      requestId: input.requestId,
+    });
+  }
+
+  return { ok: true };
+}
+
 export async function cancelPendingTurn() {
-  throw new Error("Pending-turn cancellation is not supported in the spatial turn loop.");
+  throw new Error("Use cancelTurnRequest with campaignId, sessionId, and requestId.");
 }
 
 export async function resolvePendingCheck() {
@@ -1680,14 +3024,7 @@ export async function retryLastTurn(turnId: string) {
     throw new Error("Only the latest resolved turn can be undone.");
   }
 
-  const resultJson =
-    turn.resultJson && typeof turn.resultJson === "object" && !Array.isArray(turn.resultJson)
-      ? (turn.resultJson as Record<string, unknown>)
-      : null;
-  const rollback =
-    resultJson && resultJson.rollback && typeof resultJson.rollback === "object"
-      ? (resultJson.rollback as TurnRollbackData)
-      : null;
+  const rollback = parseTurnResultPayloadJson(turn.resultJson)?.rollback ?? null;
 
   if (!rollback) {
     throw new Error("Turn rollback data is missing.");
@@ -1709,6 +3046,26 @@ export async function retryLastTurn(turnId: string) {
         where: {
           id: {
             in: rollback.createdMemoryIds,
+          },
+        },
+      });
+    }
+
+    if (rollback.createdMemoryLinkIds.length) {
+      await tx.memoryEntityLink.deleteMany({
+        where: {
+          id: {
+            in: rollback.createdMemoryLinkIds,
+          },
+        },
+      });
+    }
+
+    if (rollback.createdScheduleJobIds.length) {
+      await tx.scheduleGenerationJob.deleteMany({
+        where: {
+          id: {
+            in: rollback.createdScheduleJobIds,
           },
         },
       });
@@ -1738,7 +3095,7 @@ export async function retryLastTurn(turnId: string) {
     await tx.campaign.update({
       where: { id: turn.campaignId },
       data: {
-        stateJson: rollback.previousState as unknown as Prisma.JsonObject,
+        stateJson: toCampaignRuntimeStateJson(rollback.previousState),
       },
     });
 

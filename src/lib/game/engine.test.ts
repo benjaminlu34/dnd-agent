@@ -27,3 +27,32 @@ test("promoted temporary actor names preserve the seed identity instead of colla
     "Dock Repairer",
   );
 });
+
+test("request hash includes session and version so request identity matches the full submission", () => {
+  const baseHash = engineTestUtils.requestHashForSubmission({
+    campaignId: "camp_1",
+    sessionId: "sess_1",
+    expectedStateVersion: 7,
+    playerAction: "Wait here for an hour",
+  });
+
+  assert.notEqual(
+    baseHash,
+    engineTestUtils.requestHashForSubmission({
+      campaignId: "camp_1",
+      sessionId: "sess_2",
+      expectedStateVersion: 7,
+      playerAction: "Wait here for an hour",
+    }),
+  );
+
+  assert.notEqual(
+    baseHash,
+    engineTestUtils.requestHashForSubmission({
+      campaignId: "camp_1",
+      sessionId: "sess_1",
+      expectedStateVersion: 8,
+      playerAction: "Wait here for an hour",
+    }),
+  );
+});

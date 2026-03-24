@@ -613,6 +613,170 @@ export async function applySimulationPayload(input: {
   }
 }
 
+async function simulationPayloadInvalidationReason(input: {
+  tx: Prisma.TransactionClient;
+  campaignId: string;
+  payload: SimulationPayload;
+}): Promise<string | null> {
+  const { tx, campaignId, payload } = input;
+
+  switch (payload.type) {
+    case "change_location_state":
+    case "change_faction_control":
+    case "transfer_location_control": {
+      const location = await tx.locationNode.findFirst({
+        where: { id: payload.locationId, campaignId },
+        select: { id: true },
+      });
+      return location ? null : "Referenced location is no longer valid.";
+    }
+    case "change_npc_state":
+    case "change_npc_location": {
+      const npc = await tx.nPC.findFirst({
+        where: { id: payload.npcId, campaignId },
+        select: { id: true, state: true },
+      });
+      if (!npc) {
+        return "Referenced NPC is no longer valid.";
+      }
+      if (npc.state === "dead" && payload.type === "change_npc_location") {
+        return "Referenced NPC is dead.";
+      }
+      return null;
+    }
+    case "change_faction_resources": {
+      const faction = await tx.faction.findFirst({
+        where: { id: payload.factionId, campaignId },
+        select: { id: true },
+      });
+      return faction ? null : "Referenced faction is no longer valid.";
+    }
+    case "spawn_world_event": {
+      if (payload.event.locationId) {
+        const location = await tx.locationNode.findFirst({
+          where: { id: payload.event.locationId, campaignId },
+          select: { id: true },
+        });
+        if (!location) {
+          return "Referenced event location is no longer valid.";
+        }
+      }
+
+      return simulationPayloadInvalidationReason({
+        tx,
+        campaignId,
+        payload: payload.event.payload,
+      });
+    }
+    case "spawn_information": {
+      if (payload.information.locationId) {
+        const location = await tx.locationNode.findFirst({
+          where: { id: payload.information.locationId, campaignId },
+          select: { id: true },
+        });
+        if (!location) {
+          return "Referenced information location is no longer valid.";
+        }
+      }
+      if (payload.information.factionId) {
+        const faction = await tx.faction.findFirst({
+          where: { id: payload.information.factionId, campaignId },
+          select: { id: true },
+        });
+        if (!faction) {
+          return "Referenced information faction is no longer valid.";
+        }
+      }
+      if (payload.information.sourceNpcId) {
+        const npc = await tx.nPC.findFirst({
+          where: { id: payload.information.sourceNpcId, campaignId },
+          select: { id: true, state: true },
+        });
+        if (!npc) {
+          return "Referenced source NPC is no longer valid.";
+        }
+        if (npc.state === "dead") {
+          return "Referenced source NPC is dead.";
+        }
+      }
+      return null;
+    }
+    case "cancel_faction_move": {
+      const move = await tx.factionMove.findFirst({
+        where: { id: payload.factionMoveId, campaignId },
+        select: { id: true },
+      });
+      return move ? null : "Referenced faction move is no longer valid.";
+    }
+    case "change_route_status": {
+      const edge = await tx.locationEdge.findFirst({
+        where: { id: payload.edgeId, campaignId },
+        select: { id: true },
+      });
+      return edge ? null : "Referenced route is no longer valid.";
+    }
+    case "change_market_price": {
+      const price = await tx.marketPrice.findFirst({
+        where: { id: payload.marketPriceId, campaignId },
+        select: { id: true },
+      });
+      return price ? null : "Referenced market price is no longer valid.";
+    }
+  }
+}
+
+async function cancelWorldEvent(input: {
+  tx: Prisma.TransactionClient;
+  eventId: string;
+  isCancelled: boolean;
+  cancellationReason: string | null;
+  inverses: SimulationInverse[];
+  reason: string;
+}) {
+  recordInverse(input.inverses, "worldEvent", input.eventId, "isCancelled", input.isCancelled);
+  recordInverse(
+    input.inverses,
+    "worldEvent",
+    input.eventId,
+    "cancellationReason",
+    input.cancellationReason,
+  );
+  await input.tx.worldEvent.update({
+    where: { id: input.eventId },
+    data: {
+      isCancelled: true,
+      cancellationReason: input.reason,
+    },
+  });
+}
+
+async function cancelFactionMove(input: {
+  tx: Prisma.TransactionClient;
+  moveId: string;
+  isCancelled: boolean;
+  cancellationReason: string | null;
+  inverses: SimulationInverse[];
+  cancelledMoveIds?: string[];
+  reason: string;
+}) {
+  recordInverse(input.inverses, "factionMove", input.moveId, "isCancelled", input.isCancelled);
+  recordInverse(
+    input.inverses,
+    "factionMove",
+    input.moveId,
+    "cancellationReason",
+    input.cancellationReason,
+  );
+  await input.tx.factionMove.update({
+    where: { id: input.moveId },
+    data: {
+      isCancelled: true,
+      cancellationReason: input.reason,
+    },
+  });
+  input.cancelledMoveIds?.push(input.moveId);
+}
+
 export async function runSimulationTick(input: {
   tx: Prisma.TransactionClient;
   campaignId: string;
@@ -719,11 +883,36 @@ export async function runSimulationTick(input: {
       continue;
     }
 
+    if (event.locationId) {
+      const location = await tx.locationNode.findFirst({
+        where: { id: event.locationId, campaignId },
+        select: { id: true },
+      });
+      if (!location) {
+        await cancelWorldEvent({
+          tx,
+          eventId: event.id,
+          isCancelled: event.isCancelled,
+          cancellationReason: event.cancellationReason,
+          inverses,
+          reason: "Referenced location is no longer valid.",
+        });
+        continue;
+      }
+    }
+
     const parsedCondition = event.triggerCondition
       ? parseNpcRoutineCondition(event.triggerCondition)
       : null;
     if (parsedCondition && !parsedCondition.success) {
-      console.warn(`[sim.tick] Unknown event trigger condition for ${event.id}; treated as false.`);
+      await cancelWorldEvent({
+        tx,
+        eventId: event.id,
+        isCancelled: event.isCancelled,
+        cancellationReason: event.cancellationReason,
+        inverses,
+        reason: "Trigger condition is no longer valid.",
+      });
       continue;
     }
 
@@ -735,12 +924,45 @@ export async function runSimulationTick(input: {
     });
 
     if (!isSatisfied) {
+      await cancelWorldEvent({
+        tx,
+        eventId: event.id,
+        isCancelled: event.isCancelled,
+        cancellationReason: event.cancellationReason,
+        inverses,
+        reason: "Trigger condition no longer holds at execution time.",
+      });
       continue;
     }
 
     const parsedPayload = parseSimulationPayload(event.payload);
     if (!parsedPayload.success) {
-      throw new Error(`Invalid world event payload for ${event.id}: ${parsedPayload.error.message}`);
+      await cancelWorldEvent({
+        tx,
+        eventId: event.id,
+        isCancelled: event.isCancelled,
+        cancellationReason: event.cancellationReason,
+        inverses,
+        reason: `Event payload became invalid: ${parsedPayload.error.message}`,
+      });
+      continue;
+    }
+
+    const eventInvalidationReason = await simulationPayloadInvalidationReason({
+      tx,
+      campaignId,
+      payload: parsedPayload.data,
+    });
+    if (eventInvalidationReason) {
+      await cancelWorldEvent({
+        tx,
+        eventId: event.id,
+        isCancelled: event.isCancelled,
+        cancellationReason: event.cancellationReason,
+        inverses,
+        reason: eventInvalidationReason,
+      });
+      continue;
     }
 
     await applySimulationPayload({
@@ -787,7 +1009,34 @@ export async function runSimulationTick(input: {
 
     const parsedPayload = parseSimulationPayload(move.payload);
     if (!parsedPayload.success) {
-      throw new Error(`Invalid faction move payload for ${move.id}: ${parsedPayload.error.message}`);
+      await cancelFactionMove({
+        tx,
+        moveId: move.id,
+        isCancelled: move.isCancelled,
+        cancellationReason: move.cancellationReason,
+        inverses,
+        cancelledMoveIds,
+        reason: `Faction move payload became invalid: ${parsedPayload.error.message}`,
+      });
+      continue;
+    }
+
+    const moveInvalidationReason = await simulationPayloadInvalidationReason({
+      tx,
+      campaignId,
+      payload: parsedPayload.data,
+    });
+    if (moveInvalidationReason) {
+      await cancelFactionMove({
+        tx,
+        moveId: move.id,
+        isCancelled: move.isCancelled,
+        cancellationReason: move.cancellationReason,
+        inverses,
+        cancelledMoveIds,
+        reason: moveInvalidationReason,
+      });
+      continue;
     }
 
     await applySimulationPayload({
@@ -821,22 +1070,15 @@ export async function runSimulationTick(input: {
     });
 
     for (const move of pendingMoves) {
-      recordInverse(inverses, "factionMove", move.id, "isCancelled", move.isCancelled);
-      recordInverse(
+      await cancelFactionMove({
+        tx,
+        moveId: move.id,
+        isCancelled: move.isCancelled,
+        cancellationReason: move.cancellationReason,
         inverses,
-        "factionMove",
-        move.id,
-        "cancellationReason",
-        move.cancellationReason,
-      );
-      await tx.factionMove.update({
-        where: { id: move.id },
-        data: {
-          isCancelled: true,
-          cancellationReason: "Superseded by fresh faction reaction.",
-        },
+        cancelledMoveIds,
+        reason: "Superseded by fresh faction reaction.",
       });
-      cancelledMoveIds.push(move.id);
     }
 
     const reactionMoveId = `fmove_${randomUUID()}`;
@@ -957,6 +1199,9 @@ export async function applySimulationInverse(
         return;
       case "characterCommodityStack":
         await tx.characterCommodityStack.delete({ where: { id: inverse.id } });
+        return;
+      case "scheduleGenerationJob":
+        await tx.scheduleGenerationJob.delete({ where: { id: inverse.id } });
         return;
       default:
         return;

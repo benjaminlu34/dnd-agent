@@ -130,6 +130,7 @@ type TurnInput = {
   character: CampaignCharacter;
   playerAction: string;
   executeFetchTool: (call: TurnFetchToolCall) => Promise<TurnFetchToolResult>;
+  signal?: AbortSignal;
 };
 
 type DailyWorldScheduleInput = {
@@ -2100,7 +2101,6 @@ const actionTools = [
         narration: { type: "string" },
         suggestedActions: { type: "array", items: { type: "string" } },
         timeMode: { type: "string", enum: ["travel"] },
-        timeElapsed: { type: "number" },
         citedEntities: citedEntitiesInputSchema,
       },
       required: [
@@ -2109,7 +2109,6 @@ const actionTools = [
         "narration",
         "suggestedActions",
         "timeMode",
-        "timeElapsed",
         "citedEntities",
       ],
     },
@@ -2123,11 +2122,12 @@ const actionTools = [
       properties: {
         targetNpcId: { type: "string" },
         approach: { type: "string", enum: ["attack", "subdue", "assassinate"] },
+        durationMagnitude: { type: "string", enum: ["instant", "brief", "standard", "extended", "long"] },
+        challengeApproach: { type: "string", enum: ["force", "finesse", "endure", "analyze", "notice", "influence"] },
         memorySummary: { type: "string" },
         narration: { type: "string" },
         suggestedActions: { type: "array", items: { type: "string" } },
         timeMode: { type: "string", enum: ["combat", "exploration"] },
-        timeElapsed: { type: "number" },
         citedEntities: citedEntitiesInputSchema,
       },
       required: [
@@ -2136,7 +2136,6 @@ const actionTools = [
         "narration",
         "suggestedActions",
         "timeMode",
-        "timeElapsed",
         "citedEntities",
       ],
     },
@@ -2154,16 +2153,16 @@ const actionTools = [
         },
         npcId: { type: "string" },
         topic: { type: "string" },
-        approvalDelta: { type: "number" },
-        discoverInformationIds: { type: "array", items: { type: "string" } },
+        durationMagnitude: { type: "string", enum: ["instant", "brief", "standard", "extended", "long"] },
+        relationshipMove: { type: "string", enum: ["worsen", "slip", "steady", "warm", "bond"] },
+        discoveryIntent: { type: "string", enum: ["none", "surface", "focused", "deep"] },
         memorySummary: { type: "string" },
         narration: { type: "string" },
         suggestedActions: { type: "array", items: { type: "string" } },
         timeMode: { type: "string", enum: ["exploration", "downtime", "combat"] },
-        timeElapsed: { type: "number" },
         citedEntities: citedEntitiesInputSchema,
       },
-      required: ["interlocutor", "topic", "narration", "suggestedActions", "timeMode", "timeElapsed", "citedEntities"],
+      required: ["interlocutor", "topic", "narration", "suggestedActions", "timeMode", "citedEntities"],
     },
   },
   {
@@ -2176,12 +2175,12 @@ const actionTools = [
         targetType: { type: "string", enum: ["location", "npc", "route", "information"] },
         targetId: { type: "string" },
         method: { type: "string" },
-        discoverInformationIds: { type: "array", items: { type: "string" } },
+        durationMagnitude: { type: "string", enum: ["instant", "brief", "standard", "extended", "long"] },
+        discoveryIntent: { type: "string", enum: ["none", "surface", "focused", "deep"] },
         memorySummary: { type: "string" },
         narration: { type: "string" },
         suggestedActions: { type: "array", items: { type: "string" } },
         timeMode: { type: "string", enum: ["exploration", "downtime", "combat"] },
-        timeElapsed: { type: "number" },
         citedEntities: citedEntitiesInputSchema,
       },
       required: [
@@ -2191,7 +2190,6 @@ const actionTools = [
         "narration",
         "suggestedActions",
         "timeMode",
-        "timeElapsed",
         "citedEntities",
       ],
     },
@@ -2205,12 +2203,12 @@ const actionTools = [
       properties: {
         targetType: { type: "string", enum: ["location", "npc", "route", "faction"] },
         targetId: { type: "string" },
-        discoverInformationIds: { type: "array", items: { type: "string" } },
+        durationMagnitude: { type: "string", enum: ["instant", "brief", "standard", "extended", "long"] },
+        discoveryIntent: { type: "string", enum: ["none", "surface", "focused", "deep"] },
         memorySummary: { type: "string" },
         narration: { type: "string" },
         suggestedActions: { type: "array", items: { type: "string" } },
         timeMode: { type: "string", enum: ["exploration", "downtime", "combat"] },
-        timeElapsed: { type: "number" },
         citedEntities: citedEntitiesInputSchema,
       },
       required: [
@@ -2219,7 +2217,6 @@ const actionTools = [
         "narration",
         "suggestedActions",
         "timeMode",
-        "timeElapsed",
         "citedEntities",
       ],
     },
@@ -2232,11 +2229,11 @@ const actionTools = [
       additionalProperties: false,
       properties: {
         durationMinutes: { type: "number" },
+        durationMagnitude: { type: "string", enum: ["instant", "brief", "standard", "extended", "long"] },
         memorySummary: { type: "string" },
         narration: { type: "string" },
         suggestedActions: { type: "array", items: { type: "string" } },
         timeMode: { type: "string", enum: ["exploration", "downtime"] },
-        timeElapsed: { type: "number" },
         citedEntities: citedEntitiesInputSchema,
       },
       required: [
@@ -2244,7 +2241,6 @@ const actionTools = [
         "narration",
         "suggestedActions",
         "timeMode",
-        "timeElapsed",
         "citedEntities",
       ],
     },
@@ -2260,11 +2256,11 @@ const actionTools = [
         marketPriceId: { type: "string" },
         commodityId: { type: "string" },
         quantity: { type: "number" },
+        durationMagnitude: { type: "string", enum: ["instant", "brief", "standard", "extended", "long"] },
         memorySummary: { type: "string" },
         narration: { type: "string" },
         suggestedActions: { type: "array", items: { type: "string" } },
         timeMode: { type: "string", enum: ["exploration", "downtime"] },
-        timeElapsed: { type: "number" },
         citedEntities: citedEntitiesInputSchema,
       },
       required: [
@@ -2275,7 +2271,6 @@ const actionTools = [
         "narration",
         "suggestedActions",
         "timeMode",
-        "timeElapsed",
         "citedEntities",
       ],
     },
@@ -2292,7 +2287,6 @@ const actionTools = [
         narration: { type: "string" },
         suggestedActions: { type: "array", items: { type: "string" } },
         timeMode: { type: "string", enum: ["rest"] },
-        timeElapsed: { type: "number" },
         citedEntities: citedEntitiesInputSchema,
       },
       required: [
@@ -2300,7 +2294,6 @@ const actionTools = [
         "narration",
         "suggestedActions",
         "timeMode",
-        "timeElapsed",
         "citedEntities",
       ],
     },
@@ -2313,15 +2306,10 @@ const actionTools = [
       additionalProperties: false,
       properties: {
         actionDescription: { type: "string" },
-        statToCheck: {
-          type: "string",
-          enum: ["strength", "dexterity", "constitution", "intelligence", "wisdom", "charisma"],
-        },
         timeMode: { type: "string", enum: ["combat", "exploration", "downtime"] },
-        estimatedTimeElapsedMinutes: { type: "number" },
-        timeElapsed: { type: "number" },
+        durationMagnitude: { type: "string", enum: ["instant", "brief", "standard", "extended", "long"] },
         intendedMechanicalOutcome: { type: "string" },
-        dc: { type: "number" },
+        challengeApproach: { type: "string", enum: ["force", "finesse", "endure", "analyze", "notice", "influence"] },
         failureConsequence: { type: "string" },
         memorySummary: { type: "string" },
         narration: { type: "string" },
@@ -2330,10 +2318,8 @@ const actionTools = [
       },
       required: [
         "actionDescription",
-        "statToCheck",
         "timeMode",
-        "estimatedTimeElapsedMinutes",
-        "timeElapsed",
+        "challengeApproach",
         "intendedMechanicalOutcome",
         "narration",
         "suggestedActions",
@@ -2502,8 +2488,6 @@ function normalizeTurnToolCall(input: {
       ...record,
       interlocutor,
       npcId,
-      approvalDelta:
-        npcId && typeof record.approvalDelta === "number" ? record.approvalDelta : undefined,
     } as TurnActionToolCall;
   }
 
@@ -2593,6 +2577,7 @@ async function runCompletion(options: {
   user: string;
   tools?: Array<{ name: string; description: string; input_schema: Record<string, unknown> }>;
   maxTokens?: number;
+  signal?: AbortSignal;
 }) {
   const apiKeys = getOpenRouterApiKeys();
 
@@ -2621,17 +2606,20 @@ async function runCompletion(options: {
     });
 
     try {
-      const response = await client.chat.completions.create({
-        model: env.openRouterModel,
-        temperature: 0.7,
-        max_tokens: options.maxTokens ?? 8000,
-        messages: [
-          { role: "system", content: options.system },
-          { role: "user", content: options.user },
-        ],
-        tools: options.tools?.map(toFunctionTool),
-        tool_choice: options.tools?.length ? "auto" : undefined,
-      });
+      const response = await client.chat.completions.create(
+        {
+          model: env.openRouterModel,
+          temperature: 0.7,
+          max_tokens: options.maxTokens ?? 8000,
+          messages: [
+            { role: "system", content: options.system },
+            { role: "user", content: options.user },
+          ],
+          tools: options.tools?.map(toFunctionTool),
+          tool_choice: options.tools?.length ? "auto" : undefined,
+        },
+        options.signal ? { signal: options.signal } : undefined,
+      );
 
       preferredOpenRouterKeyIndex = keyIndex;
 
@@ -4773,7 +4761,8 @@ class DungeonMasterClient {
         "After any fetches, end with exactly one action tool or request_clarification.",
         "Do not invent named mechanical entities outside the provided context.",
         "Keep payloads compact: narration should be 1-3 sentences, topic/method/actionDescription should be short phrases, memorySummary should be one short sentence, and suggestedActions should contain at most 3 short actions.",
-        "Every executable tool call must include timeMode, timeElapsed, narration, suggestedActions, and citedEntities.",
+        "Every executable tool call must include timeMode, narration, suggestedActions, and citedEntities.",
+        "Use durationMagnitude only as a bounded hint when the action is not travel or fixed rest.",
         "If the player talks to an unnamed local person or bystander implied by the scene, use execute_converse with a short lower-case descriptive role label and leave npcId empty.",
         "If the player continues a conversation with an unnamed local from recentUnnamedLocals, reuse that exact label and still leave npcId empty.",
         "Do not redirect an unnamed bystander interaction to a named NPC unless the player's action clearly points to that NPC.",
@@ -4792,7 +4781,8 @@ class DungeonMasterClient {
         "6. Use execute_observe when the player is mainly looking, listening, waiting, or taking in the current scene.",
         "7. Use execute_rest for explicit light or full rest.",
         "8. Use execute_freeform only for concrete actions that do not fit the typed tools and do not directly change combat, trade, faction resources, prices, or control.",
-        "9. Use request_clarification only if the action is too ambiguous, impossible to map, or missing a required target.",
+        "9. Do not choose stats, DCs, approval numbers, discovery ids, or exact elapsed minutes. The engine owns those mechanics.",
+        "10. Use request_clarification only if the action is too ambiguous, impossible to map, or missing a required target.",
       ].join("\n");
 
       let correctionNotes: string | null = null;
@@ -4825,12 +4815,13 @@ class DungeonMasterClient {
           user,
         });
 
-        const response = await runCompletion({
-          system,
-          user,
-          tools: turnTools,
-          maxTokens: 1500,
-        });
+      const response = await runCompletion({
+        system,
+        user,
+        tools: turnTools,
+        maxTokens: 1500,
+        signal: input.signal,
+      });
 
         const toolName = response?.name;
         const inputPayload = response?.input;

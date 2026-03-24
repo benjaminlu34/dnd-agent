@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { dmClient } from "@/lib/ai/provider";
 import { toCampaignCharacter, toCharacterStats } from "@/lib/game/characters";
+import { parseTurnResultPayloadJson, parseCampaignRuntimeStateJson, approvalBandForValue, toCampaignRuntimeStateJson, toFactionResourcesJson } from "@/lib/game/json-contracts";
 import { createAdHocCampaignInventoryItem } from "@/lib/game/items";
 import {
   generatedWorldModuleSchema,
@@ -12,6 +13,8 @@ import { env } from "@/lib/env";
 import type {
   AdventureModuleDetail,
   AdventureModuleSummary,
+  ActivePressureSummary,
+  ActiveThreadSummary,
   CampaignListItem,
   CampaignRuntimeState,
   CampaignSnapshot,
@@ -25,6 +28,7 @@ import type {
   FactionMoveSummary,
   FactionSummary,
   GeneratedCampaignOpening,
+  GeneratedDailySchedule,
   GeneratedWorldModule,
   InformationDetail,
   InformationSummary,
@@ -32,6 +36,8 @@ import type {
   LocationSummary,
   MarketPriceDetail,
   MemoryRecord,
+  MemoryEntityLinkRecord,
+  MemoryKind,
   NpcDetail,
   OpenWorldGenerationArtifacts,
   NpcSummary,
@@ -43,6 +49,8 @@ import type {
   SpatialPromptContext,
   StoryMessage,
   TemporaryActorSummary,
+  TurnDigest,
+  WorldShiftSummary,
 } from "@/lib/game/types";
 import { prisma } from "@/lib/prisma";
 
@@ -111,6 +119,166 @@ function scopeEntityId(scopeId: string, entityType: string, id: string) {
 
 function toPrismaJsonValue(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
+}
+
+function dayNumberForTime(globalTime: number) {
+  return Math.floor(globalTime / 1440) + 1;
+}
+
+function dayStartTimeForDay(dayNumber: number) {
+  return (dayNumber - 1) * 1440;
+}
+
+function normalizeMemoryKind(value: string): MemoryKind {
+  switch (value) {
+    case "conflict":
+    case "promise":
+    case "relationship_shift":
+    case "world_change":
+    case "discovery":
+    case "injury":
+    case "travel":
+    case "trade":
+      return value;
+    default:
+      return "world_change";
+  }
+}
+
+function memoryKindPriority(memoryKind: MemoryKind) {
+  switch (memoryKind) {
+    case "conflict":
+      return 8;
+    case "promise":
+      return 7;
+    case "relationship_shift":
+      return 6;
+    case "world_change":
+      return 5;
+    case "discovery":
+      return 4;
+    case "injury":
+      return 3;
+    case "travel":
+      return 2;
+    case "trade":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+function toMemoryRecord(
+  memory: Prisma.MemoryEntryGetPayload<{
+    include?: { entityLinks: true };
+  }>,
+): MemoryRecord {
+  return {
+    id: memory.id,
+    type: memory.type,
+    turnId: memory.turnId ?? null,
+    memoryKind: normalizeMemoryKind(memory.memoryKind),
+    isLongArcCandidate: memory.isLongArcCandidate,
+    summary: memory.summary,
+    summarySource: memory.summarySource as MemoryRecord["summarySource"],
+    narrativeNote: memory.narrativeNote,
+    createdAt: memory.createdAt.toISOString(),
+  };
+}
+
+function buildKnowledgeRows(input: {
+  campaignId: string;
+  information: GeneratedWorldModule["information"];
+}) {
+  const locationKnowledge: Array<{
+    campaignId: string;
+    locationId: string;
+    informationId: string;
+  }> = [];
+  const factionKnowledge: Array<{
+    campaignId: string;
+    factionId: string;
+    informationId: string;
+  }> = [];
+  const npcKnowledge: Array<{
+    campaignId: string;
+    npcId: string;
+    informationId: string;
+    shareability: string;
+  }> = [];
+
+  for (const information of input.information) {
+    if (information.locationId) {
+      locationKnowledge.push({
+        campaignId: input.campaignId,
+        locationId: information.locationId,
+        informationId: information.id,
+      });
+    }
+
+    if (information.factionId) {
+      factionKnowledge.push({
+        campaignId: input.campaignId,
+        factionId: information.factionId,
+        informationId: information.id,
+      });
+    }
+
+    if (information.sourceNpcId && information.accessibility !== "public") {
+      npcKnowledge.push({
+        campaignId: input.campaignId,
+        npcId: information.sourceNpcId,
+        informationId: information.id,
+        shareability: information.accessibility === "guarded" ? "guarded" : "private",
+      });
+    }
+  }
+
+  return {
+    locationKnowledge,
+    factionKnowledge,
+    npcKnowledge,
+  };
+}
+
+function scoreRetrievedMemory(input: {
+  memory: Prisma.MemoryEntryGetPayload<{
+    include: {
+      entityLinks: true;
+    };
+  }>;
+  currentEntityKeys: Set<string>;
+  activePressureKeys: Set<string>;
+  activeThreadKeys: Set<string>;
+  now: number;
+}) {
+  let score = 0;
+
+  for (const link of input.memory.entityLinks) {
+    const key = `${link.entityType}:${link.entityId}`;
+    if (input.currentEntityKeys.has(key)) {
+      score += link.isPrimary ? 40 : 25;
+    }
+    if (input.activePressureKeys.has(key)) {
+      score += 15;
+    }
+  }
+
+  if (input.memory.isLongArcCandidate) {
+    score += 20;
+  }
+
+  score += memoryKindPriority(normalizeMemoryKind(input.memory.memoryKind)) * 5;
+
+  const threadKey = `${input.memory.memoryKind}:${input.memory.id}`;
+  if (input.activeThreadKeys.has(threadKey)) {
+    score += 10;
+  }
+
+  const ageHours = Math.max(0, (input.now - input.memory.createdAt.getTime()) / (1000 * 60 * 60));
+  score -= Math.min(18, ageHours * 0.35);
+
+  return score;
 }
 
 function toLocalTextureSummary(value: unknown): LocalTextureSummary | null {
@@ -626,6 +794,96 @@ export async function generateCampaignOpeningDraftForUser(input: {
   return { draft };
 }
 
+function buildDailyScheduleInputFromWorld(input: {
+  campaignId: string;
+  title: string;
+  premise: string;
+  tone: string;
+  setting: string;
+  currentLocationId: string;
+  dayStartTime: number;
+  world: GeneratedWorldModule;
+  discoveredInformationIds: Set<string>;
+}) {
+  return {
+    campaign: {
+      id: input.campaignId,
+      title: input.title,
+      premise: input.premise,
+      tone: input.tone,
+      setting: input.setting,
+      currentLocationId: input.currentLocationId,
+      dayStartTime: input.dayStartTime,
+      locations: input.world.locations.map((location) => ({
+        id: location.id,
+        name: location.name,
+        type: location.type,
+        state: location.state,
+        controllingFactionId: location.controllingFactionId,
+      })),
+      factions: input.world.factions.map((faction) => ({
+        id: faction.id,
+        name: faction.name,
+        type: faction.type,
+        agenda: faction.agenda,
+        pressureClock: faction.pressureClock,
+        resources: faction.resources,
+      })),
+      npcs: input.world.npcs.map((npc) => ({
+        id: npc.id,
+        name: npc.name,
+        role: npc.role,
+        factionId: npc.factionId,
+        currentLocationId: npc.currentLocationId,
+        state: "active",
+        threatLevel: 1,
+      })),
+      discoveredInformation: input.world.information
+        .filter((information) => input.discoveredInformationIds.has(information.id))
+        .map((entry) => ({
+          id: entry.id,
+          title: entry.title,
+          summary: entry.summary,
+          truthfulness: entry.truthfulness,
+          locationId: entry.locationId,
+          factionId: entry.factionId,
+        })),
+    },
+  };
+}
+
+async function generateRequiredInitialSchedules(input: {
+  campaignId: string;
+  module: Prisma.AdventureModuleGetPayload<Record<string, never>>;
+  opening: GeneratedCampaignOpening;
+  world: GeneratedWorldModule;
+  entryPoint: GeneratedWorldModule["entryPoints"][number];
+}) {
+  const discoveredInformationIds = new Set(input.entryPoint.initialInformationIds);
+  const schedules: Array<{ dayNumber: number; schedule: GeneratedDailySchedule }> = [];
+
+  for (const dayNumber of [1, 2]) {
+    schedules.push({
+      dayNumber,
+      schedule: await dmClient.generateDailyWorldSchedule(
+        buildDailyScheduleInputFromWorld({
+          campaignId: input.campaignId,
+          title: input.module.title,
+          premise: input.module.premise,
+          tone: input.module.tone,
+          setting: input.module.setting,
+          currentLocationId: input.entryPoint.startLocationId,
+          dayStartTime: dayStartTimeForDay(dayNumber),
+          world: input.world,
+          discoveredInformationIds,
+        }),
+      ),
+    });
+  }
+
+  return schedules;
+}
+
 async function createCampaignInTx(
   tx: Prisma.TransactionClient,
   input: {
@@ -639,8 +897,16 @@ async function createCampaignInTx(
     instancedEntryPoint: GeneratedWorldModule["entryPoints"][number];
     hydratedStartingNpcs: GeneratedWorldModule["npcs"];
     locationTextures: Map<string, LocalTextureSummary>;
+    initialSchedules: Array<{ dayNumber: number; schedule: GeneratedDailySchedule }>;
   },
 ) {
+  const state: CampaignRuntimeState = {
+    currentLocationId: input.instancedEntryPoint.startLocationId,
+    globalTime: 480,
+    pendingTurnId: null,
+    lastActionSummary: input.opening.activeThreat,
+  };
+
   const campaign = await tx.campaign.create({
     data: {
       id: input.campaignId,
@@ -649,12 +915,8 @@ async function createCampaignInTx(
       templateId: input.template.id,
       moduleSchemaVersion: input.module.schemaVersion,
       selectedEntryPointId: input.entryPointId,
-      stateJson: {
-        currentLocationId: "",
-        globalTime: 480,
-        pendingTurnId: null,
-        lastActionSummary: input.opening.activeThreat,
-      } satisfies CampaignRuntimeState,
+      generatedThroughDay: 2,
+      stateJson: toCampaignRuntimeStateJson(state),
       characterInstance: {
         create: {
           templateId: input.template.id,
@@ -692,13 +954,6 @@ async function createCampaignInTx(
     throw new Error("Campaign initialization failed.");
   }
 
-  const state: CampaignRuntimeState = {
-    currentLocationId: input.instancedEntryPoint.startLocationId,
-    globalTime: 480,
-    pendingTurnId: null,
-    lastActionSummary: input.opening.activeThreat,
-  };
-
   if (input.instancedWorld.factions.length) {
     await tx.faction.createMany({
       data: input.instancedWorld.factions.map((faction) => ({
@@ -708,7 +963,7 @@ async function createCampaignInTx(
         type: faction.type,
         summary: faction.summary,
         agenda: faction.agenda,
-        resources: faction.resources,
+        resources: toFactionResourcesJson(faction.resources),
         pressureClock: faction.pressureClock,
       })),
     });
@@ -773,7 +1028,8 @@ async function createCampaignInTx(
     isCompanion: false,
     socialLayer: "starting_local",
     isNarrativelyHydrated: true,
-    hydrationClaimedAt: null,
+    hydrationClaimRequestId: null,
+    hydrationClaimExpiresAt: null,
     state: "active",
     threatLevel: 1,
   }));
@@ -790,7 +1046,8 @@ async function createCampaignInTx(
           description: npc.description,
           socialLayer: "anchor",
           isNarrativelyHydrated: true,
-          hydrationClaimedAt: null,
+          hydrationClaimRequestId: null,
+          hydrationClaimExpiresAt: null,
           factionId: npc.factionId,
           currentLocationId: npc.currentLocationId,
           approval: npc.approval,
@@ -823,6 +1080,29 @@ async function createCampaignInTx(
         expiresAtTime: null,
       })),
     });
+
+    const knowledgeRows = buildKnowledgeRows({
+      campaignId: campaign.id,
+      information: input.instancedWorld.information,
+    });
+
+    if (knowledgeRows.locationKnowledge.length) {
+      await tx.locationKnowledge.createMany({
+        data: knowledgeRows.locationKnowledge,
+      });
+    }
+
+    if (knowledgeRows.factionKnowledge.length) {
+      await tx.factionKnowledge.createMany({
+        data: knowledgeRows.factionKnowledge,
+      });
+    }
+
+    if (knowledgeRows.npcKnowledge.length) {
+      await tx.npcKnowledge.createMany({
+        data: knowledgeRows.npcKnowledge,
+      });
+    }
   }
 
   if (input.instancedWorld.informationLinks.length) {
@@ -877,9 +1157,59 @@ async function createCampaignInTx(
   await tx.campaign.update({
     where: { id: campaign.id },
     data: {
-      stateJson: state,
+      stateJson: toCampaignRuntimeStateJson(state),
     },
   });
+
+  for (const day of input.initialSchedules) {
+    await tx.scheduleGenerationJob.create({
+      data: {
+        campaignId: campaign.id,
+        dayNumber: day.dayNumber,
+        dayStartTime: dayStartTimeForDay(day.dayNumber),
+        status: "completed",
+        attempts: 1,
+        completedAt: new Date(),
+      },
+    });
+
+    for (const event of day.schedule.worldEvents) {
+      await tx.worldEvent.create({
+        data: {
+          id: `wevt_${randomUUID()}`,
+          campaignId: campaign.id,
+          locationId: event.locationId,
+          triggerTime: event.triggerTime,
+          triggerCondition: event.triggerCondition
+            ? (event.triggerCondition as unknown as Prisma.JsonObject)
+            : Prisma.JsonNull,
+          description: event.description,
+          payload: event.payload as unknown as Prisma.JsonObject,
+          isProcessed: false,
+          isCancelled: false,
+          cancellationReason: null,
+          cascadeDepth: event.cascadeDepth ?? 0,
+        },
+      });
+    }
+
+    for (const move of day.schedule.factionMoves) {
+      await tx.factionMove.create({
+        data: {
+          id: `fmove_${randomUUID()}`,
+          campaignId: campaign.id,
+          factionId: move.factionId,
+          scheduledAtTime: move.scheduledAtTime,
+          description: move.description,
+          payload: move.payload as unknown as Prisma.JsonObject,
+          isExecuted: false,
+          isCancelled: false,
+          cancellationReason: null,
+          cascadeDepth: move.cascadeDepth ?? 0,
+        },
+      });
+    }
+  }
 
   return {
     campaignId: campaign.id,
@@ -955,6 +1285,13 @@ export async function createCampaignFromModuleForUser(input: {
     previousDraft: input.opening ?? preliminaryOpening,
   });
   const locationTextures = buildLocationTextureMap(generationArtifacts, campaignId);
+  const initialSchedules = await generateRequiredInitialSchedules({
+    campaignId,
+    module,
+    opening,
+    world: openingInput.module,
+    entryPoint: openingInput.entryPoint,
+  });
 
   const result = await prisma.$transaction((tx) =>
     createCampaignInTx(tx, {
@@ -968,6 +1305,7 @@ export async function createCampaignFromModuleForUser(input: {
       instancedEntryPoint,
       hydratedStartingNpcs,
       locationTextures,
+      initialSchedules,
     }),
   );
 
@@ -991,7 +1329,7 @@ export async function listCampaigns(): Promise<CampaignListItem[]> {
      where: {
        OR: campaigns.map((campaign) => ({
          campaignId: campaign.id,
-         id: (campaign.stateJson as CampaignRuntimeState).currentLocationId,
+         id: parseCampaignRuntimeStateJson(campaign.stateJson).currentLocationId,
        })),
      },
      select: {
@@ -1004,7 +1342,9 @@ export async function listCampaigns(): Promise<CampaignListItem[]> {
    );
 
     return campaigns.map((campaign) => {
-      const state = campaign.stateJson as unknown as { customTitle?: string };
+      const state = parseCampaignRuntimeStateJson(campaign.stateJson) as CampaignRuntimeState & {
+        customTitle?: string;
+      };
       const title = state.customTitle ?? campaign.module.title;
       return {
         id: campaign.id,
@@ -1048,15 +1388,15 @@ export async function renameCampaignForUser(campaignId: string, title: string): 
      return null;
    }
 
-   const updatedCampaign = await prisma.campaign.update({
-     where: { id: campaign.id },
-     data: {
-       stateJson: {
-         ...(campaign.stateJson as unknown as Record<string, unknown>),
-         customTitle: title,
-       },
-     },
-   });
+  const updatedCampaign = await prisma.campaign.update({
+    where: { id: campaign.id },
+    data: {
+      stateJson: toCampaignRuntimeStateJson({
+        ...parseCampaignRuntimeStateJson(campaign.stateJson),
+        customTitle: title,
+      } as CampaignRuntimeState),
+    },
+  });
 
    return {
      campaignId: updatedCampaign.id,
@@ -1133,6 +1473,7 @@ function toNpcSummary(
     factionName: faction?.name ?? null,
     currentLocationId: npc.currentLocationId,
     approval: npc.approval,
+    approvalBand: approvalBandForValue(npc.approval),
     isCompanion: npc.isCompanion,
     state: npc.state as NpcSummary["state"],
     threatLevel: npc.threatLevel,
@@ -1256,32 +1597,71 @@ function buildCrossLocationLeads(input: {
   return Array.from(leads.values()).sort((left, right) => left.depth - right.depth);
 }
 
+function sortMemoriesByPriority(
+  memories: Array<Prisma.MemoryEntryGetPayload<{ include: { entityLinks: true } }>>,
+  prioritizedKinds: MemoryKind[] = [],
+) {
+  const rank = new Map(prioritizedKinds.map((kind, index) => [kind, prioritizedKinds.length - index]));
+
+  return [...memories].sort((left, right) => {
+    const leftRank = rank.get(normalizeMemoryKind(left.memoryKind)) ?? 0;
+    const rightRank = rank.get(normalizeMemoryKind(right.memoryKind)) ?? 0;
+
+    if (leftRank !== rightRank) {
+      return rightRank - leftRank;
+    }
+
+    const leftKind = memoryKindPriority(normalizeMemoryKind(left.memoryKind));
+    const rightKind = memoryKindPriority(normalizeMemoryKind(right.memoryKind));
+    if (leftKind !== rightKind) {
+      return rightKind - leftKind;
+    }
+
+    return right.createdAt.getTime() - left.createdAt.getTime();
+  });
+}
+
+async function fetchEntityLinkedMemories(input: {
+  campaignId: string;
+  entityType: MemoryEntityLinkRecord["entityType"];
+  entityId: string;
+  take: number;
+  prioritizedKinds?: MemoryKind[];
+}) {
+  const memories = await prisma.memoryEntry.findMany({
+    where: {
+      campaignId: input.campaignId,
+      entityLinks: {
+        some: {
+          entityType: input.entityType,
+          entityId: input.entityId,
+        },
+      },
+    },
+    include: {
+      entityLinks: true,
+    },
+    orderBy: { createdAt: "desc" },
+    take: Math.max(input.take, 12),
+  });
+
+  return sortMemoriesByPriority(memories, input.prioritizedKinds).slice(0, input.take);
+}
+
 export async function fetchNpcDetail(campaignId: string, npcId: string): Promise<NpcDetail | null> {
-  const [npc, factions, information, memories, temporaryActor] = await Promise.all([
+  const [npc, factions, memories, temporaryActor] = await Promise.all([
     prisma.nPC.findFirst({
       where: { id: npcId, campaignId },
     }),
     prisma.faction.findMany({
       where: { campaignId },
     }),
-    prisma.information.findMany({
-      where: {
-        campaignId,
-        OR: [{ sourceNpcId: npcId }, { isDiscovered: true }],
-      },
-      orderBy: { title: "asc" },
-      take: 12,
-    }),
-    prisma.memoryEntry.findMany({
-      where: {
-        campaignId,
-        summary: {
-          contains: npcId,
-          mode: "insensitive",
-        },
-      },
-      orderBy: { createdAt: "desc" },
+    fetchEntityLinkedMemories({
+      campaignId,
+      entityType: "npc",
+      entityId: npcId,
       take: 8,
+      prioritizedKinds: ["relationship_shift", "promise", "conflict"],
     }),
     prisma.temporaryActor.findFirst({
       where: {
@@ -1295,24 +1675,89 @@ export async function fetchNpcDetail(campaignId: string, npcId: string): Promise
     return null;
   }
 
-  const locations = await prisma.locationNode.findMany({
-    where: { campaignId },
-  });
-  const npcs = await prisma.nPC.findMany({
-    where: { campaignId },
-  });
+  const [locations, npcs, npcKnowledge, factionKnowledge, locationKnowledge] = await Promise.all([
+    prisma.locationNode.findMany({
+      where: { campaignId },
+    }),
+    prisma.nPC.findMany({
+      where: { campaignId },
+    }),
+    prisma.npcKnowledge.findMany({
+      where: {
+        campaignId,
+        npcId,
+      },
+      include: {
+        information: true,
+      },
+      orderBy: { informationId: "asc" },
+      take: 12,
+    }),
+    npc.factionId
+      ? prisma.factionKnowledge.findMany({
+          where: {
+            campaignId,
+            factionId: npc.factionId,
+          },
+          include: {
+            information: true,
+          },
+          orderBy: { informationId: "asc" },
+          take: 12,
+        })
+      : Promise.resolve([]),
+    npc.currentLocationId
+      ? prisma.locationKnowledge.findMany({
+          where: {
+            campaignId,
+            locationId: npc.currentLocationId,
+          },
+          include: {
+            information: true,
+          },
+          orderBy: { informationId: "asc" },
+          take: 12,
+        })
+      : Promise.resolve([]),
+  ]);
+
+  const visibleKnowledgeById = new Map<string, InformationSummary>();
+  for (const entry of npcKnowledge) {
+    if (entry.shareability === "private" && !entry.information.isDiscovered) {
+      continue;
+    }
+    visibleKnowledgeById.set(
+      entry.informationId,
+      toInformationSummary(entry.information, locations, factions, npcs),
+    );
+  }
+  for (const entry of factionKnowledge) {
+    if (entry.information.accessibility === "secret" && !entry.information.isDiscovered) {
+      continue;
+    }
+    if (!visibleKnowledgeById.has(entry.informationId)) {
+      visibleKnowledgeById.set(
+        entry.informationId,
+        toInformationSummary(entry.information, locations, factions, npcs),
+      );
+    }
+  }
+  for (const entry of locationKnowledge) {
+    if (entry.information.accessibility === "secret" && !entry.information.isDiscovered) {
+      continue;
+    }
+    if (!visibleKnowledgeById.has(entry.informationId)) {
+      visibleKnowledgeById.set(
+        entry.informationId,
+        toInformationSummary(entry.information, locations, factions, npcs),
+      );
+    }
+  }
 
   return {
     ...toNpcSummary(npc, factions),
-    knownInformation: information.map((entry) =>
-      toInformationSummary(entry, locations, factions, npcs),
-    ),
-    relationshipHistory: memories.map((memory) => ({
-      id: memory.id,
-      type: memory.type,
-      summary: memory.summary,
-      createdAt: memory.createdAt.toISOString(),
-    })),
+    knownInformation: Array.from(visibleKnowledgeById.values()).slice(0, 12),
+    relationshipHistory: memories.map((memory) => toMemoryRecord(memory)),
     temporaryActorId: temporaryActor?.id ?? null,
   };
 }
@@ -1484,20 +1929,12 @@ export async function fetchRelationshipHistory(
       where: { id: npcId, campaignId },
       select: { id: true, name: true },
     }),
-    prisma.memoryEntry.findMany({
-      where: {
-        campaignId,
-        OR: [
-          {
-            summary: {
-              contains: npcId,
-              mode: "insensitive",
-            },
-          },
-        ],
-      },
-      orderBy: { createdAt: "desc" },
-      take: 10,
+    fetchEntityLinkedMemories({
+      campaignId,
+      entityType: "npc",
+      entityId: npcId,
+      take: 8,
+      prioritizedKinds: ["relationship_shift", "promise", "conflict"],
     }),
   ]);
 
@@ -1508,13 +1945,215 @@ export async function fetchRelationshipHistory(
   return {
     npcId: npc.id,
     npcName: npc.name,
-    memories: memories.map((memory) => ({
-      id: memory.id,
-      type: memory.type,
-      summary: memory.summary,
-      createdAt: memory.createdAt.toISOString(),
-    })),
+    memories: memories.map((memory) => toMemoryRecord(memory)),
   };
+}
+
+function toTurnDigest(
+  turn: Prisma.TurnGetPayload<Record<string, never>>,
+): TurnDigest {
+  const result = parseTurnResultPayloadJson(turn.resultJson);
+  const narration =
+    result && result.error == null && result.clarification == null
+      ? typeof result.whatChanged[0] === "string"
+        ? result.whatChanged[0]
+        : null
+      : null;
+
+  return {
+    turnId: turn.id,
+    requestId: turn.requestId,
+    status: turn.status,
+    stateVersionAfter: turn.stateVersionAfter ?? result?.stateVersionAfter ?? null,
+    narration,
+    whatChanged: result?.whatChanged ?? [],
+    why: result?.why ?? [],
+    createdAt: turn.createdAt.toISOString(),
+  };
+}
+
+function buildRelevantKnowledgeIds(input: {
+  currentLocationId: string;
+  presentNpcIds: string[];
+  knownFactionIds: string[];
+  locationKnowledge: Prisma.LocationKnowledgeGetPayload<Record<string, never>>[];
+  factionKnowledge: Prisma.FactionKnowledgeGetPayload<Record<string, never>>[];
+  npcKnowledge: Prisma.NpcKnowledgeGetPayload<Record<string, never>>[];
+}) {
+  const ids = new Set<string>();
+
+  for (const knowledge of input.locationKnowledge) {
+    if (knowledge.locationId === input.currentLocationId) {
+      ids.add(knowledge.informationId);
+    }
+  }
+
+  for (const knowledge of input.factionKnowledge) {
+    if (input.knownFactionIds.includes(knowledge.factionId)) {
+      ids.add(knowledge.informationId);
+    }
+  }
+
+  for (const knowledge of input.npcKnowledge) {
+    if (
+      input.presentNpcIds.includes(knowledge.npcId)
+      && knowledge.shareability !== "private"
+    ) {
+      ids.add(knowledge.informationId);
+    }
+  }
+
+  return ids;
+}
+
+function buildActivePressures(input: {
+  factions: Prisma.FactionGetPayload<Record<string, never>>[];
+  knownFactionIds: Set<string>;
+  currentLocation: LocationSummary;
+}): ActivePressureSummary[] {
+  const factionPressures = input.factions
+    .filter((faction) => input.knownFactionIds.has(faction.id))
+    .sort((left, right) => right.pressureClock - left.pressureClock)
+    .slice(0, 4)
+    .map<ActivePressureSummary>((faction) => ({
+      entityType: "faction",
+      entityId: faction.id,
+      label: faction.name,
+      summary: faction.agenda,
+    }));
+
+  if (input.currentLocation.state !== "active") {
+    factionPressures.unshift({
+      entityType: "location",
+      entityId: input.currentLocation.id,
+      label: input.currentLocation.name,
+      summary: `The current area is ${input.currentLocation.state}.`,
+    });
+  }
+
+  return factionPressures.slice(0, 4);
+}
+
+function buildRecentWorldShifts(
+  turns: Array<Prisma.TurnGetPayload<Record<string, never>>>,
+): WorldShiftSummary[] {
+  return turns
+    .map((turn) => ({
+      turnId: turn.id,
+      payload: parseTurnResultPayloadJson(turn.resultJson),
+    }))
+    .filter((entry): entry is { turnId: string; payload: NonNullable<ReturnType<typeof parseTurnResultPayloadJson>> } =>
+      entry.payload != null && entry.payload.changeCodes.length > 0,
+    )
+    .slice(0, 4)
+    .map((entry) => ({
+      turnId: entry.turnId,
+      summary: entry.payload.whatChanged[0] ?? "The world shifted.",
+      changeCodes: entry.payload.changeCodes,
+    }));
+}
+
+function buildActiveThreads(input: {
+  memories: Array<Prisma.MemoryEntryGetPayload<{ include: { entityLinks: true } }>>;
+  worldEvents: Prisma.WorldEventGetPayload<Record<string, never>>[];
+  factionMoves: Prisma.FactionMoveGetPayload<Record<string, never>>[];
+  currentLocationId: string;
+  knownFactionIds: Set<string>;
+}): ActiveThreadSummary[] {
+  const memoryThreads = input.memories
+    .filter((memory) => memory.isLongArcCandidate)
+    .map((memory) => {
+      const primary = memory.entityLinks.find((link) => link.isPrimary) ?? memory.entityLinks[0] ?? null;
+      return {
+        memoryId: memory.id,
+        memoryKind: normalizeMemoryKind(memory.memoryKind),
+        summary: memory.summary,
+        isLongArcCandidate: memory.isLongArcCandidate,
+        primaryEntityType: primary?.entityType as ActiveThreadSummary["primaryEntityType"],
+        primaryEntityId: primary?.entityId ?? null,
+      };
+    })
+    .slice(0, 4);
+
+  const obligationThreads: ActiveThreadSummary[] = [];
+
+  for (const event of input.worldEvents) {
+    if (event.isProcessed || event.isCancelled || event.locationId !== input.currentLocationId) {
+      continue;
+    }
+
+    obligationThreads.push({
+      memoryId: `wevt:${event.id}`,
+      memoryKind: "world_change",
+      summary: event.description,
+      isLongArcCandidate: true,
+      primaryEntityType: "location",
+      primaryEntityId: event.locationId,
+    });
+  }
+
+  for (const move of input.factionMoves) {
+    if (move.isExecuted || move.isCancelled || !input.knownFactionIds.has(move.factionId)) {
+      continue;
+    }
+
+    obligationThreads.push({
+      memoryId: `fmove:${move.id}`,
+      memoryKind: "world_change",
+      summary: move.description,
+      isLongArcCandidate: true,
+      primaryEntityType: "faction",
+      primaryEntityId: move.factionId,
+    });
+  }
+
+  return [...memoryThreads, ...obligationThreads].slice(0, 6);
+}
+
+function pickRetrievedMemories(input: {
+  memories: Array<Prisma.MemoryEntryGetPayload<{ include: { entityLinks: true } }>>;
+  currentLocationId: string;
+  presentNpcIds: string[];
+  knownFactionIds: string[];
+  currentRouteIds: string[];
+  discoveredInformationIds: string[];
+  activePressures: ActivePressureSummary[];
+  activeThreads: ActiveThreadSummary[];
+}) {
+  const currentEntityKeys = new Set<string>([
+    `location:${input.currentLocationId}`,
+    ...input.presentNpcIds.map((id) => `npc:${id}`),
+    ...input.knownFactionIds.map((id) => `faction:${id}`),
+    ...input.currentRouteIds.map((id) => `route:${id}`),
+    ...input.discoveredInformationIds.map((id) => `information:${id}`),
+  ]);
+  const activePressureKeys = new Set(
+    input.activePressures.map((pressure) => `${pressure.entityType}:${pressure.entityId}`),
+  );
+  const activeThreadKeys = new Set(
+    input.activeThreads.map((thread) => `${thread.memoryKind}:${thread.memoryId}`),
+  );
+  const now = Date.now();
+
+  return [...input.memories]
+    .sort(
+      (left, right) =>
+        scoreRetrievedMemory({
+          memory: right,
+          currentEntityKeys,
+          activePressureKeys,
+          activeThreadKeys,
+          now,
+        })
+        - scoreRetrievedMemory({
+          memory: left,
+          currentEntityKeys,
+          activePressureKeys,
+          activeThreadKeys,
+          now,
+        }),
+    )
+    .slice(0, 6);
 }
 
 export async function getCampaignSnapshot(campaignId: string): Promise<CampaignSnapshot | null> {
@@ -1547,7 +2186,10 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
       },
       memories: {
         orderBy: { createdAt: "desc" },
-        take: 12,
+        take: 32,
+        include: {
+          entityLinks: true,
+        },
       },
       locationNodes: {
         orderBy: { name: "asc" },
@@ -1570,8 +2212,23 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
       informationLinks: {
         orderBy: { createdAt: "asc" },
       },
+      npcKnowledge: true,
+      factionKnowledge: true,
+      locationKnowledge: true,
       worldEvents: {
+        where: {
+          isProcessed: false,
+          isCancelled: false,
+        },
         orderBy: { triggerTime: "desc" },
+        take: 30,
+      },
+      factionMoves: {
+        where: {
+          isExecuted: false,
+          isCancelled: false,
+        },
+        orderBy: { scheduledAtTime: "asc" },
         take: 30,
       },
       temporaryActors: {
@@ -1581,11 +2238,7 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
       turns: {
         where: { status: "resolved" },
         orderBy: { createdAt: "desc" },
-        take: 1,
-        select: {
-          id: true,
-          sessionId: true,
-        },
+        take: 8,
       },
     },
   });
@@ -1594,9 +2247,7 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     return null;
   }
 
-  const state = campaign.stateJson as unknown as CampaignRuntimeState & {
-    customTitle?: string;
-  };
+  const state = parseCampaignRuntimeStateJson(campaign.stateJson);
   const session = campaign.sessions[0];
   const currentLocationRecord = campaign.locationNodes.find((location) => location.id === state.currentLocationId);
   if (!currentLocationRecord) {
@@ -1628,18 +2279,36 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
   const discoveredIds = new Set(
     campaign.information.filter((information) => information.isDiscovered).map((information) => information.id),
   );
+  const knownFactionIds = new Set<string>();
+  if (currentLocation.controllingFactionId) {
+    knownFactionIds.add(currentLocation.controllingFactionId);
+  }
+  for (const npc of presentNpcs) {
+    if (npc.factionId) {
+      knownFactionIds.add(npc.factionId);
+    }
+  }
+  const visibleKnowledgeIds = buildRelevantKnowledgeIds({
+    currentLocationId: currentLocation.id,
+    presentNpcIds: presentNpcs.map((npc) => npc.id),
+    knownFactionIds: Array.from(knownFactionIds),
+    locationKnowledge: campaign.locationKnowledge,
+    factionKnowledge: campaign.factionKnowledge,
+    npcKnowledge: campaign.npcKnowledge,
+  });
+
   const localInformation = campaign.information
     .filter(
       (information) =>
-        information.locationId === currentLocation.id &&
-        (information.accessibility === "public" || discoveredIds.has(information.id)),
+        visibleKnowledgeIds.has(information.id)
+        && (information.accessibility === "public" || discoveredIds.has(information.id)),
     )
     .map((information) =>
       toInformationSummary(information, campaign.locationNodes, campaign.factions, campaign.npcs),
     );
 
   const discoveredInformation = campaign.information
-    .filter((information) => discoveredIds.has(information.id) || information.isDiscovered)
+    .filter((information) => discoveredIds.has(information.id))
     .map((information) =>
       toInformationSummary(information, campaign.locationNodes, campaign.factions, campaign.npcs),
     );
@@ -1653,15 +2322,6 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     npcs: campaign.npcs,
   });
 
-  const knownFactionIds = new Set<string>();
-  if (currentLocation.controllingFactionId) {
-    knownFactionIds.add(currentLocation.controllingFactionId);
-  }
-  for (const npc of presentNpcs) {
-    if (npc.factionId) {
-      knownFactionIds.add(npc.factionId);
-    }
-  }
   for (const information of [...localInformation, ...discoveredInformation, ...connectedLeads.map((lead) => lead.information)]) {
     if (information.factionId) {
       knownFactionIds.add(information.factionId);
@@ -1687,13 +2347,29 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
   };
 
   const character = toCampaignCharacter(toTemplateRecord(campaign.template), instance);
-
-  const memories: MemoryRecord[] = campaign.memories.map((memory) => ({
-    id: memory.id,
-    type: memory.type,
-    summary: memory.summary,
-    createdAt: memory.createdAt.toISOString(),
-  }));
+  const activePressures = buildActivePressures({
+    factions: campaign.factions,
+    knownFactionIds,
+    currentLocation,
+  });
+  const activeThreads = buildActiveThreads({
+    memories: campaign.memories,
+    worldEvents: campaign.worldEvents,
+    factionMoves: campaign.factionMoves,
+    currentLocationId: currentLocation.id,
+    knownFactionIds,
+  });
+  const memories: MemoryRecord[] = pickRetrievedMemories({
+    memories: campaign.memories,
+    currentLocationId: currentLocation.id,
+    presentNpcIds: presentNpcs.map((npc) => npc.id),
+    knownFactionIds: Array.from(knownFactionIds),
+    currentRouteIds: adjacentRoutes.map((route) => route.id),
+    discoveredInformationIds: Array.from(discoveredIds),
+    activePressures,
+    activeThreads,
+  }).map((memory) => toMemoryRecord(memory));
+  const recentWorldShifts = buildRecentWorldShifts(campaign.turns);
 
   const recentMessages: StoryMessage[] = [...session.messages]
     .reverse()
@@ -1719,6 +2395,8 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     campaignId: campaign.id,
     sessionId: session.id,
     sessionTurnCount: session.turnCount,
+    stateVersion: campaign.stateVersion,
+    generatedThroughDay: campaign.generatedThroughDay,
     moduleId: campaign.moduleId,
     selectedEntryPointId: campaign.selectedEntryPointId,
     title: state.customTitle ?? campaign.module.title,
@@ -1740,15 +2418,476 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     connectedLeads,
     temporaryActors,
     memories,
+    activePressures,
+    recentWorldShifts,
+    activeThreads,
     recentMessages,
     canRetryLatestTurn,
   };
+}
+
+export async function getTurnSnapshot(
+  campaignId: string,
+  sessionId: string,
+): Promise<CampaignSnapshot | null> {
+  const campaign = await prisma.campaign.findUnique({
+    where: { id: campaignId },
+    include: {
+      module: true,
+      template: true,
+      characterInstance: {
+        include: {
+          inventory: {
+            orderBy: { createdAt: "asc" },
+            include: { template: true },
+          },
+          commodityStacks: {
+            orderBy: { createdAt: "asc" },
+            include: { commodity: true },
+          },
+        },
+      },
+      sessions: {
+        where: { id: sessionId },
+        take: 1,
+        include: {
+          messages: {
+            orderBy: { createdAt: "desc" },
+            take: 20,
+          },
+        },
+      },
+      memories: {
+        orderBy: { createdAt: "desc" },
+        take: 32,
+        include: {
+          entityLinks: true,
+        },
+      },
+      turns: {
+        where: { status: "resolved" },
+        orderBy: { createdAt: "desc" },
+        take: 8,
+      },
+    },
+  });
+
+  if (!campaign || !campaign.characterInstance || !campaign.sessions[0]) {
+    return null;
+  }
+
+  const state = parseCampaignRuntimeStateJson(campaign.stateJson);
+  const session = campaign.sessions[0];
+
+  const [currentLocationRecord, adjacentEdges, presentNpcRecords, temporaryActorRecords, discoveredInfoRecords] = await Promise.all([
+    prisma.locationNode.findFirst({
+      where: {
+        campaignId,
+        id: state.currentLocationId,
+      },
+    }),
+    prisma.locationEdge.findMany({
+      where: {
+        campaignId,
+        OR: [{ sourceId: state.currentLocationId }, { targetId: state.currentLocationId }],
+      },
+      orderBy: { createdAt: "asc" },
+    }),
+    prisma.nPC.findMany({
+      where: {
+        campaignId,
+        currentLocationId: state.currentLocationId,
+      },
+      orderBy: { name: "asc" },
+    }),
+    prisma.temporaryActor.findMany({
+      where: {
+        campaignId,
+        currentLocationId: state.currentLocationId,
+      },
+      orderBy: [{ lastSeenAtTurn: "desc" }, { updatedAt: "desc" }],
+      take: 20,
+    }),
+    prisma.information.findMany({
+      where: {
+        campaignId,
+        isDiscovered: true,
+      },
+      orderBy: { title: "asc" },
+    }),
+  ]);
+
+  if (!currentLocationRecord) {
+    return null;
+  }
+
+  const baseKnownFactionIds = new Set<string>();
+  if (currentLocationRecord.controllingFactionId) {
+    baseKnownFactionIds.add(currentLocationRecord.controllingFactionId);
+  }
+  for (const npc of presentNpcRecords) {
+    if (npc.factionId) {
+      baseKnownFactionIds.add(npc.factionId);
+    }
+  }
+
+  const [locationKnowledge, factionKnowledge, npcKnowledge] = await Promise.all([
+    prisma.locationKnowledge.findMany({
+      where: {
+        campaignId,
+        locationId: state.currentLocationId,
+      },
+    }),
+    baseKnownFactionIds.size
+      ? prisma.factionKnowledge.findMany({
+          where: {
+            campaignId,
+            factionId: {
+              in: Array.from(baseKnownFactionIds),
+            },
+          },
+        })
+      : Promise.resolve([]),
+    presentNpcRecords.length
+      ? prisma.npcKnowledge.findMany({
+          where: {
+            campaignId,
+            npcId: {
+              in: presentNpcRecords.map((npc) => npc.id),
+            },
+            shareability: {
+              not: "private",
+            },
+          },
+        })
+      : Promise.resolve([]),
+  ]);
+
+  const discoveredIds = new Set(discoveredInfoRecords.map((information) => information.id));
+  const visibleKnowledgeIds = buildRelevantKnowledgeIds({
+    currentLocationId: state.currentLocationId,
+    presentNpcIds: presentNpcRecords.map((npc) => npc.id),
+    knownFactionIds: Array.from(baseKnownFactionIds),
+    locationKnowledge,
+    factionKnowledge,
+    npcKnowledge,
+  });
+
+  const firstHopLinks = discoveredIds.size
+    ? await prisma.informationLink.findMany({
+        where: {
+          campaignId,
+          sourceId: {
+            in: Array.from(discoveredIds),
+          },
+        },
+        orderBy: { createdAt: "asc" },
+      })
+    : [];
+  const firstHopIds = Array.from(new Set(firstHopLinks.map((link) => link.targetId)));
+  const secondHopLinks = firstHopIds.length
+    ? await prisma.informationLink.findMany({
+        where: {
+          campaignId,
+          sourceId: {
+            in: firstHopIds,
+          },
+        },
+        orderBy: { createdAt: "asc" },
+      })
+    : [];
+
+  const relevantInformationIds = Array.from(new Set([
+    ...Array.from(discoveredIds),
+    ...Array.from(visibleKnowledgeIds),
+    ...firstHopIds,
+    ...secondHopLinks.map((link) => link.targetId),
+  ]));
+  const relevantInformationRecords = relevantInformationIds.length
+    ? await prisma.information.findMany({
+        where: {
+          campaignId,
+          id: {
+            in: relevantInformationIds,
+          },
+        },
+        orderBy: { title: "asc" },
+      })
+    : [];
+
+  const adjacentLocationIds = Array.from(
+    new Set(
+      adjacentEdges.map((edge) =>
+        edge.sourceId === state.currentLocationId ? edge.targetId : edge.sourceId,
+      ),
+    ),
+  );
+  const relevantLocationIds = Array.from(new Set([
+    state.currentLocationId,
+    ...adjacentLocationIds,
+    ...relevantInformationRecords.flatMap((information) => (information.locationId ? [information.locationId] : [])),
+  ]));
+  const relevantFactionIds = Array.from(new Set([
+    ...Array.from(baseKnownFactionIds),
+    ...relevantInformationRecords.flatMap((information) => (information.factionId ? [information.factionId] : [])),
+  ]));
+  const relevantNpcIds = Array.from(new Set([
+    ...presentNpcRecords.map((npc) => npc.id),
+    ...relevantInformationRecords.flatMap((information) => (information.sourceNpcId ? [information.sourceNpcId] : [])),
+  ]));
+
+  const [locationRecords, factionRecords, sourceNpcRecords] = await Promise.all([
+    relevantLocationIds.length
+      ? prisma.locationNode.findMany({
+          where: {
+            campaignId,
+            id: {
+              in: relevantLocationIds,
+            },
+          },
+        })
+      : Promise.resolve([]),
+    relevantFactionIds.length
+      ? prisma.faction.findMany({
+          where: {
+            campaignId,
+            id: {
+              in: relevantFactionIds,
+            },
+          },
+          orderBy: { name: "asc" },
+        })
+      : Promise.resolve([]),
+    relevantNpcIds.length
+      ? prisma.nPC.findMany({
+          where: {
+            campaignId,
+            id: {
+              in: relevantNpcIds,
+            },
+          },
+          orderBy: { name: "asc" },
+        })
+      : Promise.resolve([]),
+  ]);
+
+  const currentLocation = toLocationSummary(currentLocationRecord, factionRecords);
+  const adjacentRoutes = adjacentEdges.map<RouteSummary>((edge) => {
+    const targetId = edge.sourceId === currentLocation.id ? edge.targetId : edge.sourceId;
+    const target = locationRecords.find((location) => location.id === targetId);
+
+    return {
+      id: edge.id,
+      targetLocationId: targetId,
+      targetLocationName: target?.name ?? targetId,
+      travelTimeMinutes: edge.travelTimeMinutes,
+      dangerLevel: edge.dangerLevel,
+      currentStatus: edge.currentStatus,
+      description: edge.description,
+    };
+  });
+  const presentNpcs = presentNpcRecords.map((npc) => toNpcSummary(npc, factionRecords));
+
+  const localInformation = relevantInformationRecords
+    .filter(
+      (information) =>
+        visibleKnowledgeIds.has(information.id)
+        && (information.accessibility === "public" || discoveredIds.has(information.id)),
+    )
+    .map((information) =>
+      toInformationSummary(information, locationRecords, factionRecords, sourceNpcRecords),
+    );
+  const discoveredInformation = discoveredInfoRecords.map((information) =>
+    toInformationSummary(information, locationRecords, factionRecords, sourceNpcRecords),
+  );
+  const connectedLeads = buildCrossLocationLeads({
+    discoveredInformationIds: Array.from(discoveredIds),
+    information: relevantInformationRecords,
+    informationLinks: [...firstHopLinks, ...secondHopLinks],
+    locations: locationRecords,
+    factions: factionRecords,
+    npcs: sourceNpcRecords,
+  });
+
+  const knownFactionIds = new Set(relevantFactionIds);
+  for (const information of [
+    ...localInformation,
+    ...discoveredInformation,
+    ...connectedLeads.map((lead) => lead.information),
+  ]) {
+    if (information.factionId) {
+      knownFactionIds.add(information.factionId);
+    }
+  }
+
+  const [knownFactionRecords, factionRelations, pendingWorldEvents, pendingFactionMoves] = await Promise.all([
+    knownFactionIds.size
+      ? prisma.faction.findMany({
+          where: {
+            campaignId,
+            id: {
+              in: Array.from(knownFactionIds),
+            },
+          },
+          orderBy: { name: "asc" },
+        })
+      : Promise.resolve([]),
+    knownFactionIds.size
+      ? prisma.factionRelation.findMany({
+          where: {
+            campaignId,
+            factionAId: {
+              in: Array.from(knownFactionIds),
+            },
+            factionBId: {
+              in: Array.from(knownFactionIds),
+            },
+          },
+          orderBy: { createdAt: "asc" },
+        })
+      : Promise.resolve([]),
+    prisma.worldEvent.findMany({
+      where: {
+        campaignId,
+        locationId: state.currentLocationId,
+        isProcessed: false,
+        isCancelled: false,
+      },
+      orderBy: { triggerTime: "desc" },
+      take: 30,
+    }),
+    knownFactionIds.size
+      ? prisma.factionMove.findMany({
+          where: {
+            campaignId,
+            factionId: {
+              in: Array.from(knownFactionIds),
+            },
+            isExecuted: false,
+            isCancelled: false,
+          },
+          orderBy: { scheduledAtTime: "asc" },
+          take: 30,
+        })
+      : Promise.resolve([]),
+  ]);
+
+  const knownFactions = knownFactionRecords.map(toFactionSummary);
+  const normalizedFactionRecords = knownFactionRecords.length ? knownFactionRecords : factionRecords;
+  const normalizedFactionRelations = factionRelations.map((relation) =>
+    toFactionRelationSummary(relation, normalizedFactionRecords),
+  );
+
+  const instance: CharacterInstance = {
+    id: campaign.characterInstance.id,
+    templateId: campaign.characterInstance.templateId,
+    health: campaign.characterInstance.health,
+    gold: campaign.characterInstance.gold,
+    inventory: campaign.characterInstance.inventory.map(toItemInstanceRecord),
+    commodityStacks: campaign.characterInstance.commodityStacks.map(toCommodityStackRecord),
+  };
+  const character = toCampaignCharacter(toTemplateRecord(campaign.template), instance);
+  const activePressures = buildActivePressures({
+    factions: normalizedFactionRecords,
+    knownFactionIds,
+    currentLocation,
+  });
+  const activeThreads = buildActiveThreads({
+    memories: campaign.memories,
+    worldEvents: pendingWorldEvents,
+    factionMoves: pendingFactionMoves,
+    currentLocationId: currentLocation.id,
+    knownFactionIds,
+  });
+  const memories: MemoryRecord[] = pickRetrievedMemories({
+    memories: campaign.memories,
+    currentLocationId: currentLocation.id,
+    presentNpcIds: presentNpcs.map((npc) => npc.id),
+    knownFactionIds: Array.from(knownFactionIds),
+    currentRouteIds: adjacentRoutes.map((route) => route.id),
+    discoveredInformationIds: Array.from(discoveredIds),
+    activePressures,
+    activeThreads,
+  }).map((memory) => toMemoryRecord(memory));
+  const recentWorldShifts = buildRecentWorldShifts(campaign.turns);
+  const recentMessages: StoryMessage[] = [...session.messages]
+    .reverse()
+    .map((message) => ({
+      id: message.id,
+      role: message.role as StoryMessage["role"],
+      kind: message.kind as StoryMessage["kind"],
+      content: message.content,
+      createdAt: message.createdAt.toISOString(),
+      payload:
+        message.payload && typeof message.payload === "object" && !Array.isArray(message.payload)
+          ? (structuredClone(message.payload) as Record<string, unknown>)
+          : null,
+    }));
+  const temporaryActors = temporaryActorRecords.map(toTemporaryActorSummary);
+  const canRetryLatestTurn =
+    env.enableTurnUndo &&
+    Boolean(campaign.turns[0]?.id) &&
+    campaign.turns[0]?.sessionId === session.id;
+
+  return {
+    campaignId: campaign.id,
+    sessionId: session.id,
+    sessionTurnCount: session.turnCount,
+    stateVersion: campaign.stateVersion,
+    generatedThroughDay: campaign.generatedThroughDay,
+    moduleId: campaign.moduleId,
+    selectedEntryPointId: campaign.selectedEntryPointId,
+    title: state.customTitle ?? campaign.module.title,
+    premise: campaign.module.premise,
+    tone: campaign.module.tone,
+    setting: campaign.module.setting,
+    state,
+    character: {
+      ...character,
+      stats: toCharacterStats(character),
+    },
+    currentLocation,
+    adjacentRoutes,
+    presentNpcs,
+    knownFactions,
+    factionRelations: normalizedFactionRelations,
+    localInformation,
+    discoveredInformation,
+    connectedLeads,
+    temporaryActors,
+    memories,
+    activePressures,
+    recentWorldShifts,
+    activeThreads,
+    recentMessages,
+    canRetryLatestTurn,
+  };
+}
+
+export async function getMissedTurnDigests(
+  campaignId: string,
+  expectedStateVersion: number,
+): Promise<TurnDigest[]> {
+  const turns = await prisma.turn.findMany({
+    where: {
+      campaignId,
+      stateVersionAfter: {
+        gt: expectedStateVersion,
+      },
+      status: "resolved",
+    },
+    orderBy: { stateVersionAfter: "asc" },
+  });
+
+  return turns.map((turn) => toTurnDigest(turn));
 }
 
 export function toPlayerCampaignSnapshot(snapshot: CampaignSnapshot): PlayerCampaignSnapshot {
   return {
     campaignId: snapshot.campaignId,
     sessionId: snapshot.sessionId,
+    stateVersion: snapshot.stateVersion,
+    generatedThroughDay: snapshot.generatedThroughDay,
     moduleId: snapshot.moduleId,
     selectedEntryPointId: snapshot.selectedEntryPointId,
     title: snapshot.title,
@@ -1765,6 +2904,9 @@ export function toPlayerCampaignSnapshot(snapshot: CampaignSnapshot): PlayerCamp
     discoveredInformation: snapshot.discoveredInformation,
     temporaryActors: snapshot.temporaryActors,
     memories: snapshot.memories,
+    activePressures: snapshot.activePressures,
+    recentWorldShifts: snapshot.recentWorldShifts,
+    activeThreads: snapshot.activeThreads,
     recentMessages: snapshot.recentMessages,
     canRetryLatestTurn: snapshot.canRetryLatestTurn,
   };
@@ -1853,6 +2995,9 @@ export async function getPromptContext(snapshot: CampaignSnapshot): Promise<Spat
       summary: information.summary,
       truthfulness: information.truthfulness,
     })),
+    activePressures: snapshot.activePressures,
+    recentWorldShifts: snapshot.recentWorldShifts,
+    activeThreads: snapshot.activeThreads,
     inventory: toPromptInventory(snapshot.character),
     localTexture: snapshot.currentLocation.localTexture,
     globalTime: snapshot.state.globalTime,
