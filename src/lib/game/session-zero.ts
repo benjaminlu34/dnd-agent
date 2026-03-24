@@ -1,4 +1,9 @@
 import { z } from "zod";
+import {
+  buildAdjacency,
+  countLocationsWithinHops,
+  minimumEntryRadius,
+} from "@/lib/game/world-validation";
 
 function addDuplicateStringIssues(
   values: string[],
@@ -116,7 +121,7 @@ const marketPriceSchema = z.object({
   legalStatus: z.enum(["legal", "restricted", "contraband"]),
 });
 
-const entryPointSchema = z.object({
+export const entryPointSchema = z.object({
   id: z.string().trim().min(1),
   title: z.string().trim().min(1),
   summary: z.string().trim().min(1),
@@ -124,6 +129,259 @@ const entryPointSchema = z.object({
   presentNpcIds: z.array(z.string().trim().min(1)),
   initialInformationIds: z.array(z.string().trim().min(1)),
 });
+
+export const launchTemporaryActorSchema = z.object({
+  label: z.string().trim().min(1),
+  summary: z.string().trim().min(1),
+});
+
+export const generatedEntryContextSchema = entryPointSchema.extend({
+  immediatePressure: z.string().trim().min(1),
+  publicLead: z.string().trim().min(1),
+  localContactNpcId: z.string().trim().min(1),
+  mundaneActionPath: z.string().trim().min(1),
+  evidenceWorldAlreadyMoving: z.string().trim().min(1),
+});
+
+const resolvedLaunchEntryContextSchemaBase = entryPointSchema.extend({
+  immediatePressure: z.string().trim().min(1),
+  publicLead: z.string().trim().min(1),
+  localContactNpcId: z.string().trim().min(1).nullable(),
+  localContactTemporaryActorLabel: z.string().trim().min(1).nullable(),
+  temporaryLocalActors: z.array(launchTemporaryActorSchema).max(3),
+  mundaneActionPath: z.string().trim().min(1),
+  evidenceWorldAlreadyMoving: z.string().trim().min(1),
+});
+
+function refineResolvedLaunchEntryShape(
+  entryPoint: {
+    presentNpcIds: string[];
+    localContactNpcId: string | null;
+    localContactTemporaryActorLabel: string | null;
+    temporaryLocalActors: Array<{ label: string; summary: string }>;
+  },
+  ctx: z.RefinementCtx,
+) {
+  const hasNamedContact = Boolean(entryPoint.localContactNpcId);
+  const hasTemporaryContact = Boolean(entryPoint.localContactTemporaryActorLabel);
+
+  if (hasNamedContact === hasTemporaryContact) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["localContactNpcId"],
+      message: "Resolved launch entries must use exactly one local contact anchor.",
+    });
+  }
+
+  addDuplicateStringIssues(
+    entryPoint.temporaryLocalActors.map((actor) => actor.label.trim().toLowerCase()),
+    ctx,
+    ["temporaryLocalActors"],
+    "Temporary local actor labels must be unique.",
+  );
+
+  if (!entryPoint.localContactNpcId && entryPoint.presentNpcIds.length > 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["presentNpcIds"],
+      message: "Present named NPCs require a named localContactNpcId anchor.",
+    });
+  }
+
+  if (entryPoint.localContactTemporaryActorLabel) {
+    const hasMatchingTemporaryActor = entryPoint.temporaryLocalActors.some(
+      (actor) => actor.label === entryPoint.localContactTemporaryActorLabel,
+    );
+
+    if (!hasMatchingTemporaryActor) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["localContactTemporaryActorLabel"],
+        message: "Resolved launch entry temporary local contact must match one temporaryLocalActors label.",
+      });
+    }
+  }
+
+  if (!entryPoint.localContactNpcId && entryPoint.temporaryLocalActors.length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["temporaryLocalActors"],
+      message: "Unnamed-contact launch entries must seed at least one temporary local actor.",
+    });
+  }
+}
+
+export const resolvedLaunchEntryContextSchema = resolvedLaunchEntryContextSchemaBase.superRefine(
+  refineResolvedLaunchEntryShape,
+);
+
+export const customResolvedLaunchEntryDraftSchema = resolvedLaunchEntryContextSchemaBase
+  .omit({
+    id: true,
+  })
+  .superRefine(refineResolvedLaunchEntryShape);
+
+export const resolvedLaunchEntrySchema = resolvedLaunchEntryContextSchemaBase.extend({
+  isCustom: z.boolean(),
+  customRequestPrompt: z.string().trim().min(1).nullable(),
+}).superRefine(refineResolvedLaunchEntryShape);
+
+type EntryPointReferenceIssue = {
+  path: PropertyKey[];
+  message: string;
+};
+
+type WorldEntryPointReference = {
+  id?: string;
+  startLocationId: string;
+  presentNpcIds: string[];
+  initialInformationIds: string[];
+};
+
+type WorldResolvedLaunchEntry = WorldEntryPointReference & {
+  localContactNpcId: string | null;
+  localContactTemporaryActorLabel: string | null;
+  temporaryLocalActors: Array<{ label: string; summary: string }>;
+};
+
+function addEntryPointIssues(
+  issues: EntryPointReferenceIssue[],
+  ctx: z.RefinementCtx,
+  pathPrefix: PropertyKey[] = [],
+) {
+  for (const issue of issues) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: [...pathPrefix, ...issue.path],
+      message: issue.message,
+    });
+  }
+}
+
+export function validateEntryPointReferencesAgainstWorld(
+  entryPoint: WorldEntryPointReference,
+  world: {
+    locations: Array<{ id: string }>;
+    npcs: Array<{ id: string }>;
+    information: Array<{ id: string }>;
+  },
+): EntryPointReferenceIssue[] {
+  const issues: EntryPointReferenceIssue[] = [];
+  const locationIds = new Set(world.locations.map((location) => location.id));
+  const npcIds = new Set(world.npcs.map((npc) => npc.id));
+  const informationIds = new Set(world.information.map((information) => information.id));
+
+  if (!locationIds.has(entryPoint.startLocationId)) {
+    issues.push({
+      path: ["startLocationId"],
+      message: "Entry point startLocationId must reference a known location.",
+    });
+  }
+
+  entryPoint.presentNpcIds.forEach((npcId, npcIndex) => {
+    if (!npcIds.has(npcId)) {
+      issues.push({
+        path: ["presentNpcIds", npcIndex],
+        message: "Entry point presentNpcIds must reference known NPCs.",
+      });
+    }
+  });
+
+  entryPoint.initialInformationIds.forEach((informationId, infoIndex) => {
+    if (!informationIds.has(informationId)) {
+      issues.push({
+        path: ["initialInformationIds", infoIndex],
+        message: "Entry point initialInformationIds must reference known information nodes.",
+      });
+    }
+  });
+
+  return issues;
+}
+
+export function validateResolvedLaunchEntryAgainstWorld(
+  entryPoint: WorldResolvedLaunchEntry,
+  world: {
+    locations: Array<{ id: string }>;
+    edges: Array<{ sourceId: string; targetId: string }>;
+    npcs: Array<{ id: string; currentLocationId: string }>;
+    information: Array<{ id: string; accessibility: string }>;
+  },
+): EntryPointReferenceIssue[] {
+  const issues = validateEntryPointReferencesAgainstWorld(entryPoint, world);
+  const npcMap = new Map(world.npcs.map((npc) => [npc.id, npc]));
+  const informationMap = new Map(world.information.map((information) => [information.id, information]));
+
+  entryPoint.presentNpcIds.forEach((npcId, npcIndex) => {
+    const npc = npcMap.get(npcId);
+    if (npc && npc.currentLocationId !== entryPoint.startLocationId) {
+      issues.push({
+        path: ["presentNpcIds", npcIndex],
+        message: "Resolved launch entries may only include NPCs already at the start location.",
+      });
+    }
+  });
+
+  if (entryPoint.localContactNpcId) {
+    if (!npcMap.has(entryPoint.localContactNpcId)) {
+      issues.push({
+        path: ["localContactNpcId"],
+        message: "Resolved launch entry localContactNpcId must reference a known NPC.",
+      });
+    }
+
+    if (!entryPoint.presentNpcIds.includes(entryPoint.localContactNpcId)) {
+      issues.push({
+        path: ["localContactNpcId"],
+        message: "Resolved launch entry localContactNpcId must be included in presentNpcIds.",
+      });
+    }
+
+    const localContact = npcMap.get(entryPoint.localContactNpcId);
+    if (localContact && localContact.currentLocationId !== entryPoint.startLocationId) {
+      issues.push({
+        path: ["localContactNpcId"],
+        message: "Resolved launch entry localContactNpcId must already be at the start location.",
+      });
+    }
+  }
+
+  if (entryPoint.localContactTemporaryActorLabel) {
+    const temporaryActorLabels = new Set(
+      entryPoint.temporaryLocalActors.map((actor) => actor.label),
+    );
+
+    if (!temporaryActorLabels.has(entryPoint.localContactTemporaryActorLabel)) {
+      issues.push({
+        path: ["localContactTemporaryActorLabel"],
+        message: "Resolved launch entry temporary local contact must match one temporaryLocalActors label.",
+      });
+    }
+  }
+
+  entryPoint.initialInformationIds.forEach((informationId, infoIndex) => {
+    const information = informationMap.get(informationId);
+    if (information?.accessibility === "secret") {
+      issues.push({
+        path: ["initialInformationIds", infoIndex],
+        message: "Resolved launch entries may not seed secret information.",
+      });
+    }
+  });
+
+  const adjacency = buildAdjacency(world);
+  const minimumNearbyLocations = minimumEntryRadius(world.locations.length);
+  const nearbyReach = countLocationsWithinHops(adjacency, entryPoint.startLocationId, 4);
+
+  if (nearbyReach < minimumNearbyLocations) {
+    issues.push({
+      path: ["startLocationId"],
+      message: `Resolved launch entry must reach at least ${minimumNearbyLocations} locations within four hops, but only reaches ${nearbyReach}.`,
+    });
+  }
+
+  return issues;
+}
 
 const explanationThreadSchema = z.object({
   key: z.string().trim().min(1),
@@ -471,17 +729,9 @@ export const generatedEconomyMaterialLifeInputSchema = z
     });
   });
 
-const entryContextSchema = z.object({
-  title: z.string().trim().min(1),
-  summary: z.string().trim().min(1),
-  startLocationId: z.string().trim().min(1),
+const entryContextSchema = generatedEntryContextSchema.extend({
   presentNpcIds: z.array(z.string().trim().min(1)).min(1),
   initialInformationIds: z.array(z.string().trim().min(1)).min(1),
-  immediatePressure: z.string().trim().min(1),
-  publicLead: z.string().trim().min(1),
-  localContactNpcId: z.string().trim().min(1),
-  mundaneActionPath: z.string().trim().min(1),
-  evidenceWorldAlreadyMoving: z.string().trim().min(1),
 });
 
 export const generatedEntryContextsInputSchema = z.object({
@@ -639,33 +889,15 @@ export const generatedWorldModuleSchema = z
     });
 
     draft.entryPoints.forEach((entryPoint, index) => {
-      if (!locationIds.has(entryPoint.startLocationId)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["entryPoints", index, "startLocationId"],
-          message: "Entry point startLocationId must reference a known location.",
-        });
-      }
-
-      entryPoint.presentNpcIds.forEach((npcId, npcIndex) => {
-        if (!npcIds.has(npcId)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ["entryPoints", index, "presentNpcIds", npcIndex],
-            message: "Entry point presentNpcIds must reference known NPCs.",
-          });
-        }
-      });
-
-      entryPoint.initialInformationIds.forEach((informationId, infoIndex) => {
-        if (!informationIds.has(informationId)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ["entryPoints", index, "initialInformationIds", infoIndex],
-            message: "Entry point initialInformationIds must reference known information nodes.",
-          });
-        }
-      });
+      addEntryPointIssues(
+        validateEntryPointReferencesAgainstWorld(entryPoint, {
+          locations: draft.locations,
+          npcs: draft.npcs,
+          information: draft.information,
+        }),
+        ctx,
+        ["entryPoints", index],
+      );
     });
   });
 
@@ -786,19 +1018,38 @@ export const campaignDraftRequestSchema = z.object({
   progressId: z.string().trim().min(1).optional(),
 });
 
+export const customEntryResolutionRequestSchema = z.object({
+  moduleId: z.string().trim().min(1, "Module selection is required."),
+  templateId: z.string().trim().min(1, "Template selection is required."),
+  prompt: z.string().trim().min(1, "Custom entry prompt is required."),
+});
+
+function hasExactlyOneLaunchEntrySelection(input: {
+  entryPointId?: string;
+  customEntryPoint?: unknown;
+}) {
+  return (input.entryPointId !== undefined) !== (input.customEntryPoint !== undefined);
+}
+
 export const campaignOpeningDraftRequestSchema = z.object({
   moduleId: z.string().trim().min(1, "Module selection is required."),
   templateId: z.string().trim().min(1, "Template selection is required."),
-  entryPointId: z.string().trim().min(1, "Entry point selection is required."),
+  entryPointId: z.string().trim().min(1, "Entry point selection is required.").optional(),
+  customEntryPoint: resolvedLaunchEntrySchema.optional(),
   prompt: z.string().trim().optional(),
   previousDraft: generatedCampaignOpeningSchema.optional(),
+}).refine(hasExactlyOneLaunchEntrySelection, {
+  message: "Must provide exactly one of entryPointId or customEntryPoint.",
 });
 
 export const campaignCreateRequestSchema = z.object({
   moduleId: z.string().trim().min(1, "Module selection is required."),
   templateId: z.string().trim().min(1, "Template selection is required."),
-  entryPointId: z.string().trim().min(1, "Entry point selection is required."),
+  entryPointId: z.string().trim().min(1, "Entry point selection is required.").optional(),
+  customEntryPoint: resolvedLaunchEntrySchema.optional(),
   opening: generatedCampaignOpeningSchema,
+}).refine(hasExactlyOneLaunchEntrySelection, {
+  message: "Must provide exactly one of entryPointId or customEntryPoint.",
 });
 
 export const moduleCreateRequestSchema = z.object({

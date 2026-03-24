@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { generatedWorldModuleSchema } from "./session-zero";
+import {
+  campaignCreateRequestSchema,
+  campaignOpeningDraftRequestSchema,
+  customResolvedLaunchEntryDraftSchema,
+  generatedWorldModuleSchema,
+  validateResolvedLaunchEntryAgainstWorld,
+} from "./session-zero";
 import type { GeneratedWorldModule } from "./types";
 
 function createWorld(): GeneratedWorldModule {
@@ -275,4 +281,133 @@ test("generatedWorldModuleSchema rejects market prices with unknown factionId", 
 
   assert.equal(parsed.success, false);
   assert.match(JSON.stringify(parsed.error?.flatten()), /factionId/);
+});
+
+test("campaign launch request schemas enforce strict XOR for entry selection", () => {
+  const openingPayload = {
+    moduleId: "mod_1",
+    templateId: "tpl_1",
+    opening: {
+      narration: "Rain glistens across the checkpoint.",
+      activeThreat: "The line is about to be searched.",
+      entryPointId: "entry_1",
+      locationNodeId: "loc_gate",
+      presentNpcIds: ["npc_4"],
+      citedInformationIds: ["info_2"],
+      scene: {
+        title: "At the Gate",
+        summary: "The checkpoint tightens as you arrive.",
+        location: "Gate",
+        atmosphere: "Wet stone and restless guards.",
+        suggestedActions: ["Join the line"],
+      },
+    },
+  };
+
+  assert.equal(
+    campaignOpeningDraftRequestSchema.safeParse({
+      moduleId: "mod_1",
+      templateId: "tpl_1",
+      entryPointId: "entry_1",
+      customEntryPoint: {
+        id: "custom_entry_1",
+        title: "Courier at Dawn",
+        summary: "Slip through the gate under borrowed authority.",
+        startLocationId: "loc_gate",
+        presentNpcIds: ["npc_4"],
+        initialInformationIds: ["info_2"],
+        immediatePressure: "Inspections are tightening.",
+        publicLead: "The guide is already scanning the line.",
+        localContactNpcId: "npc_4",
+        localContactTemporaryActorLabel: null,
+        temporaryLocalActors: [],
+        mundaneActionPath: "Join the queue and stay in character.",
+        evidenceWorldAlreadyMoving: "The district is already tense.",
+        isCustom: true,
+        customRequestPrompt: "I want to arrive as a courier.",
+      },
+    }).success,
+    false,
+  );
+  assert.equal(
+    campaignCreateRequestSchema.safeParse(openingPayload).success,
+    false,
+  );
+  assert.equal(
+    campaignCreateRequestSchema.safeParse({
+      ...openingPayload,
+      entryPointId: "entry_1",
+    }).success,
+    true,
+  );
+});
+
+test("custom resolved launch entry draft schema requires presentNpcIds and localContactNpcId", () => {
+  const parsed = customResolvedLaunchEntryDraftSchema.safeParse({
+    title: "Courier at Dawn",
+    summary: "Slip through the gate under borrowed authority.",
+    startLocationId: "loc_gate",
+    initialInformationIds: ["info_2"],
+    immediatePressure: "Inspections are tightening.",
+    publicLead: "The guide is already scanning the line.",
+    mundaneActionPath: "Join the queue and stay in character.",
+    evidenceWorldAlreadyMoving: "The district is already tense.",
+  });
+
+  assert.equal(parsed.success, false);
+  assert.match(JSON.stringify(parsed.error?.flatten()), /presentNpcIds|localContactNpcId/);
+});
+
+test("validateResolvedLaunchEntryAgainstWorld rejects NPC/location mismatch and secret starting information", () => {
+  const world = createWorld();
+  const issues = validateResolvedLaunchEntryAgainstWorld(
+    {
+      id: "custom_entry_1",
+      title: "Wrong Place, Wrong Secrets",
+      summary: "A forced opening that should fail validation.",
+      startLocationId: "loc_gate",
+      presentNpcIds: ["npc_3"],
+      initialInformationIds: ["info_4"],
+      immediatePressure: "The search line is collapsing.",
+      publicLead: "Someone nearby is motioning you over.",
+      localContactNpcId: "npc_3",
+      localContactTemporaryActorLabel: null,
+      temporaryLocalActors: [],
+      mundaneActionPath: "Join the line and keep walking.",
+      evidenceWorldAlreadyMoving: "The checkpoint is already active.",
+    },
+    world,
+  );
+
+  assert.match(JSON.stringify(issues), /presentNpcIds/);
+  assert.match(JSON.stringify(issues), /secret information/);
+});
+
+test("validateResolvedLaunchEntryAgainstWorld allows unnamed-local openings without present named NPCs", () => {
+  const world = createWorld();
+  const issues = validateResolvedLaunchEntryAgainstWorld(
+    {
+      id: "custom_entry_2",
+      title: "Kitchen Shift",
+      summary: "You begin halfway through a dawn tavern shift before the city fully wakes.",
+      startLocationId: "loc_gate",
+      presentNpcIds: [],
+      initialInformationIds: ["info_2"],
+      immediatePressure: "A patrol is about to stop in for a surprise count.",
+      publicLead: "The cellar runner heard the watch arguing nearby.",
+      localContactNpcId: null,
+      localContactTemporaryActorLabel: "cellar runner",
+      temporaryLocalActors: [
+        {
+          label: "cellar runner",
+          summary: "A breathless tavern worker moving crates before the rush.",
+        },
+      ],
+      mundaneActionPath: "Stay on task, listen, and decide whether to keep your head down.",
+      evidenceWorldAlreadyMoving: "The district is already awake and tense before the player acts.",
+    },
+    world,
+  );
+
+  assert.deepEqual(issues, []);
 });

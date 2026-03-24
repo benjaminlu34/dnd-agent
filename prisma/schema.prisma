@@ -65,6 +65,7 @@ model Campaign {
   templateId          String
   moduleSchemaVersion Int                @default(1)
   selectedEntryPointId String
+  customEntryPointJson Json?
   turnLockRequestId   String?
   turnLockSessionId   String?
   turnLockExpiresAt   DateTime?

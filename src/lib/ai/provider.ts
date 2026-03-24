@@ -6,6 +6,7 @@ import { env } from "@/lib/env";
 import { characterTemplateDraftSchema } from "@/lib/game/characters";
 import { MAX_STARTER_ITEMS, normalizeItemNameList } from "@/lib/game/item-utils";
 import {
+  customResolvedLaunchEntryDraftSchema,
   generatedCampaignOpeningSchema,
   generatedEconomyMaterialLifeInputSchema,
   generatedEntryContextsInputSchema,
@@ -27,8 +28,8 @@ import type {
   GeneratedWorldModule,
   LocalTextureSummary,
   OpenWorldGenerationArtifacts,
-  OpenWorldEntryPoint,
   PromotedNpcHydrationDraft,
+  ResolvedLaunchEntry,
   SpatialPromptContext,
   TurnActionToolCall,
   TurnFetchToolCall,
@@ -58,7 +59,7 @@ import { FetchSynchronizationError } from "@/lib/game/errors";
 type CampaignOpeningInput = {
   module: GeneratedWorldModule;
   character: CharacterTemplate;
-  entryPoint: OpenWorldEntryPoint;
+  entryPoint: ResolvedLaunchEntry;
   artifacts?: OpenWorldGenerationArtifacts | null;
   prompt?: string;
   previousDraft?: GeneratedCampaignOpening;
@@ -66,10 +67,16 @@ type CampaignOpeningInput = {
 
 type StartingLocalNpcDraft = Omit<GeneratedWorldModule["npcs"][number], "id">;
 
+type CustomEntryResolutionInput = {
+  module: GeneratedWorldModule;
+  character: CharacterTemplate;
+  prompt: string;
+};
+
 type StartingLocalHydrationInput = {
   module: GeneratedWorldModule;
   character: CharacterTemplate;
-  entryPoint: OpenWorldEntryPoint;
+  entryPoint: ResolvedLaunchEntry;
   opening: GeneratedCampaignOpening;
   nearbyLocationIds: string[];
 };
@@ -2007,6 +2014,12 @@ const openingTool = {
   description: "Generate the opening scene for a chosen entry point.",
   input_schema: z.toJSONSchema(generatedCampaignOpeningSchema),
 };
+
+const customEntryResolutionTool = createStructuredTool(
+  "resolve_custom_entry_point",
+  "Resolve a player-authored custom entry into an existing grounded launch entry using only provided ids.",
+  customResolvedLaunchEntryDraftSchema,
+);
 
 const promotedNpcHydrationSchema = z.object({
   summary: z.string().trim().min(1),
@@ -4538,11 +4551,16 @@ class DungeonMasterClient {
     const seededInformation = input.module.information.filter((info) =>
       input.entryPoint.initialInformationIds.includes(info.id),
     );
+    const temporaryLocals = input.entryPoint.temporaryLocalActors;
     const system = [
       "Write the opening scene for a chosen entry point in an open-world solo RPG.",
       "Stay inside the selected entry-point bubble and do not invent off-screen mechanical facts.",
-      "Open on immediate pressure, sensory detail, and a situation a normal person can act on right now.",
+      "Open on immediate lived circumstance, sensory detail, and a situation a normal person can act on right now.",
+      "The opening does not need to be grand, exceptional, or high drama. Ordinary work, travel, errands, routine obligations, or a quiet departure are all valid starts.",
+      "Immediate pressure may be mundane and local: being late, a shift starting, weather turning, a line forming, a supervisor watching, stock running short, a cart breaking down, or neighbors noticing something off.",
+      "Do not force a quest-giver, crisis escalation, conspiracy reveal, or dramatic named-NPC confrontation if the launch entry is grounded in ordinary life.",
       "Avoid prophecy, trailer voiceover, destiny framing, and broad setting-summary prose.",
+      "If the launch entry uses unnamed temporary locals instead of named NPCs, treat them as real scene participants and do not force a named contact into the opening.",
       "Scene summary must be 40 words or fewer.",
       "Return narration, an active threat, a scene summary, and exact ids for the starting location, present NPCs, and cited information via the provided tool schema.",
     ].join("\n");
@@ -4560,15 +4578,29 @@ class DungeonMasterClient {
               regionalLife: input.artifacts.regionalLife.locations.filter(
                 (entry) => idsReferToSameEntity(entry.locationId, input.entryPoint.startLocationId),
               ),
-              entryContext: input.artifacts.entryContexts.entryPoints.find(
-                (entry) => entry.id === input.entryPoint.id,
-              ),
+              entryContext: {
+                id: input.entryPoint.id,
+                title: input.entryPoint.title,
+                summary: input.entryPoint.summary,
+                startLocationId: input.entryPoint.startLocationId,
+                presentNpcIds: input.entryPoint.presentNpcIds,
+                initialInformationIds: input.entryPoint.initialInformationIds,
+                immediatePressure: input.entryPoint.immediatePressure,
+                publicLead: input.entryPoint.publicLead,
+                localContactNpcId: input.entryPoint.localContactNpcId,
+                localContactTemporaryActorLabel: input.entryPoint.localContactTemporaryActorLabel,
+                temporaryLocalActors: input.entryPoint.temporaryLocalActors,
+                mundaneActionPath: input.entryPoint.mundaneActionPath,
+                evidenceWorldAlreadyMoving: input.entryPoint.evidenceWorldAlreadyMoving,
+                isCustom: input.entryPoint.isCustom,
+              },
             }
           : null,
       ),
       formatPromptBlock("entry_point", input.entryPoint),
       formatPromptBlock("start_location", location),
       formatPromptBlock("present_npcs", presentNpcs),
+      formatPromptBlock("temporary_locals", temporaryLocals),
       formatPromptBlock(
         "seeded_information",
         seededInformation.map((entry) => ({
@@ -4631,6 +4663,78 @@ class DungeonMasterClient {
         message: error instanceof Error ? error.message : String(error),
       });
       throw new Error(error instanceof Error ? error.message : "Opening generation failed.");
+    }
+  }
+
+  async resolveCustomEntryPoint(
+    input: CustomEntryResolutionInput,
+  ): Promise<z.infer<typeof customResolvedLaunchEntryDraftSchema>> {
+    const locationOptions = input.module.locations.map((location) => ({
+      id: location.id,
+      name: location.name,
+      type: location.type,
+    }));
+    const npcOptions = input.module.npcs.map((npc) => ({
+      id: npc.id,
+      name: npc.name,
+      role: npc.role,
+      currentLocationId: npc.currentLocationId,
+    }));
+    const informationOptions = input.module.information.map((information) => ({
+      id: information.id,
+      title: information.title,
+      summary: information.summary,
+      accessibility: information.accessibility,
+      locationId: information.locationId,
+      factionId: information.factionId,
+      sourceNpcId: information.sourceNpcId,
+    }));
+
+    try {
+      const response = await runCompletion({
+        system: [
+          "Resolve a player's desired campaign opening into a grounded launch entry for an open-world solo RPG.",
+          "Treat the player's examples as signals about social scale, anonymity, routine, and tone, not as nouns you must mirror literally.",
+          "A valid start may be ordinary and low-status: regular work, local routine, private obligations, travel preparation, or leaving a familiar place without spectacle.",
+          "Do not bias toward dramatic intrigue, combat readiness, elite roles, or special destiny framing.",
+          "Use only the provided canonical ids exactly as written.",
+          "Do not invent locations, NPCs, factions, information, or new ids.",
+          "Do not move NPCs from their authored currentLocationId.",
+          "Choose present NPCs only from the selected start location.",
+          "If no suitable named local is needed, you may leave presentNpcIds empty and instead seed temporary unnamed locals.",
+          "Use localContactNpcId only when the opening should hinge on a named NPC already authored in the world.",
+          "Use localContactTemporaryActorLabel and temporaryLocalActors when the opening should hinge on unnamed locals or ordinary roles already implied by the place.",
+          "If localContactNpcId is null, localContactTemporaryActorLabel must match one temporaryLocalActors label.",
+          "Do not invent named NPCs to satisfy the request when unnamed locals are enough.",
+          "initialInformationIds may include only public or guarded information, never secret information.",
+          "If the player's request is unsupported, repair it into the nearest honest version the world can support.",
+          "Keep title and summary concrete, local, and player-facing.",
+          "Return only the structured launch entry payload.",
+        ].join("\n"),
+        user: [
+          formatPromptBlock("module_summary", summarizeWorld(input.module)),
+          formatPromptBlock("player_request", input.prompt),
+          formatPromptBlock("character", {
+            name: input.character.name,
+            archetype: input.character.archetype,
+            backstory: input.character.backstory,
+          }),
+          formatPromptBlock("valid_locations", locationOptions),
+          formatPromptBlock("valid_npcs", npcOptions),
+          formatPromptBlock("valid_information", informationOptions),
+        ].join("\n\n"),
+        tools: [customEntryResolutionTool],
+        maxTokens: 1400,
+      });
+
+      const parsed = customResolvedLaunchEntryDraftSchema.safeParse(response?.input);
+      if (!parsed.success) {
+        throw new Error(`Custom entry resolution returned invalid structured data: ${parsed.error.message}`);
+      }
+
+      return parsed.data;
+    } catch (error) {
+      throw new Error(error instanceof Error ? error.message : "Custom entry resolution failed.");
     }
   }
 

@@ -5,6 +5,8 @@ import { toCampaignCharacter, toCharacterStats } from "@/lib/game/characters";
 import { parseTurnResultPayloadJson, parseCampaignRuntimeStateJson, approvalBandForValue, toCampaignRuntimeStateJson, toFactionResourcesJson } from "@/lib/game/json-contracts";
 import { createAdHocCampaignInventoryItem } from "@/lib/game/items";
 import {
+  resolvedLaunchEntrySchema,
+  validateResolvedLaunchEntryAgainstWorld,
   generatedWorldModuleSchema,
   openWorldGenerationArtifactsSchema,
 } from "@/lib/game/session-zero";
@@ -43,6 +45,7 @@ import type {
   NpcSummary,
   PlayerCampaignSnapshot,
   PromptInventoryItem,
+  ResolvedLaunchEntry,
   RelationshipHistory,
   RecentLocalEventSummary,
   RouteSummary,
@@ -98,6 +101,98 @@ function parseOpenWorldGenerationArtifacts(value: unknown): OpenWorldGenerationA
   return openWorldGenerationArtifactsSchema.parse(value);
 }
 
+function fallbackLocalContactNpcId(
+  world: GeneratedWorldModule,
+  entryPoint: GeneratedWorldModule["entryPoints"][number],
+) {
+  return (
+    entryPoint.presentNpcIds[0]
+    ?? world.npcs.find((npc) => npc.currentLocationId === entryPoint.startLocationId)?.id
+    ?? null
+  );
+}
+
+function createFallbackResolvedLaunchEntry(
+  world: GeneratedWorldModule,
+  entryPoint: GeneratedWorldModule["entryPoints"][number],
+): ResolvedLaunchEntry {
+  const localContactNpcId = fallbackLocalContactNpcId(world, entryPoint);
+
+  if (!localContactNpcId) {
+    throw new Error("Selected entry point cannot be normalized because no local contact NPC is available.");
+  }
+
+  return resolvedLaunchEntrySchema.parse({
+    ...entryPoint,
+    presentNpcIds: Array.from(new Set([...entryPoint.presentNpcIds, localContactNpcId])),
+    immediatePressure: entryPoint.summary,
+    publicLead: entryPoint.summary,
+    localContactNpcId,
+    localContactTemporaryActorLabel: null,
+    temporaryLocalActors: [],
+    mundaneActionPath: "Take stock of the scene and engage with the nearest visible local.",
+    evidenceWorldAlreadyMoving: "The opening situation is already in motion before the player intervenes.",
+    isCustom: false,
+    customRequestPrompt: null,
+  });
+}
+
+function resolveStockLaunchEntry(input: {
+  world: GeneratedWorldModule;
+  artifacts: OpenWorldGenerationArtifacts | null;
+  entryPointId: string;
+}): ResolvedLaunchEntry {
+  const entryPoint = input.world.entryPoints.find((entry) => entry.id === input.entryPointId);
+
+  if (!entryPoint) {
+    throw new Error("Selected entry point was not found.");
+  }
+
+  const entryContext = input.artifacts?.entryContexts.entryPoints.find(
+    (entry) => entry.id === input.entryPointId,
+  );
+
+  if (entryContext) {
+    return resolvedLaunchEntrySchema.parse({
+      ...entryContext,
+      localContactTemporaryActorLabel: null,
+      temporaryLocalActors: [],
+      isCustom: false,
+      customRequestPrompt: null,
+    });
+  }
+
+  return createFallbackResolvedLaunchEntry(input.world, entryPoint);
+}
+
+function normalizeLaunchEntrySelection(input: {
+  world: GeneratedWorldModule;
+  artifacts: OpenWorldGenerationArtifacts | null;
+  entryPointId?: string;
+  customEntryPoint?: ResolvedLaunchEntry;
+}): ResolvedLaunchEntry {
+  if (input.customEntryPoint) {
+    const entryPoint = resolvedLaunchEntrySchema.parse(input.customEntryPoint);
+    const issues = validateResolvedLaunchEntryAgainstWorld(entryPoint, input.world);
+
+    if (issues.length) {
+      throw new Error(`Custom launch entry failed validation: ${issues.map((issue) => issue.message).join("; ")}`);
+    }
+
+    return entryPoint;
+  }
+
+  if (!input.entryPointId) {
+    throw new Error("A stock or custom launch entry selection is required.");
+  }
+
+  return resolveStockLaunchEntry({
+    world: input.world,
+    artifacts: input.artifacts,
+    entryPointId: input.entryPointId,
+  });
+}
+
 function collectNearbyLocationIds(world: GeneratedWorldModule, startLocationId: string) {
   const nearby = new Set<string>();
 
@@ -119,10 +214,6 @@ function scopeEntityId(scopeId: string, entityType: string, id: string) {
 
 function toPrismaJsonValue(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
-}
-
-function dayNumberForTime(globalTime: number) {
-  return Math.floor(globalTime / 1440) + 1;
 }
 
 function dayStartTimeForDay(dayNumber: number) {
@@ -339,7 +430,7 @@ function assignStartingLocalNpcIds(
 
 function buildOpeningWorldWithStartingLocals(input: {
   module: GeneratedWorldModule;
-  entryPoint: GeneratedWorldModule["entryPoints"][number];
+  entryPoint: ResolvedLaunchEntry;
   startingLocals: GeneratedWorldModule["npcs"];
 }) {
   const startLocationNpcIds = input.startingLocals
@@ -353,14 +444,19 @@ function buildOpeningWorldWithStartingLocals(input: {
     },
     entryPoint: {
       ...input.entryPoint,
-      presentNpcIds: Array.from(new Set([...input.entryPoint.presentNpcIds, ...startLocationNpcIds])),
+      // Preserve unnamed-local openings by keeping generated starting locals off-scene
+      // unless the launch entry already hinges on named NPCs.
+      presentNpcIds:
+        !input.entryPoint.localContactNpcId && input.entryPoint.presentNpcIds.length === 0
+          ? input.entryPoint.presentNpcIds
+          : Array.from(new Set([...input.entryPoint.presentNpcIds, ...startLocationNpcIds])),
     },
   };
 }
 
 async function generateStartingHydratedNpcs(input: {
   world: GeneratedWorldModule;
-  entryPoint: GeneratedWorldModule["entryPoints"][number];
+  entryPoint: ResolvedLaunchEntry;
   template: CharacterTemplate;
   opening: GeneratedCampaignOpening;
 }) {
@@ -663,6 +759,50 @@ export async function getAdventureModuleForUser(moduleId: string): Promise<Adven
   };
 }
 
+export async function resolveCustomEntryPointForUser(input: {
+  moduleId: string;
+  templateId: string;
+  prompt: string;
+}) {
+  const user = await ensureLocalUser();
+  const [module, template] = await Promise.all([
+    prisma.adventureModule.findFirst({
+      where: { id: input.moduleId, userId: user.id },
+    }),
+    prisma.characterTemplate.findFirst({
+      where: { id: input.templateId, userId: user.id },
+    }),
+  ]);
+
+  if (!module) {
+    return { error: "module_not_found" as const };
+  }
+
+  if (!template) {
+    return { error: "template_not_found" as const };
+  }
+
+  const world = parseWorldTemplate(module.openWorldTemplateJson);
+  const resolvedDraft = await dmClient.resolveCustomEntryPoint({
+    module: world,
+    character: toTemplateRecord(template),
+    prompt: input.prompt,
+  });
+  const resolvedEntryPoint = resolvedLaunchEntrySchema.parse({
+    id: `custom_entry_${randomUUID()}`,
+    ...resolvedDraft,
+    isCustom: true,
+    customRequestPrompt: input.prompt.trim(),
+  });
+  const issues = validateResolvedLaunchEntryAgainstWorld(resolvedEntryPoint, world);
+
+  if (issues.length) {
+    throw new Error(`Resolved custom entry failed validation: ${issues.map((issue) => issue.message).join("; ")}`);
+  }
+
+  return { entryPoint: resolvedEntryPoint };
+}
+
 export async function createAdventureModule(input: {
   draft: GeneratedWorldModule;
   artifacts?: OpenWorldGenerationArtifacts;
@@ -723,7 +863,8 @@ export async function deleteAdventureModuleForUser(moduleId: string) {
 export async function generateCampaignOpeningDraftForUser(input: {
   moduleId: string;
   templateId: string;
-  entryPointId: string;
+  entryPointId?: string;
+  customEntryPoint?: ResolvedLaunchEntry;
   prompt?: string;
   previousDraft?: GeneratedCampaignOpening;
 }) {
@@ -747,17 +888,18 @@ export async function generateCampaignOpeningDraftForUser(input: {
 
   const world = parseWorldTemplate(module.openWorldTemplateJson);
   const generationArtifacts = parseOpenWorldGenerationArtifacts(module.openWorldGenerationArtifactsJson);
-  const entryPoint = world.entryPoints.find((entry) => entry.id === input.entryPointId);
-
-  if (!entryPoint) {
-    throw new Error("Entry point not found on selected module.");
-  }
+  const entryPoint = normalizeLaunchEntrySelection({
+    world,
+    artifacts: generationArtifacts,
+    entryPointId: input.entryPointId,
+    customEntryPoint: input.customEntryPoint,
+  });
 
   const previewCampaignId = `preview_${randomUUID()}`;
   const { world: previewWorld, entryPoint: previewEntryPoint } = instanceWorldForCampaign(
     previewCampaignId,
     world,
-    input.entryPointId,
+    entryPoint,
   );
   const character = toTemplateRecord(template);
   const preliminaryOpening = await dmClient.generateCampaignOpening({
@@ -857,7 +999,7 @@ async function generateRequiredInitialSchedules(input: {
   module: Prisma.AdventureModuleGetPayload<Record<string, never>>;
   opening: GeneratedCampaignOpening;
   world: GeneratedWorldModule;
-  entryPoint: GeneratedWorldModule["entryPoints"][number];
+  entryPoint: ResolvedLaunchEntry;
 }) {
   const discoveredInformationIds = new Set(input.entryPoint.initialInformationIds);
   const schedules: Array<{ dayNumber: number; schedule: GeneratedDailySchedule }> = [];
@@ -891,10 +1033,10 @@ async function createCampaignInTx(
     userId: string;
     module: Prisma.AdventureModuleGetPayload<Record<string, never>>;
     template: CharacterTemplate;
-    entryPointId: string;
+    entryPoint: ResolvedLaunchEntry;
     opening: GeneratedCampaignOpening;
     instancedWorld: GeneratedWorldModule;
-    instancedEntryPoint: GeneratedWorldModule["entryPoints"][number];
+    instancedEntryPoint: ResolvedLaunchEntry;
     hydratedStartingNpcs: GeneratedWorldModule["npcs"];
     locationTextures: Map<string, LocalTextureSummary>;
     initialSchedules: Array<{ dayNumber: number; schedule: GeneratedDailySchedule }>;
@@ -914,7 +1056,10 @@ async function createCampaignInTx(
       moduleId: input.module.id,
       templateId: input.template.id,
       moduleSchemaVersion: input.module.schemaVersion,
-      selectedEntryPointId: input.entryPointId,
+      selectedEntryPointId: input.entryPoint.id,
+      customEntryPointJson: input.entryPoint.isCustom
+        ? toPrismaJsonValue(input.entryPoint)
+        : Prisma.JsonNull,
       generatedThroughDay: 2,
       stateJson: toCampaignRuntimeStateJson(state),
       characterInstance: {
@@ -1057,6 +1202,27 @@ async function createCampaignInTx(
         })),
         ...hydratedStartingNpcRecords,
       ],
+    });
+  }
+
+  if (input.instancedEntryPoint.temporaryLocalActors.length) {
+    await tx.temporaryActor.createMany({
+      data: input.instancedEntryPoint.temporaryLocalActors.map((actor) => ({
+        id: `tactor_${randomUUID()}`,
+        campaignId: campaign.id,
+        label: actor.label,
+        currentLocationId: input.instancedEntryPoint.startLocationId,
+        interactionCount: 0,
+        firstSeenAtTurn: 0,
+        lastSeenAtTurn: 0,
+        lastSeenAtTime: state.globalTime,
+        recentTopics: [],
+        lastSummary: actor.summary,
+        holdsInventory: false,
+        affectedWorldState: false,
+        isInMemoryGraph: false,
+        promotedNpcId: null,
+      })),
     });
   }
 
@@ -1220,7 +1386,8 @@ async function createCampaignInTx(
 export async function createCampaignFromModuleForUser(input: {
   moduleId: string;
   templateId: string;
-  entryPointId: string;
+  entryPointId?: string;
+  customEntryPoint?: ResolvedLaunchEntry;
   opening?: GeneratedCampaignOpening;
 }) {
   const user = await ensureLocalUser();
@@ -1243,17 +1410,19 @@ export async function createCampaignFromModuleForUser(input: {
 
   const world = parseWorldTemplate(module.openWorldTemplateJson);
   const generationArtifacts = parseOpenWorldGenerationArtifacts(module.openWorldGenerationArtifactsJson);
-  const entryPoint = world.entryPoints.find((entry) => entry.id === input.entryPointId);
-  if (!entryPoint) {
-    throw new Error("Selected entry point was not found.");
-  }
+  const entryPoint = normalizeLaunchEntrySelection({
+    world,
+    artifacts: generationArtifacts,
+    entryPointId: input.entryPointId,
+    customEntryPoint: input.customEntryPoint,
+  });
 
   const templateRecord = toTemplateRecord(template);
   const campaignId = `camp_${randomUUID()}`;
   const { world: instancedWorld, entryPoint: instancedEntryPoint } = instanceWorldForCampaign(
     campaignId,
     world,
-    input.entryPointId,
+    entryPoint,
   );
   const preliminaryOpening =
     input.opening ??
@@ -1299,7 +1468,7 @@ export async function createCampaignFromModuleForUser(input: {
       userId: user.id,
       module,
       template: templateRecord,
-      entryPointId: input.entryPointId,
+      entryPoint,
       opening,
       instancedWorld,
       instancedEntryPoint,
@@ -3005,3 +3174,9 @@ export async function getPromptContext(snapshot: CampaignSnapshot): Promise<Spat
     dayCount: Math.floor(snapshot.state.globalTime / 1440) + 1,
   };
 }
+
+export const repositoryTestUtils = {
+  createFallbackResolvedLaunchEntry,
+  normalizeLaunchEntrySelection,
+  resolveStockLaunchEntry,
+};

@@ -326,6 +326,23 @@ export type OpenWorldEntryPoint = {
   initialInformationIds: string[];
 };
 
+export type LaunchTemporaryActor = {
+  label: string;
+  summary: string;
+};
+
+export type ResolvedLaunchEntry = OpenWorldEntryPoint & {
+  immediatePressure: string;
+  publicLead: string;
+  localContactNpcId: string | null;
+  localContactTemporaryActorLabel: string | null;
+  temporaryLocalActors: LaunchTemporaryActor[];
+  mundaneActionPath: string;
+  evidenceWorldAlreadyMoving: string;
+  isCustom: boolean;
+  customRequestPrompt: string | null;
+};
+
 export type WorldGenerationStageName =
   | "world_bible"
   | "world_spine"

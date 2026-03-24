@@ -38,7 +38,10 @@ const FACTION_TEXT_STOPWORDS = new Set([
   "cult",
 ]);
 
-function buildAdjacency(module: GeneratedWorldModule) {
+export function buildAdjacency(module: {
+  locations: Array<{ id: string }>;
+  edges: Array<{ sourceId: string; targetId: string }>;
+}) {
   const adjacency = new Map<string, Set<string>>();
 
   for (const location of module.locations) {
@@ -521,36 +524,7 @@ export function validateWorldModuleCoherence(module: GeneratedWorldModule): Vali
   };
 }
 
-function shortestHops(adjacency: Map<string, Set<string>>, from: string, to: string) {
-  if (from === to) {
-    return 0;
-  }
-
-  const visited = new Set<string>([from]);
-  const queue: Array<{ id: string; depth: number }> = [{ id: from, depth: 0 }];
-
-  while (queue.length) {
-    const current = queue.shift();
-    if (!current) {
-      continue;
-    }
-
-    for (const neighbor of adjacency.get(current.id) ?? []) {
-      if (neighbor === to) {
-        return current.depth + 1;
-      }
-
-      if (!visited.has(neighbor)) {
-        visited.add(neighbor);
-        queue.push({ id: neighbor, depth: current.depth + 1 });
-      }
-    }
-  }
-
-  return Number.POSITIVE_INFINITY;
-}
-
-function countLocationsWithinHops(
+export function countLocationsWithinHops(
   adjacency: Map<string, Set<string>>,
   startLocationId: string,
   maxHops: number,
@@ -580,7 +554,7 @@ function countLocationsWithinHops(
   return visited.size;
 }
 
-function minimumEntryRadius(totalLocations: number) {
+export function minimumEntryRadius(totalLocations: number) {
   return Math.min(totalLocations, Math.max(4, Math.ceil(totalLocations * 0.4)));
 }
 

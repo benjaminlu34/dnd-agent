@@ -6,6 +6,7 @@ import type {
   AdventureModuleDetail,
   CharacterTemplate,
   GeneratedCampaignOpening,
+  ResolvedLaunchEntry,
 } from "@/lib/game/types";
 import { backOrPush } from "@/lib/ui/navigation";
 
@@ -17,6 +18,8 @@ function fieldClassName(multiline = false) {
   ].join(" ");
 }
 
+type LaunchMode = "stock" | "custom";
+
 export function CampaignCreationApp({
   moduleId,
   templateId,
@@ -27,9 +30,13 @@ export function CampaignCreationApp({
   const router = useRouter();
   const [module, setModule] = useState<AdventureModuleDetail | null>(null);
   const [character, setCharacter] = useState<CharacterTemplate | null>(null);
+  const [launchMode, setLaunchMode] = useState<LaunchMode>("stock");
   const [selectedEntryPointId, setSelectedEntryPointId] = useState<string | null>(null);
+  const [customEntryPrompt, setCustomEntryPrompt] = useState("");
+  const [customEntryPoint, setCustomEntryPoint] = useState<ResolvedLaunchEntry | null>(null);
   const [draft, setDraft] = useState<GeneratedCampaignOpening | null>(null);
   const [loadingContext, setLoadingContext] = useState(true);
+  const [resolvingCustomEntry, setResolvingCustomEntry] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [launching, setLaunching] = useState(false);
   const [followUpPrompt, setFollowUpPrompt] = useState("");
@@ -111,9 +118,25 @@ export function CampaignCreationApp({
     };
   }
 
+  const hasActiveLaunchSelection =
+    launchMode === "custom" ? Boolean(customEntryPoint) : Boolean(selectedEntryPointId);
+
   const generateDraft = useCallback(
     async (prompt?: string, previousDraft?: GeneratedCampaignOpening) => {
-      if (!moduleId || !templateId || !selectedEntryPointId) {
+      if (!moduleId || !templateId) {
+        return;
+      }
+
+      const launchSelection =
+        launchMode === "custom"
+          ? customEntryPoint
+            ? { customEntryPoint }
+            : null
+          : selectedEntryPointId
+            ? { entryPointId: selectedEntryPointId }
+            : null;
+
+      if (!launchSelection) {
         return;
       }
 
@@ -129,7 +152,7 @@ export function CampaignCreationApp({
           body: JSON.stringify({
             moduleId,
             templateId,
-            entryPointId: selectedEntryPointId,
+            ...launchSelection,
             prompt: prompt?.trim() || undefined,
             previousDraft: previousDraft ? normalizeOpeningDraft(previousDraft) : undefined,
           }),
@@ -151,23 +174,75 @@ export function CampaignCreationApp({
         setGenerating(false);
       }
     },
-    [moduleId, templateId, selectedEntryPointId],
+    [customEntryPoint, launchMode, moduleId, selectedEntryPointId, templateId],
   );
+
+  async function resolveCustomEntry() {
+    if (!moduleId || !templateId || !customEntryPrompt.trim() || resolvingCustomEntry) {
+      return;
+    }
+
+    setResolvingCustomEntry(true);
+    setError(null);
+
+    try {
+      const response = await fetch("/api/campaigns/custom-entry", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          moduleId,
+          templateId,
+          prompt: customEntryPrompt.trim(),
+        }),
+      });
+      const data = (await response.json()) as {
+        entryPoint?: ResolvedLaunchEntry;
+        error?: string;
+      };
+
+      if (!response.ok || !data.entryPoint) {
+        throw new Error(data.error ?? "Failed to resolve custom entry.");
+      }
+
+      setLaunchMode("custom");
+      setCustomEntryPoint(data.entryPoint);
+      setDraft(null);
+    } catch (resolveError) {
+      setError(resolveError instanceof Error ? resolveError.message : "Failed to resolve custom entry.");
+    } finally {
+      setResolvingCustomEntry(false);
+    }
+  }
 
   useEffect(() => {
     setDraft(null);
-  }, [selectedEntryPointId]);
+  }, [launchMode, selectedEntryPointId, customEntryPoint?.id]);
 
   useEffect(() => {
-    if (!module || !character || !selectedEntryPointId || draft || generating) {
+    if (!module || !character || !hasActiveLaunchSelection || draft || generating) {
       return;
     }
 
     void generateDraft();
-  }, [character, draft, generateDraft, generating, module, selectedEntryPointId]);
+  }, [character, draft, generateDraft, generating, hasActiveLaunchSelection, module]);
 
   async function startCampaign() {
-    if (!moduleId || !templateId || !selectedEntryPointId || !draft || launching) {
+    if (!moduleId || !templateId || !draft || launching) {
+      return;
+    }
+
+    const launchSelection =
+      launchMode === "custom"
+        ? customEntryPoint
+          ? { customEntryPoint }
+          : null
+        : selectedEntryPointId
+          ? { entryPointId: selectedEntryPointId }
+          : null;
+
+    if (!launchSelection) {
       return;
     }
 
@@ -183,7 +258,7 @@ export function CampaignCreationApp({
         body: JSON.stringify({
           moduleId,
           templateId,
-          entryPointId: selectedEntryPointId,
+          ...launchSelection,
           opening: normalizeOpeningDraft(draft),
         }),
       });
@@ -210,8 +285,8 @@ export function CampaignCreationApp({
             <div>
               <h1 className="ui-title text-4xl md:text-5xl">Choose your way into the world.</h1>
               <p className="ui-body mt-3 max-w-3xl">
-                Pick an entry point, shape the opening draft, and launch a spatial campaign rooted
-                in the selected start location.
+                Pick a generated entry or ground your own custom arrival, then shape the opening
+                draft before launch.
               </p>
             </div>
             <button
@@ -240,27 +315,73 @@ export function CampaignCreationApp({
               </div>
 
               <div className="app-section p-6">
-                <p className="ui-label">Entry Points</p>
+                <div className="flex items-center justify-between gap-3">
+                  <p className="ui-label">Entry Points</p>
+                  <span className="ui-label text-zinc-500">
+                    {launchMode === "custom" ? "Custom" : "Generated"}
+                  </span>
+                </div>
                 <div className="mt-4 space-y-3">
                   {module.entryPoints.map((entryPoint) => (
                     <button
                       key={entryPoint.id}
                       type="button"
-                      onClick={() => setSelectedEntryPointId(entryPoint.id)}
+                      onClick={() => {
+                        setLaunchMode("stock");
+                        setSelectedEntryPointId(entryPoint.id);
+                      }}
                       className={[
                         "w-full rounded-2xl border p-4 text-left transition-colors",
-                        selectedEntryPointId === entryPoint.id
+                        launchMode === "stock" && selectedEntryPointId === entryPoint.id
                           ? "border-zinc-500 bg-black"
                           : "border-zinc-800 bg-black hover:border-zinc-700",
                       ].join(" ")}
                     >
                       <h3 className="ui-title text-base">{entryPoint.title}</h3>
                       <p className="ui-body mt-2">{entryPoint.summary}</p>
-                      <p className="ui-label mt-3">
-                        {entryPoint.locationName}
-                      </p>
+                      <p className="ui-label mt-3">{entryPoint.locationName}</p>
                     </button>
                   ))}
+                  <div
+                    className={[
+                      "rounded-2xl border p-4 transition-colors",
+                      launchMode === "custom"
+                        ? "border-zinc-500 bg-black"
+                        : "border-zinc-800 bg-black",
+                    ].join(" ")}
+                  >
+                    <button
+                      type="button"
+                      className="w-full text-left"
+                      onClick={() => setLaunchMode("custom")}
+                    >
+                      <h3 className="ui-title text-base">Custom Entry</h3>
+                      <p className="ui-body mt-2">
+                        Describe how you want to arrive, and the system will ground it into the
+                        existing world without inventing new canon.
+                      </p>
+                    </button>
+                    <div className="mt-4 space-y-3">
+                      <textarea
+                        className={fieldClassName(true)}
+                        value={customEntryPrompt}
+                        onChange={(event) => setCustomEntryPrompt(event.target.value)}
+                        placeholder="I want to enter quietly at dawn as a courier, trying to avoid watch attention while looking for the first crack in the city’s routine..."
+                      />
+                      <button
+                        type="button"
+                        className="button-press ui-button-secondary rounded-full px-4 py-2 text-sm font-semibold disabled:opacity-60"
+                        onClick={() => void resolveCustomEntry()}
+                        disabled={!customEntryPrompt.trim() || resolvingCustomEntry}
+                      >
+                        {resolvingCustomEntry
+                          ? "Resolving..."
+                          : customEntryPoint
+                            ? "Re-resolve Entry"
+                            : "Resolve Entry"}
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -279,18 +400,66 @@ export function CampaignCreationApp({
                 <div>
                   <p className="ui-label">Opening Draft</p>
                   <h2 className="ui-title mt-2 text-2xl">
-                    {draft?.scene.title ?? "Generating entry-point opening..."}
+                    {draft?.scene.title
+                      ?? (launchMode === "custom" && !customEntryPoint
+                        ? "Resolve a custom entry to preview the opening."
+                        : "Generating entry-point opening...")}
                   </h2>
                 </div>
                 <button
                   type="button"
                   className="button-press ui-button-secondary rounded-full px-4 py-2 text-sm font-semibold disabled:opacity-60"
                   onClick={() => void generateDraft(followUpPrompt, draft ?? undefined)}
-                  disabled={!selectedEntryPointId || generating}
+                  disabled={!hasActiveLaunchSelection || generating}
                 >
                   {generating ? "Generating..." : "Regenerate"}
                 </button>
               </div>
+
+              {launchMode === "custom" && customEntryPoint ? (
+                <div className="mt-6 rounded-2xl border border-zinc-800 p-4">
+                  <p className="ui-label">Resolved Custom Entry</p>
+                  <h3 className="ui-title mt-3 text-xl">{customEntryPoint.title}</h3>
+                  <p className="ui-body mt-2">{customEntryPoint.summary}</p>
+                  <div className="mt-4 grid gap-4 md:grid-cols-2">
+                    <div className="rounded-2xl border border-zinc-800 p-4">
+                      <p className="ui-label">Start Location</p>
+                      <p className="ui-body mt-2 text-zinc-300">{customEntryPoint.startLocationId}</p>
+                    </div>
+                    <div className="rounded-2xl border border-zinc-800 p-4">
+                      <p className="ui-label">Local Contact</p>
+                      <p className="ui-body mt-2 text-zinc-300">
+                        {customEntryPoint.localContactNpcId
+                          ?? customEntryPoint.localContactTemporaryActorLabel
+                          ?? "None"}
+                      </p>
+                    </div>
+                  </div>
+                  {customEntryPoint.temporaryLocalActors.length ? (
+                    <div className="mt-4 rounded-2xl border border-zinc-800 p-4">
+                      <p className="ui-label">Unnamed Locals</p>
+                      <div className="mt-3 space-y-2">
+                        {customEntryPoint.temporaryLocalActors.map((actor) => (
+                          <div key={actor.label}>
+                            <p className="ui-title text-sm">{actor.label}</p>
+                            <p className="ui-body mt-1 text-zinc-300">{actor.summary}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                  <div className="mt-4 grid gap-4 md:grid-cols-2">
+                    <div className="rounded-2xl border border-zinc-800 p-4">
+                      <p className="ui-label">Immediate Situation</p>
+                      <p className="ui-body mt-2 text-zinc-300">{customEntryPoint.immediatePressure}</p>
+                    </div>
+                    <div className="rounded-2xl border border-zinc-800 p-4">
+                      <p className="ui-label">Open Thread</p>
+                      <p className="ui-body mt-2 text-zinc-300">{customEntryPoint.publicLead}</p>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
 
               <div className="mt-6">
                 <textarea
@@ -318,6 +487,14 @@ export function CampaignCreationApp({
                     </div>
                   </div>
                   <div className="rounded-2xl border border-zinc-800 p-4">
+                    <p className="ui-label">Scene Summary</p>
+                    <p className="ui-body mt-2 text-zinc-300">{draft.scene.summary}</p>
+                  </div>
+                  <div className="rounded-2xl border border-zinc-800 p-4">
+                    <p className="ui-label">Atmosphere</p>
+                    <p className="ui-body mt-2 text-zinc-300">{draft.scene.atmosphere}</p>
+                  </div>
+                  <div className="rounded-2xl border border-zinc-800 p-4">
                     <p className="ui-label">Suggested Actions</p>
                     <div className="mt-3 flex flex-wrap gap-2">
                       {draft.scene.suggestedActions.map((action) => (
@@ -337,7 +514,7 @@ export function CampaignCreationApp({
                 type="button"
                 className="button-press ui-button-primary mt-8 rounded-full px-5 py-3 text-sm font-semibold disabled:opacity-60"
                 onClick={() => void startCampaign()}
-                disabled={!draft || !selectedEntryPointId || launching}
+                disabled={!draft || !hasActiveLaunchSelection || launching}
               >
                 {launching ? "Launching..." : "Launch Campaign"}
               </button>

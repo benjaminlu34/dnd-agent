@@ -9,12 +9,12 @@ import type {
   GeneratedMarketPrice,
   GeneratedNpc,
   GeneratedWorldModule,
-  OpenWorldEntryPoint,
+  ResolvedLaunchEntry,
 } from "@/lib/game/types";
 
 type InstancedWorld = {
   world: GeneratedWorldModule;
-  entryPoint: OpenWorldEntryPoint;
+  entryPoint: ResolvedLaunchEntry;
 };
 
 function scopedId(campaignId: string, entityType: string, id: string) {
@@ -153,7 +153,7 @@ function remapMarketPrice(
 export function instanceWorldForCampaign(
   campaignId: string,
   world: GeneratedWorldModule,
-  entryPointId: string,
+  entryPoint: ResolvedLaunchEntry,
 ): InstancedWorld {
   const factionIds = buildIdMap(world.factions, campaignId, "faction");
   const locationIds = buildIdMap(world.locations, campaignId, "location");
@@ -165,10 +165,28 @@ export function instanceWorldForCampaign(
   const commodityIds = buildIdMap(world.commodities, campaignId, "commodity");
   const marketPriceIds = buildIdMap(world.marketPrices, campaignId, "market-price");
 
-  const entryPoint = world.entryPoints.find((entry) => entry.id === entryPointId);
+  const instancedEntryPoints = world.entryPoints.map((entry) => ({
+    ...entry,
+    startLocationId: locationIds.get(entry.startLocationId) ?? entry.startLocationId,
+    presentNpcIds: entry.presentNpcIds.map((id) => npcIds.get(id) ?? id),
+    initialInformationIds: entry.initialInformationIds.map(
+      (id) => informationIds.get(id) ?? id,
+    ),
+  }));
+  const instancedEntryPoint: ResolvedLaunchEntry = {
+    ...entryPoint,
+    startLocationId: locationIds.get(entryPoint.startLocationId) ?? entryPoint.startLocationId,
+    presentNpcIds: entryPoint.presentNpcIds.map((id) => npcIds.get(id) ?? id),
+    initialInformationIds: entryPoint.initialInformationIds.map(
+      (id) => informationIds.get(id) ?? id,
+    ),
+    localContactNpcId: entryPoint.localContactNpcId
+      ? (npcIds.get(entryPoint.localContactNpcId) ?? entryPoint.localContactNpcId)
+      : null,
+  };
 
-  if (!entryPoint) {
-    throw new Error("Entry point not found during world instancing.");
+  if (entryPoint.isCustom) {
+    instancedEntryPoints.push(instancedEntryPoint);
   }
 
   return {
@@ -191,22 +209,8 @@ export function instanceWorldForCampaign(
       marketPrices: world.marketPrices.map((price) =>
         remapMarketPrice(price, marketPriceIds, commodityIds, locationIds, npcIds, factionIds),
       ),
-      entryPoints: world.entryPoints.map((entry) => ({
-        ...entry,
-        startLocationId: locationIds.get(entry.startLocationId) ?? entry.startLocationId,
-        presentNpcIds: entry.presentNpcIds.map((id) => npcIds.get(id) ?? id),
-        initialInformationIds: entry.initialInformationIds.map(
-          (id) => informationIds.get(id) ?? id,
-        ),
-      })),
+      entryPoints: instancedEntryPoints,
     },
-    entryPoint: {
-      ...entryPoint,
-      startLocationId: locationIds.get(entryPoint.startLocationId) ?? entryPoint.startLocationId,
-      presentNpcIds: entryPoint.presentNpcIds.map((id) => npcIds.get(id) ?? id),
-      initialInformationIds: entryPoint.initialInformationIds.map(
-        (id) => informationIds.get(id) ?? id,
-      ),
-    },
+    entryPoint: instancedEntryPoint,
   };
 }
