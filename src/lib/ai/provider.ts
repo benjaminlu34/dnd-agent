@@ -1550,6 +1550,89 @@ function normalizeRegionalLifeInput(input: unknown, expectedLocations: number) {
   };
 }
 
+function normalizeUniqueStringList(value: unknown, maxItems: number) {
+  const entries = normalizeStringList(value);
+  if (!Array.isArray(entries)) {
+    return value;
+  }
+
+  const normalizedEntries: string[] = [];
+  const seen = new Set<string>();
+
+  for (const entry of entries) {
+    const normalizedEntry = entry.toLowerCase();
+    if (seen.has(normalizedEntry)) {
+      continue;
+    }
+
+    seen.add(normalizedEntry);
+    normalizedEntries.push(entry);
+
+    if (normalizedEntries.length >= maxItems) {
+      break;
+    }
+  }
+
+  return normalizedEntries;
+}
+
+function normalizeSocialCastInput(input: unknown, expectedNpcs: number) {
+  if (!input || typeof input !== "object") {
+    return input;
+  }
+
+  const draft = input as Record<string, unknown>;
+  if (!Array.isArray(draft.npcs)) {
+    return input;
+  }
+
+  return {
+    ...draft,
+    npcs: draft.npcs.slice(0, expectedNpcs).map((npc) => {
+      if (!npc || typeof npc !== "object") {
+        return npc;
+      }
+
+      const normalizedNpc = { ...(npc as Record<string, unknown>) };
+      normalizedNpc.bridgeLocationIds = normalizeUniqueStringList(normalizedNpc.bridgeLocationIds, 2);
+      normalizedNpc.bridgeFactionIds = normalizeUniqueStringList(normalizedNpc.bridgeFactionIds, 2);
+
+      if (typeof normalizedNpc.factionId === "string" && !normalizedNpc.factionId.trim()) {
+        normalizedNpc.factionId = null;
+      }
+
+      if (normalizedNpc.ties && typeof normalizedNpc.ties === "object") {
+        const normalizedTies = { ...(normalizedNpc.ties as Record<string, unknown>) };
+        normalizedTies.locationIds = normalizeUniqueStringList(normalizedTies.locationIds, 2);
+        normalizedTies.factionIds = normalizeUniqueStringList(normalizedTies.factionIds, 2);
+        normalizedTies.economyHooks = normalizeUniqueStringList(normalizedTies.economyHooks, 2);
+        normalizedTies.informationHooks = normalizeUniqueStringList(normalizedTies.informationHooks, 2);
+        normalizedNpc.ties = normalizedTies;
+      }
+
+      return normalizedNpc;
+    }),
+  };
+}
+
+function formatReservedNamesBlock(
+  tag: string,
+  label: string,
+  values: Iterable<string>,
+) {
+  const reserved = uniqueNames(
+    [...values]
+      .map((value) => value.trim())
+      .filter(Boolean),
+  ).sort();
+
+  if (!reserved.length) {
+    return null;
+  }
+
+  return formatPromptBlock(tag, `${label}: ${reserved.join(", ")}`);
+}
+
 async function runStructuredStage<T>({
   stage,
   system,
@@ -3408,6 +3491,16 @@ class DungeonMasterClient {
             .map((npc) => firstNameOf(npc.name))
             .filter(Boolean),
         );
+        const reservedFullNamesBlock = formatReservedNamesBlock(
+          "reserved_npc_full_names",
+          "These full names are already taken in earlier batches and may not be reused",
+          priorNpcNames,
+        );
+        const reservedFirstNamesBlock = formatReservedNamesBlock(
+          "reserved_npc_first_names",
+          "These first names are already taken in earlier batches and may not be reused",
+          priorFirstNames,
+        );
 
         const socialBatch = await runStructuredStage({
           stage: "social_cast",
@@ -3453,9 +3546,12 @@ class DungeonMasterClient {
                   ),
                 }),
               ),
+              ...(reservedFullNamesBlock ? [reservedFullNamesBlock] : []),
+              ...(reservedFirstNamesBlock ? [reservedFirstNamesBlock] : []),
               formatFinalInstruction([
                 "Use only the provided location ids and faction ids.",
                 "For structured fields, use ids like loc_* and fac_* exactly as shown above, never the key= values.",
+                "Treat any reserved_npc_full_names and reserved_npc_first_names blocks as hard ban lists.",
                 `Return exactly ${locationBatch.length} NPCs for this batch, with one currentLocationId per batch location.`,
               ]),
             ].join("\n\n"),
@@ -3464,6 +3560,7 @@ class DungeonMasterClient {
           attempts,
           validationReports,
           stageSummaries,
+          normalizeInput: (input) => normalizeSocialCastInput(input, locationBatch.length),
           validate: (parsed) => {
             const issues: string[] = [];
             const locationIds = new Set(locationBatch.map((location) => location.id));
@@ -4976,6 +5073,7 @@ class DungeonMasterClient {
 export const dmClient = new DungeonMasterClient();
 export const aiProviderTestUtils = {
   extractToolInput,
+  normalizeSocialCastInput,
   normalizeModelToolCall,
   normalizeTurnToolCall,
 };
