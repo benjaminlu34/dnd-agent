@@ -180,7 +180,7 @@ test("buildTurnSystemPrompt hard-locks observe mode to passive tools", () => {
   const prompt = aiProviderTestUtils.buildTurnSystemPrompt("observe");
 
   assert.match(prompt, /MUST invoke exactly one of execute_observe or execute_wait/);
-  assert.match(prompt, /STRICTLY FORBIDDEN from invoking execute_combat, execute_converse, execute_trade, execute_freeform, execute_travel, execute_investigate, or execute_rest/);
+  assert.match(prompt, /STRICTLY FORBIDDEN from invoking execute_combat, execute_converse, execute_scene_interaction, execute_trade, execute_freeform, execute_travel, execute_investigate, or execute_rest/);
   assert.match(prompt, /player character takes no chosen action and speaks no dialogue/);
   assert.match(prompt, /at most 4 short actions/);
 });
@@ -188,10 +188,87 @@ test("buildTurnSystemPrompt hard-locks observe mode to passive tools", () => {
 test("buildTurnSystemPrompt distinguishes same-scene approach from travel", () => {
   const prompt = aiProviderTestUtils.buildTurnSystemPrompt("player_input");
 
+  assert.match(prompt, /Obey the router_constraints block/);
+  assert.match(prompt, /Preserve the player's commitment level/);
+  assert.match(prompt, /written in second person/);
+  assert.match(prompt, /2-5 sentences/);
+  assert.match(prompt, /concrete sensory or environmental detail/);
+  assert.match(prompt, /immediate and embodied/);
+  assert.match(prompt, /Do not merely restate or paraphrase the player's submitted action/);
+  assert.match(prompt, /other party's immediate reply or visible reaction/);
+  assert.match(prompt, /scene in a more specific, changed, or newly clarified state/);
+  assert.match(prompt, /forward-moving beat/);
+  assert.match(prompt, /natural handoff point/);
+  assert.match(prompt, /Use execute_scene_interaction/);
   assert.match(prompt, /leaves the current location for a known adjacent node or route/);
   assert.match(prompt, /Walking across the current scene to a nearby stall, doorway, corner, or present NPC is not travel/);
   assert.match(prompt, /Never use execute_travel just because the player says 'walk over'/);
   assert.match(prompt, /named present NPC's stall, shop, table, cart, or post within the current location is not travel/);
+});
+
+test("parseFinalActionToolCall rejects malformed action payloads", () => {
+  const parsed = aiProviderTestUtils.parseFinalActionToolCall({
+    type: "execute_freeform",
+    actionDescription: "Drift toward the stall",
+    timeMode: "exploration",
+    challengeApproach: "none",
+    intendedMechanicalOutcome: "Buy breakfast",
+    narration: "You head toward the stall.",
+    suggestedActions: ["Wait"],
+    citedEntities: {
+      npcIds: [],
+      locationIds: ["loc_gate"],
+      factionIds: [],
+      commodityIds: [],
+      informationIds: [],
+    },
+  } as unknown as Parameters<typeof aiProviderTestUtils.parseFinalActionToolCall>[0]);
+
+  assert.equal(parsed.success, false);
+});
+
+test("normalizeTurnToolCall strips placeholder citation values from repaired payloads", () => {
+  const normalized = aiProviderTestUtils.normalizeModelToolCall({
+    toolName: "execute_converse",
+    payload: {
+      interlocutor: "Mara Thistle",
+      npcId: "npc_guide",
+      topic: "greeting",
+      narration: "You greet Mara and the bakery's warm scent rolls over you from the counter.",
+      suggestedActions: ["Ask about today's specials"],
+      timeMode: "exploration",
+      citedEntities: {
+        npcIds: ["npc_guide"],
+        locationIds: ["loc_gate"],
+        factionIds: ["none"],
+        commodityIds: ["null", ""],
+        informationIds: ["none"],
+      },
+    },
+    promptContext: createPromptContext(),
+  });
+
+  assert.equal(normalized?.type, "execute_converse");
+  if (!normalized || normalized.type !== "execute_converse") {
+    assert.fail("Expected execute_converse payload.");
+  }
+  assert.deepEqual(normalized.citedEntities.factionIds, []);
+  assert.deepEqual(normalized.citedEntities.commodityIds, []);
+  assert.deepEqual(normalized.citedEntities.informationIds, []);
+});
+
+test("selectPromptContextProfile falls back to full when router confidence is low", () => {
+  assert.equal(
+    aiProviderTestUtils.selectPromptContextProfile(
+      aiProviderTestUtils.normalizeRouterClassification({
+        profile: "local",
+        confidence: "low",
+        authorizedCommitments: ["converse", "converse"],
+        reason: "uncertain",
+      }),
+    ),
+    "full",
+  );
 });
 
 test("same-scene approach to a present NPC is recognized as misrouted travel", () => {

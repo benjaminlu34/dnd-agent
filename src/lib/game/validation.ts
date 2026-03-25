@@ -7,6 +7,7 @@ import type {
   ExecuteCombatToolCall,
   ExecuteFreeformToolCall,
   RelationshipMove,
+  RouterClassification,
   TimeMode,
   TurnActionToolCall,
   TurnFetchToolResult,
@@ -372,6 +373,26 @@ function validateInteractionTarget(
     assertNpcDetailFetchedIfRequired(snapshot, command.targetId, fetchedFacts);
   }
 
+  if (command.type === "execute_scene_interaction") {
+    if (command.targetType === "npc") {
+      if (!findPresentNpc(snapshot, command.targetId)) {
+        throw new Error("Cannot interact with an NPC who is not present.");
+      }
+      if (!command.citedEntities.npcIds.includes(command.targetId)) {
+        throw new Error("Scene interaction targeting an NPC must cite that NPC.");
+      }
+    }
+
+    if (command.targetType === "location") {
+      if (!idsReferToSameEntity(command.targetId, snapshot.currentLocation.id)) {
+        throw new Error("Scene interaction locations must stay in the current scene.");
+      }
+      if (!command.citedEntities.locationIds.includes(snapshot.currentLocation.id)) {
+        throw new Error("Scene interaction targeting the current location must cite it.");
+      }
+    }
+  }
+
   if (command.type === "execute_combat") {
     const target = findPresentNpc(snapshot, command.targetNpcId);
     if (!target) {
@@ -421,6 +442,93 @@ function looksLikeTypedCombatOrTrade(text: string) {
   );
 }
 
+function looksLikeTypedConverse(text: string) {
+  return /\b(ask|asks|tell|tells|say|says|speak|speaks|greet|greets|greeting|question|questions|negotiat|bargain|chat|talk)\b/i.test(
+    text,
+  );
+}
+
+function looksLikeTypedInvestigation(text: string) {
+  return /\b(investigat|search|examin|inspect|study|probe|track|uncover|look for clues|close look)\b/i.test(
+    text,
+  );
+}
+
+function looksLikeFirstPersonNarration(text: string) {
+  return /(^|[.!?]\s+)(i|i'm|i’ve|i've|i’d|i'd|i’ll|i'll|my|we|we’re|we're|we’ve|we've|we’d|we'd|we’ll|we'll|our)\b/i.test(
+    text.trim(),
+  );
+}
+
+function validateNarrationVoice(
+  command: Exclude<TurnActionToolCall, { type: "request_clarification" }>,
+) {
+  if (looksLikeFirstPersonNarration(command.narration)) {
+    throw new Error("narration_voice_first_person: Narration must be written in second person from the Dungeon Master perspective.");
+  }
+}
+
+function sentenceCount(text: string) {
+  return text
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean)
+    .length;
+}
+
+function validateNarrationRichness(
+  command: Exclude<TurnActionToolCall, { type: "request_clarification" }>,
+) {
+  if (
+    (command.type === "execute_scene_interaction" || command.type === "execute_observe")
+    && (sentenceCount(command.narration) < 2 || command.narration.trim().length < 100)
+  ) {
+    throw new Error(
+      "narration_too_thin: Scene-forward narration should usually give at least two sentences with some concrete texture, not just a bare action summary.",
+    );
+  }
+}
+
+function extractQuotedSegments(text: string) {
+  return Array.from(text.matchAll(/["“”]([^"“”]+)["“”]/g))
+    .map((match) => match[1]?.trim().toLowerCase())
+    .filter((entry): entry is string => Boolean(entry));
+}
+
+function hasNpcReplyOrReactionCue(narration: string) {
+  return /\b(replies?|responds?|answers?|greets?|nods?|laughs?|smiles back|frowns?|glances?|looks up|meets your eyes|slides|offers|gestures|waves|calls back|says)\b/i.test(
+    narration,
+  );
+}
+
+function validateNarrationAdvancement(
+  command: Exclude<TurnActionToolCall, { type: "request_clarification" }>,
+  playerAction: string | undefined,
+) {
+  if (!playerAction?.trim()) {
+    return;
+  }
+
+  if (command.type !== "execute_converse") {
+    return;
+  }
+
+  const playerQuotes = extractQuotedSegments(playerAction);
+  const narrationQuotes = extractQuotedSegments(command.narration);
+  const repeatedPlayerQuote = playerQuotes.some((quote) => narrationQuotes.includes(quote));
+  const hasDistinctNarrationQuote = narrationQuotes.some((quote) => !playerQuotes.includes(quote));
+
+  if (
+    repeatedPlayerQuote
+    && !hasDistinctNarrationQuote
+    && !hasNpcReplyOrReactionCue(command.narration)
+  ) {
+    throw new Error(
+      "narration_parroting_player_action: Converse narration must advance past the player's own line with an NPC reply or visible reaction.",
+    );
+  }
+}
+
 function validateFreeform(command: ExecuteFreeformToolCall) {
   if (!command.intendedMechanicalOutcome.trim()) {
     throw new Error("execute_freeform requires intendedMechanicalOutcome.");
@@ -432,6 +540,24 @@ function validateFreeform(command: ExecuteFreeformToolCall) {
 
   if (looksLikeTypedCombatOrTrade(`${command.actionDescription} ${command.intendedMechanicalOutcome}`)) {
     throw new Error("execute_freeform cannot replace typed combat or trade actions.");
+  }
+}
+
+function validateSceneInteraction(
+  command: Extract<TurnActionToolCall, { type: "execute_scene_interaction" }>,
+) {
+  const combined = `${command.approach} ${command.narration}`;
+
+  if (looksLikeTypedCombatOrTrade(combined)) {
+    throw new Error("execute_scene_interaction cannot replace typed trade or combat actions.");
+  }
+
+  if (looksLikeTypedConverse(combined)) {
+    throw new Error("execute_scene_interaction cannot replace explicit conversation or negotiation.");
+  }
+
+  if (looksLikeTypedInvestigation(combined)) {
+    throw new Error("execute_scene_interaction cannot replace explicit investigation.");
   }
 }
 
@@ -591,12 +717,41 @@ function auditWorldFidelity(input: {
   return issues;
 }
 
+function assertRouterAuthorization(
+  command: Exclude<TurnActionToolCall, { type: "request_clarification" }>,
+  routerClassification: RouterClassification | undefined,
+) {
+  if (!routerClassification) {
+    return;
+  }
+
+  const authorized = new Set(routerClassification.authorizedCommitments);
+
+  if (command.type === "execute_trade" && !authorized.has("trade")) {
+    throw new Error("intent_overcommit_trade: Router did not authorize execute_trade for this turn.");
+  }
+
+  if (command.type === "execute_combat" && !authorized.has("combat")) {
+    throw new Error("intent_overcommit_combat: Router did not authorize execute_combat for this turn.");
+  }
+
+  if (command.type === "execute_investigate" && !authorized.has("investigate")) {
+    throw new Error("intent_overcommit_investigate: Router did not authorize execute_investigate for this turn.");
+  }
+
+  if (command.type === "execute_converse" && !authorized.has("converse")) {
+    throw new Error("intent_overcommit_converse: Router did not authorize execute_converse for this turn.");
+  }
+}
+
 export function validateTurnCommand(input: {
   snapshot: CampaignSnapshot;
   command: TurnActionToolCall;
   fetchedFacts?: TurnFetchToolResult[];
+  routerClassification?: RouterClassification;
+  playerAction?: string;
 }): ValidatedTurnCommand {
-  const { snapshot, command, fetchedFacts = [] } = input;
+  const { snapshot, command, fetchedFacts = [], routerClassification, playerAction } = input;
 
   if (command.type === "request_clarification") {
     return {
@@ -610,6 +765,15 @@ export function validateTurnCommand(input: {
   const timeElapsed = deriveTimeElapsed(command, snapshot);
   validateInteractionTarget(snapshot, command, fetchedFacts);
   assertCitedEntities(command.citedEntities, snapshot, fetchedFacts);
+  assertRouterAuthorization(command, routerClassification);
+  validateNarrationVoice(command);
+  validateNarrationAdvancement(command, playerAction);
+
+  if (command.type === "execute_scene_interaction") {
+    validateSceneInteraction(command);
+  }
+
+  validateNarrationRichness(command);
 
   const commandWithMechanics = {
     ...command,

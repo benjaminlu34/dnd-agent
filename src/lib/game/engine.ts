@@ -20,6 +20,7 @@ import {
   fetchRelationshipHistory,
   getMissedTurnDigests,
   getPromptContext,
+  getTurnRouterContext,
   getTurnSnapshot,
   toPlayerCampaignSnapshot,
 } from "@/lib/game/repository";
@@ -39,6 +40,7 @@ import type {
   LocalTextureSummary,
   PromotedNpcHydrationDraft,
   RequestClarificationToolCall,
+  RouterClassification,
   RetryRequiredResponse,
   StateConflictResponse,
   TurnCausalityCode,
@@ -187,6 +189,24 @@ function applyCommittedTimeWindow(input: {
       overrideText: input.overrideText,
     },
   } satisfies Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
+}
+
+function promptContextProfileForRouter(classification: RouterClassification) {
+  return classification.confidence === "high" ? classification.profile : "full";
+}
+
+function isRepairableTurnValidationError(message: string) {
+  return (
+    /intent_overcommit_(trade|combat|investigate|converse)/i.test(message)
+    || /narration_voice_first_person/i.test(message)
+    || /narration_parroting_player_action/i.test(message)
+    || /narration_too_thin/i.test(message)
+    || /execute_freeform cannot replace typed combat or trade actions/i.test(message)
+    || /execute_scene_interaction cannot replace typed trade or combat actions/i.test(message)
+    || /execute_scene_interaction cannot replace explicit conversation or negotiation/i.test(message)
+    || /execute_scene_interaction cannot replace explicit investigation/i.test(message)
+    || /Approaching a present NPC within the current scene is not execute_travel/i.test(message)
+  );
 }
 
 async function cleanupTurnLock(input: {
@@ -1732,6 +1752,9 @@ function collectMemoryEntityLinks(input: {
   if (input.command.type === "execute_trade") {
     pushKey("commodity", input.command.commodityId);
   }
+  if (input.command.type === "execute_scene_interaction") {
+    pushKey(input.command.targetType, input.command.targetId);
+  }
   if (input.command.type === "execute_investigate" || input.command.type === "execute_observe") {
     pushKey(input.command.targetType === "route" ? "route" : input.command.targetType, input.command.targetId);
   }
@@ -1824,6 +1847,15 @@ function buildTurnCausality(input: {
       code: "PLAYER_TRADE",
       entityType: "commodity",
       targetId: input.command.commodityId,
+      metadata: null,
+    });
+  }
+
+  if (input.command.type === "execute_scene_interaction") {
+    reasonCodes.push({
+      code: "PLAYER_SCENE_INTERACTION",
+      entityType: input.command.targetType,
+      targetId: input.command.targetId,
       metadata: null,
     });
   }
@@ -2278,6 +2310,8 @@ export const engineTestUtils = {
   toPromotedTemporaryActorName,
   toPromotedTemporaryActorRole,
   requestHashForSubmission,
+  promptContextProfileForRouter,
+  isRepairableTurnValidationError,
 };
 
 async function buildStateConflictPayload(input: {
@@ -2722,7 +2756,34 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       activeThreadCount: snapshot.activeThreads.length,
     });
 
-    const promptContext = await getPromptContext(snapshot);
+    const routerClassification =
+      turnMode === "observe" || intent?.type === "travel_route"
+        ? ({
+            profile: "full",
+            confidence: "low",
+            authorizedCommitments: [],
+            reason: "Router classification skipped for observe mode or explicitly committed travel.",
+          } satisfies RouterClassification)
+        : await dmClient.classifyTurnIntent({
+            playerAction,
+            turnMode,
+            context: await getTurnRouterContext(snapshot),
+            signal: abortController.signal,
+          });
+    logBackendDiagnostic("turn.router.resolved", {
+      campaignId: input.campaignId,
+      sessionId: input.sessionId,
+      requestId: input.requestId,
+      turnId: turn.id,
+      profile: routerClassification.profile,
+      confidence: routerClassification.confidence,
+      authorizedCommitments: routerClassification.authorizedCommitments,
+      reason: routerClassification.reason,
+    });
+    const promptContext = await getPromptContext(
+      snapshot,
+      promptContextProfileForRouter(routerClassification),
+    );
     const narrationOverride =
       intent?.type === "travel_route"
         ? {
@@ -2756,6 +2817,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
           })()
         : await dmClient.runTurn({
             promptContext,
+            routerClassification,
             character: snapshot.character,
             playerAction: narrationOverride.playerActionForModel,
             turnMode,
@@ -2775,11 +2837,59 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       throw new TurnAbandonedError("Turn resolution was aborted before commit.");
     }
 
-    const validated = validateTurnCommand({
-      snapshot,
-      command: resolution.command,
-      fetchedFacts: resolution.fetchedFacts,
-    });
+    let resolvedCommand = resolution.command;
+    let validated: ValidatedTurnCommand;
+    try {
+      validated = validateTurnCommand({
+        snapshot,
+        command: resolvedCommand,
+        fetchedFacts: resolution.fetchedFacts,
+        routerClassification,
+        playerAction,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        resolvedCommand.type !== "request_clarification"
+        && isRepairableTurnValidationError(message)
+      ) {
+        logBackendDiagnostic("turn.repair.start", {
+          campaignId: input.campaignId,
+          sessionId: input.sessionId,
+          requestId: input.requestId,
+          turnId: turn.id,
+          previousCommandType: resolvedCommand.type,
+          validationError: message,
+        });
+        resolvedCommand = await dmClient.repairTurn({
+          promptContext,
+          routerClassification,
+          character: snapshot.character,
+          playerAction,
+          turnMode,
+          fetchedFacts: resolution.fetchedFacts,
+          previousCommand: resolvedCommand,
+          validationError: message,
+          signal: abortController.signal,
+        });
+        logBackendDiagnostic("turn.repair.resolved", {
+          campaignId: input.campaignId,
+          sessionId: input.sessionId,
+          requestId: input.requestId,
+          turnId: turn.id,
+          repairedCommandType: resolvedCommand.type,
+        });
+        validated = validateTurnCommand({
+          snapshot,
+          command: resolvedCommand,
+          fetchedFacts: resolution.fetchedFacts,
+          routerClassification,
+          playerAction,
+        });
+      } else {
+        throw error;
+      }
+    }
 
     if (validated.type === "request_clarification") {
       logBackendDiagnostic("turn.clarification_requested", {

@@ -147,7 +147,7 @@ function createArtifacts(): OpenWorldGenerationArtifacts {
         },
       ],
     },
-  } as OpenWorldGenerationArtifacts;
+  } as unknown as OpenWorldGenerationArtifacts;
 }
 
 test("resolveStockLaunchEntry prefers artifact-backed entry context and marks it non-custom", () => {

@@ -8,8 +8,10 @@ import type {
   ExecuteInvestigateToolCall,
   ExecuteObserveToolCall,
   ExecuteRestToolCall,
+  ExecuteSceneInteractionToolCall,
   ExecuteTradeToolCall,
   ExecuteTravelToolCall,
+  RouterClassification,
   TurnFetchToolResult,
 } from "./types";
 import { validateTurnCommand } from "./validation";
@@ -186,6 +188,17 @@ function createMarketFacts(): TurnFetchToolResult[] {
       ],
     },
   ];
+}
+
+function createRouterClassification(
+  authorizedCommitments: RouterClassification["authorizedCommitments"],
+): RouterClassification {
+  return {
+    profile: "local",
+    confidence: "high",
+    authorizedCommitments,
+    reason: "test fixture",
+  };
 }
 
 test("validateTurnCommand enforces travel adjacency and exact route time", () => {
@@ -618,6 +631,236 @@ test("validateTurnCommand rejects travel commands that are really same-scene NPC
   );
 });
 
+test("validateTurnCommand accepts low-commitment scene interaction with a present NPC", () => {
+  const command: ExecuteSceneInteractionToolCall = {
+    type: "execute_scene_interaction",
+    targetType: "npc",
+    targetId: "npc_guide",
+    approach: "step over and see what Tarin is focused on",
+    narration: "You drift over to Tarin's side and take in what has his attention. Rain beads on his cloak while carts rumble through the gate behind him.",
+    suggestedActions: ["Ask what changed", "Keep watching the gate"],
+    timeMode: "exploration",
+    durationMagnitude: "brief",
+    citedEntities: {
+      npcIds: ["npc_guide"],
+      locationIds: ["loc_gate"],
+      factionIds: [],
+      commodityIds: [],
+      informationIds: [],
+    },
+  };
+
+  const validated = validateTurnCommand({
+    snapshot: createSnapshot(),
+    command,
+  });
+
+  assert.equal(validated.type, "execute_scene_interaction");
+  assert.equal(validated.timeElapsed, 10);
+  assert.equal(validated.checkResult, undefined);
+});
+
+test("validateTurnCommand rejects scene interaction that encodes an explicit conversation", () => {
+  const command: ExecuteSceneInteractionToolCall = {
+    type: "execute_scene_interaction",
+    targetType: "npc",
+    targetId: "npc_guide",
+    approach: "ask Tarin what changed at the gate",
+    narration: "You ask Tarin what changed at the gate.",
+    suggestedActions: ["Listen closely"],
+    timeMode: "exploration",
+    citedEntities: {
+      npcIds: ["npc_guide"],
+      locationIds: ["loc_gate"],
+      factionIds: [],
+      commodityIds: [],
+      informationIds: [],
+    },
+  };
+
+  assert.throws(
+    () =>
+      validateTurnCommand({
+        snapshot: createSnapshot(),
+        command,
+      }),
+    /cannot replace explicit conversation or negotiation/,
+  );
+});
+
+test("validateTurnCommand rejects scene interaction that encodes explicit trade", () => {
+  const command: ExecuteSceneInteractionToolCall = {
+    type: "execute_scene_interaction",
+    targetType: "location",
+    targetId: "loc_gate",
+    approach: "buy breakfast from the stall",
+    narration: "You buy breakfast and tuck the loaf under your arm.",
+    suggestedActions: ["Head back to the lane"],
+    timeMode: "exploration",
+    citedEntities: {
+      npcIds: [],
+      locationIds: ["loc_gate"],
+      factionIds: [],
+      commodityIds: [],
+      informationIds: [],
+    },
+  };
+
+  assert.throws(
+    () =>
+      validateTurnCommand({
+        snapshot: createSnapshot(),
+        command,
+      }),
+    /cannot replace typed trade or combat actions/,
+  );
+});
+
+test("validateTurnCommand rejects first-person Dungeon Master narration", () => {
+  const command: ExecuteSceneInteractionToolCall = {
+    type: "execute_scene_interaction",
+    targetType: "npc",
+    targetId: "npc_guide",
+    approach: "browse",
+    narration: "I walk over to Tarin and look over his shoulder.",
+    suggestedActions: ["Ask what changed"],
+    timeMode: "exploration",
+    citedEntities: {
+      npcIds: ["npc_guide"],
+      locationIds: ["loc_gate"],
+      factionIds: [],
+      commodityIds: [],
+      informationIds: [],
+    },
+  };
+
+  assert.throws(
+    () =>
+      validateTurnCommand({
+        snapshot: createSnapshot(),
+        command,
+      }),
+    /narration_voice_first_person/,
+  );
+});
+
+test("validateTurnCommand rejects thin scene-forward narration", () => {
+  const command: ExecuteSceneInteractionToolCall = {
+    type: "execute_scene_interaction",
+    targetType: "npc",
+    targetId: "npc_guide",
+    approach: "browse",
+    narration: "You walk over to Tarin.",
+    suggestedActions: ["Ask what changed"],
+    timeMode: "exploration",
+    citedEntities: {
+      npcIds: ["npc_guide"],
+      locationIds: ["loc_gate"],
+      factionIds: [],
+      commodityIds: [],
+      informationIds: [],
+    },
+  };
+
+  assert.throws(
+    () =>
+      validateTurnCommand({
+        snapshot: createSnapshot(),
+        command,
+      }),
+    /narration_too_thin/,
+  );
+});
+
+test("validateTurnCommand rejects unauthorized trade based on router classification", () => {
+  const snapshot = createSnapshot();
+  snapshot.character.gold = 20;
+  const command: ExecuteTradeToolCall = {
+    type: "execute_trade",
+    action: "buy",
+    marketPriceId: "mp_spice_gate",
+    commodityId: "commodity_spice",
+    quantity: 2,
+    narration: "You buy two spice sacks for 10 gold.",
+    suggestedActions: ["Ask who else is buying spice"],
+    timeMode: "exploration",
+    citedEntities: {
+      npcIds: [],
+      locationIds: ["loc_gate"],
+      factionIds: [],
+      commodityIds: ["commodity_spice"],
+      informationIds: [],
+    },
+  };
+
+  assert.throws(
+    () =>
+      validateTurnCommand({
+        snapshot,
+        command,
+        fetchedFacts: createMarketFacts(),
+        routerClassification: createRouterClassification([]),
+      }),
+    /intent_overcommit_trade/,
+  );
+});
+
+test("validateTurnCommand accepts authorized converse based on router classification", () => {
+  const command: ExecuteConverseToolCall = {
+    type: "execute_converse",
+    npcId: "npc_guide",
+    interlocutor: "Tarin Ash",
+    topic: "what happened at the gate",
+    narration: "Tarin lowers his voice and tells you the watch has been overwhelmed since dawn.",
+    suggestedActions: ["Ask who moved first"],
+    timeMode: "exploration",
+    citedEntities: {
+      npcIds: ["npc_guide"],
+      locationIds: ["loc_gate"],
+      factionIds: [],
+      commodityIds: [],
+      informationIds: [],
+    },
+  };
+
+  const validated = validateTurnCommand({
+    snapshot: createSnapshot(),
+    command,
+    routerClassification: createRouterClassification(["converse"]),
+  });
+
+  assert.equal(validated.type, "execute_converse");
+});
+
+test("validateTurnCommand rejects converse narration that only echoes the player's line", () => {
+  const command: ExecuteConverseToolCall = {
+    type: "execute_converse",
+    npcId: "npc_guide",
+    interlocutor: "Tarin Ash",
+    topic: "greeting",
+    narration: "You smile at Tarin. \"Hey Tarin, how've you been?\" you ask casually.",
+    suggestedActions: ["Wait for his answer"],
+    timeMode: "exploration",
+    citedEntities: {
+      npcIds: ["npc_guide"],
+      locationIds: ["loc_gate"],
+      factionIds: [],
+      commodityIds: [],
+      informationIds: [],
+    },
+  };
+
+  assert.throws(
+    () =>
+      validateTurnCommand({
+        snapshot: createSnapshot(),
+        command,
+        playerAction: "\"Hey Tarin, how've you been?\" I ask casually.",
+      }),
+    /narration_parroting_player_action/,
+  );
+});
+
 test("validateTurnCommand leaves routine freeform actions checkless by default", () => {
   const command: ExecuteFreeformToolCall = {
     type: "execute_freeform",
@@ -712,7 +955,7 @@ test("validateTurnCommand caps suggested actions at four items", () => {
     type: "execute_observe",
     targetType: "location",
     targetId: "loc_gate",
-    narration: "You watch the gate traffic shift under the rain.",
+    narration: "You watch the gate traffic shift under the rain. Wet wheels hiss over the stones while the next patrol squeezes past a knot of carts.",
     suggestedActions: [
       "Ask Tarin what changed",
       "Watch the carts longer",

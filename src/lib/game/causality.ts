@@ -35,6 +35,7 @@ const reasonRenderers: Record<string, (code: TurnCausalityCode) => string> = {
   PLAYER_TRADE: () => "Because you traded.",
   PLAYER_COMBAT: () => "Because you initiated violence.",
   PLAYER_CONVERSATION: () => "Because you pressed the conversation.",
+  PLAYER_SCENE_INTERACTION: () => "Because you approached and engaged with the scene.",
   PLAYER_INVESTIGATION: () => "Because you investigated further.",
   PLAYER_OBSERVATION: () => "Because you watched and listened.",
   MODEL_DISCOVERY_INTENT: () => "Because the scene supported a discovery.",

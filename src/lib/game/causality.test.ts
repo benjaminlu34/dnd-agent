@@ -29,6 +29,12 @@ test("renderWhy translates structured reason codes into readable causality copy"
   assert.deepEqual(
     renderWhy([
       {
+        code: "PLAYER_SCENE_INTERACTION",
+        entityType: "npc",
+        targetId: "npc_mara",
+        metadata: { label: "Mara Thistle" },
+      },
+      {
         code: "PLAYER_INVESTIGATION",
         entityType: "information",
         targetId: "info_1",
@@ -43,6 +49,7 @@ test("renderWhy translates structured reason codes into readable causality copy"
       },
     ]),
     [
+      "Because you approached and engaged with the scene.",
       "Because you investigated further.",
       "Because time could only advance inside the committed schedule window.",
     ],

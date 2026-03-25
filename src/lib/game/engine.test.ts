@@ -79,3 +79,54 @@ test("request hash changes when observe mode changes the submission identity", (
 
   assert.notEqual(playerInputHash, observeHash);
 });
+
+test("router-selected local profile only applies at high confidence", () => {
+  assert.equal(
+    engineTestUtils.promptContextProfileForRouter({
+      profile: "local",
+      confidence: "high",
+      authorizedCommitments: [],
+      reason: "same-scene action",
+    }),
+    "local",
+  );
+
+  assert.equal(
+    engineTestUtils.promptContextProfileForRouter({
+      profile: "local",
+      confidence: "low",
+      authorizedCommitments: ["converse"],
+      reason: "uncertain broader context dependency",
+    }),
+    "full",
+  );
+});
+
+test("repairable validation errors are limited to router overcommit and scene-misroute cases", () => {
+  assert.equal(engineTestUtils.isRepairableTurnValidationError("intent_overcommit_trade: trade is unauthorized"), true);
+  assert.equal(
+    engineTestUtils.isRepairableTurnValidationError(
+      "narration_voice_first_person: Narration must be written in second person from the Dungeon Master perspective.",
+    ),
+    true,
+  );
+  assert.equal(
+    engineTestUtils.isRepairableTurnValidationError(
+      "narration_too_thin: Scene-forward narration should usually give at least two sentences with some concrete texture, not just a bare action summary.",
+    ),
+    true,
+  );
+  assert.equal(
+    engineTestUtils.isRepairableTurnValidationError(
+      "narration_parroting_player_action: Converse narration must advance past the player's own line with an NPC reply or visible reaction.",
+    ),
+    true,
+  );
+  assert.equal(
+    engineTestUtils.isRepairableTurnValidationError(
+      "execute_scene_interaction cannot replace explicit conversation or negotiation.",
+    ),
+    true,
+  );
+  assert.equal(engineTestUtils.isRepairableTurnValidationError("A cited commodity is required for execute_trade."), false);
+});

@@ -12,6 +12,7 @@ export type CheckMode = "normal" | "advantage" | "disadvantage";
 export type CheckOutcome = "success" | "partial" | "failure";
 export type TimeMode = "combat" | "exploration" | "travel" | "rest" | "downtime";
 export type TurnMode = "player_input" | "observe";
+export type PromptContextProfile = "local" | "full";
 export type NpcState = "active" | "wounded" | "incapacitated" | "dead";
 export type CombatApproach = "attack" | "subdue" | "assassinate";
 export type TradeAction = "buy" | "sell";
@@ -79,6 +80,7 @@ export type TurnCausalityCodeName =
   | "PLAYER_TRADE"
   | "PLAYER_COMBAT"
   | "PLAYER_CONVERSATION"
+  | "PLAYER_SCENE_INTERACTION"
   | "PLAYER_INVESTIGATION"
   | "PLAYER_OBSERVATION"
   | "MODEL_DISCOVERY_INTENT"
@@ -935,6 +937,32 @@ export type SpatialPromptContext = {
   dayCount: number;
 };
 
+export type TurnRouterContext = Pick<
+  SpatialPromptContext,
+  | "currentLocation"
+  | "adjacentRoutes"
+  | "presentNpcs"
+  | "recentUnnamedLocals"
+  | "recentLocalEvents"
+  | "recentTurnLedger"
+  | "discoveredInformation"
+  | "activePressures"
+  | "activeThreads"
+>;
+
+export type RouterAuthorizedCommitment =
+  | "trade"
+  | "combat"
+  | "investigate"
+  | "converse";
+
+export type RouterClassification = {
+  profile: PromptContextProfile;
+  confidence: "high" | "low";
+  authorizedCommitments: RouterAuthorizedCommitment[];
+  reason: string;
+};
+
 export type CitedEntities = {
   npcIds: string[];
   locationIds: string[];
@@ -1187,6 +1215,19 @@ export type ExecuteObserveToolCall = {
   memorySummary?: string;
 };
 
+export type ExecuteSceneInteractionToolCall = {
+  type: "execute_scene_interaction";
+  targetType: "location" | "npc";
+  targetId: string;
+  approach: string;
+  narration: string;
+  suggestedActions: string[];
+  timeMode: "exploration" | "downtime";
+  durationMagnitude?: DurationMagnitude;
+  citedEntities: CitedEntities;
+  memorySummary?: string;
+};
+
 export type ExecuteWaitToolCall = {
   type: "execute_wait";
   durationMinutes: number;
@@ -1244,6 +1285,7 @@ export type TurnActionToolCall =
   | ExecuteConverseToolCall
   | ExecuteInvestigateToolCall
   | ExecuteObserveToolCall
+  | ExecuteSceneInteractionToolCall
   | ExecuteTradeToolCall
   | ExecuteRestToolCall
   | ExecuteWaitToolCall

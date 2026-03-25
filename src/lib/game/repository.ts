@@ -50,9 +50,11 @@ import type {
   RelationshipHistory,
   RecentLocalEventSummary,
   RouteSummary,
+  PromptContextProfile,
   SpatialPromptContext,
   StoryMessage,
   TemporaryActorSummary,
+  TurnRouterContext,
   TurnDigest,
   WorldShiftSummary,
 } from "@/lib/game/types";
@@ -246,18 +248,31 @@ function temporaryActorMatchesStartingLocal(input: {
   actor: { label: string; summary: string };
   npc: Pick<GeneratedWorldModule["npcs"][number], "role" | "summary" | "description">;
 }) {
-  const actorTokens = normalizeActorSurfaceText(`${input.actor.label} ${input.actor.summary}`)
+  const labelTokens = normalizeActorSurfaceText(input.actor.label)
     .split(" ")
     .filter((token) => token.length >= 3);
-  if (!actorTokens.length) {
+  if (!labelTokens.length) {
     return false;
   }
+  const summaryTokens = normalizeActorSurfaceText(input.actor.summary)
+    .split(" ")
+    .filter((token) => token.length >= 4);
 
   const npcSurface = normalizeActorSurfaceText(
     `${input.npc.role} ${input.npc.summary} ${input.npc.description}`,
   );
 
-  return actorTokens.every((token) => npcSurface.includes(token));
+  if (!labelTokens.every((token) => npcSurface.includes(token))) {
+    return false;
+  }
+
+  if (!summaryTokens.length) {
+    return true;
+  }
+
+  const summaryOverlap = summaryTokens.filter((token) => npcSurface.includes(token)).length;
+  const requiredSummaryOverlap = Math.min(summaryTokens.length, Math.max(1, Math.ceil(summaryTokens.length / 3)));
+  return summaryOverlap >= requiredSummaryOverlap;
 }
 
 function reconcileEntryPointWithStartingLocals(input: {
@@ -1697,7 +1712,7 @@ export async function createCampaignFromModuleForUser(input: {
   const locationTextures = buildLocationTextureMap(generationArtifacts, campaignId);
   const initialSchedules = await generateRequiredInitialSchedules({
     campaignId,
-    module,
+    module: adventureModule,
     opening,
     world: openingInput.module,
     entryPoint: openingInput.entryPoint,
@@ -1712,7 +1727,7 @@ export async function createCampaignFromModuleForUser(input: {
     createCampaignInTx(tx, {
       campaignId,
       userId: user.id,
-      module,
+      module: adventureModule,
       template: templateRecord,
       entryPoint: openingInput.entryPoint,
       opening,
@@ -3346,7 +3361,7 @@ function buildRecentTurnLedger(snapshot: CampaignSnapshot) {
   });
 }
 
-export async function getPromptContext(snapshot: CampaignSnapshot): Promise<SpatialPromptContext> {
+async function loadRecentLocalEvents(snapshot: CampaignSnapshot) {
   const recentLocalEvents: RecentLocalEventSummary[] = [];
   const now = snapshot.state.globalTime;
   const worldEventRecords = await prisma.worldEvent.findMany({
@@ -3374,6 +3389,10 @@ export async function getPromptContext(snapshot: CampaignSnapshot): Promise<Spat
     });
   }
 
+  return recentLocalEvents;
+}
+
+export async function getTurnRouterContext(snapshot: CampaignSnapshot): Promise<TurnRouterContext> {
   return {
     currentLocation: {
       id: snapshot.currentLocation.id,
@@ -3402,7 +3421,7 @@ export async function getPromptContext(snapshot: CampaignSnapshot): Promise<Spat
         lastSummary: actor.lastSummary,
         lastSeenAtTurn: actor.lastSeenAtTurn,
       })),
-    recentLocalEvents,
+    recentLocalEvents: await loadRecentLocalEvents(snapshot),
     recentTurnLedger: buildRecentTurnLedger(snapshot),
     discoveredInformation: snapshot.discoveredInformation.map((information) => ({
       id: information.id,
@@ -3411,8 +3430,28 @@ export async function getPromptContext(snapshot: CampaignSnapshot): Promise<Spat
       truthfulness: information.truthfulness,
     })),
     activePressures: snapshot.activePressures,
-    recentWorldShifts: snapshot.recentWorldShifts,
     activeThreads: snapshot.activeThreads,
+  };
+}
+
+export async function getPromptContext(
+  snapshot: CampaignSnapshot,
+  profile: PromptContextProfile = "full",
+): Promise<SpatialPromptContext> {
+  const routerContext = await getTurnRouterContext(snapshot);
+  const isLocal = profile === "local";
+
+  return {
+    currentLocation: routerContext.currentLocation,
+    adjacentRoutes: isLocal ? [] : routerContext.adjacentRoutes,
+    presentNpcs: routerContext.presentNpcs,
+    recentUnnamedLocals: routerContext.recentUnnamedLocals,
+    recentLocalEvents: routerContext.recentLocalEvents,
+    recentTurnLedger: routerContext.recentTurnLedger,
+    discoveredInformation: isLocal ? [] : routerContext.discoveredInformation,
+    activePressures: isLocal ? [] : routerContext.activePressures,
+    recentWorldShifts: isLocal ? [] : snapshot.recentWorldShifts,
+    activeThreads: isLocal ? [] : routerContext.activeThreads,
     inventory: toPromptInventory(snapshot.character),
     localTexture: snapshot.currentLocation.localTexture,
     globalTime: snapshot.state.globalTime,
