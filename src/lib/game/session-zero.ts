@@ -180,14 +180,6 @@ function refineResolvedLaunchEntryShape(
     "Temporary local actor labels must be unique.",
   );
 
-  if (!entryPoint.localContactNpcId && entryPoint.presentNpcIds.length > 0) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["presentNpcIds"],
-      message: "Present named NPCs require a named localContactNpcId anchor.",
-    });
-  }
-
   if (entryPoint.localContactTemporaryActorLabel) {
     const hasMatchingTemporaryActor = entryPoint.temporaryLocalActors.some(
       (actor) => actor.label === entryPoint.localContactTemporaryActorLabel,
@@ -201,7 +193,6 @@ function refineResolvedLaunchEntryShape(
       });
     }
   }
-
 }
 
 export const resolvedLaunchEntryContextSchema = resolvedLaunchEntryContextSchemaBase.superRefine(
@@ -1005,6 +996,25 @@ export const generatedCampaignOpeningSchema = z.object({
   }),
 });
 
+export const preparedCampaignLaunchSchema = z.object({
+  previewCampaignId: z.string().trim().min(1),
+  entryPoint: resolvedLaunchEntrySchema,
+  startingLocals: z.array(
+    z.object({
+      id: z.string().trim().min(1),
+      name: z.string().trim().min(1),
+      role: z.string().trim().min(1),
+      summary: z.string().trim().min(1),
+      description: z.string().trim().min(1),
+      factionId: z.string().trim().min(1).nullable(),
+      currentLocationId: z.string().trim().min(1),
+      approval: z.number().int().min(-5).max(5),
+      isCompanion: z.literal(false).default(false),
+    }),
+  ).max(6),
+  opening: generatedCampaignOpeningSchema,
+});
+
 export const campaignDraftRequestSchema = z.object({
   prompt: z.string().trim().min(1, "Prompt is required."),
   previousDraft: generatedWorldModuleSchema.optional(),
@@ -1040,9 +1050,12 @@ export const campaignCreateRequestSchema = z.object({
   templateId: z.string().trim().min(1, "Template selection is required."),
   entryPointId: z.string().trim().min(1, "Entry point selection is required.").optional(),
   customEntryPoint: resolvedLaunchEntrySchema.optional(),
-  opening: generatedCampaignOpeningSchema,
+  opening: generatedCampaignOpeningSchema.optional(),
+  preparedLaunch: preparedCampaignLaunchSchema.optional(),
 }).refine(hasExactlyOneLaunchEntrySelection, {
   message: "Must provide exactly one of entryPointId or customEntryPoint.",
+}).refine((input) => input.preparedLaunch !== undefined || input.opening !== undefined, {
+  message: "Campaign creation requires either a prepared launch bundle or an opening draft.",
 });
 
 export const moduleCreateRequestSchema = z.object({

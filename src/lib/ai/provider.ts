@@ -577,6 +577,18 @@ function appendNarrationLog(message: string) {
   }
 }
 
+export function logBackendDiagnostic(stage: string, details: Record<string, unknown>) {
+  const timestamp = new Date().toISOString();
+  const message = [
+    `[backend.debug] ${timestamp}`,
+    `stage=${stage}`,
+    JSON.stringify(details, null, 2),
+    "--- end ---",
+  ].join("\n");
+
+  appendNarrationLog(message);
+}
+
 function startWorldGenerationLog() {
   mkdirSync(WORLD_GEN_LOG_DIR, { recursive: true });
 
@@ -601,6 +613,7 @@ function logWorldGenerationProgress(update: WorldGenerationProgressUpdate) {
 
   console.info(message);
   appendWorldGenerationLog(message);
+  appendNarrationLog(message);
 }
 
 function logOpenRouterRequest(options: {
@@ -624,6 +637,7 @@ function logOpenRouterRequest(options: {
 
   console.info(message);
   appendWorldGenerationLog(message);
+  appendNarrationLog(message);
 }
 
 function logOpenRouterResponse(stage: string, details: Record<string, unknown>) {
@@ -637,6 +651,7 @@ function logOpenRouterResponse(stage: string, details: Record<string, unknown>) 
 
   console.info(message);
   appendWorldGenerationLog(message);
+  appendNarrationLog(message);
 }
 
 function logNarrationDebug(stage: string, details: Record<string, unknown>) {
@@ -1100,6 +1115,69 @@ function idsReferToSameEntity(left: string | null | undefined, right: string | n
   }
 
   return left === right || unscopedEntityId(left) === unscopedEntityId(right);
+}
+
+function buildUnscopedIdLookup(ids: string[]) {
+  return new Map(ids.map((id) => [unscopedEntityId(id), id]));
+}
+
+function normalizeScheduleEntityId(
+  value: string,
+  lookups: {
+    locations: Map<string, string>;
+    factions: Map<string, string>;
+    npcs: Map<string, string>;
+    information: Map<string, string>;
+  },
+) {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.includes(":")) {
+    return trimmed;
+  }
+
+  if (trimmed.startsWith("loc_")) {
+    return lookups.locations.get(trimmed) ?? trimmed;
+  }
+  if (trimmed.startsWith("fac_")) {
+    return lookups.factions.get(trimmed) ?? trimmed;
+  }
+  if (trimmed.startsWith("npc_")) {
+    return lookups.npcs.get(trimmed) ?? trimmed;
+  }
+  if (trimmed.startsWith("info_")) {
+    return lookups.information.get(trimmed) ?? trimmed;
+  }
+
+  return trimmed;
+}
+
+function normalizeSchedulePayloadIds(
+  value: unknown,
+  lookups: {
+    locations: Map<string, string>;
+    factions: Map<string, string>;
+    npcs: Map<string, string>;
+    information: Map<string, string>;
+  },
+): unknown {
+  if (typeof value === "string") {
+    return normalizeScheduleEntityId(value, lookups);
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => normalizeSchedulePayloadIds(entry, lookups));
+  }
+
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
+      key,
+      normalizeSchedulePayloadIds(entry, lookups),
+    ]),
+  );
 }
 
 function canonicalizeRecentUnnamedLocalLabel(
@@ -4619,6 +4697,7 @@ class DungeonMasterClient {
       "Do not force a quest-giver, crisis escalation, conspiracy reveal, or dramatic named-NPC confrontation if the launch entry is grounded in ordinary life.",
       "Avoid prophecy, trailer voiceover, destiny framing, and broad setting-summary prose.",
       "If the launch entry uses unnamed temporary locals instead of named NPCs, treat them as real scene participants and do not force a named contact into the opening.",
+      "If the launch entry has no localContactNpcId, no localContactTemporaryActorLabel, and no temporary locals, preserve that solitude or privacy instead of inventing an immediate social interaction.",
       "Scene summary must be 40 words or fewer.",
       "Return narration, an active threat, a scene summary, and exact ids for the starting location, present NPCs, and cited information via the provided tool schema.",
     ].join("\n");
@@ -4759,9 +4838,13 @@ class DungeonMasterClient {
           "Do not invent locations, NPCs, factions, information, or new ids.",
           "Do not move NPCs from their authored currentLocationId.",
           "Choose present NPCs only from the selected start location.",
+          "A viable start needs immediate playable affordances, not necessarily an immediate person to interact with.",
+          "Playable affordances may come from routine work, visible public movement, private obligations, environmental pressure, travel preparation, nearby named NPCs, or unnamed locals already implied by the place.",
+          "You may include presentNpcIds even when the opening does not hinge on directly interacting with them.",
           "If no suitable named local is needed, you may leave presentNpcIds empty and instead seed temporary unnamed locals.",
           "If the opening is solitary or private, you may leave presentNpcIds empty and set both localContactNpcId and localContactTemporaryActorLabel to null.",
           "Use localContactNpcId only when the opening should hinge on a named NPC already authored in the world.",
+          "You may use temporaryLocalActors for scene texture even when no single unnamed local is the opening hinge.",
           "Use localContactTemporaryActorLabel and temporaryLocalActors when the opening should hinge on unnamed locals or ordinary roles already implied by the place.",
           "If localContactNpcId is null, localContactTemporaryActorLabel must match one temporaryLocalActors label.",
           "Do not invent named NPCs to satisfy the request when unnamed locals are enough.",
@@ -4831,6 +4914,7 @@ class DungeonMasterClient {
           "Generate ordinary persistent locals for the starting region of an open-world solo RPG campaign.",
           "These NPCs are not mythic movers, ornamental quest-givers, or quirky mascots. They are workers, wardens, clerks, haulers, brokers, patrols, repairers, vendors, and household-level operators who make the place feel inhabited.",
           "Tie every NPC to the immediate social surface around the starting location and nearby hops.",
+          "If the launch entry already includes temporary unnamed locals, prefer resolving those social roles into persistent locals instead of inventing parallel duplicates for the same surface.",
           "Use only the exact provided location ids and faction ids.",
           "Do not duplicate or rename any existing NPCs already present in the region.",
           "At least two generated NPCs must live at the starting location.",
@@ -4845,6 +4929,7 @@ class DungeonMasterClient {
             summary: input.opening.scene.summary,
             suggestedActions: input.opening.scene.suggestedActions,
           }),
+          formatPromptBlock("temporary_locals", input.entryPoint.temporaryLocalActors),
           formatPromptBlock(
             "region_locations",
             summarizeLocationRefs(regionLocations, { includeKey: false }),
@@ -5004,7 +5089,29 @@ class DungeonMasterClient {
         throw new Error(`Daily schedule generation returned invalid structured data: ${parsed.error.message}`);
       }
 
-      return parsed.data as GeneratedDailySchedule;
+      const scopedIdLookups = {
+        locations: buildUnscopedIdLookup(input.campaign.locations.map((location) => location.id)),
+        factions: buildUnscopedIdLookup(input.campaign.factions.map((faction) => faction.id)),
+        npcs: buildUnscopedIdLookup(input.campaign.npcs.map((npc) => npc.id)),
+        information: buildUnscopedIdLookup(
+          input.campaign.discoveredInformation.map((information) => information.id),
+        ),
+      };
+
+      return {
+        worldEvents: parsed.data.worldEvents.map((event) => ({
+          ...event,
+          locationId: event.locationId
+            ? normalizeScheduleEntityId(event.locationId, scopedIdLookups)
+            : null,
+          payload: normalizeSchedulePayloadIds(event.payload, scopedIdLookups) as GeneratedDailySchedule["worldEvents"][number]["payload"],
+        })),
+        factionMoves: parsed.data.factionMoves.map((move) => ({
+          ...move,
+          factionId: normalizeScheduleEntityId(move.factionId, scopedIdLookups),
+          payload: normalizeSchedulePayloadIds(move.payload, scopedIdLookups) as GeneratedDailySchedule["factionMoves"][number]["payload"],
+        })),
+      } satisfies GeneratedDailySchedule;
     } catch (error) {
       logOpenRouterResponse("daily_schedule.error", {
         message: error instanceof Error ? error.message : String(error),
@@ -5222,6 +5329,8 @@ export const aiProviderTestUtils = {
   extractToolInput,
   isObservePermittedFinalTool,
   normalizeSocialCastInput,
+  normalizeScheduleEntityId,
+  normalizeSchedulePayloadIds,
   normalizeModelToolCall,
   normalizeTurnToolCall,
 };

@@ -611,6 +611,13 @@ export type GeneratedCampaignOpening = {
   };
 };
 
+export type PreparedCampaignLaunch = {
+  previewCampaignId: string;
+  entryPoint: ResolvedLaunchEntry;
+  startingLocals: GeneratedNpc[];
+  opening: GeneratedCampaignOpening;
+};
+
 export type CampaignRuntimeState = {
   currentLocationId: string;
   globalTime: number;

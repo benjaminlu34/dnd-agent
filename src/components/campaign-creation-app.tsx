@@ -6,6 +6,7 @@ import type {
   AdventureModuleDetail,
   CharacterTemplate,
   GeneratedCampaignOpening,
+  PreparedCampaignLaunch,
   ResolvedLaunchEntry,
 } from "@/lib/game/types";
 import { backOrPush } from "@/lib/ui/navigation";
@@ -35,6 +36,7 @@ export function CampaignCreationApp({
   const [customEntryPrompt, setCustomEntryPrompt] = useState("");
   const [customEntryPoint, setCustomEntryPoint] = useState<ResolvedLaunchEntry | null>(null);
   const [draft, setDraft] = useState<GeneratedCampaignOpening | null>(null);
+  const [preparedLaunch, setPreparedLaunch] = useState<PreparedCampaignLaunch | null>(null);
   const [loadingContext, setLoadingContext] = useState(true);
   const [resolvingCustomEntry, setResolvingCustomEntry] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -159,14 +161,16 @@ export function CampaignCreationApp({
         });
         const data = (await response.json()) as {
           draft?: GeneratedCampaignOpening;
+          preparedLaunch?: PreparedCampaignLaunch;
           error?: string;
         };
 
-        if (!response.ok || !data.draft) {
+        if (!response.ok || !data.draft || !data.preparedLaunch) {
           throw new Error(data.error ?? "Failed to generate opening draft.");
         }
 
         setDraft(data.draft);
+        setPreparedLaunch(data.preparedLaunch);
         setFollowUpPrompt("");
       } catch (draftError) {
         setError(draftError instanceof Error ? draftError.message : "Failed to generate opening.");
@@ -209,6 +213,7 @@ export function CampaignCreationApp({
       setLaunchMode("custom");
       setCustomEntryPoint(data.entryPoint);
       setDraft(null);
+      setPreparedLaunch(null);
     } catch (resolveError) {
       setError(resolveError instanceof Error ? resolveError.message : "Failed to resolve custom entry.");
     } finally {
@@ -218,6 +223,7 @@ export function CampaignCreationApp({
 
   useEffect(() => {
     setDraft(null);
+    setPreparedLaunch(null);
   }, [launchMode, selectedEntryPointId, customEntryPoint?.id]);
 
   useEffect(() => {
@@ -229,7 +235,7 @@ export function CampaignCreationApp({
   }, [character, draft, generateDraft, generating, hasActiveLaunchSelection, module]);
 
   async function startCampaign() {
-    if (!moduleId || !templateId || !draft || launching) {
+    if (!moduleId || !templateId || !draft || !preparedLaunch || launching) {
       return;
     }
 
@@ -260,6 +266,7 @@ export function CampaignCreationApp({
           templateId,
           ...launchSelection,
           opening: normalizeOpeningDraft(draft),
+          preparedLaunch,
         }),
       });
       const data = (await response.json()) as { campaignId?: string; error?: string };
@@ -427,12 +434,22 @@ export function CampaignCreationApp({
                       <p className="ui-body mt-2 text-zinc-300">{customEntryPoint.startLocationId}</p>
                     </div>
                     <div className="rounded-2xl border border-zinc-800 p-4">
-                      <p className="ui-label">Local Contact</p>
+                      <p className="ui-label">Scene Anchor</p>
                       <p className="ui-body mt-2 text-zinc-300">
                         {customEntryPoint.localContactNpcId
                           ?? customEntryPoint.localContactTemporaryActorLabel
-                          ?? "None"}
+                          ?? "No immediate contact required"}
                       </p>
+                    </div>
+                  </div>
+                  <div className="mt-4 grid gap-4 md:grid-cols-2">
+                    <div className="rounded-2xl border border-zinc-800 p-4">
+                      <p className="ui-label">Routine Path</p>
+                      <p className="ui-body mt-2 text-zinc-300">{customEntryPoint.mundaneActionPath}</p>
+                    </div>
+                    <div className="rounded-2xl border border-zinc-800 p-4">
+                      <p className="ui-label">World In Motion</p>
+                      <p className="ui-body mt-2 text-zinc-300">{customEntryPoint.evidenceWorldAlreadyMoving}</p>
                     </div>
                   </div>
                   {customEntryPoint.temporaryLocalActors.length ? (
@@ -514,7 +531,7 @@ export function CampaignCreationApp({
                 type="button"
                 className="button-press ui-button-primary mt-8 rounded-full px-5 py-3 text-sm font-semibold disabled:opacity-60"
                 onClick={() => void startCampaign()}
-                disabled={!draft || !hasActiveLaunchSelection || launching}
+                disabled={!draft || !preparedLaunch || !hasActiveLaunchSelection || launching}
               >
                 {launching ? "Launching..." : "Launch Campaign"}
               </button>

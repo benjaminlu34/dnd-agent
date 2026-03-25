@@ -342,6 +342,67 @@ test("campaign launch request schemas enforce strict XOR for entry selection", (
   );
 });
 
+test("campaign create request schema accepts a prepared launch bundle without an opening draft", () => {
+  const parsed = campaignCreateRequestSchema.safeParse({
+    moduleId: "mod_1",
+    templateId: "tpl_1",
+    entryPointId: "entry_1",
+    preparedLaunch: {
+      previewCampaignId: "preview_launch_1",
+      entryPoint: {
+        id: "entry_1",
+        title: "At the Gate",
+        summary: "Begin under watchful eyes.",
+        startLocationId: "preview_launch_1:location:loc_gate",
+        presentNpcIds: ["preview_launch_1:npc:npc_4"],
+        initialInformationIds: ["preview_launch_1:information:info_2"],
+        immediatePressure: "The line is about to be searched.",
+        publicLead: "The guide is already scanning the line.",
+        localContactNpcId: "preview_launch_1:npc:npc_4",
+        localContactTemporaryActorLabel: null,
+        temporaryLocalActors: [],
+        mundaneActionPath: "Join the queue and play your role.",
+        evidenceWorldAlreadyMoving: "The checkpoint is already active.",
+        isCustom: false,
+        customRequestPrompt: null,
+      },
+      startingLocals: [
+        {
+          id: "preview_launch_1:npc:npc_local_1",
+          name: "Bryn Stoutheart",
+          role: "market guard",
+          summary: "A guard checking permits near the gate.",
+          description: "A watch patrol already pacing the bottleneck.",
+          factionId: "preview_launch_1:faction:fac_watch",
+          currentLocationId: "preview_launch_1:location:loc_gate",
+          approval: 0,
+          isCompanion: false,
+        },
+      ],
+      opening: {
+        narration: "Rain glistens across the checkpoint.",
+        activeThreat: "The line is about to be searched.",
+        entryPointId: "entry_1",
+        locationNodeId: "preview_launch_1:location:loc_gate",
+        presentNpcIds: [
+          "preview_launch_1:npc:npc_4",
+          "preview_launch_1:npc:npc_local_1",
+        ],
+        citedInformationIds: ["preview_launch_1:information:info_2"],
+        scene: {
+          title: "At the Gate",
+          summary: "The checkpoint tightens as you arrive.",
+          location: "Gate",
+          atmosphere: "Wet stone and restless guards.",
+          suggestedActions: ["Join the line"],
+        },
+      },
+    },
+  });
+
+  assert.equal(parsed.success, true);
+});
+
 test("custom resolved launch entry draft schema allows solitary openings without local contacts", () => {
   const parsed = customResolvedLaunchEntryDraftSchema.safeParse({
     title: "At Home Before Dawn",
@@ -356,6 +417,53 @@ test("custom resolved launch entry draft schema allows solitary openings without
     temporaryLocalActors: [],
     mundaneActionPath: "Dress, pack the stall cloth, and decide how quickly to head downstairs.",
     evidenceWorldAlreadyMoving: "Wheel-rattle and shouted prices are already carrying up from the street.",
+  });
+
+  assert.equal(parsed.success, true);
+});
+
+test("custom resolved launch entry draft schema allows present named NPCs without a designated contact", () => {
+  const parsed = customResolvedLaunchEntryDraftSchema.safeParse({
+    title: "Shutters Up in the Market",
+    summary: "Open the stall while familiar faces filter into the lane around you.",
+    startLocationId: "loc_market",
+    presentNpcIds: ["npc_4"],
+    initialInformationIds: ["info_2"],
+    immediatePressure: "The first customers are arriving before all your stock is unpacked.",
+    publicLead: "The watch guide is already crossing the square toward the checkpoint.",
+    localContactNpcId: null,
+    localContactTemporaryActorLabel: null,
+    temporaryLocalActors: [],
+    mundaneActionPath: "Finish opening the stall and decide whether to keep working or step away.",
+    evidenceWorldAlreadyMoving: "Carts are already clogging the lane and traders are shouting over one another.",
+  });
+
+  assert.equal(parsed.success, true);
+});
+
+test("custom resolved launch entry draft schema allows ambient unnamed locals without a designated contact", () => {
+  const parsed = customResolvedLaunchEntryDraftSchema.safeParse({
+    title: "Morning Rush",
+    summary: "The market is already filling as workers and neighbors press past your doorway.",
+    startLocationId: "loc_market",
+    presentNpcIds: [],
+    initialInformationIds: ["info_2"],
+    immediatePressure: "Your awning needs to be secured before the lane fully clogs.",
+    publicLead: "Porters are already warning each other about a jam near the square.",
+    localContactNpcId: null,
+    localContactTemporaryActorLabel: null,
+    temporaryLocalActors: [
+      {
+        label: "porter",
+        summary: "A laborer hauling bundled goods through the morning crowd.",
+      },
+      {
+        label: "neighboring vendor",
+        summary: "A nearby seller already laying out wares and complaining about the crush.",
+      },
+    ],
+    mundaneActionPath: "Handle your setup before deciding whether to join the flow or stay tucked in.",
+    evidenceWorldAlreadyMoving: "Foot traffic is already thick enough that people have to angle sideways between carts.",
   });
 
   assert.equal(parsed.success, true);
@@ -391,18 +499,12 @@ test("validateResolvedLaunchEntryAgainstWorld rejects NPC/location mismatch and 
   const issues = validateResolvedLaunchEntryAgainstWorld(
     {
       id: "custom_entry_1",
-      title: "Wrong Place, Wrong Secrets",
-      summary: "A forced opening that should fail validation.",
       startLocationId: "loc_gate",
       presentNpcIds: ["npc_3"],
       initialInformationIds: ["info_4"],
-      immediatePressure: "The search line is collapsing.",
-      publicLead: "Someone nearby is motioning you over.",
       localContactNpcId: "npc_3",
       localContactTemporaryActorLabel: null,
       temporaryLocalActors: [],
-      mundaneActionPath: "Join the line and keep walking.",
-      evidenceWorldAlreadyMoving: "The checkpoint is already active.",
     },
     world,
   );
@@ -416,13 +518,9 @@ test("validateResolvedLaunchEntryAgainstWorld allows unnamed-local openings with
   const issues = validateResolvedLaunchEntryAgainstWorld(
     {
       id: "custom_entry_2",
-      title: "Kitchen Shift",
-      summary: "You begin halfway through a dawn tavern shift before the city fully wakes.",
       startLocationId: "loc_gate",
       presentNpcIds: [],
       initialInformationIds: ["info_2"],
-      immediatePressure: "A patrol is about to stop in for a surprise count.",
-      publicLead: "The cellar runner heard the watch arguing nearby.",
       localContactNpcId: null,
       localContactTemporaryActorLabel: "cellar runner",
       temporaryLocalActors: [
@@ -431,8 +529,6 @@ test("validateResolvedLaunchEntryAgainstWorld allows unnamed-local openings with
           summary: "A breathless tavern worker moving crates before the rush.",
         },
       ],
-      mundaneActionPath: "Stay on task, listen, and decide whether to keep your head down.",
-      evidenceWorldAlreadyMoving: "The district is already awake and tense before the player acts.",
     },
     world,
   );

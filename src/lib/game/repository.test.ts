@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { repositoryTestUtils } from "./repository";
-import type { GeneratedWorldModule, OpenWorldGenerationArtifacts, ResolvedLaunchEntry } from "./types";
+import type {
+  GeneratedCampaignOpening,
+  GeneratedWorldModule,
+  OpenWorldGenerationArtifacts,
+  PreparedCampaignLaunch,
+  ResolvedLaunchEntry,
+} from "./types";
 
 function createWorld(): GeneratedWorldModule {
   return {
@@ -183,4 +189,223 @@ test("normalizeLaunchEntrySelection returns provided custom entry unchanged", ()
   });
 
   assert.deepEqual(resolved, customEntryPoint);
+});
+
+test("assignStartingLocalNpcIds is deterministic for preview-to-launch rescoping", () => {
+  const assigned = repositoryTestUtils.assignStartingLocalNpcIds("preview_launch_1", [
+    {
+      name: "Kael Windwhisper",
+      role: "street performer",
+      summary: "A bard gathering morning trade with a lute and a grin.",
+      description: "A half-elf performer tuning up beside the opening stall.",
+      factionId: null,
+      currentLocationId: "preview_launch_1:location:loc_market",
+      approval: 0,
+      isCompanion: false,
+    },
+    {
+      name: "Bryn Stoutheart",
+      role: "market guard",
+      summary: "A watch patrol checking permits along the lane.",
+      description: "A city guard walking the stalls before the rush hits.",
+      factionId: "preview_launch_1:faction:fac_watch",
+      currentLocationId: "preview_launch_1:location:loc_market",
+      approval: 0,
+      isCompanion: false,
+    },
+  ]);
+
+  assert.deepEqual(
+    assigned.map((npc) => npc.id),
+    [
+      "preview_launch_1:npc:npc_local_1",
+      "preview_launch_1:npc:npc_local_2",
+    ],
+  );
+});
+
+test("buildOpeningWorldWithStartingLocals removes duplicated temporary locals and upgrades the contact", () => {
+  const entryPoint: ResolvedLaunchEntry = {
+    id: "custom_entry_market",
+    title: "Morning Market Setup",
+    summary: "Open the stall before the rush hits.",
+    startLocationId: "preview_launch_1:location:loc_market",
+    presentNpcIds: [],
+    initialInformationIds: ["preview_launch_1:information:info_watch"],
+    immediatePressure: "The lane is filling before the bolts are out.",
+    publicLead: "A street performer is already drawing eyes down the row.",
+    localContactNpcId: null,
+    localContactTemporaryActorLabel: "street performer",
+    temporaryLocalActors: [
+      {
+        label: "street performer",
+        summary: "A half-elf bard tuning a lute and practicing juggling tricks to attract attention",
+      },
+      {
+        label: "early shopper",
+        summary: "A merchant's wife comparing cloth and price across nearby stalls.",
+      },
+    ],
+    mundaneActionPath: "Finish laying out the fabrics and decide how to greet the crowd.",
+    evidenceWorldAlreadyMoving: "Bread carts and shouted prices are already rolling through the lane.",
+    isCustom: true,
+    customRequestPrompt: "I start the day as a fabric vendor in the market.",
+  };
+  const startingLocals = repositoryTestUtils.assignStartingLocalNpcIds("preview_launch_1", [
+    {
+      name: "Kael Windwhisper",
+      role: "street performer",
+      summary: "A half-elf bard tuning a lute and practicing juggling tricks.",
+      description: "A colorful performer setting up near the stall to draw a crowd.",
+      factionId: null,
+      currentLocationId: "preview_launch_1:location:loc_market",
+      approval: 0,
+      isCompanion: false,
+    },
+    {
+      name: "Bryn Stoutheart",
+      role: "market guard",
+      summary: "A City Watch officer checking permits and watching the lane.",
+      description: "A familiar guard pacing the market edge before the morning rush.",
+      factionId: "preview_launch_1:faction:fac_watch",
+      currentLocationId: "preview_launch_1:location:loc_market",
+      approval: 0,
+      isCompanion: false,
+    },
+  ]);
+
+  const built = repositoryTestUtils.buildOpeningWorldWithStartingLocals({
+    module: {
+      title: "Preview Market",
+      premise: "A quiet lane before the morning rush.",
+      tone: "Grounded",
+      setting: "A trade market",
+      locations: [
+        {
+          id: "preview_launch_1:location:loc_market",
+          name: "Lantern Market",
+          type: "market",
+          summary: "A busy market lane.",
+          description: "A lane lined with stalls and awnings.",
+          state: "active",
+          controllingFactionId: "preview_launch_1:faction:fac_watch",
+          tags: [],
+        },
+      ],
+      edges: [],
+      factions: [
+        {
+          id: "preview_launch_1:faction:fac_watch",
+          name: "Watch",
+          type: "civic",
+          summary: "Market patrols.",
+          agenda: "Keep order in the market.",
+          resources: { gold: 4, military: 5, influence: 5, information: 3 },
+          pressureClock: 2,
+        },
+      ],
+      factionRelations: [],
+      npcs: [],
+      information: [],
+      informationLinks: [],
+      commodities: [],
+      marketPrices: [],
+      entryPoints: [],
+    },
+    entryPoint,
+    startingLocals,
+  });
+
+  assert.equal(built.entryPoint.localContactTemporaryActorLabel, null);
+  assert.equal(built.entryPoint.localContactNpcId, "preview_launch_1:npc:npc_local_1");
+  assert.deepEqual(built.entryPoint.temporaryLocalActors, [
+    {
+      label: "early shopper",
+      summary: "A merchant's wife comparing cloth and price across nearby stalls.",
+    },
+  ]);
+});
+
+test("rescopeOpeningToCampaign remaps preview ids to final campaign ids", () => {
+  const opening: GeneratedCampaignOpening = {
+    narration: "Morning light spills across the lane as you raise the awning.",
+    activeThreat: "The first buyers are already close enough to see what is still unpacked.",
+    entryPointId: "custom_entry_market",
+    locationNodeId: "preview_launch_1:location:loc_market",
+    presentNpcIds: [
+      "preview_launch_1:npc:npc_local_1",
+      "preview_launch_1:npc:npc_local_2",
+    ],
+    citedInformationIds: ["preview_launch_1:information:info_watch"],
+    scene: {
+      title: "Morning Market Setup",
+      summary: "Open the stall before the lane clogs.",
+      location: "Lantern Market",
+      atmosphere: "Carts, bread steam, and wet cobbles.",
+      suggestedActions: ["Finish unpacking"],
+    },
+  };
+
+  const rescoped = repositoryTestUtils.rescopeOpeningToCampaign(opening, "camp_final_1");
+
+  assert.equal(rescoped.locationNodeId, "camp_final_1:location:loc_market");
+  assert.deepEqual(rescoped.presentNpcIds, [
+    "camp_final_1:npc:npc_local_1",
+    "camp_final_1:npc:npc_local_2",
+  ]);
+  assert.deepEqual(rescoped.citedInformationIds, [
+    "camp_final_1:information:info_watch",
+  ]);
+});
+
+test("preparedLaunchMatchesSelection rejects stale bundles from a different launch selection", () => {
+  const preparedLaunch: PreparedCampaignLaunch = {
+    previewCampaignId: "preview_launch_1",
+    entryPoint: {
+      id: "custom_entry_market",
+      title: "Morning Market Setup",
+      summary: "Open the stall before the lane clogs.",
+      startLocationId: "preview_launch_1:location:loc_market",
+      presentNpcIds: ["preview_launch_1:npc:npc_local_1"],
+      initialInformationIds: ["preview_launch_1:information:info_watch"],
+      immediatePressure: "You need to get set before the buyers arrive.",
+      publicLead: "A performer is already gathering a crowd.",
+      localContactNpcId: "preview_launch_1:npc:npc_local_1",
+      localContactTemporaryActorLabel: null,
+      temporaryLocalActors: [],
+      mundaneActionPath: "Lay out the fabrics and take the first sale.",
+      evidenceWorldAlreadyMoving: "Bakers and porters are already moving through the lane.",
+      isCustom: true,
+      customRequestPrompt: "I start as a cloth seller in the market.",
+    },
+    startingLocals: [],
+    opening: {
+      narration: "You finish lifting the awning into place.",
+      activeThreat: "The lane is filling fast.",
+      entryPointId: "custom_entry_market",
+      locationNodeId: "preview_launch_1:location:loc_market",
+      presentNpcIds: ["preview_launch_1:npc:npc_local_1"],
+      citedInformationIds: ["preview_launch_1:information:info_watch"],
+      scene: {
+        title: "Morning Market Setup",
+        summary: "The market is waking around you.",
+        location: "Lantern Market",
+        atmosphere: "Crowded, damp, and busy.",
+        suggestedActions: ["Open the stall"],
+      },
+    },
+  };
+  const mismatchedSelection: ResolvedLaunchEntry = {
+    ...preparedLaunch.entryPoint,
+    startLocationId: "loc_gate",
+    initialInformationIds: ["info_watch", "info_extra"],
+  };
+
+  assert.equal(
+    repositoryTestUtils.preparedLaunchMatchesSelection({
+      preparedLaunch,
+      normalizedEntryPoint: mismatchedSelection,
+    }),
+    false,
+  );
 });

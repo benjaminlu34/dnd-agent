@@ -34,7 +34,10 @@ export async function POST(request: Request) {
       );
     }
 
-    return NextResponse.json({ draft: result.draft });
+    return NextResponse.json({
+      draft: result.draft,
+      preparedLaunch: result.preparedLaunch,
+    });
   } catch (error) {
     return NextResponse.json(
       {

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { dmClient } from "@/lib/ai/provider";
+import { dmClient, logBackendDiagnostic } from "@/lib/ai/provider";
 import { renderWhatChanged, renderWhy } from "@/lib/game/causality";
 import { parseTurnResultPayloadJson, toCampaignRuntimeStateJson, toTurnResultPayloadJson } from "@/lib/game/json-contracts";
 import {
@@ -2498,6 +2498,14 @@ export async function triageTurn(input: TurnSubmissionRequest & {
 }) {
   const playerAction = input.action.trim();
   const turnMode: TurnMode = input.mode === "observe" ? "observe" : "player_input";
+  logBackendDiagnostic("turn.triage.start", {
+    campaignId: input.campaignId,
+    sessionId: input.sessionId,
+    requestId: input.requestId,
+    expectedStateVersion: input.expectedStateVersion,
+    turnMode,
+    playerActionPreview: playerAction.slice(0, 240),
+  });
   const requestHash = requestHashForSubmission({
     campaignId: input.campaignId,
     sessionId: input.sessionId,
@@ -2516,6 +2524,11 @@ export async function triageTurn(input: TurnSubmissionRequest & {
 
   if (existingTurn) {
     if (existingTurn.requestHash && existingTurn.requestHash !== requestHash) {
+      logBackendDiagnostic("turn.triage.request_hash_conflict", {
+        campaignId: input.campaignId,
+        requestId: input.requestId,
+        turnId: existingTurn.id,
+      });
       throw new Error("requestId was reused with a different action payload.");
     }
 
@@ -2538,6 +2551,12 @@ export async function triageTurn(input: TurnSubmissionRequest & {
         "abandoned",
       ].includes(existingTurn.status)
     ) {
+      logBackendDiagnostic("turn.triage.retry_required", {
+        campaignId: input.campaignId,
+        requestId: input.requestId,
+        turnId: existingTurn.id,
+        previousStatus: existingTurn.status,
+      });
       return {
         type: "retry_required" as const,
         payload: retryRequiredResultForTurn(existingTurn),
@@ -2558,6 +2577,14 @@ export async function triageTurn(input: TurnSubmissionRequest & {
   }
 
   if (input.expectedStateVersion < campaign.stateVersion) {
+    logBackendDiagnostic("turn.triage.state_conflict", {
+      campaignId: input.campaignId,
+      sessionId: input.sessionId,
+      requestId: input.requestId,
+      expectedStateVersion: input.expectedStateVersion,
+      latestStateVersion: campaign.stateVersion,
+      reason: "stale_client",
+    });
     return {
       type: "state_conflict" as const,
       payload: await buildStateConflictPayload({
@@ -2569,6 +2596,12 @@ export async function triageTurn(input: TurnSubmissionRequest & {
   }
 
   if (input.expectedStateVersion > campaign.stateVersion) {
+    logBackendDiagnostic("turn.triage.invalid_expected_state_version", {
+      campaignId: input.campaignId,
+      requestId: input.requestId,
+      expectedStateVersion: input.expectedStateVersion,
+      latestStateVersion: campaign.stateVersion,
+    });
     throw new InvalidExpectedStateVersionError(
       `expectedStateVersion ${input.expectedStateVersion} is ahead of the campaign state ${campaign.stateVersion}.`,
       campaign.stateVersion,
@@ -2598,6 +2631,14 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       select: { stateVersion: true },
     });
     if (latest && latest.stateVersion > input.expectedStateVersion) {
+      logBackendDiagnostic("turn.triage.state_conflict", {
+        campaignId: input.campaignId,
+        sessionId: input.sessionId,
+        requestId: input.requestId,
+        expectedStateVersion: input.expectedStateVersion,
+        latestStateVersion: latest.stateVersion,
+        reason: "lock_claim_revealed_newer_state",
+      });
       return {
         type: "state_conflict" as const,
         payload: await buildStateConflictPayload({
@@ -2607,8 +2648,20 @@ export async function triageTurn(input: TurnSubmissionRequest & {
         }),
       };
     }
+    logBackendDiagnostic("turn.triage.lock_conflict", {
+      campaignId: input.campaignId,
+      sessionId: input.sessionId,
+      requestId: input.requestId,
+      expectedStateVersion: input.expectedStateVersion,
+    });
     throw new TurnLockedError("Another turn already owns the campaign lock.");
   }
+  logBackendDiagnostic("turn.triage.lock_claimed", {
+    campaignId: input.campaignId,
+    sessionId: input.sessionId,
+    requestId: input.requestId,
+    expectedStateVersion: input.expectedStateVersion,
+  });
 
   const turn = existingTurn
     ? await prisma.turn.update({
@@ -2633,6 +2686,13 @@ export async function triageTurn(input: TurnSubmissionRequest & {
           status: "processing",
         },
       });
+  logBackendDiagnostic("turn.triage.turn_row_ready", {
+    campaignId: input.campaignId,
+    sessionId: input.sessionId,
+    requestId: input.requestId,
+    turnId: turn.id,
+    reusedExistingTurn: Boolean(existingTurn),
+  });
 
   const abortController = new AbortController();
   const turnKey = activeTurnKey(input.campaignId, input.requestId);
@@ -2647,6 +2707,17 @@ export async function triageTurn(input: TurnSubmissionRequest & {
     if (!snapshot) {
       throw new Error("Campaign session not found.");
     }
+    logBackendDiagnostic("turn.snapshot.loaded", {
+      campaignId: input.campaignId,
+      sessionId: input.sessionId,
+      requestId: input.requestId,
+      turnId: turn.id,
+      stateVersion: snapshot.stateVersion,
+      locationId: snapshot.currentLocation.id,
+      presentNpcCount: snapshot.presentNpcs.length,
+      activePressureCount: snapshot.activePressures.length,
+      activeThreadCount: snapshot.activeThreads.length,
+    });
 
     const promptContext = await getPromptContext(snapshot);
     const narrationOverride = buildNarrationOverride({
@@ -2661,6 +2732,14 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       executeFetchTool: (call) => executeFetchTool(snapshot, call),
       signal: abortController.signal,
     });
+    logBackendDiagnostic("turn.provider.resolved", {
+      campaignId: input.campaignId,
+      sessionId: input.sessionId,
+      requestId: input.requestId,
+      turnId: turn.id,
+      commandType: resolution.command.type,
+      fetchedFactCount: resolution.fetchedFacts.length,
+    });
 
     if (abortController.signal.aborted && !commitStarted) {
       throw new TurnAbandonedError("Turn resolution was aborted before commit.");
@@ -2673,6 +2752,12 @@ export async function triageTurn(input: TurnSubmissionRequest & {
     });
 
     if (validated.type === "request_clarification") {
+      logBackendDiagnostic("turn.clarification_requested", {
+        campaignId: input.campaignId,
+        sessionId: input.sessionId,
+        requestId: input.requestId,
+        turnId: turn.id,
+      });
       await prisma.turn.update({
         where: { id: turn.id },
         data: {
@@ -2724,6 +2809,14 @@ export async function triageTurn(input: TurnSubmissionRequest & {
 
     commitStarted = true;
     activeCommitTurnKeys.add(turnKey);
+    logBackendDiagnostic("turn.commit.start", {
+      campaignId: input.campaignId,
+      sessionId: input.sessionId,
+      requestId: input.requestId,
+      turnId: turn.id,
+      commandType: committedCommand.type,
+      expectedStateVersion: input.expectedStateVersion,
+    });
     const resultPayload = await commitResolvedTurn({
       snapshot,
       sessionId: input.sessionId,
@@ -2737,8 +2830,23 @@ export async function triageTurn(input: TurnSubmissionRequest & {
     });
     commitStarted = false;
     activeCommitTurnKeys.delete(turnKey);
+    logBackendDiagnostic("turn.commit.success", {
+      campaignId: input.campaignId,
+      sessionId: input.sessionId,
+      requestId: input.requestId,
+      turnId: turn.id,
+      stateVersionAfter: resultPayload.stateVersionAfter,
+      changeCount: resultPayload.changeCodes.length,
+      reasonCount: resultPayload.reasonCodes.length,
+    });
     void wakeScheduleGenerationJobs().catch((error) => {
       console.error("[schedule-jobs] Wake failed after commit.", error);
+      logBackendDiagnostic("schedule_jobs.wake_failed_after_commit", {
+        campaignId: input.campaignId,
+        requestId: input.requestId,
+        turnId: turn.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
     });
 
     return {
@@ -2752,6 +2860,13 @@ export async function triageTurn(input: TurnSubmissionRequest & {
     };
   } catch (error) {
     if (error instanceof StateConflictError) {
+      logBackendDiagnostic("turn.commit.state_conflict", {
+        campaignId: input.campaignId,
+        sessionId: input.sessionId,
+        requestId: input.requestId,
+        turnId: turn.id,
+        message: error.message,
+      });
       await prisma.turn.update({
         where: { id: turn.id },
         data: {
@@ -2792,6 +2907,12 @@ export async function triageTurn(input: TurnSubmissionRequest & {
 
     if (abortController.signal.aborted && !commitStarted) {
       if (abortController.signal.reason === "deadline_exceeded") {
+        logBackendDiagnostic("turn.aborted.deadline_exceeded", {
+          campaignId: input.campaignId,
+          sessionId: input.sessionId,
+          requestId: input.requestId,
+          turnId: turn.id,
+        });
         await abandonTurnRequest({
           campaignId: input.campaignId,
           requestId: input.requestId,
@@ -2801,6 +2922,12 @@ export async function triageTurn(input: TurnSubmissionRequest & {
           message: "Turn resolution exceeded the internal deadline before commit.",
         });
       } else {
+        logBackendDiagnostic("turn.aborted.cancelled", {
+          campaignId: input.campaignId,
+          sessionId: input.sessionId,
+          requestId: input.requestId,
+          turnId: turn.id,
+        });
         await abandonCancelledTurnIfOwned({
           campaignId: input.campaignId,
           sessionId: input.sessionId,
@@ -2831,6 +2958,14 @@ export async function triageTurn(input: TurnSubmissionRequest & {
             : "failed_infrastructure",
       infrastructureFailureCode,
       message: error instanceof Error ? error.message : "Turn processing failed.",
+    });
+    logBackendDiagnostic("turn.failed", {
+      campaignId: input.campaignId,
+      sessionId: input.sessionId,
+      requestId: input.requestId,
+      turnId: turn.id,
+      infrastructureFailureCode,
+      error: error instanceof Error ? error.message : String(error),
     });
     await cleanupTurnLock({
       campaignId: input.campaignId,
@@ -2898,6 +3033,11 @@ export async function cancelTurnRequest(input: {
   sessionId: string;
   requestId: string;
 }) {
+  logBackendDiagnostic("turn.cancel.requested", {
+    campaignId: input.campaignId,
+    sessionId: input.sessionId,
+    requestId: input.requestId,
+  });
   const turn = await prisma.turn.findUnique({
     where: {
       campaignId_requestId: {
@@ -2944,6 +3084,12 @@ export async function cancelTurnRequest(input: {
   }
 
   controller.abort("cancelled");
+  logBackendDiagnostic("turn.cancel.signal_sent", {
+    campaignId: input.campaignId,
+    sessionId: input.sessionId,
+    requestId: input.requestId,
+    turnId: turn.id,
+  });
 
   const campaign = await prisma.campaign.findUnique({
     where: { id: input.campaignId },
@@ -2992,6 +3138,12 @@ export async function cancelTurnRequest(input: {
   });
 
   if (abandoned.count === 1) {
+    logBackendDiagnostic("turn.cancel.abandoned", {
+      campaignId: input.campaignId,
+      sessionId: input.sessionId,
+      requestId: input.requestId,
+      turnId: turn.id,
+    });
     await cleanupTurnLock({
       campaignId: input.campaignId,
       requestId: input.requestId,

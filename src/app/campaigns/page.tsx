@@ -129,7 +129,7 @@ export default function CampaignsPage() {
         ) : (
           <div className="space-y-4 w-full max-w-2xl">
             {campaigns.map((campaign) => (
-              <div key={campaign.id} className="block rounded-xl border border-zinc-800 bg-zinc-950/50 p-4 hover:bg-zinc-900 transition-colors relative">
+              <Link key={campaign.id} href={`/play/${campaign.id}`} className="block rounded-xl border border-zinc-800 bg-zinc-950/50 p-4 hover:bg-zinc-900 transition-colors relative">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                   <div className="min-w-0 flex-1">
                     {editingCampaign?.id === campaign.id ? (
@@ -172,11 +172,12 @@ export default function CampaignsPage() {
                       <p className="text-sm text-zinc-400 line-clamp-2">{campaign.description}</p>
                     )}
                   </div>
-                  <div className="flex shrink-0 gap-2 self-start">
+                  <div className="flex shrink-0 gap-2 self-start" onClick={(e) => e.preventDefault()}>
                     {editingCampaign?.id === campaign.id ? (
                       <>
                         <button
-                          onClick={() => {
+                          onClick={(e) => {
+                            e.stopPropagation();
                             setError(null);
                             setEditingCampaign(null);
                           }}
@@ -186,7 +187,8 @@ export default function CampaignsPage() {
                           Cancel
                         </button>
                         <button
-                          onClick={async () => {
+                          onClick={async (e) => {
+                            e.stopPropagation();
                             const didRename = await handleRename(campaign.id, editingCampaign.title);
                             if (didRename) {
                               setEditingCampaign(null);
@@ -201,7 +203,8 @@ export default function CampaignsPage() {
                     ) : !deleteConfirmId ? (
                       <>
                         <button
-                          onClick={() => {
+                          onClick={(e) => {
+                            e.stopPropagation();
                             setError(null);
                             setEditingCampaign({ id: campaign.id, title: campaign.title || "" });
                           }}
@@ -210,7 +213,10 @@ export default function CampaignsPage() {
                           Rename
                         </button>
                         <button
-                          onClick={() => setDeleteConfirmId(campaign.id)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDeleteConfirmId(campaign.id);
+                          }}
                           className="rounded border border-red-600 px-2 py-1 text-xs font-semibold text-red-300 hover:bg-red-800/20 transition-colors"
                         >
                           Delete
@@ -219,7 +225,7 @@ export default function CampaignsPage() {
                     ) : null}
                   </div>
                 </div>
-              </div>
+              </Link>
             ))}
           </div>
         )}

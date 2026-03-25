@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
-import { dmClient } from "@/lib/ai/provider";
+import { dmClient, logBackendDiagnostic } from "@/lib/ai/provider";
 import { toCampaignCharacter, toCharacterStats } from "@/lib/game/characters";
 import { parseTurnResultPayloadJson, parseCampaignRuntimeStateJson, approvalBandForValue, toCampaignRuntimeStateJson, toFactionResourcesJson } from "@/lib/game/json-contracts";
 import { createAdHocCampaignInventoryItem } from "@/lib/game/items";
@@ -45,6 +45,7 @@ import type {
   NpcSummary,
   PlayerCampaignSnapshot,
   PromptInventoryItem,
+  PreparedCampaignLaunch,
   ResolvedLaunchEntry,
   RelationshipHistory,
   RecentLocalEventSummary,
@@ -210,6 +211,113 @@ function collectNearbyLocationIds(world: GeneratedWorldModule, startLocationId: 
 
 function scopeEntityId(scopeId: string, entityType: string, id: string) {
   return `${scopeId}:${entityType}:${id}`;
+}
+
+function rescopeScopedEntityId(value: string, nextScopeId: string) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+
+  const parts = trimmed.split(":");
+  return parts.length >= 3 ? `${nextScopeId}:${parts[1]}:${parts.slice(2).join(":")}` : trimmed;
+}
+
+function stripScopedEntityId(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+
+  const parts = trimmed.split(":");
+  return parts.length >= 3 ? `${parts[1]}:${parts.slice(2).join(":")}` : trimmed;
+}
+
+function normalizeActorSurfaceText(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function temporaryActorMatchesStartingLocal(input: {
+  actor: { label: string; summary: string };
+  npc: Pick<GeneratedWorldModule["npcs"][number], "role" | "summary" | "description">;
+}) {
+  const actorTokens = normalizeActorSurfaceText(`${input.actor.label} ${input.actor.summary}`)
+    .split(" ")
+    .filter((token) => token.length >= 3);
+  if (!actorTokens.length) {
+    return false;
+  }
+
+  const npcSurface = normalizeActorSurfaceText(
+    `${input.npc.role} ${input.npc.summary} ${input.npc.description}`,
+  );
+
+  return actorTokens.every((token) => npcSurface.includes(token));
+}
+
+function reconcileEntryPointWithStartingLocals(input: {
+  entryPoint: ResolvedLaunchEntry;
+  startingLocals: GeneratedWorldModule["npcs"];
+}) {
+  let localContactNpcId = input.entryPoint.localContactNpcId;
+  let localContactTemporaryActorLabel = input.entryPoint.localContactTemporaryActorLabel;
+  const temporaryLocalActors = input.entryPoint.temporaryLocalActors.filter((actor) => {
+    const matchingLocal = input.startingLocals.find((npc) =>
+      npc.currentLocationId === input.entryPoint.startLocationId
+      && temporaryActorMatchesStartingLocal({ actor, npc }),
+    );
+
+    if (!matchingLocal) {
+      return true;
+    }
+
+    if (
+      !localContactNpcId
+      && localContactTemporaryActorLabel
+      && normalizeActorSurfaceText(localContactTemporaryActorLabel) === normalizeActorSurfaceText(actor.label)
+    ) {
+      localContactNpcId = matchingLocal.id;
+      localContactTemporaryActorLabel = null;
+    }
+
+    return false;
+  });
+
+  return {
+    ...input.entryPoint,
+    localContactNpcId,
+    localContactTemporaryActorLabel,
+    temporaryLocalActors,
+  };
+}
+
+function rescopeGeneratedNpcToCampaign(
+  npc: GeneratedWorldModule["npcs"][number],
+  campaignId: string,
+): GeneratedWorldModule["npcs"][number] {
+  return {
+    ...npc,
+    id: rescopeScopedEntityId(npc.id, campaignId),
+    factionId: npc.factionId ? rescopeScopedEntityId(npc.factionId, campaignId) : null,
+    currentLocationId: rescopeScopedEntityId(npc.currentLocationId, campaignId),
+  };
+}
+
+function rescopeOpeningToCampaign(
+  opening: GeneratedCampaignOpening,
+  campaignId: string,
+): GeneratedCampaignOpening {
+  return {
+    ...opening,
+    locationNodeId: rescopeScopedEntityId(opening.locationNodeId, campaignId),
+    presentNpcIds: opening.presentNpcIds.map((id) => rescopeScopedEntityId(id, campaignId)),
+    citedInformationIds: opening.citedInformationIds.map((id) => rescopeScopedEntityId(id, campaignId)),
+  };
 }
 
 function toPrismaJsonValue(value: unknown): Prisma.InputJsonValue {
@@ -424,7 +532,7 @@ function assignStartingLocalNpcIds(
 ): GeneratedWorldModule["npcs"] {
   return npcs.map((npc, index) => ({
     ...npc,
-    id: scopeEntityId(campaignId, "npc", `npc_local_${index + 1}_${randomUUID()}`),
+    id: scopeEntityId(campaignId, "npc", `npc_local_${index + 1}`),
   }));
 }
 
@@ -433,8 +541,12 @@ function buildOpeningWorldWithStartingLocals(input: {
   entryPoint: ResolvedLaunchEntry;
   startingLocals: GeneratedWorldModule["npcs"];
 }) {
+  const reconciledEntryPoint = reconcileEntryPointWithStartingLocals({
+    entryPoint: input.entryPoint,
+    startingLocals: input.startingLocals,
+  });
   const startLocationNpcIds = input.startingLocals
-    .filter((npc) => npc.currentLocationId === input.entryPoint.startLocationId)
+    .filter((npc) => npc.currentLocationId === reconciledEntryPoint.startLocationId)
     .map((npc) => npc.id);
 
   return {
@@ -443,15 +555,111 @@ function buildOpeningWorldWithStartingLocals(input: {
       npcs: [...input.module.npcs, ...input.startingLocals],
     },
     entryPoint: {
-      ...input.entryPoint,
+      ...reconciledEntryPoint,
       // Preserve unnamed-local openings by keeping generated starting locals off-scene
       // unless the launch entry already hinges on named NPCs.
       presentNpcIds:
-        !input.entryPoint.localContactNpcId && input.entryPoint.presentNpcIds.length === 0
-          ? input.entryPoint.presentNpcIds
-          : Array.from(new Set([...input.entryPoint.presentNpcIds, ...startLocationNpcIds])),
+        !reconciledEntryPoint.localContactNpcId && reconciledEntryPoint.presentNpcIds.length === 0
+          ? reconciledEntryPoint.presentNpcIds
+          : Array.from(new Set([...reconciledEntryPoint.presentNpcIds, ...startLocationNpcIds])),
     },
   };
+}
+
+async function prepareCampaignLaunch(input: {
+  campaignId: string;
+  world: GeneratedWorldModule;
+  entryPoint: ResolvedLaunchEntry;
+  template: CharacterTemplate;
+  artifacts: OpenWorldGenerationArtifacts | null;
+  prompt?: string;
+  previousDraft?: GeneratedCampaignOpening;
+}): Promise<PreparedCampaignLaunch> {
+  const { world: instancedWorld, entryPoint: instancedEntryPoint } = instanceWorldForCampaign(
+    input.campaignId,
+    input.world,
+    input.entryPoint,
+  );
+  const rescaledPreviousDraft = input.previousDraft
+    ? rescopeOpeningToCampaign(input.previousDraft, input.campaignId)
+    : undefined;
+  const openingSeed =
+    rescaledPreviousDraft
+    ?? await dmClient.generateCampaignOpening({
+      module: instancedWorld,
+      character: input.template,
+      entryPoint: instancedEntryPoint,
+      artifacts: input.artifacts,
+      prompt: input.prompt,
+    });
+  const startingLocals = assignStartingLocalNpcIds(
+    input.campaignId,
+    await generateStartingHydratedNpcs({
+      world: instancedWorld,
+      entryPoint: instancedEntryPoint,
+      template: input.template,
+      opening: openingSeed,
+    }),
+  );
+  const openingInput = buildOpeningWorldWithStartingLocals({
+    module: instancedWorld,
+    entryPoint: instancedEntryPoint,
+    startingLocals,
+  });
+  const opening = await dmClient.generateCampaignOpening({
+    module: openingInput.module,
+    character: input.template,
+    entryPoint: openingInput.entryPoint,
+    artifacts: input.artifacts,
+    prompt: input.prompt,
+    previousDraft: rescaledPreviousDraft ?? openingSeed,
+  });
+
+  return {
+    previewCampaignId: input.campaignId,
+    entryPoint: openingInput.entryPoint,
+    startingLocals,
+    opening,
+  };
+}
+
+function preparedLaunchMatchesSelection(input: {
+  preparedLaunch: PreparedCampaignLaunch;
+  normalizedEntryPoint: ResolvedLaunchEntry;
+}) {
+  const prepared = input.preparedLaunch.entryPoint;
+  const selected = input.normalizedEntryPoint;
+
+  if (prepared.id !== selected.id || prepared.isCustom !== selected.isCustom) {
+    return false;
+  }
+
+  if (prepared.customRequestPrompt !== selected.customRequestPrompt) {
+    return false;
+  }
+
+  if (stripScopedEntityId(prepared.startLocationId) !== stripScopedEntityId(selected.startLocationId)) {
+    return false;
+  }
+
+  const preparedInformationIds = new Set(
+    prepared.initialInformationIds.map((id) => stripScopedEntityId(id)),
+  );
+  const selectedInformationIds = new Set(
+    selected.initialInformationIds.map((id) => stripScopedEntityId(id)),
+  );
+
+  if (preparedInformationIds.size !== selectedInformationIds.size) {
+    return false;
+  }
+
+  for (const informationId of selectedInformationIds) {
+    if (!preparedInformationIds.has(informationId)) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 async function generateStartingHydratedNpcs(input: {
@@ -473,6 +681,13 @@ async function generateStartingHydratedNpcs(input: {
       "[campaign-start-hydration] Failed to generate additional starting locals, continuing with anchor NPCs only.",
       error,
     );
+    logBackendDiagnostic("campaign.starting_locals.fallback", {
+      message:
+        "Failed to generate additional starting locals, continuing with anchor NPCs only.",
+      error: error instanceof Error ? error.message : String(error),
+      entryPointId: input.entryPoint.id,
+      startLocationId: input.entryPoint.startLocationId,
+    });
     return [];
   }
 }
@@ -868,6 +1083,14 @@ export async function generateCampaignOpeningDraftForUser(input: {
   prompt?: string;
   previousDraft?: GeneratedCampaignOpening;
 }) {
+  logBackendDiagnostic("campaign.opening_draft.start", {
+    moduleId: input.moduleId,
+    templateId: input.templateId,
+    entryPointId: input.entryPointId ?? null,
+    customEntryId: input.customEntryPoint?.id ?? null,
+    hasPreviousDraft: Boolean(input.previousDraft),
+    hasPrompt: Boolean(input.prompt?.trim()),
+  });
   const user = await ensureLocalUser();
   const [module, template] = await Promise.all([
     prisma.adventureModule.findFirst({
@@ -895,45 +1118,27 @@ export async function generateCampaignOpeningDraftForUser(input: {
     customEntryPoint: input.customEntryPoint,
   });
 
-  const previewCampaignId = `preview_${randomUUID()}`;
-  const { world: previewWorld, entryPoint: previewEntryPoint } = instanceWorldForCampaign(
-    previewCampaignId,
+  const character = toTemplateRecord(template);
+  const preparedLaunch = await prepareCampaignLaunch({
+    campaignId: `preview_${randomUUID()}`,
     world,
     entryPoint,
-  );
-  const character = toTemplateRecord(template);
-  const preliminaryOpening = await dmClient.generateCampaignOpening({
-    module: previewWorld,
-    character,
-    entryPoint: previewEntryPoint,
+    template: character,
     artifacts: generationArtifacts,
     prompt: input.prompt,
     previousDraft: input.previousDraft,
   });
-  const hydratedStartingNpcs = assignStartingLocalNpcIds(
-    previewCampaignId,
-    await generateStartingHydratedNpcs({
-      world: previewWorld,
-      entryPoint: previewEntryPoint,
-      template: character,
-      opening: preliminaryOpening,
-    }),
-  );
-  const openingInput = buildOpeningWorldWithStartingLocals({
-    module: previewWorld,
-    entryPoint: previewEntryPoint,
-    startingLocals: hydratedStartingNpcs,
-  });
-  const draft = await dmClient.generateCampaignOpening({
-    module: openingInput.module,
-    character,
-    entryPoint: openingInput.entryPoint,
-    artifacts: generationArtifacts,
-    prompt: input.prompt,
-    previousDraft: preliminaryOpening,
+  logBackendDiagnostic("campaign.opening_draft.success", {
+    previewCampaignId: preparedLaunch.previewCampaignId,
+    entryPointId: preparedLaunch.entryPoint.id,
+    startLocationId: preparedLaunch.entryPoint.startLocationId,
+    startingLocalCount: preparedLaunch.startingLocals.length,
   });
 
-  return { draft };
+  return {
+    draft: preparedLaunch.opening,
+    preparedLaunch,
+  };
 }
 
 function buildDailyScheduleInputFromWorld(input: {
@@ -1389,6 +1594,7 @@ export async function createCampaignFromModuleForUser(input: {
   entryPointId?: string;
   customEntryPoint?: ResolvedLaunchEntry;
   opening?: GeneratedCampaignOpening;
+  preparedLaunch?: PreparedCampaignLaunch;
 }) {
   const user = await ensureLocalUser();
   const [module, template] = await Promise.all([
@@ -1408,6 +1614,15 @@ export async function createCampaignFromModuleForUser(input: {
     return { error: "template_not_found" as const };
   }
 
+  logBackendDiagnostic("campaign.create.start", {
+    moduleId: input.moduleId,
+    templateId: input.templateId,
+    entryPointId: input.entryPointId ?? null,
+    customEntryId: input.customEntryPoint?.id ?? null,
+    hasPreparedLaunch: Boolean(input.preparedLaunch),
+    hasOpeningDraft: Boolean(input.opening),
+  });
+
   const world = parseWorldTemplate(module.openWorldTemplateJson);
   const generationArtifacts = parseOpenWorldGenerationArtifacts(module.openWorldGenerationArtifactsJson);
   const entryPoint = normalizeLaunchEntrySelection({
@@ -1424,35 +1639,60 @@ export async function createCampaignFromModuleForUser(input: {
     world,
     entryPoint,
   );
-  const preliminaryOpening =
-    input.opening ??
-    (await dmClient.generateCampaignOpening({
-      module: instancedWorld,
-      character: templateRecord,
-      entryPoint: instancedEntryPoint,
-      artifacts: generationArtifacts,
-    }));
-  const hydratedStartingNpcs = assignStartingLocalNpcIds(
-    campaignId,
-    await generateStartingHydratedNpcs({
-      world: instancedWorld,
-      entryPoint: instancedEntryPoint,
-      template: templateRecord,
-      opening: preliminaryOpening,
-    }),
-  );
+  const preparedLaunch = input.preparedLaunch
+    ? (() => {
+        if (!preparedLaunchMatchesSelection({
+          preparedLaunch: input.preparedLaunch,
+          normalizedEntryPoint: entryPoint,
+        })) {
+          throw new Error("Prepared launch bundle no longer matches the selected entry point.");
+        }
+
+        return {
+          ...input.preparedLaunch,
+          entryPoint: {
+            ...instancedEntryPoint,
+            ...input.preparedLaunch.entryPoint,
+            startLocationId: rescopeScopedEntityId(input.preparedLaunch.entryPoint.startLocationId, campaignId),
+            presentNpcIds: input.preparedLaunch.entryPoint.presentNpcIds.map((id) =>
+              rescopeScopedEntityId(id, campaignId),
+            ),
+            initialInformationIds: input.preparedLaunch.entryPoint.initialInformationIds.map((id) =>
+              rescopeScopedEntityId(id, campaignId),
+            ),
+            localContactNpcId: input.preparedLaunch.entryPoint.localContactNpcId
+              ? rescopeScopedEntityId(input.preparedLaunch.entryPoint.localContactNpcId, campaignId)
+              : null,
+          },
+          startingLocals: input.preparedLaunch.startingLocals.map((npc) =>
+            rescopeGeneratedNpcToCampaign(npc, campaignId),
+          ),
+          opening: rescopeOpeningToCampaign(input.preparedLaunch.opening, campaignId),
+        };
+      })()
+    : await prepareCampaignLaunch({
+        campaignId,
+        world,
+        entryPoint,
+        template: templateRecord,
+        artifacts: generationArtifacts,
+        previousDraft: input.opening,
+      });
   const openingInput = buildOpeningWorldWithStartingLocals({
     module: instancedWorld,
     entryPoint: instancedEntryPoint,
-    startingLocals: hydratedStartingNpcs,
+    startingLocals: preparedLaunch.startingLocals,
   });
-  const opening = await dmClient.generateCampaignOpening({
-    module: openingInput.module,
-    character: templateRecord,
-    entryPoint: openingInput.entryPoint,
-    artifacts: generationArtifacts,
-    previousDraft: input.opening ?? preliminaryOpening,
-  });
+  const opening = {
+    ...preparedLaunch.opening,
+    locationNodeId: openingInput.entryPoint.startLocationId,
+    presentNpcIds: preparedLaunch.opening.presentNpcIds.filter((id) =>
+      openingInput.module.npcs.some((npc) => npc.id === id),
+    ),
+    citedInformationIds: preparedLaunch.opening.citedInformationIds.filter((id) =>
+      openingInput.module.information.some((information) => information.id === id),
+    ),
+  };
   const locationTextures = buildLocationTextureMap(generationArtifacts, campaignId);
   const initialSchedules = await generateRequiredInitialSchedules({
     campaignId,
@@ -1461,6 +1701,11 @@ export async function createCampaignFromModuleForUser(input: {
     world: openingInput.module,
     entryPoint: openingInput.entryPoint,
   });
+  logBackendDiagnostic("campaign.create.initial_schedules_ready", {
+    campaignId,
+    dayNumbers: initialSchedules.map((schedule) => schedule.dayNumber),
+    startLocationId: openingInput.entryPoint.startLocationId,
+  });
 
   const result = await prisma.$transaction((tx) =>
     createCampaignInTx(tx, {
@@ -1468,15 +1713,21 @@ export async function createCampaignFromModuleForUser(input: {
       userId: user.id,
       module,
       template: templateRecord,
-      entryPoint,
+      entryPoint: openingInput.entryPoint,
       opening,
       instancedWorld,
-      instancedEntryPoint,
-      hydratedStartingNpcs,
+      instancedEntryPoint: openingInput.entryPoint,
+      hydratedStartingNpcs: preparedLaunch.startingLocals,
       locationTextures,
       initialSchedules,
     }),
   );
+
+  logBackendDiagnostic("campaign.create.success", {
+    campaignId: result.campaignId,
+    startLocationId: openingInput.entryPoint.startLocationId,
+    preparedLaunchReused: Boolean(input.preparedLaunch),
+  });
 
   return { campaignId: result.campaignId };
 }
@@ -3179,4 +3430,9 @@ export const repositoryTestUtils = {
   createFallbackResolvedLaunchEntry,
   normalizeLaunchEntrySelection,
   resolveStockLaunchEntry,
+  stripScopedEntityId,
+  assignStartingLocalNpcIds,
+  buildOpeningWorldWithStartingLocals,
+  rescopeOpeningToCampaign,
+  preparedLaunchMatchesSelection,
 };

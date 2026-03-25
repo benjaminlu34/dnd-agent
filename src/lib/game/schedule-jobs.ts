@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
-import { dmClient } from "@/lib/ai/provider";
+import { dmClient, logBackendDiagnostic } from "@/lib/ai/provider";
 import { parseCampaignRuntimeStateJson, parseFactionResourcesJson } from "@/lib/game/json-contracts";
 import { prisma } from "@/lib/prisma";
 
@@ -164,6 +164,11 @@ function startScheduleLeaseHeartbeat(input: {
       },
     }).catch((error) => {
       console.error("[schedule-jobs] Failed to renew lease heartbeat.", error);
+      logBackendDiagnostic("schedule_jobs.lease_heartbeat_failed", {
+        jobId: input.jobId,
+        leaseOwnerId: input.leaseOwnerId,
+        error: error instanceof Error ? error.message : String(error),
+      });
     });
   }, SCHEDULE_LEASE_HEARTBEAT_MS);
 

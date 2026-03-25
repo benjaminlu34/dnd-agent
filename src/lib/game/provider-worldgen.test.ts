@@ -79,3 +79,33 @@ test("normalizeSocialCastInput dedupes and clamps social ties so schema-sized ov
     "fac_harper_network",
   ]);
 });
+
+test("normalizeSchedulePayloadIds upgrades bare payload ids to campaign-scoped ids", () => {
+  const normalized = aiProviderTestUtils.normalizeSchedulePayloadIds(
+    {
+      faction: "fac_waterdeep_authorities",
+      targetNpcId: "npc_captain_thorne_waterdeep",
+      informationId: "info_waterdeep_guild_rivalries",
+      nested: {
+        locationId: "loc_waterdeep",
+      },
+      untouched: "market_day",
+    },
+    {
+      locations: new Map([["loc_waterdeep", "camp_123:location:loc_waterdeep"]]),
+      factions: new Map([["fac_waterdeep_authorities", "camp_123:faction:fac_waterdeep_authorities"]]),
+      npcs: new Map([["npc_captain_thorne_waterdeep", "camp_123:npc:npc_captain_thorne_waterdeep"]]),
+      information: new Map([["info_waterdeep_guild_rivalries", "camp_123:information:info_waterdeep_guild_rivalries"]]),
+    },
+  ) as Record<string, unknown>;
+
+  assert.deepEqual(normalized, {
+    faction: "camp_123:faction:fac_waterdeep_authorities",
+    targetNpcId: "camp_123:npc:npc_captain_thorne_waterdeep",
+    informationId: "camp_123:information:info_waterdeep_guild_rivalries",
+    nested: {
+      locationId: "camp_123:location:loc_waterdeep",
+    },
+    untouched: "market_day",
+  });
+});
