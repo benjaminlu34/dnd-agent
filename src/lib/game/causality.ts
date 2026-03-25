@@ -12,19 +12,26 @@ const changeRenderers: Record<string, (code: TurnCausalityCode) => string> = {
   NPC_APPROVAL_CHANGED: (code) =>
     `${entityLabel(code)}'s attitude shifted by ${code.delta ?? 0}.`,
   INFORMATION_DISCOVERED: (code) => `You uncovered ${entityLabel(code)}.`,
+  INFORMATION_ADDED: (code) => `${entityLabel(code)} entered the world.`,
+  INFORMATION_EXPIRED: (code) => `${entityLabel(code)} became outdated.`,
+  SCENE_OBJECT_STATE_CHANGED: (code) => `${entityLabel(code)} changed state.`,
   NPC_STATE_CHANGED: (code) => `${entityLabel(code)} changed state.`,
+  NPC_LOCATION_CHANGED: (code) => `${entityLabel(code)} moved.`,
   CHARACTER_HEALTH_CHANGED: (code) => `Your health changed by ${code.delta ?? 0}.`,
   ROUTE_STATUS_CHANGED: (code) => `${entityLabel(code)} changed.`,
   LOCATION_STATE_CHANGED: (code) => `${entityLabel(code)} changed.`,
   LOCATION_CONTROL_CHANGED: (code) => `Control shifted at ${entityLabel(code)}.`,
   FACTION_RESOURCES_CHANGED: (code) => `${entityLabel(code)} adjusted its resources.`,
+  WORLD_EVENT_SPAWNED: (code) => `${entityLabel(code)} was added to the world schedule.`,
   WORLD_EVENT_CANCELLED: (code) => `${entityLabel(code)} was cancelled.`,
   WORLD_EVENT_PROCESSED: (code) => `${entityLabel(code)} took effect.`,
   FACTION_MOVE_CANCELLED: (code) => `${entityLabel(code)} was cancelled.`,
   FACTION_MOVE_EXECUTED: (code) => `${entityLabel(code)} took effect.`,
   MARKET_PRICE_CHANGED: (code) => `${entityLabel(code)} changed.`,
+  MARKET_RESTOCKED: (code) => `${entityLabel(code)} was restocked.`,
   MEMORY_RECORDED: (code) => `A new memory was recorded about ${entityLabel(code)}.`,
   SCHEDULE_JOB_ENQUEUED: (code) => `Future schedule generation was queued for ${entityLabel(code)}.`,
+  SIMULATION_TICK: (code) => `The world shifted around ${entityLabel(code)}.`,
 };
 
 const reasonRenderers: Record<string, (code: TurnCausalityCode) => string> = {

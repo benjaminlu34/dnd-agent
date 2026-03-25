@@ -46,10 +46,12 @@ test("parseFinalActionToolCall accepts resolve_mechanics payloads", () => {
         npcId: "npc_guard",
         delta: 1,
         reason: "The guard relents a little.",
+        phase: "conditional",
       },
       {
         type: "advance_time",
         durationMinutes: 5,
+        phase: "immediate",
       },
     ],
   });
@@ -81,7 +83,108 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   assert.match(prompt, /Obey the router_constraints block/);
   assert.match(prompt, /Use only bounded mutations/);
   assert.match(prompt, /The engine will reject them automatically on failure or partial success/);
+  assert.match(prompt, /Mark resource costs, fees, and other upfront expenditures as phase immediate/);
+  assert.match(prompt, /Mark success-only rewards or outcomes as phase conditional/);
   assert.match(prompt, /Use commit_market_trade only for strict commodity trade backed by fetched market prices/);
+  assert.match(prompt, /Use record_local_interaction for current-scene unnamed locals instead of adjust_relationship/);
+  assert.match(prompt, /Use adjust_inventory for gaining, losing, consuming, or handing over grounded inventory items/);
+  assert.match(prompt, /Use update_scene_object for simple persistent object or scene state changes/);
+});
+
+test("buildResolvedTurnNarrationPrompt includes prompt context and fetched facts", () => {
+  const prompt = aiProviderTestUtils.buildResolvedTurnNarrationPrompt({
+    playerAction: "Ask the dockhand what changed overnight.",
+    promptContext: {
+      currentLocation: {
+        id: "loc_docks",
+        name: "Blackwater Docks",
+        type: "harbor",
+        summary: "Rain-dark piers and tarred rope.",
+        state: "tense",
+      },
+      adjacentRoutes: [],
+      presentNpcs: [],
+      recentUnnamedLocals: [
+        {
+          id: "temp_dockhand",
+          label: "dockhand",
+          interactionCount: 1,
+          lastSummary: "He kept glancing toward the sealed pier.",
+          lastSeenAtTurn: 3,
+        },
+      ],
+      recentLocalEvents: [],
+      recentTurnLedger: [],
+      discoveredInformation: [],
+      activePressures: [],
+      recentWorldShifts: [],
+      activeThreads: [],
+      inventory: [],
+      sceneObjectStates: {},
+      localTexture: null,
+      globalTime: 270,
+      timeOfDay: "pre-dawn",
+      dayCount: 3,
+    },
+    fetchedFacts: [
+      {
+        type: "fetch_information_detail",
+        result: {
+          id: "info_pier",
+          title: "Pier Nine Closure",
+          summary: "Pier Nine was sealed before dawn.",
+          content: "Guild runners closed the pier after a late-night disturbance.",
+          truthfulness: "verified",
+          accessibility: "public",
+          locationId: "loc_docks",
+          locationName: "Blackwater Docks",
+          factionId: "fac_harbor",
+          factionName: "Harbor Guild",
+          sourceNpcId: null,
+          sourceNpcName: null,
+          isDiscovered: true,
+          expiresAtTime: null,
+        },
+      },
+      {
+        type: "fetch_npc_detail",
+        result: {
+          id: "npc_dockhand",
+          name: "Night Dockhand",
+          role: "dock worker",
+          summary: "A tired laborer with tar on his sleeves.",
+          description: "He keeps watching the cordoned pier.",
+          socialLayer: "promoted_local",
+          isNarrativelyHydrated: true,
+          factionId: null,
+          factionName: null,
+          currentLocationId: "loc_docks",
+          approval: 0,
+          approvalBand: "neutral",
+          isCompanion: false,
+          state: "active",
+          threatLevel: 0,
+          knownInformation: [],
+          relationshipHistory: [],
+          temporaryActorId: "temp_dockhand",
+        },
+        hydrationDraft: {
+          summary: "A dockhand drawn into the night's trouble.",
+          description: "He smells of brine and lamp oil.",
+          factionId: null,
+          information: [],
+        },
+      },
+    ],
+    stateCommitLog: [],
+    checkResult: null,
+    suggestedActions: ["Press for specifics"],
+  });
+
+  assert.match(prompt.user, /context/);
+  assert.match(prompt.user, /Blackwater Docks/);
+  assert.match(prompt.user, /fetched_facts/);
+  assert.match(prompt.user, /Pier Nine Closure/);
 });
 
 test("normalizeRouterDecision dedupes vectors and prerequisites", () => {

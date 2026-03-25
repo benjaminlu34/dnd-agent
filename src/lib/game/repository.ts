@@ -768,6 +768,10 @@ function toItemInstanceRecord(
   };
 }
 
+function isArchivedInventoryProperties(value: Record<string, unknown> | null) {
+  return value?.removedFromInventory === true;
+}
+
 function toCommodityStackRecord(
   stack: PrismaCommodityStackRecord,
 ): CharacterInstance["commodityStacks"][number] {
@@ -786,14 +790,46 @@ function toCommodityStackRecord(
   };
 }
 
-function toPromptInventory(character: CharacterInstance): PromptInventoryItem[] {
-  return [
-    ...character.inventory.map((item) => ({
-      kind: "item" as const,
-      id: item.id,
+function toPromptInventory(
+  character: CharacterInstance,
+  campaignItemTemplates: Array<{ id: string; name: string; description: string | null }> = [],
+): PromptInventoryItem[] {
+  const itemsById = new Map<string, PromptInventoryItem>();
+
+  for (const template of campaignItemTemplates) {
+    itemsById.set(template.id, {
+      kind: "item",
+      id: template.id,
+      name: template.name,
+      description: template.description,
+      quantity: 0,
+    });
+  }
+
+  for (const item of character.inventory) {
+    const existing = itemsById.get(item.templateId);
+    if (existing) {
+      existing.quantity = (existing.quantity ?? 0) + 1;
+      continue;
+    }
+    itemsById.set(item.templateId, {
+      kind: "item",
+      id: item.templateId,
       name: item.template.name,
       description: item.template.description,
-    })),
+      quantity: 1,
+    });
+  }
+
+  return [
+    ...Array.from(itemsById.values()).sort((left, right) => {
+      const leftQuantity = left.quantity ?? 0;
+      const rightQuantity = right.quantity ?? 0;
+      if (leftQuantity !== rightQuantity) {
+        return rightQuantity - leftQuantity;
+      }
+      return left.name.localeCompare(right.name);
+    }),
     ...character.commodityStacks
       .filter((stack) => stack.quantity > 0)
       .map((stack) => ({
@@ -1270,6 +1306,7 @@ async function createCampaignInTx(
     globalTime: 480,
     pendingTurnId: null,
     lastActionSummary: input.opening.activeThreat,
+    sceneObjectStates: {},
   };
 
   const campaign = await tx.campaign.create({
@@ -2780,7 +2817,9 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     templateId: campaign.characterInstance.templateId,
     health: campaign.characterInstance.health,
     gold: campaign.characterInstance.gold,
-    inventory: campaign.characterInstance.inventory.map(toItemInstanceRecord),
+    inventory: campaign.characterInstance.inventory
+      .map(toItemInstanceRecord)
+      .filter((item) => !isArchivedInventoryProperties(item.properties)),
     commodityStacks: campaign.characterInstance.commodityStacks.map(toCommodityStackRecord),
   };
 
@@ -3213,7 +3252,9 @@ export async function getTurnSnapshot(
     templateId: campaign.characterInstance.templateId,
     health: campaign.characterInstance.health,
     gold: campaign.characterInstance.gold,
-    inventory: campaign.characterInstance.inventory.map(toItemInstanceRecord),
+    inventory: campaign.characterInstance.inventory
+      .map(toItemInstanceRecord)
+      .filter((item) => !isArchivedInventoryProperties(item.properties)),
     commodityStacks: campaign.characterInstance.commodityStacks.map(toCommodityStackRecord),
   };
   const character = toCampaignCharacter(toTemplateRecord(campaign.template), instance);
@@ -3416,6 +3457,7 @@ export async function getTurnRouterContext(snapshot: CampaignSnapshot): Promise<
       )
       .slice(0, 5)
       .map((actor) => ({
+        id: actor.id,
         label: actor.label,
         interactionCount: actor.interactionCount,
         lastSummary: actor.lastSummary,
@@ -3439,6 +3481,15 @@ export async function getPromptContext(
   profile: PromptContextProfile = "full",
 ): Promise<SpatialPromptContext> {
   const routerContext = await getTurnRouterContext(snapshot);
+  const campaignItemTemplates = await prisma.itemTemplate.findMany({
+    where: { campaignId: snapshot.campaignId },
+    orderBy: { name: "asc" },
+    select: {
+      id: true,
+      name: true,
+      description: true,
+    },
+  });
   const isLocal = profile === "local";
 
   return {
@@ -3452,7 +3503,8 @@ export async function getPromptContext(
     activePressures: isLocal ? [] : routerContext.activePressures,
     recentWorldShifts: isLocal ? [] : snapshot.recentWorldShifts,
     activeThreads: isLocal ? [] : routerContext.activeThreads,
-    inventory: toPromptInventory(snapshot.character),
+    inventory: toPromptInventory(snapshot.character, campaignItemTemplates),
+    sceneObjectStates: structuredClone(snapshot.state.sceneObjectStates ?? {}),
     localTexture: snapshot.currentLocation.localTexture,
     globalTime: snapshot.state.globalTime,
     timeOfDay: timeOfDay(snapshot.state.globalTime),

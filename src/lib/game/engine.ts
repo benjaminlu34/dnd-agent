@@ -5,7 +5,6 @@ import { dmClient, logBackendDiagnostic } from "@/lib/ai/provider";
 import { renderWhatChanged, renderWhy } from "@/lib/game/causality";
 import { parseTurnResultPayloadJson, toCampaignRuntimeStateJson, toTurnResultPayloadJson } from "@/lib/game/json-contracts";
 import {
-  FetchSynchronizationError,
   InvalidExpectedStateVersionError,
   StateConflictError,
   TurnAbandonedError,
@@ -65,12 +64,13 @@ import { env } from "@/lib/env";
 
 type TurnStream = {
   narration?: (chunk: string) => void;
+  warning?: (message: string) => void;
   checkResult?: (result: CheckResult) => void;
 };
 
 const TURN_LOCK_TTL_MS = 120_000;
 const TURN_INTERNAL_DEADLINE_MS = 115_000;
-const HYDRATION_CLAIM_TTL_MS = 120_000;
+const INCIDENTAL_GOLD_MAX = 50;
 
 const activeTurnControllers = new Map<string, AbortController>();
 const activeCommitTurnKeys = new Set<string>();
@@ -200,6 +200,33 @@ function applyCommittedTimeWindow(input: {
 
 function promptContextProfileForRouter(decision: RouterDecision) {
   return decision.confidence === "high" ? decision.profile : "full";
+}
+
+function routerDecisionForTurnMode(input: {
+  turnMode: TurnMode;
+  explicitTravel: boolean;
+}): RouterDecision {
+  if (input.explicitTravel) {
+    return {
+      profile: "full",
+      confidence: "low",
+      authorizedVectors: [],
+      requiredPrerequisites: [],
+      reason: "Router classification skipped for explicitly committed travel.",
+    };
+  }
+
+  if (input.turnMode === "observe") {
+    return {
+      profile: "full",
+      confidence: "low",
+      authorizedVectors: ["investigate"],
+      requiredPrerequisites: [],
+      reason: "Router classification skipped for observe mode.",
+    };
+  }
+
+  throw new Error("Router fallback is only defined for observe mode or explicit travel.");
 }
 
 async function cleanupTurnLock(input: {
@@ -472,35 +499,14 @@ function sanitizePromotedNpcHydrationDraft(input: {
   };
 }
 
-async function hydratePromotedNpcRecord(input: {
+async function buildPromotedNpcHydrationPayload(input: {
   campaignId: string;
-  npcId: string;
-  claimRequestId: string;
+  baseResult: NpcDetail;
 }) {
-  const npc = await prisma.nPC.findFirst({
-    where: { id: input.npcId, campaignId: input.campaignId },
-    select: {
-      id: true,
-      campaignId: true,
-      name: true,
-      role: true,
-      summary: true,
-      description: true,
-      factionId: true,
-      currentLocationId: true,
-      isNarrativelyHydrated: true,
-      hydrationClaimRequestId: true,
-      hydrationClaimExpiresAt: true,
-      socialLayer: true,
-    },
-  });
-
-  if (!npc) {
-    throw new Error("Promoted NPC not found.");
-  }
+  const npc = input.baseResult;
 
   if (npc.isNarrativelyHydrated) {
-    return;
+    return null;
   }
 
   if (!npc.currentLocationId) {
@@ -684,27 +690,107 @@ async function hydratePromotedNpcRecord(input: {
     fallbackDescription: npc.description,
   });
 
-  await prisma.$transaction(async (tx) => {
-    const finalized = await tx.nPC.updateMany({
-      where: {
-        id: npc.id,
-        campaignId: input.campaignId,
-        isNarrativelyHydrated: false,
-        hydrationClaimRequestId: input.claimRequestId,
-      },
+  return {
+    npcId: npc.id,
+    hydratedResult: {
+      ...npc,
+      summary: draft.summary,
+      description: draft.description,
+      factionId: draft.factionId,
+      isNarrativelyHydrated: true,
+    } satisfies NpcDetail,
+    hydrationDraft: draft,
+  };
+}
+
+async function persistPromotedNpcHydrationDraft(input: {
+  tx: Prisma.TransactionClient;
+  snapshot: CampaignSnapshot;
+  npcId: string;
+  hydrationDraft: PromotedNpcHydrationDraft;
+  nextTurnCount: number;
+  rollback: TurnRollbackData;
+}) {
+  const npc = await input.tx.nPC.findFirst({
+    where: {
+      id: input.npcId,
+      campaignId: input.snapshot.campaignId,
+    },
+    select: {
+      id: true,
+      summary: true,
+      description: true,
+      factionId: true,
+      isNarrativelyHydrated: true,
+      hydrationClaimRequestId: true,
+      hydrationClaimExpiresAt: true,
+    },
+  });
+
+  if (!npc || npc.isNarrativelyHydrated) {
+    return;
+  }
+
+  recordInverse(input.rollback, "nPC", npc.id, "summary", npc.summary);
+  recordInverse(input.rollback, "nPC", npc.id, "description", npc.description);
+  recordInverse(input.rollback, "nPC", npc.id, "factionId", npc.factionId);
+  recordInverse(input.rollback, "nPC", npc.id, "isNarrativelyHydrated", npc.isNarrativelyHydrated);
+  recordInverse(
+    input.rollback,
+    "nPC",
+    npc.id,
+    "hydrationClaimRequestId",
+    npc.hydrationClaimRequestId,
+  );
+  recordInverse(
+    input.rollback,
+    "nPC",
+    npc.id,
+    "hydrationClaimExpiresAt",
+    npc.hydrationClaimExpiresAt,
+  );
+
+  const updated = await input.tx.nPC.updateMany({
+    where: {
+      id: npc.id,
+      campaignId: input.snapshot.campaignId,
+      isNarrativelyHydrated: false,
+    },
+    data: {
+      summary: input.hydrationDraft.summary,
+      description: input.hydrationDraft.description,
+      factionId: input.hydrationDraft.factionId,
+      isNarrativelyHydrated: true,
+      hydrationClaimRequestId: null,
+      hydrationClaimExpiresAt: null,
+    },
+  });
+
+  if (updated.count === 0) {
+    return;
+  }
+
+  for (const information of input.hydrationDraft.information) {
+    const informationId = `info_${randomUUID()}`;
+    await input.tx.information.create({
       data: {
-        summary: draft.summary,
-        description: draft.description,
-        factionId: draft.factionId,
-        isNarrativelyHydrated: true,
-        hydrationClaimRequestId: null,
-        hydrationClaimExpiresAt: null,
+        id: informationId,
+        campaignId: input.snapshot.campaignId,
+        title: information.title,
+        summary: information.summary,
+        content: information.content,
+        truthfulness: information.truthfulness,
+        accessibility: information.accessibility,
+        locationId: information.locationId,
+        factionId: information.factionId,
+        sourceNpcId: npc.id,
+        isDiscovered: true,
+        discoveredAtTurn: input.nextTurnCount,
+        expiresAtTime: null,
       },
     });
-    if (finalized.count === 0) {
-      return;
-    }
-  });
+    recordCreated(input.rollback, "information", informationId);
+  }
 }
 
 function findFetchedMarketPrice(
@@ -866,11 +952,66 @@ function hasVector(decision: RouterDecision, vector: RouterDecision["authorizedV
   return decision.authorizedVectors.includes(vector);
 }
 
+function hasAnyAuthorizedVector(decision: RouterDecision) {
+  return decision.authorizedVectors.length > 0;
+}
+
+function isTraversableRoute(route: CampaignSnapshot["adjacentRoutes"][number]) {
+  return route.currentStatus === "open";
+}
+
+function isRemovedInventoryProperties(value: Prisma.JsonValue | null) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+
+  return value.removedFromInventory === true;
+}
+
+function withRemovedInventoryMarker(value: Prisma.JsonValue | null): Prisma.InputJsonValue {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { removedFromInventory: true };
+  }
+
+  return {
+    ...value,
+    removedFromInventory: true,
+  } satisfies Prisma.JsonObject;
+}
+
+function mutationPhaseForEvaluation(mutation: MechanicsMutation): "immediate" | "conditional" {
+  if (mutation.phase) {
+    return mutation.phase;
+  }
+  if (mutation.type === "advance_time") {
+    return "immediate";
+  }
+  if (mutation.type === "adjust_gold" && mutation.delta < 0) {
+    return "immediate";
+  }
+  if (mutation.type === "record_local_interaction") {
+    return "immediate";
+  }
+  if (mutation.type === "adjust_inventory" && mutation.action === "remove") {
+    return "immediate";
+  }
+  return "conditional";
+}
+
+function clampRelationshipDelta(delta: number) {
+  return Math.max(-2, Math.min(2, delta));
+}
+
+function clampIncidentalGoldDelta(delta: number) {
+  return delta > 0 ? Math.min(delta, INCIDENTAL_GOLD_MAX) : delta;
+}
+
 function evaluateResolvedCommand(input: {
   snapshot: CampaignSnapshot;
   command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
   fetchedFacts: TurnFetchToolResult[];
   routerDecision: RouterDecision;
+  groundedItemIds?: string[];
 }) {
   const stateCommitLog: StateCommitLog = [];
   const appliedMutations: AppliedMutationRecord[] = [];
@@ -879,10 +1020,34 @@ function evaluateResolvedCommand(input: {
   );
   const projectedMarketStock = new Map<string, number>();
   const projectedRelationshipDelta = new Map<string, number>();
+  const projectedInventoryQuantities = new Map<string, number>();
+  for (const item of input.snapshot.character.inventory) {
+    if (isRemovedInventoryProperties(item.properties as Prisma.JsonValue | null)) {
+      continue;
+    }
+    projectedInventoryQuantities.set(
+      item.templateId,
+      (projectedInventoryQuantities.get(item.templateId) ?? 0) + 1,
+    );
+  }
+  const projectedTemporaryActors = new Map(
+    input.snapshot.temporaryActors.map((actor) => [
+      actor.id,
+      {
+        ...actor,
+        recentTopics: [...actor.recentTopics],
+      },
+    ]),
+  );
   const discoveredInformationIds = new Set<string>();
   let projectedGold = input.snapshot.character.gold;
   let projectedLocationId = input.snapshot.state.currentLocationId;
   let projectedHealth = input.snapshot.character.health;
+  const projectedSceneObjectStates = structuredClone(input.snapshot.state.sceneObjectStates ?? {});
+  const groundedItemIds = new Set(
+    input.groundedItemIds
+    ?? input.snapshot.character.inventory.map((item) => item.templateId),
+  );
   let hasAppliedMove = false;
   const knownInformation = knownInformationIds(input.snapshot, input.fetchedFacts);
   const checkOutcome = input.command.checkResult?.outcome;
@@ -899,19 +1064,22 @@ function evaluateResolvedCommand(input: {
   }
 
   for (const mutation of input.command.mutations) {
-    if (mutation.type !== "advance_time" && input.command.checkResult && checkOutcome !== "success") {
+    const phase = mutationPhaseForEvaluation(mutation);
+
+    if (mutation.type !== "advance_time" && input.command.checkResult && phase === "conditional" && checkOutcome !== "success") {
       stateCommitLog.push({
         kind: "mutation",
         mutationType: mutation.type,
         status: "rejected",
         reasonCode: checkOutcome === "partial" ? "check_partial_blocked" : "check_failed",
         summary: `The attempted ${mutation.type.replace(/_/g, " ")} does not take effect.`,
-        metadata: mutation as unknown as Record<string, unknown>,
+        metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
       });
       continue;
     }
 
     if (mutation.type === "advance_time") {
+      const appliedMutation = { ...mutation, phase } as MechanicsMutation;
       const entry = {
         kind: "mutation" as const,
         mutationType: mutation.type,
@@ -921,10 +1089,10 @@ function evaluateResolvedCommand(input: {
           typeof mutation.durationMinutes === "number"
             ? `Time passes for ${mutation.durationMinutes} minutes.`
             : "Time passes.",
-        metadata: mutation as unknown as Record<string, unknown>,
+        metadata: { ...appliedMutation } as unknown as Record<string, unknown>,
       };
       stateCommitLog.push(entry);
-      appliedMutations.push({ mutation, entry });
+      appliedMutations.push({ mutation: appliedMutation, entry });
       continue;
     }
 
@@ -937,7 +1105,22 @@ function evaluateResolvedCommand(input: {
           status: "rejected",
           reasonCode: "invalid_target",
           summary: "The requested travel route could not be applied.",
-          metadata: mutation as unknown as Record<string, unknown>,
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (!isTraversableRoute(route)) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "route_blocked",
+          summary: `The route to ${route.targetLocationName} is currently blocked.`,
+          metadata: {
+            ...mutation,
+            phase,
+            currentStatus: route.currentStatus,
+          } as unknown as Record<string, unknown>,
         });
         continue;
       }
@@ -948,30 +1131,34 @@ function evaluateResolvedCommand(input: {
           status: "rejected",
           reasonCode: "conflicting_mutation",
           summary: "Only one location change can apply in a single turn.",
-          metadata: mutation as unknown as Record<string, unknown>,
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
         });
         continue;
       }
       projectedLocationId = mutation.targetLocationId;
       hasAppliedMove = true;
+      const appliedMutation = { ...mutation, phase } as MechanicsMutation;
       const entry = {
         kind: "mutation" as const,
         mutationType: mutation.type,
         status: "applied" as const,
         reasonCode: "moved_player",
         summary: `You travel to ${route.targetLocationName}.`,
-        metadata: mutation as unknown as Record<string, unknown>,
+        metadata: { ...appliedMutation } as unknown as Record<string, unknown>,
       };
       stateCommitLog.push(entry);
-      appliedMutations.push({ mutation, entry });
+      appliedMutations.push({ mutation: appliedMutation, entry });
       continue;
     }
 
     if (mutation.type === "adjust_gold") {
+      const appliedDelta = clampIncidentalGoldDelta(mutation.delta);
+      const appliedMutation = { ...mutation, delta: appliedDelta, phase } as MechanicsMutation;
       const authorized =
         mutation.delta < 0
           ? hasVector(input.routerDecision, "economy_light") || hasVector(input.routerDecision, "economy_strict")
           : hasVector(input.routerDecision, "economy_light")
+            || hasVector(input.routerDecision, "economy_strict")
             || hasVector(input.routerDecision, "converse")
             || hasVector(input.routerDecision, "violence")
             || hasVector(input.routerDecision, "investigate");
@@ -982,35 +1169,106 @@ function evaluateResolvedCommand(input: {
           status: "rejected",
           reasonCode: "unauthorized_vector",
           summary: "The requested gold change is not authorized for this turn.",
-          metadata: mutation as unknown as Record<string, unknown>,
+          metadata: {
+            ...mutation,
+            delta: appliedDelta,
+            requestedDelta: mutation.delta,
+            appliedDelta,
+            phase,
+          } as unknown as Record<string, unknown>,
         });
         continue;
       }
-      if (projectedGold + mutation.delta < 0) {
+      if (projectedGold + appliedDelta < 0) {
         stateCommitLog.push({
           kind: "mutation",
           mutationType: mutation.type,
           status: "rejected",
           reasonCode: "insufficient_gold",
           summary: "You do not have enough gold for that cost.",
-          metadata: mutation as unknown as Record<string, unknown>,
+          metadata: {
+            ...mutation,
+            delta: appliedDelta,
+            requestedDelta: mutation.delta,
+            appliedDelta,
+            phase,
+          } as unknown as Record<string, unknown>,
         });
         continue;
       }
-      projectedGold += mutation.delta;
+      projectedGold += appliedDelta;
       const entry = {
         kind: "mutation" as const,
         mutationType: mutation.type,
         status: "applied" as const,
         reasonCode: "gold_adjusted",
         summary:
-          mutation.delta >= 0
-            ? `You gain ${mutation.delta} gold.`
-            : `You spend ${Math.abs(mutation.delta)} gold.`,
-        metadata: mutation as unknown as Record<string, unknown>,
+          appliedDelta >= 0
+            ? `You gain ${appliedDelta} gold.`
+            : `You spend ${Math.abs(appliedDelta)} gold.`,
+        metadata: {
+          ...mutation,
+          delta: appliedDelta,
+          requestedDelta: mutation.delta,
+          appliedDelta,
+          phase,
+        },
       };
       stateCommitLog.push(entry);
-      appliedMutations.push({ mutation, entry });
+      appliedMutations.push({ mutation: appliedMutation, entry });
+      continue;
+    }
+
+    if (mutation.type === "record_local_interaction") {
+      if (!hasVector(input.routerDecision, "converse")) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "unauthorized_vector",
+          summary: "Unnamed-local interaction is not authorized for this turn.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      const actor = projectedTemporaryActors.get(mutation.localEntityId);
+      if (
+        !actor
+        || actor.currentLocationId !== input.snapshot.state.currentLocationId
+        || actor.promotedNpcId != null
+      ) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "That unnamed local is not available here.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      const topic = mutation.topic?.trim() || undefined;
+      actor.interactionCount += 1;
+      actor.lastSummary = mutation.interactionSummary.trim();
+      if (topic) {
+        actor.recentTopics = dedupeStrings([...actor.recentTopics, topic]).slice(-4);
+      }
+      actor.lastSeenAtTurn = input.snapshot.sessionTurnCount + 1;
+      actor.lastSeenAtTime = input.snapshot.state.globalTime + input.command.timeElapsed;
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "local_interaction_recorded",
+        summary: actor.lastSummary || `You engage ${actor.label}.`,
+        metadata: {
+          ...mutation,
+          phase,
+          interactionCount: actor.interactionCount,
+        } as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({ mutation: { ...mutation, phase } as MechanicsMutation, entry });
       continue;
     }
 
@@ -1022,7 +1280,7 @@ function evaluateResolvedCommand(input: {
           status: "rejected",
           reasonCode: "unauthorized_vector",
           summary: "Commodity trade is not authorized for this turn.",
-          metadata: mutation as unknown as Record<string, unknown>,
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
         });
         continue;
       }
@@ -1038,7 +1296,7 @@ function evaluateResolvedCommand(input: {
           status: "rejected",
           reasonCode: "missing_prerequisite",
           summary: "Authoritative market prices were not fetched for that trade.",
-          metadata: mutation as unknown as Record<string, unknown>,
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
         });
         continue;
       }
@@ -1058,7 +1316,7 @@ function evaluateResolvedCommand(input: {
             status: "rejected",
             reasonCode: "insufficient_stock",
             summary: "The market does not have enough stock for that trade.",
-            metadata: mutation as unknown as Record<string, unknown>,
+            metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
           });
           continue;
         }
@@ -1069,7 +1327,7 @@ function evaluateResolvedCommand(input: {
             status: "rejected",
             reasonCode: "insufficient_gold",
             summary: "You do not have enough gold to complete that trade.",
-            metadata: mutation as unknown as Record<string, unknown>,
+            metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
           });
           continue;
         }
@@ -1086,7 +1344,7 @@ function evaluateResolvedCommand(input: {
             status: "rejected",
             reasonCode: "insufficient_inventory",
             summary: "You cannot sell more of that commodity than you own.",
-            metadata: mutation as unknown as Record<string, unknown>,
+            metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
           });
           continue;
         }
@@ -1105,15 +1363,85 @@ function evaluateResolvedCommand(input: {
         summary: `${mutation.action === "buy" ? "Buy" : "Sell"} ${mutation.quantity} commodity units for ${total} gold.`,
         metadata: {
           ...mutation,
+          phase,
           total,
         },
       };
       stateCommitLog.push(entry);
-      appliedMutations.push({ mutation, entry });
+      appliedMutations.push({ mutation: { ...mutation, phase } as MechanicsMutation, entry });
+      continue;
+    }
+
+    if (mutation.type === "adjust_inventory") {
+      if (!hasAnyAuthorizedVector(input.routerDecision)) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "unauthorized_vector",
+          summary: "Inventory changes are not authorized for this turn.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (!Number.isInteger(mutation.quantity) || mutation.quantity <= 0) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "Inventory changes require a positive whole quantity.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      const ownedQuantity = projectedInventoryQuantities.get(mutation.itemId) ?? 0;
+      if (mutation.action === "remove") {
+        if (ownedQuantity < mutation.quantity) {
+          stateCommitLog.push({
+            kind: "mutation",
+            mutationType: mutation.type,
+            status: "rejected",
+            reasonCode: "insufficient_inventory",
+            summary: "You do not have enough of that item.",
+            metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+          });
+          continue;
+        }
+        projectedInventoryQuantities.set(mutation.itemId, ownedQuantity - mutation.quantity);
+      } else {
+        if (!groundedItemIds.has(mutation.itemId)) {
+          stateCommitLog.push({
+            kind: "mutation",
+            mutationType: mutation.type,
+            status: "rejected",
+            reasonCode: "invalid_target",
+            summary: "That item is not grounded in the current turn context.",
+            metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+          });
+          continue;
+        }
+        projectedInventoryQuantities.set(mutation.itemId, ownedQuantity + mutation.quantity);
+      }
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "inventory_adjusted",
+        summary:
+          mutation.action === "add"
+            ? `You gain ${mutation.quantity} item${mutation.quantity === 1 ? "" : "s"}.`
+            : `You lose ${mutation.quantity} item${mutation.quantity === 1 ? "" : "s"}.`,
+        metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({ mutation: { ...mutation, phase } as MechanicsMutation, entry });
       continue;
     }
 
     if (mutation.type === "adjust_relationship") {
+      const appliedDelta = clampRelationshipDelta(mutation.delta);
+      const appliedMutation = { ...mutation, delta: appliedDelta, phase } as MechanicsMutation;
       if (!hasVector(input.routerDecision, "converse")) {
         stateCommitLog.push({
           kind: "mutation",
@@ -1121,7 +1449,13 @@ function evaluateResolvedCommand(input: {
           status: "rejected",
           reasonCode: "unauthorized_vector",
           summary: "Relationship shifts are not authorized for this turn.",
-          metadata: mutation as unknown as Record<string, unknown>,
+          metadata: {
+            ...mutation,
+            delta: appliedDelta,
+            requestedDelta: mutation.delta,
+            appliedDelta,
+            phase,
+          } as unknown as Record<string, unknown>,
         });
         continue;
       }
@@ -1135,13 +1469,19 @@ function evaluateResolvedCommand(input: {
           status: "rejected",
           reasonCode: "invalid_target",
           summary: "That relationship target is not available here.",
-          metadata: mutation as unknown as Record<string, unknown>,
+          metadata: {
+            ...mutation,
+            delta: appliedDelta,
+            requestedDelta: mutation.delta,
+            appliedDelta,
+            phase,
+          } as unknown as Record<string, unknown>,
         });
         continue;
       }
       projectedRelationshipDelta.set(
         mutation.npcId,
-        (projectedRelationshipDelta.get(mutation.npcId) ?? 0) + mutation.delta,
+        (projectedRelationshipDelta.get(mutation.npcId) ?? 0) + appliedDelta,
       );
       const entry = {
         kind: "mutation" as const,
@@ -1149,10 +1489,16 @@ function evaluateResolvedCommand(input: {
         status: "applied" as const,
         reasonCode: "relationship_adjusted",
         summary: `Your standing with ${"name" in npc ? npc.name : npc.npcName} shifts.`,
-        metadata: mutation as unknown as Record<string, unknown>,
+        metadata: {
+          ...mutation,
+          delta: appliedDelta,
+          requestedDelta: mutation.delta,
+          appliedDelta,
+          phase,
+        } as unknown as Record<string, unknown>,
       };
       stateCommitLog.push(entry);
-      appliedMutations.push({ mutation, entry });
+      appliedMutations.push({ mutation: appliedMutation, entry });
       continue;
     }
 
@@ -1164,7 +1510,18 @@ function evaluateResolvedCommand(input: {
           status: "rejected",
           reasonCode: "unauthorized_vector",
           summary: "New discoveries are not authorized for this turn.",
-          metadata: mutation as unknown as Record<string, unknown>,
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (input.snapshot.discoveredInformation.some((information) => information.id === mutation.informationId)) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "noop",
+          reasonCode: "already_applied",
+          summary: "That clue is already part of the campaign truth.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
         });
         continue;
       }
@@ -1175,7 +1532,7 @@ function evaluateResolvedCommand(input: {
           status: "rejected",
           reasonCode: "invalid_target",
           summary: "That information is not grounded in the current turn context.",
-          metadata: mutation as unknown as Record<string, unknown>,
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
         });
         continue;
       }
@@ -1186,7 +1543,7 @@ function evaluateResolvedCommand(input: {
           status: "noop",
           reasonCode: "already_applied",
           summary: "That discovery was already recorded this turn.",
-          metadata: mutation as unknown as Record<string, unknown>,
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
         });
         continue;
       }
@@ -1197,10 +1554,48 @@ function evaluateResolvedCommand(input: {
         status: "applied" as const,
         reasonCode: "information_discovered",
         summary: `You uncover information ${mutation.informationId}.`,
-        metadata: mutation as unknown as Record<string, unknown>,
+        metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
       };
       stateCommitLog.push(entry);
-      appliedMutations.push({ mutation, entry });
+      appliedMutations.push({ mutation: { ...mutation, phase } as MechanicsMutation, entry });
+      continue;
+    }
+
+    if (mutation.type === "update_scene_object") {
+      if (!hasAnyAuthorizedVector(input.routerDecision)) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "unauthorized_vector",
+          summary: "Scene-object changes are not authorized for this turn.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      const currentState = projectedSceneObjectStates[mutation.objectId] ?? null;
+      if (currentState === mutation.newState) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "noop",
+          reasonCode: "already_applied",
+          summary: `${mutation.objectId} is already ${mutation.newState}.`,
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      projectedSceneObjectStates[mutation.objectId] = mutation.newState;
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "scene_object_updated",
+        summary: `${mutation.objectId} changes to ${mutation.newState}.`,
+        metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({ mutation: { ...mutation, phase } as MechanicsMutation, entry });
       continue;
     }
 
@@ -1212,7 +1607,7 @@ function evaluateResolvedCommand(input: {
           status: "rejected",
           reasonCode: "unauthorized_vector",
           summary: "Violent state changes are not authorized for this turn.",
-          metadata: mutation as unknown as Record<string, unknown>,
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
         });
         continue;
       }
@@ -1224,7 +1619,7 @@ function evaluateResolvedCommand(input: {
           status: "rejected",
           reasonCode: "invalid_target",
           summary: "That NPC target is not available here.",
-          metadata: mutation as unknown as Record<string, unknown>,
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
         });
         continue;
       }
@@ -1235,7 +1630,7 @@ function evaluateResolvedCommand(input: {
           status: "noop",
           reasonCode: "already_applied",
           summary: `${npc.name} is already ${mutation.newState}.`,
-          metadata: mutation as unknown as Record<string, unknown>,
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
         });
         continue;
       }
@@ -1245,10 +1640,10 @@ function evaluateResolvedCommand(input: {
         status: "applied" as const,
         reasonCode: "npc_state_changed",
         summary: `${npc.name} becomes ${mutation.newState}.`,
-        metadata: mutation as unknown as Record<string, unknown>,
+        metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
       };
       stateCommitLog.push(entry);
-      appliedMutations.push({ mutation, entry });
+      appliedMutations.push({ mutation: { ...mutation, phase } as MechanicsMutation, entry });
       continue;
     }
 
@@ -1260,6 +1655,7 @@ function evaluateResolvedCommand(input: {
       } else {
         projectedHealth = Math.min(input.snapshot.character.maxHealth, projectedHealth + (mutation.amount ?? 0));
       }
+      const appliedMutation = { ...mutation, phase } as MechanicsMutation;
       const entry = {
         kind: "mutation" as const,
         mutationType: mutation.type,
@@ -1269,10 +1665,10 @@ function evaluateResolvedCommand(input: {
           mutation.mode === "amount"
             ? `You recover ${mutation.amount ?? 0} health.`
             : "You regain your strength.",
-        metadata: mutation as unknown as Record<string, unknown>,
+        metadata: { ...appliedMutation } as unknown as Record<string, unknown>,
       };
       stateCommitLog.push(entry);
-      appliedMutations.push({ mutation, entry });
+      appliedMutations.push({ mutation: appliedMutation, entry });
     }
   }
 
@@ -1281,6 +1677,7 @@ function evaluateResolvedCommand(input: {
     appliedMutations,
     discoveredInformationIds: Array.from(discoveredInformationIds),
     nextState: {
+      ...input.snapshot.state,
       currentLocationId: projectedLocationId,
       globalTime: input.snapshot.state.globalTime + input.command.timeElapsed,
       pendingTurnId: null,
@@ -1288,6 +1685,7 @@ function evaluateResolvedCommand(input: {
         input.command.memorySummary
         ?? stateCommitLog.find((entry) => entry.status !== "noop")?.summary
         ?? "The situation changes.",
+      sceneObjectStates: projectedSceneObjectStates,
     } satisfies CampaignRuntimeState,
   };
 }
@@ -1409,9 +1807,11 @@ async function applyResolvedMutations(input: {
   fetchedFacts: TurnFetchToolResult[];
   rollback: TurnRollbackData;
   nextTurnCount: number;
+  nextState: CampaignRuntimeState;
 }) {
   const affectedFactionIds = new Set<string>();
   const discoveredInformationIds: string[] = [];
+  const stateCommitLog: StateCommitLog = [];
 
   for (const { mutation } of input.appliedMutations) {
     if (mutation.type === "adjust_relationship") {
@@ -1457,6 +1857,124 @@ async function applyResolvedMutations(input: {
       continue;
     }
 
+    if (mutation.type === "record_local_interaction") {
+      const actor = await input.tx.temporaryActor.findFirst({
+        where: {
+          id: mutation.localEntityId,
+          campaignId: input.snapshot.campaignId,
+          currentLocationId: input.snapshot.state.currentLocationId,
+        },
+        select: {
+          id: true,
+          label: true,
+          currentLocationId: true,
+          interactionCount: true,
+          recentTopics: true,
+          lastSummary: true,
+          lastSeenAtTurn: true,
+          lastSeenAtTime: true,
+          holdsInventory: true,
+          affectedWorldState: true,
+          isInMemoryGraph: true,
+          promotedNpcId: true,
+        },
+      });
+      if (!actor) {
+        continue;
+      }
+
+      const topic = mutation.topic?.trim() || null;
+      const nextTopics = topic
+        ? dedupeStrings([...actor.recentTopics, topic]).slice(-4)
+        : actor.recentTopics;
+      const nextInteractionCount = actor.interactionCount + 1;
+      const nextSummary = mutation.interactionSummary.trim() || actor.lastSummary;
+
+      recordInverse(input.rollback, "temporaryActor", actor.id, "interactionCount", actor.interactionCount);
+      recordInverse(input.rollback, "temporaryActor", actor.id, "recentTopics", actor.recentTopics);
+      recordInverse(input.rollback, "temporaryActor", actor.id, "lastSummary", actor.lastSummary);
+      recordInverse(input.rollback, "temporaryActor", actor.id, "lastSeenAtTurn", actor.lastSeenAtTurn);
+      recordInverse(input.rollback, "temporaryActor", actor.id, "lastSeenAtTime", actor.lastSeenAtTime);
+      await input.tx.temporaryActor.update({
+        where: { id: actor.id },
+        data: {
+          interactionCount: nextInteractionCount,
+          recentTopics: nextTopics,
+          lastSummary: nextSummary,
+          lastSeenAtTurn: input.nextTurnCount,
+          lastSeenAtTime: input.nextState.globalTime,
+        },
+      });
+
+      if (
+        shouldPromoteTemporaryActor({
+          interactionCount: nextInteractionCount,
+          holdsInventory: actor.holdsInventory,
+          affectedWorldState: actor.affectedWorldState,
+          isInMemoryGraph: actor.isInMemoryGraph,
+          promotedNpcId: actor.promotedNpcId,
+        })
+      ) {
+        const location = await input.tx.locationNode.findUnique({
+          where: { id: actor.currentLocationId },
+          select: { name: true },
+        });
+        const role = toPromotedTemporaryActorRole(actor.label);
+        const name = toPromotedTemporaryActorName(actor.label);
+        const seedText = buildPromotedTemporaryActorSeedText({
+          actor: {
+            label: actor.label,
+            recentTopics: nextTopics,
+            lastSummary: nextSummary,
+          },
+          role,
+          locationName: location?.name ?? input.snapshot.currentLocation.name,
+        });
+        const promotedNpcId = `npc_${randomUUID()}`;
+        await input.tx.nPC.create({
+          data: {
+            id: promotedNpcId,
+            campaignId: input.snapshot.campaignId,
+            name,
+            role,
+            summary: seedText.summary,
+            description: seedText.description,
+            socialLayer: "promoted_local",
+            isNarrativelyHydrated: false,
+            hydrationClaimRequestId: null,
+            hydrationClaimExpiresAt: null,
+            factionId: null,
+            currentLocationId: actor.currentLocationId,
+            approval: 0,
+            isCompanion: false,
+            state: "active",
+            threatLevel: 1,
+          },
+        });
+        recordCreated(input.rollback, "nPC", promotedNpcId);
+        recordInverse(input.rollback, "temporaryActor", actor.id, "promotedNpcId", actor.promotedNpcId);
+        await input.tx.temporaryActor.update({
+          where: { id: actor.id },
+          data: {
+            promotedNpcId,
+          },
+        });
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: "record_local_interaction",
+          status: "applied",
+          reasonCode: "promoted_local_created",
+          summary: `${name} steps forward as a remembered local presence.`,
+          metadata: {
+            localEntityId: actor.id,
+            promotedNpcId,
+            promotedNpcName: name,
+          },
+        });
+      }
+      continue;
+    }
+
     if (mutation.type === "commit_market_trade") {
       await applyMarketTradeMutation({
         tx: input.tx,
@@ -1465,6 +1983,66 @@ async function applyResolvedMutations(input: {
         fetchedFacts: input.fetchedFacts,
         rollback: input.rollback,
       });
+      continue;
+    }
+
+    if (mutation.type === "adjust_inventory") {
+      const characterInstance = await input.tx.characterInstance.findUnique({
+        where: { campaignId: input.snapshot.campaignId },
+        include: {
+          inventory: {
+            where: { templateId: mutation.itemId },
+            orderBy: { createdAt: "asc" },
+          },
+        },
+      });
+      if (!characterInstance) {
+        throw new Error("Character instance not found.");
+      }
+
+      if (mutation.action === "remove") {
+        const removableItems = characterInstance.inventory.filter(
+          (item) => !isRemovedInventoryProperties(item.properties as Prisma.JsonValue | null),
+        );
+        if (removableItems.length < mutation.quantity) {
+          throw new Error("Inventory removal exceeded owned quantity during commit.");
+        }
+        for (const item of removableItems.slice(0, mutation.quantity)) {
+          recordInverse(input.rollback, "itemInstance", item.id, "properties", item.properties);
+          await input.tx.itemInstance.update({
+            where: { id: item.id },
+            data: {
+              properties: withRemovedInventoryMarker(item.properties),
+            },
+          });
+        }
+        continue;
+      }
+
+      const template = await input.tx.itemTemplate.findFirst({
+        where: {
+          id: mutation.itemId,
+          campaignId: input.snapshot.campaignId,
+        },
+        select: { id: true },
+      });
+      if (!template) {
+        throw new Error("Inventory addition referenced an unknown item template.");
+      }
+
+      for (let index = 0; index < mutation.quantity; index += 1) {
+        const created = await input.tx.itemInstance.create({
+          data: {
+            characterInstanceId: characterInstance.id,
+            templateId: template.id,
+            isIdentified: true,
+            charges: null,
+            properties: Prisma.JsonNull,
+          },
+          select: { id: true },
+        });
+        recordCreated(input.rollback, "itemInstance", created.id);
+      }
       continue;
     }
 
@@ -1545,6 +2123,7 @@ async function applyResolvedMutations(input: {
   return {
     affectedFactionIds: Array.from(affectedFactionIds),
     discoveredInformationIds,
+    stateCommitLog,
   };
 }
 
@@ -1719,7 +2298,15 @@ async function runTemporalSimulation(input: {
   nextState: CampaignRuntimeState;
   rollback: TurnRollbackData;
   initialAffectedFactionIds: string[];
-}) {
+}): Promise<{
+  stateCommitLog: StateCommitLogEntry[];
+  changeCodes: TurnCausalityCode[];
+  reasonCodes: TurnCausalityCode[];
+}> {
+  const outcomes = {
+    stateCommitLog: [] as StateCommitLogEntry[],
+    changeCodes: [] as TurnCausalityCode[],
+  };
   let windowStart = input.snapshot.state.globalTime;
   let firstWindow = true;
 
@@ -1744,11 +2331,31 @@ async function runTemporalSimulation(input: {
       createdWorldEventIds: input.rollback.createdWorldEventIds,
       createdFactionMoveIds: input.rollback.createdFactionMoveIds,
       initialAffectedFactionIds: firstWindow ? input.initialAffectedFactionIds : [],
+      outcomes,
     });
 
     firstWindow = false;
     windowStart = chunkEnd;
   }
+
+  const reasonCodes: TurnCausalityCode[] = outcomes.changeCodes.length
+    ? [
+        {
+          code: "SIMULATION_TICK",
+          entityType: "campaign",
+          targetId: input.snapshot.campaignId,
+          metadata: {
+            label: "world simulation",
+          },
+        },
+      ]
+    : [];
+
+  return {
+    stateCommitLog: outcomes.stateCommitLog,
+    changeCodes: outcomes.changeCodes,
+    reasonCodes,
+  };
 }
 
 function normalizeMemorySummary(value: string | undefined) {
@@ -1776,6 +2383,7 @@ function isSalientMemory(input: {
 
   return (
     input.stateCommitLog.some((entry) => entry.status === "applied" && entry.mutationType === "discover_information")
+    || input.stateCommitLog.some((entry) => entry.status === "applied" && entry.kind === "simulation")
     || input.scheduleChangeCodes.length > 0
     || input.command.narrationBounds?.wasCapped === true
     || input.command.checkResult?.outcome === "failure"
@@ -1817,7 +2425,9 @@ function buildSystemFallbackMemorySummary(input: {
   stateCommitLog: StateCommitLog;
 }) {
   const locationName = input.snapshot.currentLocation.name;
-  const firstApplied = input.stateCommitLog.find((entry) => entry.status === "applied");
+  const firstApplied =
+    input.stateCommitLog.find((entry) => entry.status === "applied" && entry.kind !== "check")
+    ?? input.stateCommitLog.find((entry) => entry.status === "applied");
 
   switch (input.memoryKind) {
     case "conflict":
@@ -1875,6 +2485,19 @@ function collectMemoryEntityLinks(input: {
     if (entry.mutationType === "discover_information") {
       pushKey("information", typeof entry.metadata.informationId === "string" ? entry.metadata.informationId : null);
     }
+    if (entry.mutationType === "update_scene_object") {
+      pushKey("scene_object", typeof entry.metadata.objectId === "string" ? entry.metadata.objectId : null);
+    }
+    if (entry.mutationType === "record_local_interaction") {
+      pushKey("npc", typeof entry.metadata.promotedNpcId === "string" ? entry.metadata.promotedNpcId : null);
+    }
+    if (entry.kind === "simulation") {
+      const entityType = entry.metadata?.entityType;
+      const targetId = entry.metadata?.targetId;
+      if (typeof entityType === "string" && typeof targetId === "string") {
+        pushKey(entityType, targetId);
+      }
+    }
   }
 
   for (const factionId of input.affectedFactionIds) {
@@ -1898,6 +2521,8 @@ function buildTurnCausality(input: {
   command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
   stateCommitLog: StateCommitLog;
   nextState: CampaignRuntimeState;
+  simulationChangeCodes: TurnCausalityCode[];
+  simulationReasonCodes: TurnCausalityCode[];
   scheduleChangeCodes: TurnCausalityCode[];
 }) {
   const changeCodes: TurnCausalityCode[] = [
@@ -1981,6 +2606,44 @@ function buildTurnCausality(input: {
         metadata: null,
       });
     }
+    if (entry.mutationType === "update_scene_object") {
+      changeCodes.push({
+        code: "SCENE_OBJECT_STATE_CHANGED",
+        entityType: "scene_object",
+        targetId: typeof entry.metadata?.objectId === "string" ? entry.metadata.objectId : null,
+        metadata: {
+          state: typeof entry.metadata?.newState === "string" ? entry.metadata.newState : null,
+        },
+      });
+      reasonCodes.push({
+        code: "PLAYER_SCENE_INTERACTION",
+        entityType: "scene_object",
+        targetId: typeof entry.metadata?.objectId === "string" ? entry.metadata.objectId : null,
+        metadata: null,
+      });
+    }
+    if (entry.mutationType === "adjust_inventory") {
+      reasonCodes.push({
+        code: "PLAYER_ACTION",
+        entityType: "character",
+        targetId: input.snapshot.character.id,
+        metadata: null,
+      });
+    }
+    if (entry.mutationType === "record_local_interaction") {
+      reasonCodes.push({
+        code: "PLAYER_CONVERSATION",
+        entityType:
+          typeof entry.metadata?.promotedNpcId === "string"
+            ? "npc"
+            : "campaign",
+        targetId:
+          typeof entry.metadata?.promotedNpcId === "string"
+            ? entry.metadata.promotedNpcId
+            : input.snapshot.campaignId,
+        metadata: null,
+      });
+    }
     if (entry.mutationType === "restore_health") {
       changeCodes.push({
         code: "CHARACTER_HEALTH_CHANGED",
@@ -1995,6 +2658,11 @@ function buildTurnCausality(input: {
         metadata: null,
       });
     }
+  }
+
+  changeCodes.push(...input.simulationChangeCodes);
+  if (input.simulationReasonCodes.length) {
+    reasonCodes.push(...input.simulationReasonCodes);
   }
 
   if (input.command.narrationBounds?.wasCapped) {
@@ -2049,6 +2717,7 @@ async function commitResolvedTurn(input: {
   command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
   fetchedFacts: TurnFetchToolResult[];
   routerDecision: RouterDecision;
+  groundedItemIds: string[];
 }): Promise<{ resultPayload: TurnResultPayload; memoryEntryId: string | null }> {
   const {
     snapshot,
@@ -2073,6 +2742,7 @@ async function commitResolvedTurn(input: {
       command,
       fetchedFacts,
       routerDecision,
+      groundedItemIds: input.groundedItemIds,
     });
 
     const actionEffects = await applyResolvedMutations({
@@ -2082,17 +2752,10 @@ async function commitResolvedTurn(input: {
       fetchedFacts,
       rollback,
       nextTurnCount,
-    });
-
-    const causality = buildTurnCausality({
-      snapshot,
-      command,
-      stateCommitLog: evaluated.stateCommitLog,
       nextState: evaluated.nextState,
-      scheduleChangeCodes: [],
     });
 
-    await runTemporalSimulation({
+    const simulationOutcome = await runTemporalSimulation({
       tx,
       snapshot,
       nextState: evaluated.nextState,
@@ -2108,11 +2771,19 @@ async function commitResolvedTurn(input: {
       rollback,
     });
 
+    const stateCommitLog = [
+      ...evaluated.stateCommitLog,
+      ...actionEffects.stateCommitLog,
+      ...simulationOutcome.stateCommitLog,
+    ];
+
     const finalCausality = buildTurnCausality({
       snapshot,
       command,
-      stateCommitLog: evaluated.stateCommitLog,
+      stateCommitLog,
       nextState: evaluated.nextState,
+      simulationChangeCodes: simulationOutcome.changeCodes,
+      simulationReasonCodes: simulationOutcome.reasonCodes,
       scheduleChangeCodes,
     });
 
@@ -2135,6 +2806,21 @@ async function commitResolvedTurn(input: {
 
     if (campaignUpdate.count === 0) {
       throw new StateConflictError("Campaign state changed before the turn could commit.", expectedStateVersion);
+    }
+
+    for (const fact of fetchedFacts) {
+      if (fact.type !== "fetch_npc_detail" || !fact.hydrationDraft) {
+        continue;
+      }
+
+      await persistPromotedNpcHydrationDraft({
+        tx,
+        snapshot,
+        npcId: fact.result.id,
+        hydrationDraft: fact.hydrationDraft,
+        nextTurnCount,
+        rollback,
+      });
     }
 
     await tx.session.update({
@@ -2184,13 +2870,13 @@ async function commitResolvedTurn(input: {
 
     const memoryKind = determineMemoryKind({
       command,
-      stateCommitLog: evaluated.stateCommitLog,
+      stateCommitLog,
     });
     const modelMemorySummary = normalizeMemorySummary(command.memorySummary);
     const shouldRecordMemory = modelMemorySummary != null || isSalientMemory({
       command,
       memoryKind,
-      stateCommitLog: evaluated.stateCommitLog,
+      stateCommitLog,
       scheduleChangeCodes,
     });
 
@@ -2199,11 +2885,11 @@ async function commitResolvedTurn(input: {
         snapshot,
         command,
         memoryKind,
-        stateCommitLog: evaluated.stateCommitLog,
+        stateCommitLog,
       });
       const memoryEntityLinks = collectMemoryEntityLinks({
         snapshot,
-        stateCommitLog: evaluated.stateCommitLog,
+        stateCommitLog,
         changeCodes: finalCausality.changeCodes,
         reasonCodes: finalCausality.reasonCodes,
         affectedFactionIds: actionEffects.affectedFactionIds,
@@ -2253,7 +2939,7 @@ async function commitResolvedTurn(input: {
       whatChanged: renderWhatChanged(finalCausality.changeCodes),
       why: renderWhy(finalCausality.reasonCodes),
       warnings: command.warnings,
-      stateCommitLog: evaluated.stateCommitLog,
+      stateCommitLog,
       narrationBounds: command.narrationBounds ?? null,
       checkResult: command.checkResult ?? null,
       rollback,
@@ -2293,67 +2979,26 @@ async function executeFetchTool(
     }
 
     if (result.socialLayer === "promoted_local" && !result.isNarrativelyHydrated) {
-      const claimRequestId = `hydrate_${randomUUID()}`;
-      const claimExpiry = new Date(Date.now() + HYDRATION_CLAIM_TTL_MS);
-      const claimAttempt = await prisma.nPC.updateMany({
-        where: {
-          id: result.id,
+      try {
+        const hydration = await buildPromotedNpcHydrationPayload({
           campaignId: snapshot.campaignId,
-          socialLayer: "promoted_local",
-          isNarrativelyHydrated: false,
-          OR: [
-            { hydrationClaimRequestId: null },
-            { hydrationClaimExpiresAt: { lt: new Date() } },
-          ],
-        },
-        data: {
-          hydrationClaimRequestId: claimRequestId,
-          hydrationClaimExpiresAt: claimExpiry,
-        },
-      });
+          baseResult: result,
+        });
 
-      if (claimAttempt.count === 1) {
-        try {
-          await hydratePromotedNpcRecord({
-            campaignId: snapshot.campaignId,
-            npcId: result.id,
-            claimRequestId,
-          });
-        } catch (error) {
-          await prisma.nPC.updateMany({
-            where: {
-              id: result.id,
-              campaignId: snapshot.campaignId,
-              isNarrativelyHydrated: false,
-              hydrationClaimRequestId: claimRequestId,
-            },
-            data: {
-              hydrationClaimRequestId: null,
-              hydrationClaimExpiresAt: null,
-            },
-          });
-          throw error;
+        if (hydration) {
+          return {
+            type: call.type,
+            result: hydration.hydratedResult,
+            hydrationDraft: hydration.hydrationDraft,
+          };
         }
-
-        const hydratedResult = await fetchNpcDetail(snapshot.campaignId, result.id);
-        if (!hydratedResult) {
-          throw new Error("Hydrated NPC detail not found.");
-        }
-
-        return { type: call.type, result: hydratedResult };
+      } catch (error) {
+        logBackendDiagnostic("turn.fetch.promoted_local_hydration_failed", {
+          campaignId: snapshot.campaignId,
+          npcId: result.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
-
-      const refreshed = await fetchNpcDetail(snapshot.campaignId, result.id);
-      if (!refreshed) {
-        throw new Error("NPC detail not found.");
-      }
-      if (!refreshed.isNarrativelyHydrated) {
-        throw new FetchSynchronizationError(
-          `${refreshed.name} is still synchronizing promoted NPC detail.`,
-        );
-      }
-
-      return { type: call.type, result: refreshed };
     }
 
     return { type: call.type, result };
@@ -2428,7 +3073,7 @@ function deterministicNarrationFallback(input: {
   checkResult?: CheckResult | null;
 }) {
   const applied = input.stateCommitLog
-    .filter((entry) => entry.status === "applied" && entry.kind === "mutation")
+    .filter((entry) => entry.status === "applied" && (entry.kind === "mutation" || entry.kind === "simulation"))
     .map((entry) => entry.summary);
   const rejected = input.stateCommitLog
     .filter((entry) => entry.status === "rejected")
@@ -2493,6 +3138,7 @@ export const engineTestUtils = {
   toPromotedTemporaryActorRole,
   requestHashForSubmission,
   promptContextProfileForRouter,
+  routerDecisionForTurnMode,
   deterministicNarrationFallback,
   evaluateResolvedCommand,
 };
@@ -2940,20 +3586,22 @@ export async function triageTurn(input: TurnSubmissionRequest & {
     });
 
     const routerDecision =
-      turnMode === "observe" || intent?.type === "travel_route"
-        ? ({
-            profile: "full",
-            confidence: "low",
-            authorizedVectors: [],
-            requiredPrerequisites: [],
-            reason: "Router classification skipped for observe mode or explicitly committed travel.",
-          } satisfies RouterDecision)
-        : await dmClient.classifyTurnIntent({
-            playerAction,
+      turnMode === "observe"
+        ? routerDecisionForTurnMode({
             turnMode,
-            context: await getTurnRouterContext(snapshot),
-            signal: abortController.signal,
-          });
+            explicitTravel: false,
+          })
+        : intent?.type === "travel_route"
+          ? routerDecisionForTurnMode({
+              turnMode,
+              explicitTravel: true,
+            })
+          : await dmClient.classifyTurnIntent({
+              playerAction,
+              turnMode,
+              context: await getTurnRouterContext(snapshot),
+              signal: abortController.signal,
+            });
     logBackendDiagnostic("turn.router.resolved", {
       campaignId: input.campaignId,
       sessionId: input.sessionId,
@@ -2983,56 +3631,10 @@ export async function triageTurn(input: TurnSubmissionRequest & {
           });
     let fetchedFacts: TurnFetchToolResult[] = [];
     if (intent?.type !== "travel_route") {
-      try {
-        fetchedFacts = await executeRequiredPrerequisites({
-          snapshot,
-          prerequisites: routerDecision.requiredPrerequisites,
-        });
-      } catch (error) {
-        if (
-          error instanceof FetchSynchronizationError
-          || (error instanceof Error && error.name === "FetchSynchronizationError")
-        ) {
-          await prisma.turn.update({
-            where: { id: turn.id },
-            data: {
-              status: "clarification_requested",
-              resultJson: toPrismaJsonValue(toTurnResultPayloadJson({
-                stateVersionAfter: snapshot.stateVersion,
-                changeCodes: [],
-                reasonCodes: [],
-                whatChanged: [],
-                why: [],
-                warnings: [],
-                stateCommitLog: [],
-                narrationBounds: null,
-                checkResult: null,
-                rollback: null,
-                clarification: {
-                  question:
-                    "That detail is still synchronizing into the world. Do you want to try again in a moment or do something else first?",
-                  options: ["Try again", "Wait a moment", "Do something else"],
-                },
-                error: null,
-              })),
-            },
-          });
-          await cleanupTurnLock({
-            campaignId: input.campaignId,
-            requestId: input.requestId,
-          });
-
-          return {
-            type: "clarification" as const,
-            turnId: turn.id,
-            question:
-              "That detail is still synchronizing into the world. Do you want to try again in a moment or do something else first?",
-            options: ["Try again", "Wait a moment", "Do something else"],
-            warnings: [],
-          };
-        }
-        throw error;
-      }
+      fetchedFacts = await executeRequiredPrerequisites({
+        snapshot,
+        prerequisites: routerDecision.requiredPrerequisites,
+      });
     }
     const resolution: TurnResolution =
       intent?.type === "travel_route"
@@ -3043,6 +3645,25 @@ export async function triageTurn(input: TurnSubmissionRequest & {
             }
             if (route.targetLocationId !== intent.targetLocationId) {
               throw new Error("Travel intent target does not match the selected route.");
+            }
+            if (!isTraversableRoute(route)) {
+              return {
+                command: {
+                  type: "resolve_mechanics",
+                  timeMode: "travel",
+                  suggestedActions: [],
+                  warnings: [`The route to ${route.targetLocationName} is currently blocked.`],
+                  memorySummary: `You attempt to set out for ${route.targetLocationName}, but the route is blocked.`,
+                  mutations: [
+                    {
+                      type: "move_player",
+                      routeEdgeId: route.id,
+                      targetLocationId: route.targetLocationId,
+                    },
+                  ],
+                },
+                fetchedFacts: [],
+              } satisfies TurnResolution;
             }
 
             return {
@@ -3146,6 +3767,10 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       requestedAdvanceMinutes: narrationOverride.requestedAdvanceMinutes,
     });
 
+    for (const warning of committedCommand.warnings) {
+      input.stream?.warning?.(warning);
+    }
+
     if (committedCommand.checkResult) {
       input.stream?.checkResult?.(committedCommand.checkResult);
     }
@@ -3171,6 +3796,9 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       command: committedCommand,
       fetchedFacts: resolution.fetchedFacts,
       routerDecision,
+      groundedItemIds: promptContext.inventory
+        .filter((entry) => entry.kind === "item")
+        .map((entry) => entry.id),
     });
     commitStarted = false;
     activeCommitTurnKeys.delete(turnKey);
@@ -3197,6 +3825,8 @@ export async function triageTurn(input: TurnSubmissionRequest & {
     try {
       narration = await dmClient.narrateResolvedTurn({
         playerAction,
+        promptContext,
+        fetchedFacts: resolution.fetchedFacts,
         stateCommitLog: committed.resultPayload.stateCommitLog ?? [],
         checkResult: committed.resultPayload.checkResult ?? null,
         suggestedActions: dedupeStrings(committedCommand.suggestedActions),

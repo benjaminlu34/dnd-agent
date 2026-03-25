@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import type { StreamEvent } from "@/lib/http/ndjson";
 import type {
   CampaignListItem,
   CheckResult,
@@ -11,21 +12,11 @@ import type {
   TurnDigest,
 } from "@/lib/game/types";
 
-type TurnStreamEvent =
-  | { type: "narration"; chunk: string }
-  | { type: "clarification"; question: string; options: string[] }
-  | { type: "actions"; actions: string[] }
-  | { type: "state"; snapshot: PlayerCampaignSnapshot }
-  | { type: "warning"; message: string }
-  | { type: "error"; message: string }
-  | { type: "check_result"; result: CheckResult }
-  | { type: "done" };
-
 type InventoryItem = PlayerCampaignSnapshot["character"]["inventory"][number];
 
 async function consumeNdjson(
   response: Response,
-  onEvent: (event: TurnStreamEvent) => void,
+  onEvent: (event: StreamEvent) => void,
 ) {
   if (!response.body) {
     throw new Error("Streaming response body was empty.");
@@ -51,12 +42,12 @@ async function consumeNdjson(
         continue;
       }
 
-      onEvent(JSON.parse(line) as TurnStreamEvent);
+      onEvent(JSON.parse(line) as StreamEvent);
     }
   }
 
   if (buffer.trim()) {
-    onEvent(JSON.parse(buffer) as TurnStreamEvent);
+    onEvent(JSON.parse(buffer) as StreamEvent);
   }
 }
 
@@ -144,6 +135,7 @@ export function AdventureApp({
   const [submitting, setSubmitting] = useState(false);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [latestCheck, setLatestCheck] = useState<CheckResult | null>(null);
+  const [streamedNarration, setStreamedNarration] = useState("");
   const [suggestedActions, setSuggestedActions] = useState<string[]>([]);
   const [missedTurnDigests, setMissedTurnDigests] = useState<TurnDigest[]>([]);
 
@@ -278,6 +270,7 @@ export function AdventureApp({
     setClarification(null);
     setWarnings([]);
     setLatestCheck(null);
+    setStreamedNarration("");
 
     try {
       const body: TurnSubmissionRequest = {
@@ -299,62 +292,20 @@ export function AdventureApp({
       });
 
       if (!response.ok) {
-        const data = (await response.json().catch(() => null)) as
-          | {
-              error?: string;
-              latestSnapshot?: PlayerCampaignSnapshot;
-              latestStateVersion?: number;
-              missedTurnDigests?: TurnDigest[];
-              retryWithNewRequestId?: boolean;
-              message?: string;
-              result?: {
-                error?: {
-                  message?: string;
-                } | null;
-              } | null;
-            }
-          | null;
-
-        if (response.status === 409 && data?.error === "state_conflict" && data.latestSnapshot) {
-          setSnapshot(data.latestSnapshot);
-          setMissedTurnDigests(data.missedTurnDigests ?? []);
-          setSuggestedActions(extractSuggestedActions(data.latestSnapshot));
-          setAction("");
-          setTurnError("The world advanced before this action could commit. Review the missed outcome and choose a new action.");
-          return;
-        }
-
-        if (response.status === 409 && data?.error === "retry_with_new_request_id") {
-          setTurnError(
-            data.result?.error?.message
-            ?? "That request already ended in a retryable failure state. Submit the action again to create a fresh attempt.",
-          );
-          return;
-        }
-
-        if (response.status === 400 && data?.error === "invalid_expected_state_version") {
-          if (data.latestSnapshot) {
-            setSnapshot(data.latestSnapshot);
-            setSuggestedActions(extractSuggestedActions(data.latestSnapshot));
-          }
-          setTurnError(
-            data.message
-            ?? "The client state version was ahead of the campaign. Review the current state and choose a fresh action.",
-          );
-          return;
-        }
-
-        throw new Error(data?.error ?? "Turn submission failed.");
+        throw new Error("Turn submission failed.");
       }
 
       const nextWarnings: string[] = [];
       let nextSnapshot: PlayerCampaignSnapshot | null = null;
       let nextActions: string[] = [];
+      let nextMissedTurnDigests: TurnDigest[] = [];
       let receivedClarification = false;
       let streamErrorMessage: string | null = null;
       await consumeNdjson(response, (event) => {
         if (event.type === "warning") {
           nextWarnings.push(event.message);
+        } else if (event.type === "narration") {
+          setStreamedNarration((current) => `${current}${event.chunk}`);
         } else if (event.type === "clarification") {
           receivedClarification = true;
           setClarification({
@@ -370,10 +321,35 @@ export function AdventureApp({
           setTurnError(event.message);
         } else if (event.type === "check_result") {
           setLatestCheck(event.result);
+        } else if (event.type === "state_conflict") {
+          streamErrorMessage = "state_conflict";
+          if (event.latestSnapshot) {
+            nextSnapshot = event.latestSnapshot;
+            nextMissedTurnDigests = event.missedTurnDigests;
+            nextActions = extractSuggestedActions(event.latestSnapshot);
+          }
+          setAction("");
+          setTurnError("The world advanced before this action could commit. Review the missed outcome and choose a new action.");
+        } else if (event.type === "retry_required") {
+          streamErrorMessage = "retry_required";
+          setTurnError(
+            event.result.error?.message
+            ?? "That request already ended in a retryable failure state. Submit the action again to create a fresh attempt.",
+          );
+        } else if (event.type === "invalid_expected_state_version") {
+          streamErrorMessage = "invalid_expected_state_version";
+          if (event.latestSnapshot) {
+            nextSnapshot = event.latestSnapshot;
+            nextActions = extractSuggestedActions(event.latestSnapshot);
+          }
+          setTurnError(
+            event.message
+            ?? "The client state version was ahead of the campaign. Review the current state and choose a fresh action.",
+          );
         }
       });
 
-      if (!nextSnapshot && !receivedClarification) {
+      if (!nextSnapshot && !receivedClarification && !streamErrorMessage) {
         try {
           const snapshotResponse = await fetch(`/api/campaigns/${campaignId}`);
           const snapshotData = (await snapshotResponse.json()) as {
@@ -395,10 +371,12 @@ export function AdventureApp({
 
       if (nextSnapshot) {
         setSnapshot(nextSnapshot);
-        setMissedTurnDigests([]);
+        setMissedTurnDigests(nextMissedTurnDigests);
         setAction("");
+        setStreamedNarration("");
       } else if (receivedClarification) {
         setAction("");
+        setStreamedNarration("");
       }
 
       setWarnings(nextWarnings);
@@ -623,6 +601,16 @@ export function AdventureApp({
                       </p>
                     </article>
                   ))}
+                  {streamedNarration ? (
+                    <article className="rounded-3xl border border-amber-700/40 bg-amber-950/10 p-6 shadow-lg shadow-black/10">
+                      <p className="text-[0.68rem] uppercase tracking-[0.22em] text-amber-300/70">
+                        Dungeon Master
+                      </p>
+                      <p className="mt-3 whitespace-pre-wrap text-base leading-relaxed text-zinc-100">
+                        {streamedNarration}
+                      </p>
+                    </article>
+                  ) : null}
                 </div>
               </div>
 
@@ -753,36 +741,43 @@ export function AdventureApp({
               <section className="rounded-[1.75rem] border border-zinc-800 bg-zinc-950/95 p-6 shadow-2xl shadow-black/20 backdrop-blur">
                 <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Routes</p>
                 <div className="mt-4 space-y-3">
-                  {snapshot.adjacentRoutes.map((route) => (
-                    <div key={route.id} className="rounded-3xl border border-zinc-800 bg-zinc-900/70 p-4">
-                      <h3 className="font-serif text-lg font-semibold text-zinc-100">
-                        {route.targetLocationName}
-                      </h3>
-                      <p className="mt-2 text-sm leading-relaxed text-zinc-400">
-                        {route.travelTimeMinutes} min · danger {route.dangerLevel} · {route.currentStatus}
-                      </p>
-                      {route.description ? (
-                        <p className="mt-2 text-sm leading-relaxed text-zinc-500">{route.description}</p>
-                      ) : null}
-                      <button
-                        type="button"
-                        className="button-press mt-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm font-semibold text-amber-50 transition hover:border-amber-400/60 hover:bg-amber-400/15 disabled:cursor-not-allowed disabled:opacity-60"
-                        onClick={() =>
-                          void submitTurnWithIntent(
-                            `I set out for ${route.targetLocationName}.`,
-                            undefined,
-                            {
-                              type: "travel_route",
-                              routeEdgeId: route.id,
-                              targetLocationId: route.targetLocationId,
-                            },
-                          )}
-                        disabled={submitting}
-                      >
-                        Set Out
-                      </button>
-                    </div>
-                  ))}
+                  {snapshot.adjacentRoutes.map((route) => {
+                    const routeIsOpen = route.currentStatus === "open";
+                    return (
+                      <div key={route.id} className="rounded-3xl border border-zinc-800 bg-zinc-900/70 p-4">
+                        <h3 className="font-serif text-lg font-semibold text-zinc-100">
+                          {route.targetLocationName}
+                        </h3>
+                        <p className="mt-2 text-sm leading-relaxed text-zinc-400">
+                          {route.travelTimeMinutes} min · danger {route.dangerLevel} · {route.currentStatus}
+                        </p>
+                        {route.description ? (
+                          <p className="mt-2 text-sm leading-relaxed text-zinc-500">{route.description}</p>
+                        ) : null}
+                        <button
+                          type="button"
+                          className="button-press mt-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm font-semibold text-amber-50 transition hover:border-amber-400/60 hover:bg-amber-400/15 disabled:cursor-not-allowed disabled:opacity-60"
+                          onClick={() =>
+                            void submitTurnWithIntent(
+                              `I set out for ${route.targetLocationName}.`,
+                              undefined,
+                              {
+                                type: "travel_route",
+                                routeEdgeId: route.id,
+                                targetLocationId: route.targetLocationId,
+                              },
+                            )}
+                          disabled={submitting || !routeIsOpen}
+                        >
+                          {routeIsOpen
+                            ? "Set Out"
+                            : route.currentStatus === "blocked"
+                              ? "Blocked"
+                              : "Unavailable"}
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
               </section>
 

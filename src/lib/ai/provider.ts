@@ -150,6 +150,8 @@ type TurnInput = {
 
 type ResolvedTurnNarrationInput = {
   playerAction: string;
+  promptContext: SpatialPromptContext;
+  fetchedFacts: TurnFetchToolResult[];
   stateCommitLog: StateCommitLog;
   checkResult?: CheckResult | null;
   suggestedActions: string[];
@@ -1142,21 +1144,6 @@ function sanitizeCitationIds(value: unknown) {
       const normalized = entry.toLowerCase();
       return normalized !== "" && normalized !== "none" && normalized !== "null";
     });
-}
-
-function sanitizeCitedEntities(value: unknown) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return undefined;
-  }
-
-  const record = value as Record<string, unknown>;
-  return {
-    npcIds: sanitizeCitationIds(record.npcIds),
-    locationIds: sanitizeCitationIds(record.locationIds),
-    factionIds: sanitizeCitationIds(record.factionIds),
-    commodityIds: sanitizeCitationIds(record.commodityIds),
-    informationIds: sanitizeCitationIds(record.informationIds),
-  };
 }
 
 function idsReferToSameEntity(left: string | null | undefined, right: string | null | undefined) {
@@ -2238,16 +2225,26 @@ const mechanicsMutationSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("advance_time"),
     durationMinutes: z.number().int().positive().max(2880).optional(),
+    phase: z.enum(["immediate", "conditional"]).optional(),
   }),
   z.object({
     type: z.literal("move_player"),
     routeEdgeId: z.string().trim().min(1),
     targetLocationId: z.string().trim().min(1),
+    phase: z.enum(["immediate", "conditional"]).optional(),
   }),
   z.object({
     type: z.literal("adjust_gold"),
     delta: z.number().int(),
     reason: z.string().trim().min(1).max(120),
+    phase: z.enum(["immediate", "conditional"]).optional(),
+  }),
+  z.object({
+    type: z.literal("record_local_interaction"),
+    localEntityId: z.string().trim().min(1),
+    interactionSummary: z.string().trim().min(1).max(240),
+    topic: z.string().trim().min(1).max(80).optional(),
+    phase: z.enum(["immediate", "conditional"]).optional(),
   }),
   z.object({
     type: z.literal("commit_market_trade"),
@@ -2255,26 +2252,46 @@ const mechanicsMutationSchema = z.discriminatedUnion("type", [
     marketPriceId: z.string().trim().min(1),
     commodityId: z.string().trim().min(1),
     quantity: z.number().int().positive(),
+    phase: z.enum(["immediate", "conditional"]).optional(),
+  }),
+  z.object({
+    type: z.literal("adjust_inventory"),
+    itemId: z.string().trim().min(1),
+    quantity: z.number().int().positive(),
+    action: z.enum(["add", "remove"]),
+    reason: z.string().trim().min(1).max(120),
+    phase: z.enum(["immediate", "conditional"]).optional(),
   }),
   z.object({
     type: z.literal("adjust_relationship"),
     npcId: z.string().trim().min(1),
     delta: z.number().int(),
     reason: z.string().trim().min(1).max(120),
+    phase: z.enum(["immediate", "conditional"]).optional(),
   }),
   z.object({
     type: z.literal("discover_information"),
     informationId: z.string().trim().min(1),
+    phase: z.enum(["immediate", "conditional"]).optional(),
   }),
   z.object({
     type: z.literal("set_npc_state"),
     npcId: z.string().trim().min(1),
     newState: z.enum(["active", "wounded", "incapacitated", "dead"]),
+    phase: z.enum(["immediate", "conditional"]).optional(),
+  }),
+  z.object({
+    type: z.literal("update_scene_object"),
+    objectId: z.string().trim().min(1),
+    newState: z.string().trim().min(1).max(120),
+    reason: z.string().trim().min(1).max(120),
+    phase: z.enum(["immediate", "conditional"]).optional(),
   }),
   z.object({
     type: z.literal("restore_health"),
     mode: z.enum(["light_rest", "full_rest", "amount"]),
     amount: z.number().int().positive().optional(),
+    phase: z.enum(["immediate", "conditional"]).optional(),
   }),
 ]);
 
@@ -2446,6 +2463,8 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Do not output narration or any freeform prose.",
         "The router has already chosen scope and prerequisite fetches. Do not ask for more fetches.",
         "Use only bounded mutations. The engine will validate, filter, and commit them.",
+        "Mark resource costs, fees, and other upfront expenditures as phase immediate.",
+        "Mark success-only rewards or outcomes as phase conditional.",
         "Advance the scene or world only through passive observation or waiting.",
         "Do not create combat, market trade, or deliberate social escalation in observe mode.",
         "If a check is needed, set checkIntent and list only the success-state mutations. The engine will reject them on failure.",
@@ -2461,12 +2480,17 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Obey the router_constraints block. If a vector is not authorized, do not rely on it.",
         "Use only bounded mutations. The engine will validate, filter, and commit them deterministically.",
         "If a check is needed, set checkIntent and list only the success-state mutations. The engine will reject them automatically on failure or partial success.",
+        "Mark resource costs, fees, and other upfront expenditures as phase immediate.",
+        "Mark success-only rewards or outcomes as phase conditional.",
         "Use commit_market_trade only for strict commodity trade backed by fetched market prices.",
         "Use adjust_gold for incidental payments, rewards, bribes, tips, fees, or other non-market gold movement.",
         "Use move_player only for actual route travel to a known adjacent location.",
+        "Use record_local_interaction for current-scene unnamed locals instead of adjust_relationship.",
+        "Use adjust_inventory for gaining, losing, consuming, or handing over grounded inventory items.",
         "Use set_npc_state only for direct violence, subdual, or comparable physical outcomes.",
         "Use adjust_relationship for meaningful social shifts with a present NPC.",
         "Use discover_information only for specific known information ids grounded in context or fetched facts.",
+        "Use update_scene_object for simple persistent object or scene state changes.",
         "Use restore_health for rest recovery or explicit healing outcomes the engine should apply.",
         "Use advance_time when the action necessarily consumes time. Suggested actions should stay short and concrete.",
         "Preserve the player's commitment level. Do not upgrade browsing or approach into stronger mechanics unless the wording clearly commits to them.",
@@ -2492,6 +2516,29 @@ function buildTurnUserPrompt(input: {
     }),
     formatPromptBlock("fetched_facts", input.fetchedFacts),
   ].join("\n\n");
+}
+
+function buildResolvedTurnNarrationPrompt(input: ResolvedTurnNarrationInput) {
+  const system = [
+    "You are the Dungeon Master narrator for a resolved simulated-world turn.",
+    "Return exactly one structured payload using the provided tool.",
+    "Narrate only what is grounded in the committed state_commit_log, the player's action, the provided spatial context, and the fetched facts.",
+    "Do not invent successful outcomes, prices, discoveries, NPC reactions, travel, or social shifts that are not supported by the log, context, or fetched facts.",
+    "If a mutation was rejected or a check failed, make that failure legible in the narration.",
+    "Write in second person to the player character as 'you'.",
+    "Keep the narration compact, concrete, and forward-moving.",
+  ].join("\n");
+
+  const user = [
+    formatPromptBlock("player_action", input.playerAction),
+    formatPromptBlock("context", input.promptContext),
+    formatPromptBlock("fetched_facts", input.fetchedFacts),
+    formatPromptBlock("state_commit_log", input.stateCommitLog),
+    formatPromptBlock("check_result", input.checkResult ?? null),
+    formatPromptBlock("suggested_actions", input.suggestedActions),
+  ].join("\n\n");
+
+  return { system, user };
 }
 
 async function runCompletion(options: {
@@ -5028,24 +5075,9 @@ class DungeonMasterClient {
       let correctionNotes: string | null = null;
 
       for (let attempt = 1; attempt <= MAX_TURN_ATTEMPTS; attempt += 1) {
-        const system = [
-          "You are the Dungeon Master narrator for a resolved simulated-world turn.",
-          "Return exactly one structured payload using the provided tool.",
-          "Narrate only what is grounded in the committed state_commit_log and the player's action.",
-          "Do not invent successful outcomes, prices, discoveries, NPC reactions, travel, or social shifts that are not supported by the log.",
-          "If a mutation was rejected or a check failed, make that failure legible in the narration.",
-          "Write in second person to the player character as 'you'.",
-          "Keep the narration compact, concrete, and forward-moving.",
-          correctionNotes,
-        ]
-          .filter((line): line is string => Boolean(line))
-          .join("\n");
-        const user = [
-          formatPromptBlock("player_action", input.playerAction),
-          formatPromptBlock("state_commit_log", input.stateCommitLog),
-          formatPromptBlock("check_result", input.checkResult ?? null),
-          formatPromptBlock("suggested_actions", input.suggestedActions),
-        ].join("\n\n");
+        const prompt = buildResolvedTurnNarrationPrompt(input);
+        const system = [prompt.system, correctionNotes].filter((line): line is string => Boolean(line)).join("\n");
+        const user = prompt.user;
 
         logNarrationDebug("resolved_turn_narration.request", {
           attempt,
@@ -5105,6 +5137,7 @@ class DungeonMasterClient {
 export const dmClient = new DungeonMasterClient();
 export const aiProviderTestUtils = {
   buildTurnSystemPrompt,
+  buildResolvedTurnNarrationPrompt,
   buildRouterConstraintsBlock,
   extractToolInput,
   isObservePermittedFinalTool,

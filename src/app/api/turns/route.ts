@@ -67,78 +67,109 @@ export async function POST(request: Request) {
   const action = body.action.trim();
 
   try {
-    const bufferedNarration: string[] = [];
-    const result = await triageTurn({
-      campaignId,
-      sessionId,
-      requestId,
-      expectedStateVersion,
-      action,
-      intent,
-      mode,
-      stream: {
-        narration: (chunk) => bufferedNarration.push(chunk),
-      },
-    });
-
-    if (result.type === "state_conflict") {
-      return NextResponse.json(result.payload, { status: 409 });
-    }
-
-    if (result.type === "retry_required") {
-      return NextResponse.json(result.payload, { status: 409 });
-    }
-
     const stream = createNdjsonStream(async (send) => {
-      if (result.type === "clarification") {
-        for (const warning of result.warnings) {
-          send({ type: "warning", message: warning });
-        }
-        send({
-          type: "clarification",
-          question: result.question,
-          options: result.options,
-        });
-        return;
-      }
-
-      for (const chunk of bufferedNarration) {
-        send({ type: "narration", chunk });
-      }
-
-      send({
-        type: "actions",
-        actions: result.suggestedActions,
-      });
-
-      if (result.checkResult) {
-        send({
-          type: "check_result",
-          result: result.checkResult,
-        });
-      }
-
       try {
-        const snapshot = await getTurnSnapshot(campaignId, sessionId);
-        if (snapshot) {
+        const result = await triageTurn({
+          campaignId,
+          sessionId,
+          requestId,
+          expectedStateVersion,
+          action,
+          intent,
+          mode,
+          stream: {
+            narration: (chunk) => send({ type: "narration", chunk }),
+            warning: (message) => send({ type: "warning", message }),
+            checkResult: (result) => send({ type: "check_result", result }),
+          },
+        });
+
+        if (result.type === "state_conflict") {
           send({
-            type: "state",
-            snapshot: toPlayerCampaignSnapshot(snapshot),
+            type: "state_conflict",
+            latestSnapshot: result.payload.latestSnapshot,
+            latestStateVersion: result.payload.latestStateVersion,
+            missedTurnDigests: result.payload.missedTurnDigests,
           });
-        } else {
+          return;
+        }
+
+        if (result.type === "retry_required") {
+          send({
+            type: "retry_required",
+            turnId: result.payload.turnId,
+            previousStatus: result.payload.previousStatus,
+            result: result.payload.result,
+          });
+          return;
+        }
+
+        if (result.type === "clarification") {
+          for (const warning of result.warnings) {
+            send({ type: "warning", message: warning });
+          }
+          send({
+            type: "clarification",
+            question: result.question,
+            options: result.options,
+          });
+          return;
+        }
+
+        send({
+          type: "actions",
+          actions: result.suggestedActions,
+        });
+
+        try {
+          const snapshot = await getTurnSnapshot(campaignId, sessionId);
+          if (snapshot) {
+            send({
+              type: "state",
+              snapshot: toPlayerCampaignSnapshot(snapshot),
+            });
+          } else {
+            send({
+              type: "warning",
+              message: "Turn resolved, but the latest campaign state was unavailable for refresh.",
+            });
+          }
+        } catch (error) {
           send({
             type: "warning",
-            message: "Turn resolved, but the latest campaign state was unavailable for refresh.",
+            message:
+              error instanceof Error
+                ? `Turn resolved, but refreshing the latest campaign state failed: ${error.message}`
+                : "Turn resolved, but refreshing the latest campaign state failed.",
           });
         }
       } catch (error) {
-        send({
-          type: "warning",
-          message:
-            error instanceof Error
-              ? `Turn resolved, but refreshing the latest campaign state failed: ${error.message}`
-              : "Turn resolved, but refreshing the latest campaign state failed.",
-        });
+        if (error instanceof TurnLockedError) {
+          send({ type: "error", message: error.message });
+          return;
+        }
+        if (error instanceof StateConflictError) {
+          const snapshot = await getTurnSnapshot(campaignId, sessionId);
+          send({
+            type: "state_conflict",
+            latestSnapshot: snapshot ? toPlayerCampaignSnapshot(snapshot) : null,
+            latestStateVersion: snapshot?.stateVersion ?? expectedStateVersion,
+            missedTurnDigests: snapshot ? await getMissedTurnDigests(campaignId, expectedStateVersion) : [],
+          });
+          return;
+        }
+        if (error instanceof InvalidExpectedStateVersionError) {
+          const snapshot = await getTurnSnapshot(campaignId, sessionId);
+          send({
+            type: "invalid_expected_state_version",
+            latestSnapshot: snapshot ? toPlayerCampaignSnapshot(snapshot) : null,
+            latestStateVersion: error.latestStateVersion,
+            message: error.message,
+          });
+          return;
+        }
+
+        throw error;
       }
     });
 
@@ -149,34 +180,6 @@ export async function POST(request: Request) {
       },
     });
   } catch (error) {
-    if (error instanceof TurnLockedError) {
-      return NextResponse.json({ error: error.message }, { status: 409 });
-    }
-    if (error instanceof StateConflictError) {
-      const snapshot = await getTurnSnapshot(campaignId, sessionId);
-      return NextResponse.json(
-        {
-          error: "state_conflict",
-          latestSnapshot: snapshot ? toPlayerCampaignSnapshot(snapshot) : null,
-          latestStateVersion: snapshot?.stateVersion ?? expectedStateVersion,
-          missedTurnDigests: await getMissedTurnDigests(campaignId, expectedStateVersion),
-        },
-        { status: 409 },
-      );
-    }
-    if (error instanceof InvalidExpectedStateVersionError) {
-      const snapshot = await getTurnSnapshot(campaignId, sessionId);
-      return NextResponse.json(
-        {
-          error: "invalid_expected_state_version",
-          latestSnapshot: snapshot ? toPlayerCampaignSnapshot(snapshot) : null,
-          latestStateVersion: error.latestStateVersion,
-          message: error.message,
-        },
-        { status: 400 },
-      );
-    }
-
     return NextResponse.json(
       {
         error: error instanceof Error ? error.message : "Turn submission failed.",

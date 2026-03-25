@@ -212,6 +212,12 @@ export function validateTurnCommand(input: {
   }
 
   const warnings: string[] = [];
+  for (const warning of command.warnings ?? []) {
+    const normalized = warning.trim();
+    if (normalized) {
+      warnings.push(normalized);
+    }
+  }
   const suggestedActions = normalizedSuggestedActions(command.suggestedActions);
   if (!suggestedActions.length) {
     warnings.push("Mechanics response returned no suggested actions; engine provided none.");
@@ -220,7 +226,7 @@ export function validateTurnCommand(input: {
   return {
     ...command,
     suggestedActions,
-    warnings,
+    warnings: Array.from(new Set(warnings)),
     timeElapsed: deriveTimeElapsed(command, snapshot),
     checkResult: deriveCheckResult(snapshot, command, fetchedFacts),
   };

@@ -12,6 +12,7 @@ export type CheckMode = "normal" | "advantage" | "disadvantage";
 export type CheckOutcome = "success" | "partial" | "failure";
 export type TimeMode = "combat" | "exploration" | "travel" | "rest" | "downtime";
 export type TurnMode = "player_input" | "observe";
+export type MutationPhase = "immediate" | "conditional";
 export type PromptContextProfile = "local" | "full";
 export type NpcState = "active" | "wounded" | "incapacitated" | "dead";
 export type CombatApproach = "attack" | "subdue" | "assassinate";
@@ -46,6 +47,7 @@ export type TurnCodeEntityType =
   | "session"
   | "location"
   | "route"
+  | "scene_object"
   | "npc"
   | "faction"
   | "information"
@@ -60,17 +62,23 @@ export type TurnCausalityCodeName =
   | "LOCATION_CHANGED"
   | "NPC_APPROVAL_CHANGED"
   | "INFORMATION_DISCOVERED"
+  | "INFORMATION_ADDED"
+  | "INFORMATION_EXPIRED"
+  | "SCENE_OBJECT_STATE_CHANGED"
   | "NPC_STATE_CHANGED"
+  | "NPC_LOCATION_CHANGED"
   | "CHARACTER_HEALTH_CHANGED"
   | "ROUTE_STATUS_CHANGED"
   | "LOCATION_STATE_CHANGED"
   | "LOCATION_CONTROL_CHANGED"
   | "FACTION_RESOURCES_CHANGED"
+  | "WORLD_EVENT_SPAWNED"
   | "WORLD_EVENT_CANCELLED"
   | "WORLD_EVENT_PROCESSED"
   | "FACTION_MOVE_CANCELLED"
   | "FACTION_MOVE_EXECUTED"
   | "MARKET_PRICE_CHANGED"
+  | "MARKET_RESTOCKED"
   | "MEMORY_RECORDED"
   | "SCHEDULE_JOB_ENQUEUED"
   | "PLAYER_ACTION"
@@ -625,6 +633,7 @@ export type CampaignRuntimeState = {
   globalTime: number;
   pendingTurnId: string | null;
   lastActionSummary: string | null;
+  sceneObjectStates: Record<string, string>;
   customTitle?: string | null;
 };
 
@@ -739,6 +748,7 @@ export type RecentLocalEventSummary = {
 };
 
 export type RecentUnnamedLocalSummary = {
+  id: string;
   label: string;
   interactionCount: number;
   lastSummary: string | null;
@@ -932,6 +942,7 @@ export type SpatialPromptContext = {
   recentWorldShifts: WorldShiftSummary[];
   activeThreads: ActiveThreadSummary[];
   inventory: PromptInventoryItem[];
+  sceneObjectStates: Record<string, string>;
   localTexture: LocalTextureSummary | null;
   globalTime: number;
   timeOfDay: string;
@@ -1149,6 +1160,7 @@ export type TurnFetchToolResult =
   | {
       type: "fetch_npc_detail";
       result: NpcDetail;
+      hydrationDraft?: PromotedNpcHydrationDraft | null;
     }
   | {
       type: "fetch_market_prices";
@@ -1191,16 +1203,26 @@ export type MechanicsMutation =
   | {
       type: "advance_time";
       durationMinutes?: number;
+      phase?: MutationPhase;
     }
   | {
       type: "move_player";
       routeEdgeId: string;
       targetLocationId: string;
+      phase?: MutationPhase;
     }
   | {
       type: "adjust_gold";
       delta: number;
       reason: string;
+      phase?: MutationPhase;
+    }
+  | {
+      type: "record_local_interaction";
+      localEntityId: string;
+      interactionSummary: string;
+      topic?: string;
+      phase?: MutationPhase;
     }
   | {
       type: "commit_market_trade";
@@ -1208,26 +1230,46 @@ export type MechanicsMutation =
       marketPriceId: string;
       commodityId: string;
       quantity: number;
+      phase?: MutationPhase;
+    }
+  | {
+      type: "adjust_inventory";
+      itemId: string;
+      quantity: number;
+      action: "add" | "remove";
+      reason: string;
+      phase?: MutationPhase;
     }
   | {
       type: "adjust_relationship";
       npcId: string;
       delta: number;
       reason: string;
+      phase?: MutationPhase;
     }
   | {
       type: "discover_information";
       informationId: string;
+      phase?: MutationPhase;
     }
   | {
       type: "set_npc_state";
       npcId: string;
       newState: NpcState;
+      phase?: MutationPhase;
+    }
+  | {
+      type: "update_scene_object";
+      objectId: string;
+      newState: string;
+      reason: string;
+      phase?: MutationPhase;
     }
   | {
       type: "restore_health";
       mode: "light_rest" | "full_rest" | "amount";
       amount?: number;
+      phase?: MutationPhase;
     };
 
 export type ResolveMechanicsResponse = {
@@ -1235,6 +1277,7 @@ export type ResolveMechanicsResponse = {
   timeMode: TimeMode;
   durationMagnitude?: DurationMagnitude;
   suggestedActions: string[];
+  warnings?: string[];
   memorySummary?: string;
   checkIntent?: CheckIntent;
   mutations: MechanicsMutation[];
@@ -1243,7 +1286,7 @@ export type ResolveMechanicsResponse = {
 export type StateCommitLogStatus = "applied" | "rejected" | "noop";
 
 export type StateCommitLogEntry = {
-  kind: "check" | "mutation";
+  kind: "check" | "mutation" | "simulation";
   mutationType?: MechanicsMutation["type"] | null;
   status: StateCommitLogStatus;
   reasonCode: string;

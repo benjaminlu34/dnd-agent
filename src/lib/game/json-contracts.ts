@@ -14,6 +14,7 @@ const campaignRuntimeStateSchema = z.object({
   globalTime: z.number().int().min(0),
   pendingTurnId: z.string().trim().min(1).nullable(),
   lastActionSummary: z.string().trim().min(1).nullable(),
+  sceneObjectStates: z.record(z.string(), z.string()).optional().default({}),
   customTitle: z.string().trim().min(1).nullable().optional(),
 });
 
@@ -29,17 +30,23 @@ const turnCausalityCodeNameValues = [
   "LOCATION_CHANGED",
   "NPC_APPROVAL_CHANGED",
   "INFORMATION_DISCOVERED",
+  "INFORMATION_ADDED",
+  "INFORMATION_EXPIRED",
+  "SCENE_OBJECT_STATE_CHANGED",
   "NPC_STATE_CHANGED",
+  "NPC_LOCATION_CHANGED",
   "CHARACTER_HEALTH_CHANGED",
   "ROUTE_STATUS_CHANGED",
   "LOCATION_STATE_CHANGED",
   "LOCATION_CONTROL_CHANGED",
   "FACTION_RESOURCES_CHANGED",
+  "WORLD_EVENT_SPAWNED",
   "WORLD_EVENT_CANCELLED",
   "WORLD_EVENT_PROCESSED",
   "FACTION_MOVE_CANCELLED",
   "FACTION_MOVE_EXECUTED",
   "MARKET_PRICE_CHANGED",
+  "MARKET_RESTOCKED",
   "MEMORY_RECORDED",
   "SCHEDULE_JOB_ENQUEUED",
   "PLAYER_ACTION",
@@ -68,6 +75,7 @@ const turnCausalityCodeSchema: z.ZodType<TurnCausalityCode> = z.object({
     "session",
     "location",
     "route",
+    "scene_object",
     "npc",
     "faction",
     "information",
@@ -92,16 +100,19 @@ const turnNarrationBoundsSchema: z.ZodType<TurnNarrationBounds> = z.object({
 });
 
 const stateCommitLogEntrySchema: z.ZodType<StateCommitLogEntry> = z.object({
-  kind: z.enum(["check", "mutation"]),
+  kind: z.enum(["check", "mutation", "simulation"]),
   mutationType: z
     .enum([
       "advance_time",
       "move_player",
       "adjust_gold",
+      "record_local_interaction",
       "commit_market_trade",
+      "adjust_inventory",
       "adjust_relationship",
       "discover_information",
       "set_npc_state",
+      "update_scene_object",
       "restore_health",
     ])
     .optional()

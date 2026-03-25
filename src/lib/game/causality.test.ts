@@ -17,10 +17,24 @@ test("renderWhatChanged translates structured change codes into specific UI copy
         targetId: "day_3",
         metadata: { label: "Day 3" },
       },
+      {
+        code: "ROUTE_STATUS_CHANGED",
+        entityType: "route",
+        targetId: "edge_gate_market",
+        metadata: { label: "North Road" },
+      },
+      {
+        code: "MARKET_RESTOCKED",
+        entityType: "commodity",
+        targetId: "commodity_lantern_oil",
+        metadata: { label: "Lantern Oil" },
+      },
     ]),
     [
       "You moved to Lantern Market.",
       "Future schedule generation was queued for Day 3.",
+      "North Road changed.",
+      "Lantern Oil was restocked.",
     ],
   );
 });

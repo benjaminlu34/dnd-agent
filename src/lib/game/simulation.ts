@@ -7,6 +7,9 @@ import type {
   NpcState,
   SimulationInverse,
   SimulationPayload,
+  StateCommitLogEntry,
+  TurnCausalityCodeName,
+  TurnCausalityCode,
 } from "@/lib/game/types";
 
 export const MAX_CASCADE_DEPTH = 3;
@@ -248,6 +251,44 @@ function recordCreated(
   });
 }
 
+type SimulationOutcomeBucket = {
+  stateCommitLog: StateCommitLogEntry[];
+  changeCodes: TurnCausalityCode[];
+};
+
+function recordSimulationOutcome(input: {
+  outcomes: SimulationOutcomeBucket;
+  changeCode: TurnCausalityCodeName;
+  summary: string;
+  reasonCode: string;
+  entityType: TurnCausalityCode["entityType"];
+  targetId: string | null;
+  label?: string;
+  metadata?: Record<string, unknown> | null;
+}) {
+  const metadata = {
+    label: input.label ?? input.summary,
+    entityType: input.entityType,
+    targetId: input.targetId,
+    ...(input.metadata ?? {}),
+  } as Record<string, unknown>;
+
+  input.outcomes.stateCommitLog.push({
+    kind: "simulation",
+    mutationType: null,
+    status: "applied",
+    reasonCode: input.reasonCode,
+    summary: input.summary,
+    metadata,
+  });
+  input.outcomes.changeCodes.push({
+    code: input.changeCode,
+    entityType: input.entityType,
+    targetId: input.targetId,
+    metadata,
+  });
+}
+
 export function parseNpcRoutineCondition(value: unknown) {
   return npcRoutineConditionSchema.safeParse(value);
 }
@@ -329,10 +370,11 @@ async function applyNpcStateChange(input: {
   newState: NpcState;
   inverses: SimulationInverse[];
   changedNpcStateIds: Set<string>;
+  outcomes: SimulationOutcomeBucket;
 }) {
   const npc = await input.tx.nPC.findUnique({
     where: { id: input.npcId },
-    select: { id: true, state: true },
+    select: { id: true, state: true, name: true },
   });
 
   if (!npc || npc.state === input.newState) {
@@ -345,6 +387,20 @@ async function applyNpcStateChange(input: {
     data: { state: input.newState },
   });
   input.changedNpcStateIds.add(npc.id);
+  recordSimulationOutcome({
+    outcomes: input.outcomes,
+    changeCode: "NPC_STATE_CHANGED",
+    summary: `${npc.name} becomes ${input.newState}.`,
+    reasonCode: "npc_state_changed",
+    entityType: "npc",
+    targetId: npc.id,
+    label: npc.name,
+    metadata: {
+      npcId: npc.id,
+      previousState: npc.state,
+      newState: input.newState,
+    },
+  });
 }
 
 export async function applySimulationPayload(input: {
@@ -357,6 +413,7 @@ export async function applySimulationPayload(input: {
   affectedFactionIds: Set<string>;
   changedLocationIds: Set<string>;
   changedNpcStateIds: Set<string>;
+  outcomes: SimulationOutcomeBucket;
 }): Promise<void> {
   const {
     tx,
@@ -373,7 +430,7 @@ export async function applySimulationPayload(input: {
     case "change_location_state": {
       const location = await tx.locationNode.findUnique({
         where: { id: payload.locationId },
-        select: { id: true, state: true },
+        select: { id: true, state: true, name: true },
       });
 
       if (!location || location.state === payload.newState) {
@@ -386,12 +443,26 @@ export async function applySimulationPayload(input: {
         data: { state: payload.newState },
       });
       changedLocationIds.add(location.id);
+      recordSimulationOutcome({
+        outcomes: input.outcomes,
+        changeCode: "LOCATION_STATE_CHANGED",
+        summary: `${location.name} changes state to ${payload.newState}.`,
+        reasonCode: "location_state_changed",
+        entityType: "location",
+        targetId: location.id,
+        label: location.name,
+        metadata: {
+          locationId: location.id,
+          previousState: location.state,
+          newState: payload.newState,
+        },
+      });
       return;
     }
     case "change_faction_control": {
       const location = await tx.locationNode.findUnique({
         where: { id: payload.locationId },
-        select: { id: true, controllingFactionId: true },
+        select: { id: true, controllingFactionId: true, name: true },
       });
 
       if (!location || location.controllingFactionId === payload.factionId) {
@@ -416,6 +487,22 @@ export async function applySimulationPayload(input: {
         affectedFactionIds.add(payload.factionId);
       }
       changedLocationIds.add(location.id);
+      recordSimulationOutcome({
+        outcomes: input.outcomes,
+        changeCode: "LOCATION_CONTROL_CHANGED",
+        summary: payload.factionId
+          ? `${location.name} shifts under the control of ${payload.factionId}.`
+          : `${location.name} becomes uncontrolled.`,
+        reasonCode: "location_control_changed",
+        entityType: "location",
+        targetId: location.id,
+        label: location.name,
+        metadata: {
+          locationId: location.id,
+          previousFactionId: location.controllingFactionId,
+          newFactionId: payload.factionId,
+        },
+      });
       return;
     }
     case "change_npc_state":
@@ -425,12 +512,13 @@ export async function applySimulationPayload(input: {
         newState: payload.newState,
         inverses,
         changedNpcStateIds,
+        outcomes: input.outcomes,
       });
       return;
     case "change_faction_resources": {
       const faction = await tx.faction.findUnique({
         where: { id: payload.factionId },
-        select: { id: true, resources: true },
+        select: { id: true, resources: true, name: true },
       });
 
       if (!faction || !faction.resources || typeof faction.resources !== "object" || Array.isArray(faction.resources)) {
@@ -457,6 +545,20 @@ export async function applySimulationPayload(input: {
         },
       });
       affectedFactionIds.add(faction.id);
+      recordSimulationOutcome({
+        outcomes: input.outcomes,
+        changeCode: "FACTION_RESOURCES_CHANGED",
+        summary: `${faction.name} adjusts its resources.`,
+        reasonCode: "faction_resources_changed",
+        entityType: "faction",
+        targetId: faction.id,
+        label: faction.name,
+        metadata: {
+          factionId: faction.id,
+          previousResources: faction.resources,
+          nextResources,
+        },
+      });
       return;
     }
     case "spawn_world_event": {
@@ -477,6 +579,20 @@ export async function applySimulationPayload(input: {
       });
       createdWorldEventIds.push(eventId);
       recordCreated(inverses, "worldEvent", eventId);
+      recordSimulationOutcome({
+        outcomes: input.outcomes,
+        changeCode: "WORLD_EVENT_SPAWNED",
+        summary: `${payload.event.description} is added to the world schedule.`,
+        reasonCode: "world_event_spawned",
+        entityType: "world_event",
+        targetId: eventId,
+        label: payload.event.description,
+        metadata: {
+          worldEventId: eventId,
+          locationId: payload.event.locationId,
+          triggerTime: payload.event.triggerTime,
+        },
+      });
       return;
     }
     case "spawn_information": {
@@ -497,6 +613,24 @@ export async function applySimulationPayload(input: {
         },
       });
       recordCreated(inverses, "information", informationId);
+      recordSimulationOutcome({
+        outcomes: input.outcomes,
+        changeCode: "INFORMATION_ADDED",
+        summary: `${payload.information.title} enters the world as new information.`,
+        reasonCode: "information_spawned",
+        entityType: "information",
+        targetId: informationId,
+        label: payload.information.title,
+        metadata: {
+          informationId,
+          truthfulness: payload.information.truthfulness,
+          accessibility: payload.information.accessibility,
+          locationId: payload.information.locationId,
+          factionId: payload.information.factionId,
+          sourceNpcId: payload.information.sourceNpcId,
+          expiresAtTime: payload.information.expiresAtTime ?? null,
+        },
+      });
       return;
     }
     case "cancel_faction_move": {
@@ -524,6 +658,19 @@ export async function applySimulationPayload(input: {
           cancellationReason: payload.reason,
         },
       });
+      recordSimulationOutcome({
+        outcomes: input.outcomes,
+        changeCode: "FACTION_MOVE_CANCELLED",
+        summary: `${move.id} is cancelled: ${payload.reason}.`,
+        reasonCode: "faction_move_cancelled",
+        entityType: "faction_move",
+        targetId: move.id,
+        label: move.id,
+        metadata: {
+          factionMoveId: move.id,
+          reason: payload.reason,
+        },
+      });
       return;
     }
     case "change_route_status": {
@@ -541,12 +688,26 @@ export async function applySimulationPayload(input: {
         where: { id: edge.id },
         data: { currentStatus: payload.newStatus },
       });
+      recordSimulationOutcome({
+        outcomes: input.outcomes,
+        changeCode: "ROUTE_STATUS_CHANGED",
+        summary: `Route ${edge.id} changes status to ${payload.newStatus}.`,
+        reasonCode: "route_status_changed",
+        entityType: "route",
+        targetId: edge.id,
+        label: edge.id,
+        metadata: {
+          edgeId: edge.id,
+          previousStatus: edge.currentStatus,
+          newStatus: payload.newStatus,
+        },
+      });
       return;
     }
     case "change_market_price": {
       const price = await tx.marketPrice.findUnique({
         where: { id: payload.marketPriceId },
-        select: { id: true, modifier: true },
+        select: { id: true, modifier: true, commodityId: true, locationId: true },
       });
 
       if (!price || price.modifier === payload.newModifier) {
@@ -558,12 +719,28 @@ export async function applySimulationPayload(input: {
         where: { id: price.id },
         data: { modifier: payload.newModifier },
       });
+      recordSimulationOutcome({
+        outcomes: input.outcomes,
+        changeCode: "MARKET_PRICE_CHANGED",
+        summary: `Market price ${price.id} changes.`,
+        reasonCode: "market_price_changed",
+        entityType: "commodity",
+        targetId: price.commodityId,
+        label: price.id,
+        metadata: {
+          marketPriceId: price.id,
+          commodityId: price.commodityId,
+          locationId: price.locationId,
+          previousModifier: price.modifier,
+          newModifier: payload.newModifier,
+        },
+      });
       return;
     }
     case "transfer_location_control": {
       const location = await tx.locationNode.findUnique({
         where: { id: payload.locationId },
-        select: { id: true, controllingFactionId: true },
+        select: { id: true, controllingFactionId: true, name: true },
       });
 
       if (!location || location.controllingFactionId === payload.toFactionId) {
@@ -588,12 +765,29 @@ export async function applySimulationPayload(input: {
         affectedFactionIds.add(payload.toFactionId);
       }
       changedLocationIds.add(location.id);
+      recordSimulationOutcome({
+        outcomes: input.outcomes,
+        changeCode: "LOCATION_CONTROL_CHANGED",
+        summary: payload.toFactionId
+          ? `${location.name} transfers control to ${payload.toFactionId}.`
+          : `${location.name} becomes uncontrolled.`,
+        reasonCode: "location_control_transferred",
+        entityType: "location",
+        targetId: location.id,
+        label: location.name,
+        metadata: {
+          locationId: location.id,
+          previousFactionId: location.controllingFactionId,
+          fromFactionId: payload.fromFactionId,
+          toFactionId: payload.toFactionId,
+        },
+      });
       return;
     }
     case "change_npc_location": {
       const npc = await tx.nPC.findUnique({
         where: { id: payload.npcId },
-        select: { id: true, currentLocationId: true, factionId: true },
+        select: { id: true, currentLocationId: true, factionId: true, name: true },
       });
 
       if (!npc || npc.currentLocationId === payload.newLocationId) {
@@ -608,6 +802,20 @@ export async function applySimulationPayload(input: {
       if (npc.factionId) {
         affectedFactionIds.add(npc.factionId);
       }
+      recordSimulationOutcome({
+        outcomes: input.outcomes,
+        changeCode: "NPC_LOCATION_CHANGED",
+        summary: `${npc.name} moves to ${payload.newLocationId}.`,
+        reasonCode: "npc_location_changed",
+        entityType: "npc",
+        targetId: npc.id,
+        label: npc.name,
+        metadata: {
+          npcId: npc.id,
+          previousLocationId: npc.currentLocationId,
+          newLocationId: payload.newLocationId,
+        },
+      });
       return;
     }
   }
@@ -732,6 +940,8 @@ async function cancelWorldEvent(input: {
   cancellationReason: string | null;
   inverses: SimulationInverse[];
   reason: string;
+  outcomes: SimulationOutcomeBucket;
+  entityLabel: string;
 }) {
   recordInverse(input.inverses, "worldEvent", input.eventId, "isCancelled", input.isCancelled);
   recordInverse(
@@ -748,6 +958,19 @@ async function cancelWorldEvent(input: {
       cancellationReason: input.reason,
     },
   });
+  recordSimulationOutcome({
+    outcomes: input.outcomes,
+    changeCode: "WORLD_EVENT_CANCELLED",
+    summary: `${input.entityLabel} is cancelled: ${input.reason}.`,
+    reasonCode: "world_event_cancelled",
+    entityType: "world_event",
+    targetId: input.eventId,
+    label: input.entityLabel,
+    metadata: {
+      worldEventId: input.eventId,
+      cancellationReason: input.reason,
+    },
+  });
 }
 
 async function cancelFactionMove(input: {
@@ -758,6 +981,8 @@ async function cancelFactionMove(input: {
   inverses: SimulationInverse[];
   cancelledMoveIds?: string[];
   reason: string;
+  outcomes: SimulationOutcomeBucket;
+  entityLabel: string;
 }) {
   recordInverse(input.inverses, "factionMove", input.moveId, "isCancelled", input.isCancelled);
   recordInverse(
@@ -775,6 +1000,19 @@ async function cancelFactionMove(input: {
     },
   });
   input.cancelledMoveIds?.push(input.moveId);
+  recordSimulationOutcome({
+    outcomes: input.outcomes,
+    changeCode: "FACTION_MOVE_CANCELLED",
+    summary: `${input.entityLabel} is cancelled: ${input.reason}.`,
+    reasonCode: "faction_move_cancelled",
+    entityType: "faction_move",
+    targetId: input.moveId,
+    label: input.entityLabel,
+    metadata: {
+      factionMoveId: input.moveId,
+      cancellationReason: input.reason,
+    },
+  });
 }
 
 export async function runSimulationTick(input: {
@@ -789,6 +1027,7 @@ export async function runSimulationTick(input: {
   createdWorldEventIds: string[];
   createdFactionMoveIds: string[];
   initialAffectedFactionIds?: string[];
+  outcomes: SimulationOutcomeBucket;
 }) {
   const {
     tx,
@@ -853,7 +1092,8 @@ export async function runSimulationTick(input: {
       continue;
     }
 
-    recordInverse(inverses, "nPC", routine.npc.id, "currentLocationId", routine.npc.currentLocationId);
+    const previousLocationId = routine.npc.currentLocationId;
+    recordInverse(inverses, "nPC", routine.npc.id, "currentLocationId", previousLocationId);
     await tx.nPC.update({
       where: { id: routine.npc.id },
       data: { currentLocationId: routine.targetLocationId },
@@ -862,6 +1102,21 @@ export async function runSimulationTick(input: {
     if (routine.npc.factionId) {
       affectedFactionIds.add(routine.npc.factionId);
     }
+    recordSimulationOutcome({
+      outcomes: input.outcomes,
+      changeCode: "NPC_LOCATION_CHANGED",
+      summary: `${routine.npc.name} moves to ${routine.targetLocationId}.`,
+      reasonCode: "npc_routine_moved",
+      entityType: "npc",
+      targetId: routine.npc.id,
+      label: routine.npc.name,
+      metadata: {
+        npcId: routine.npc.id,
+        previousLocationId,
+        newLocationId: routine.targetLocationId,
+        routineId: routine.id,
+      },
+    });
   }
 
   const dueEvents = await tx.worldEvent.findMany({
@@ -896,6 +1151,8 @@ export async function runSimulationTick(input: {
           cancellationReason: event.cancellationReason,
           inverses,
           reason: "Referenced location is no longer valid.",
+          outcomes: input.outcomes,
+          entityLabel: event.description,
         });
         continue;
       }
@@ -904,17 +1161,19 @@ export async function runSimulationTick(input: {
     const parsedCondition = event.triggerCondition
       ? parseNpcRoutineCondition(event.triggerCondition)
       : null;
-    if (parsedCondition && !parsedCondition.success) {
-      await cancelWorldEvent({
-        tx,
-        eventId: event.id,
-        isCancelled: event.isCancelled,
-        cancellationReason: event.cancellationReason,
-        inverses,
-        reason: "Trigger condition is no longer valid.",
-      });
-      continue;
-    }
+      if (parsedCondition && !parsedCondition.success) {
+        await cancelWorldEvent({
+          tx,
+          eventId: event.id,
+          isCancelled: event.isCancelled,
+          cancellationReason: event.cancellationReason,
+          inverses,
+          reason: "Trigger condition is no longer valid.",
+          outcomes: input.outcomes,
+          entityLabel: event.description,
+        });
+        continue;
+      }
 
     const isSatisfied = await evaluateNpcRoutineCondition({
       tx,
@@ -923,30 +1182,34 @@ export async function runSimulationTick(input: {
       playerState,
     });
 
-    if (!isSatisfied) {
-      await cancelWorldEvent({
-        tx,
-        eventId: event.id,
-        isCancelled: event.isCancelled,
-        cancellationReason: event.cancellationReason,
-        inverses,
-        reason: "Trigger condition no longer holds at execution time.",
-      });
-      continue;
-    }
+      if (!isSatisfied) {
+        await cancelWorldEvent({
+          tx,
+          eventId: event.id,
+          isCancelled: event.isCancelled,
+          cancellationReason: event.cancellationReason,
+          inverses,
+          reason: "Trigger condition no longer holds at execution time.",
+          outcomes: input.outcomes,
+          entityLabel: event.description,
+        });
+        continue;
+      }
 
     const parsedPayload = parseSimulationPayload(event.payload);
-    if (!parsedPayload.success) {
-      await cancelWorldEvent({
-        tx,
-        eventId: event.id,
-        isCancelled: event.isCancelled,
-        cancellationReason: event.cancellationReason,
-        inverses,
-        reason: `Event payload became invalid: ${parsedPayload.error.message}`,
-      });
-      continue;
-    }
+      if (!parsedPayload.success) {
+        await cancelWorldEvent({
+          tx,
+          eventId: event.id,
+          isCancelled: event.isCancelled,
+          cancellationReason: event.cancellationReason,
+          inverses,
+          reason: `Event payload became invalid: ${parsedPayload.error.message}`,
+          outcomes: input.outcomes,
+          entityLabel: event.description,
+        });
+        continue;
+      }
 
     const eventInvalidationReason = await simulationPayloadInvalidationReason({
       tx,
@@ -961,6 +1224,8 @@ export async function runSimulationTick(input: {
         cancellationReason: event.cancellationReason,
         inverses,
         reason: eventInvalidationReason,
+        outcomes: input.outcomes,
+        entityLabel: event.description,
       });
       continue;
     }
@@ -975,6 +1240,7 @@ export async function runSimulationTick(input: {
       affectedFactionIds,
       changedLocationIds,
       changedNpcStateIds,
+      outcomes: input.outcomes,
     });
 
     recordInverse(inverses, "worldEvent", event.id, "isProcessed", event.isProcessed);
@@ -983,6 +1249,19 @@ export async function runSimulationTick(input: {
       data: { isProcessed: true },
     });
     processedEventIds.push(event.id);
+    recordSimulationOutcome({
+      outcomes: input.outcomes,
+      changeCode: "WORLD_EVENT_PROCESSED",
+      summary: `${event.description} takes effect.`,
+      reasonCode: "world_event_processed",
+      entityType: "world_event",
+      targetId: event.id,
+      label: event.description,
+      metadata: {
+        worldEventId: event.id,
+        triggerTime: event.triggerTime,
+      },
+    });
   }
 
   const dueMoves = await tx.factionMove.findMany({
@@ -1017,6 +1296,8 @@ export async function runSimulationTick(input: {
         inverses,
         cancelledMoveIds,
         reason: `Faction move payload became invalid: ${parsedPayload.error.message}`,
+        outcomes: input.outcomes,
+        entityLabel: move.description,
       });
       continue;
     }
@@ -1035,6 +1316,8 @@ export async function runSimulationTick(input: {
         inverses,
         cancelledMoveIds,
         reason: moveInvalidationReason,
+        outcomes: input.outcomes,
+        entityLabel: move.description,
       });
       continue;
     }
@@ -1049,12 +1332,26 @@ export async function runSimulationTick(input: {
       affectedFactionIds,
       changedLocationIds,
       changedNpcStateIds,
+      outcomes: input.outcomes,
     });
 
     recordInverse(inverses, "factionMove", move.id, "isExecuted", move.isExecuted);
     await tx.factionMove.update({
       where: { id: move.id },
       data: { isExecuted: true },
+    });
+    recordSimulationOutcome({
+      outcomes: input.outcomes,
+      changeCode: "FACTION_MOVE_EXECUTED",
+      summary: `${move.description} takes effect.`,
+      reasonCode: "faction_move_executed",
+      entityType: "faction_move",
+      targetId: move.id,
+      label: move.description,
+      metadata: {
+        factionMoveId: move.id,
+        scheduledAtTime: move.scheduledAtTime,
+      },
     });
   }
 
@@ -1078,6 +1375,8 @@ export async function runSimulationTick(input: {
         inverses,
         cancelledMoveIds,
         reason: "Superseded by fresh faction reaction.",
+        outcomes: input.outcomes,
+        entityLabel: move.description,
       });
     }
 
@@ -1120,6 +1419,19 @@ export async function runSimulationTick(input: {
     await tx.information.update({
       where: { id: information.id },
       data: { truthfulness: "outdated" },
+    });
+    recordSimulationOutcome({
+      outcomes: input.outcomes,
+      changeCode: "INFORMATION_EXPIRED",
+      summary: `${information.title} becomes outdated.`,
+      reasonCode: "information_expired",
+      entityType: "information",
+      targetId: information.id,
+      label: information.title,
+      metadata: {
+        informationId: information.id,
+        previousTruthfulness: information.truthfulness,
+      },
     });
 
     const links = await tx.informationLink.findMany({
@@ -1169,6 +1481,21 @@ export async function runSimulationTick(input: {
         restockTime: null,
       },
     });
+    recordSimulationOutcome({
+      outcomes: input.outcomes,
+      changeCode: "MARKET_RESTOCKED",
+      summary: `Market supply replenishes for ${price.id}.`,
+      reasonCode: "market_restocked",
+      entityType: "commodity",
+      targetId: price.commodityId,
+      label: price.id,
+      metadata: {
+        marketPriceId: price.id,
+        commodityId: price.commodityId,
+        locationId: price.locationId,
+        previousStock: price.stock,
+      },
+    });
   }
 
   if (affectedFactionIds.size > 2 || changedLocationIds.size > 3 || unexpectedNpcMoves > 5) {
@@ -1196,6 +1523,9 @@ export async function applySimulationInverse(
         return;
       case "temporaryActor":
         await tx.temporaryActor.delete({ where: { id: inverse.id } });
+        return;
+      case "itemInstance":
+        await tx.itemInstance.delete({ where: { id: inverse.id } });
         return;
       case "characterCommodityStack":
         await tx.characterCommodityStack.delete({ where: { id: inverse.id } });
@@ -1277,6 +1607,12 @@ export async function applySimulationInverse(
       return;
     case "temporaryActor":
       await tx.temporaryActor.update({
+        where: { id: inverse.id },
+        data: { [inverse.field]: inverse.previousValue } as never,
+      });
+      return;
+    case "itemInstance":
+      await tx.itemInstance.update({
         where: { id: inverse.id },
         data: { [inverse.field]: inverse.previousValue } as never,
       });

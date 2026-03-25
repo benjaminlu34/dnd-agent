@@ -25,6 +25,7 @@ function createSnapshot(): CampaignSnapshot {
       globalTime: 480,
       pendingTurnId: null,
       lastActionSummary: null,
+      sceneObjectStates: {},
     },
     character: {
       id: "char_1",
@@ -256,4 +257,26 @@ test("validateTurnCommand warns when no suggested actions are provided", () => {
   assert.deepEqual(validated.warnings, [
     "Mechanics response returned no suggested actions; engine provided none.",
   ]);
+});
+
+test("validateTurnCommand preserves explicit command warnings", () => {
+  const validated = validateTurnCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "travel",
+      suggestedActions: ["Choose another route"],
+      warnings: ["The north road is blocked."],
+      mutations: [
+        {
+          type: "move_player",
+          routeEdgeId: "edge_gate_market",
+          targetLocationId: "loc_market",
+        },
+      ],
+    },
+  });
+
+  assert.equal(validated.type, "resolve_mechanics");
+  assert.deepEqual(validated.warnings, ["The north road is blocked."]);
 });
