@@ -202,26 +202,24 @@ async function completeScheduleJob(input: {
 
   try {
 
-    const [existingEvents, existingMoves] = await Promise.all([
-      prisma.worldEvent.count({
-        where: {
-          campaignId: input.campaignId,
-          triggerTime: {
-            gte: input.dayStartTime,
-            lte: dayEndTime,
-          },
+    const existingEvents = await prisma.worldEvent.count({
+      where: {
+        campaignId: input.campaignId,
+        triggerTime: {
+          gte: input.dayStartTime,
+          lte: dayEndTime,
         },
-      }),
-      prisma.factionMove.count({
-        where: {
-          campaignId: input.campaignId,
-          scheduledAtTime: {
-            gte: input.dayStartTime,
-            lte: dayEndTime,
-          },
+      },
+    });
+    const existingMoves = await prisma.factionMove.count({
+      where: {
+        campaignId: input.campaignId,
+        scheduledAtTime: {
+          gte: input.dayStartTime,
+          lte: dayEndTime,
         },
-      }),
-    ]);
+      },
+    });
 
     if (existingEvents > 0 || existingMoves > 0) {
       await prisma.$transaction([

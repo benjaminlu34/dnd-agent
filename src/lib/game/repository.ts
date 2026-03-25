@@ -792,11 +792,18 @@ function toPromptInventory(character: CharacterInstance): PromptInventoryItem[] 
 }
 
 export async function ensureLocalUser() {
-  return prisma.user.upsert({
-    where: { email: "solo@adventure.local" },
-    update: {},
-    create: {
-      email: "solo@adventure.local",
+  const email = "solo@adventure.local";
+  const existingUser = await prisma.user.findUnique({
+    where: { email },
+  });
+
+  if (existingUser) {
+    return existingUser;
+  }
+
+  return prisma.user.create({
+    data: {
+      email,
       name: "Solo Adventurer",
     },
   });
@@ -980,16 +987,14 @@ export async function resolveCustomEntryPointForUser(input: {
   prompt: string;
 }) {
   const user = await ensureLocalUser();
-  const [module, template] = await Promise.all([
-    prisma.adventureModule.findFirst({
-      where: { id: input.moduleId, userId: user.id },
-    }),
-    prisma.characterTemplate.findFirst({
-      where: { id: input.templateId, userId: user.id },
-    }),
-  ]);
+  const adventureModule = await prisma.adventureModule.findFirst({
+    where: { id: input.moduleId, userId: user.id },
+  });
+  const template = await prisma.characterTemplate.findFirst({
+    where: { id: input.templateId, userId: user.id },
+  });
 
-  if (!module) {
+  if (!adventureModule) {
     return { error: "module_not_found" as const };
   }
 
@@ -997,7 +1002,7 @@ export async function resolveCustomEntryPointForUser(input: {
     return { error: "template_not_found" as const };
   }
 
-  const world = parseWorldTemplate(module.openWorldTemplateJson);
+  const world = parseWorldTemplate(adventureModule.openWorldTemplateJson);
   const resolvedDraft = await dmClient.resolveCustomEntryPoint({
     module: world,
     character: toTemplateRecord(template),
@@ -1092,16 +1097,14 @@ export async function generateCampaignOpeningDraftForUser(input: {
     hasPrompt: Boolean(input.prompt?.trim()),
   });
   const user = await ensureLocalUser();
-  const [module, template] = await Promise.all([
-    prisma.adventureModule.findFirst({
-      where: { id: input.moduleId, userId: user.id },
-    }),
-    prisma.characterTemplate.findFirst({
-      where: { id: input.templateId, userId: user.id },
-    }),
-  ]);
+  const adventureModule = await prisma.adventureModule.findFirst({
+    where: { id: input.moduleId, userId: user.id },
+  });
+  const template = await prisma.characterTemplate.findFirst({
+    where: { id: input.templateId, userId: user.id },
+  });
 
-  if (!module) {
+  if (!adventureModule) {
     return { error: "module_not_found" as const };
   }
 
@@ -1109,8 +1112,8 @@ export async function generateCampaignOpeningDraftForUser(input: {
     return { error: "template_not_found" as const };
   }
 
-  const world = parseWorldTemplate(module.openWorldTemplateJson);
-  const generationArtifacts = parseOpenWorldGenerationArtifacts(module.openWorldGenerationArtifactsJson);
+  const world = parseWorldTemplate(adventureModule.openWorldTemplateJson);
+  const generationArtifacts = parseOpenWorldGenerationArtifacts(adventureModule.openWorldGenerationArtifactsJson);
   const entryPoint = normalizeLaunchEntrySelection({
     world,
     artifacts: generationArtifacts,
@@ -1597,16 +1600,14 @@ export async function createCampaignFromModuleForUser(input: {
   preparedLaunch?: PreparedCampaignLaunch;
 }) {
   const user = await ensureLocalUser();
-  const [module, template] = await Promise.all([
-    prisma.adventureModule.findFirst({
-      where: { id: input.moduleId, userId: user.id },
-    }),
-    prisma.characterTemplate.findFirst({
-      where: { id: input.templateId, userId: user.id },
-    }),
-  ]);
+  const adventureModule = await prisma.adventureModule.findFirst({
+    where: { id: input.moduleId, userId: user.id },
+  });
+  const template = await prisma.characterTemplate.findFirst({
+    where: { id: input.templateId, userId: user.id },
+  });
 
-  if (!module) {
+  if (!adventureModule) {
     return { error: "module_not_found" as const };
   }
 
@@ -1623,8 +1624,8 @@ export async function createCampaignFromModuleForUser(input: {
     hasOpeningDraft: Boolean(input.opening),
   });
 
-  const world = parseWorldTemplate(module.openWorldTemplateJson);
-  const generationArtifacts = parseOpenWorldGenerationArtifacts(module.openWorldGenerationArtifactsJson);
+  const world = parseWorldTemplate(adventureModule.openWorldTemplateJson);
+  const generationArtifacts = parseOpenWorldGenerationArtifacts(adventureModule.openWorldGenerationArtifactsJson);
   const entryPoint = normalizeLaunchEntrySelection({
     world,
     artifacts: generationArtifacts,
@@ -1735,9 +1736,24 @@ export async function createCampaignFromModuleForUser(input: {
 export async function listCampaigns(): Promise<CampaignListItem[]> {
    const campaigns = await prisma.campaign.findMany({
      orderBy: { updatedAt: "desc" },
-     include: {
-       module: true,
-       template: true,
+     select: {
+       id: true,
+       updatedAt: true,
+       stateJson: true,
+       module: {
+         select: {
+           title: true,
+           premise: true,
+           setting: true,
+           tone: true,
+         },
+       },
+       template: {
+         select: {
+           name: true,
+           archetype: true,
+         },
+       },
      },
    });
 
@@ -2069,77 +2085,73 @@ async function fetchEntityLinkedMemories(input: {
 }
 
 export async function fetchNpcDetail(campaignId: string, npcId: string): Promise<NpcDetail | null> {
-  const [npc, factions, memories, temporaryActor] = await Promise.all([
-    prisma.nPC.findFirst({
-      where: { id: npcId, campaignId },
-    }),
-    prisma.faction.findMany({
-      where: { campaignId },
-    }),
-    fetchEntityLinkedMemories({
+  const npc = await prisma.nPC.findFirst({
+    where: { id: npcId, campaignId },
+  });
+  const factions = await prisma.faction.findMany({
+    where: { campaignId },
+  });
+  const memories = await fetchEntityLinkedMemories({
+    campaignId,
+    entityType: "npc",
+    entityId: npcId,
+    take: 8,
+    prioritizedKinds: ["relationship_shift", "promise", "conflict"],
+  });
+  const temporaryActor = await prisma.temporaryActor.findFirst({
+    where: {
       campaignId,
-      entityType: "npc",
-      entityId: npcId,
-      take: 8,
-      prioritizedKinds: ["relationship_shift", "promise", "conflict"],
-    }),
-    prisma.temporaryActor.findFirst({
-      where: {
-        campaignId,
-        promotedNpcId: npcId,
-      },
-    }),
-  ]);
+      promotedNpcId: npcId,
+    },
+  });
 
   if (!npc) {
     return null;
   }
 
-  const [locations, npcs, npcKnowledge, factionKnowledge, locationKnowledge] = await Promise.all([
-    prisma.locationNode.findMany({
-      where: { campaignId },
-    }),
-    prisma.nPC.findMany({
-      where: { campaignId },
-    }),
-    prisma.npcKnowledge.findMany({
-      where: {
-        campaignId,
-        npcId,
-      },
-      include: {
-        information: true,
-      },
-      orderBy: { informationId: "asc" },
-      take: 12,
-    }),
-    npc.factionId
-      ? prisma.factionKnowledge.findMany({
-          where: {
-            campaignId,
-            factionId: npc.factionId,
-          },
-          include: {
-            information: true,
-          },
-          orderBy: { informationId: "asc" },
-          take: 12,
-        })
-      : Promise.resolve([]),
-    npc.currentLocationId
-      ? prisma.locationKnowledge.findMany({
-          where: {
-            campaignId,
-            locationId: npc.currentLocationId,
-          },
-          include: {
-            information: true,
-          },
-          orderBy: { informationId: "asc" },
-          take: 12,
-        })
-      : Promise.resolve([]),
-  ]);
+  const locations = await prisma.locationNode.findMany({
+    where: { campaignId },
+  });
+  const npcs = await prisma.nPC.findMany({
+    where: { campaignId },
+  });
+  const npcKnowledge = await prisma.npcKnowledge.findMany({
+    where: {
+      campaignId,
+      npcId,
+    },
+    include: {
+      information: true,
+    },
+    orderBy: { informationId: "asc" },
+    take: 12,
+  });
+  const factionKnowledge = npc.factionId
+    ? await prisma.factionKnowledge.findMany({
+        where: {
+          campaignId,
+          factionId: npc.factionId,
+        },
+        include: {
+          information: true,
+        },
+        orderBy: { informationId: "asc" },
+        take: 12,
+      })
+    : [];
+  const locationKnowledge = npc.currentLocationId
+    ? await prisma.locationKnowledge.findMany({
+        where: {
+          campaignId,
+          locationId: npc.currentLocationId,
+        },
+        include: {
+          information: true,
+        },
+        orderBy: { informationId: "asc" },
+        take: 12,
+      })
+    : [];
 
   const visibleKnowledgeById = new Map<string, InformationSummary>();
   for (const entry of npcKnowledge) {
@@ -2186,20 +2198,18 @@ export async function fetchMarketPrices(
   campaignId: string,
   locationId: string,
 ): Promise<MarketPriceDetail[]> {
-  const [location, prices] = await Promise.all([
-    prisma.locationNode.findFirst({
-      where: { id: locationId, campaignId },
-      select: { id: true, name: true },
-    }),
-    prisma.marketPrice.findMany({
-      where: { campaignId, locationId },
-      include: {
-        commodity: true,
-        vendorNpc: true,
-      },
-      orderBy: [{ commodity: { name: "asc" } }, { createdAt: "asc" }],
-    }),
-  ]);
+  const location = await prisma.locationNode.findFirst({
+    where: { id: locationId, campaignId },
+    select: { id: true, name: true },
+  });
+  const prices = await prisma.marketPrice.findMany({
+    where: { campaignId, locationId },
+    include: {
+      commodity: true,
+      vendorNpc: true,
+    },
+    orderBy: [{ commodity: { name: "asc" } }, { createdAt: "asc" }],
+  });
 
   if (!location) {
     return [];
@@ -2223,36 +2233,34 @@ export async function fetchMarketPrices(
 }
 
 export async function fetchFactionIntel(campaignId: string, factionId: string): Promise<FactionIntel | null> {
-  const [faction, factions, relations, moves, locations] = await Promise.all([
-    prisma.faction.findFirst({
-      where: { id: factionId, campaignId },
-    }),
-    prisma.faction.findMany({
-      where: { campaignId },
-    }),
-    prisma.factionRelation.findMany({
-      where: {
-        campaignId,
-        OR: [{ factionAId: factionId }, { factionBId: factionId }],
-      },
-      orderBy: { createdAt: "asc" },
-    }),
-    prisma.factionMove.findMany({
-      where: {
-        campaignId,
-        factionId,
-      },
-      orderBy: { scheduledAtTime: "asc" },
-      take: 8,
-    }),
-    prisma.locationNode.findMany({
-      where: {
-        campaignId,
-        controllingFactionId: factionId,
-      },
-      select: { id: true },
-    }),
-  ]);
+  const faction = await prisma.faction.findFirst({
+    where: { id: factionId, campaignId },
+  });
+  const factions = await prisma.faction.findMany({
+    where: { campaignId },
+  });
+  const relations = await prisma.factionRelation.findMany({
+    where: {
+      campaignId,
+      OR: [{ factionAId: factionId }, { factionBId: factionId }],
+    },
+    orderBy: { createdAt: "asc" },
+  });
+  const moves = await prisma.factionMove.findMany({
+    where: {
+      campaignId,
+      factionId,
+    },
+    orderBy: { scheduledAtTime: "asc" },
+    take: 8,
+  });
+  const locations = await prisma.locationNode.findMany({
+    where: {
+      campaignId,
+      controllingFactionId: factionId,
+    },
+    select: { id: true },
+  });
 
   if (!faction) {
     return null;
@@ -2277,20 +2285,18 @@ export async function fetchInformationDetail(
   campaignId: string,
   informationId: string,
 ): Promise<InformationDetail | null> {
-  const [information, locations, factions, npcs] = await Promise.all([
-    prisma.information.findFirst({
-      where: { id: informationId, campaignId, isDiscovered: true },
-    }),
-    prisma.locationNode.findMany({
-      where: { campaignId },
-    }),
-    prisma.faction.findMany({
-      where: { campaignId },
-    }),
-    prisma.nPC.findMany({
-      where: { campaignId },
-    }),
-  ]);
+  const information = await prisma.information.findFirst({
+    where: { id: informationId, campaignId, isDiscovered: true },
+  });
+  const locations = await prisma.locationNode.findMany({
+    where: { campaignId },
+  });
+  const factions = await prisma.faction.findMany({
+    where: { campaignId },
+  });
+  const npcs = await prisma.nPC.findMany({
+    where: { campaignId },
+  });
 
   if (!information) {
     return null;
@@ -2306,29 +2312,27 @@ export async function fetchInformationConnections(
   campaignId: string,
   informationIds: string[],
 ): Promise<CrossLocationLead[]> {
-  const [information, informationLinks, locations, factions, npcs] = await Promise.all([
-    prisma.information.findMany({
-      where: {
-        campaignId,
-      },
-      orderBy: { title: "asc" },
-    }),
-    prisma.informationLink.findMany({
-      where: {
-        campaignId,
-      },
-      orderBy: { createdAt: "asc" },
-    }),
-    prisma.locationNode.findMany({
-      where: { campaignId },
-    }),
-    prisma.faction.findMany({
-      where: { campaignId },
-    }),
-    prisma.nPC.findMany({
-      where: { campaignId },
-    }),
-  ]);
+  const information = await prisma.information.findMany({
+    where: {
+      campaignId,
+    },
+    orderBy: { title: "asc" },
+  });
+  const informationLinks = await prisma.informationLink.findMany({
+    where: {
+      campaignId,
+    },
+    orderBy: { createdAt: "asc" },
+  });
+  const locations = await prisma.locationNode.findMany({
+    where: { campaignId },
+  });
+  const factions = await prisma.faction.findMany({
+    where: { campaignId },
+  });
+  const npcs = await prisma.nPC.findMany({
+    where: { campaignId },
+  });
 
   return buildCrossLocationLeads({
     discoveredInformationIds: informationIds,
@@ -2344,19 +2348,17 @@ export async function fetchRelationshipHistory(
   campaignId: string,
   npcId: string,
 ): Promise<RelationshipHistory | null> {
-  const [npc, memories] = await Promise.all([
-    prisma.nPC.findFirst({
-      where: { id: npcId, campaignId },
-      select: { id: true, name: true },
-    }),
-    fetchEntityLinkedMemories({
-      campaignId,
-      entityType: "npc",
-      entityId: npcId,
-      take: 8,
-      prioritizedKinds: ["relationship_shift", "promise", "conflict"],
-    }),
-  ]);
+  const npc = await prisma.nPC.findFirst({
+    where: { id: npcId, campaignId },
+    select: { id: true, name: true },
+  });
+  const memories = await fetchEntityLinkedMemories({
+    campaignId,
+    entityType: "npc",
+    entityId: npcId,
+    take: 8,
+    prioritizedKinds: ["relationship_shift", "promise", "conflict"],
+  });
 
   if (!npc) {
     return null;
@@ -2899,43 +2901,41 @@ export async function getTurnSnapshot(
   const state = parseCampaignRuntimeStateJson(campaign.stateJson);
   const session = campaign.sessions[0];
 
-  const [currentLocationRecord, adjacentEdges, presentNpcRecords, temporaryActorRecords, discoveredInfoRecords] = await Promise.all([
-    prisma.locationNode.findFirst({
-      where: {
-        campaignId,
-        id: state.currentLocationId,
-      },
-    }),
-    prisma.locationEdge.findMany({
-      where: {
-        campaignId,
-        OR: [{ sourceId: state.currentLocationId }, { targetId: state.currentLocationId }],
-      },
-      orderBy: { createdAt: "asc" },
-    }),
-    prisma.nPC.findMany({
-      where: {
-        campaignId,
-        currentLocationId: state.currentLocationId,
-      },
-      orderBy: { name: "asc" },
-    }),
-    prisma.temporaryActor.findMany({
-      where: {
-        campaignId,
-        currentLocationId: state.currentLocationId,
-      },
-      orderBy: [{ lastSeenAtTurn: "desc" }, { updatedAt: "desc" }],
-      take: 20,
-    }),
-    prisma.information.findMany({
-      where: {
-        campaignId,
-        isDiscovered: true,
-      },
-      orderBy: { title: "asc" },
-    }),
-  ]);
+  const currentLocationRecord = await prisma.locationNode.findFirst({
+    where: {
+      campaignId,
+      id: state.currentLocationId,
+    },
+  });
+  const adjacentEdges = await prisma.locationEdge.findMany({
+    where: {
+      campaignId,
+      OR: [{ sourceId: state.currentLocationId }, { targetId: state.currentLocationId }],
+    },
+    orderBy: { createdAt: "asc" },
+  });
+  const presentNpcRecords = await prisma.nPC.findMany({
+    where: {
+      campaignId,
+      currentLocationId: state.currentLocationId,
+    },
+    orderBy: { name: "asc" },
+  });
+  const temporaryActorRecords = await prisma.temporaryActor.findMany({
+    where: {
+      campaignId,
+      currentLocationId: state.currentLocationId,
+    },
+    orderBy: [{ lastSeenAtTurn: "desc" }, { updatedAt: "desc" }],
+    take: 20,
+  });
+  const discoveredInfoRecords = await prisma.information.findMany({
+    where: {
+      campaignId,
+      isDiscovered: true,
+    },
+    orderBy: { title: "asc" },
+  });
 
   if (!currentLocationRecord) {
     return null;
@@ -2951,37 +2951,35 @@ export async function getTurnSnapshot(
     }
   }
 
-  const [locationKnowledge, factionKnowledge, npcKnowledge] = await Promise.all([
-    prisma.locationKnowledge.findMany({
-      where: {
-        campaignId,
-        locationId: state.currentLocationId,
-      },
-    }),
-    baseKnownFactionIds.size
-      ? prisma.factionKnowledge.findMany({
-          where: {
-            campaignId,
-            factionId: {
-              in: Array.from(baseKnownFactionIds),
-            },
+  const locationKnowledge = await prisma.locationKnowledge.findMany({
+    where: {
+      campaignId,
+      locationId: state.currentLocationId,
+    },
+  });
+  const factionKnowledge = baseKnownFactionIds.size
+    ? await prisma.factionKnowledge.findMany({
+        where: {
+          campaignId,
+          factionId: {
+            in: Array.from(baseKnownFactionIds),
           },
-        })
-      : Promise.resolve([]),
-    presentNpcRecords.length
-      ? prisma.npcKnowledge.findMany({
-          where: {
-            campaignId,
-            npcId: {
-              in: presentNpcRecords.map((npc) => npc.id),
-            },
-            shareability: {
-              not: "private",
-            },
+        },
+      })
+    : [];
+  const npcKnowledge = presentNpcRecords.length
+    ? await prisma.npcKnowledge.findMany({
+        where: {
+          campaignId,
+          npcId: {
+            in: presentNpcRecords.map((npc) => npc.id),
           },
-        })
-      : Promise.resolve([]),
-  ]);
+          shareability: {
+            not: "private",
+          },
+        },
+      })
+    : [];
 
   const discoveredIds = new Set(discoveredInfoRecords.map((information) => information.id));
   const visibleKnowledgeIds = buildRelevantKnowledgeIds({
@@ -3056,40 +3054,38 @@ export async function getTurnSnapshot(
     ...relevantInformationRecords.flatMap((information) => (information.sourceNpcId ? [information.sourceNpcId] : [])),
   ]));
 
-  const [locationRecords, factionRecords, sourceNpcRecords] = await Promise.all([
-    relevantLocationIds.length
-      ? prisma.locationNode.findMany({
-          where: {
-            campaignId,
-            id: {
-              in: relevantLocationIds,
-            },
+  const locationRecords = relevantLocationIds.length
+    ? await prisma.locationNode.findMany({
+        where: {
+          campaignId,
+          id: {
+            in: relevantLocationIds,
           },
-        })
-      : Promise.resolve([]),
-    relevantFactionIds.length
-      ? prisma.faction.findMany({
-          where: {
-            campaignId,
-            id: {
-              in: relevantFactionIds,
-            },
+        },
+      })
+    : [];
+  const factionRecords = relevantFactionIds.length
+    ? await prisma.faction.findMany({
+        where: {
+          campaignId,
+          id: {
+            in: relevantFactionIds,
           },
-          orderBy: { name: "asc" },
-        })
-      : Promise.resolve([]),
-    relevantNpcIds.length
-      ? prisma.nPC.findMany({
-          where: {
-            campaignId,
-            id: {
-              in: relevantNpcIds,
-            },
+        },
+        orderBy: { name: "asc" },
+      })
+    : [];
+  const sourceNpcRecords = relevantNpcIds.length
+    ? await prisma.nPC.findMany({
+        where: {
+          campaignId,
+          id: {
+            in: relevantNpcIds,
           },
-          orderBy: { name: "asc" },
-        })
-      : Promise.resolve([]),
-  ]);
+        },
+        orderBy: { name: "asc" },
+      })
+    : [];
 
   const currentLocation = toLocationSummary(currentLocationRecord, factionRecords);
   const adjacentRoutes = adjacentEdges.map<RouteSummary>((edge) => {
@@ -3140,57 +3136,55 @@ export async function getTurnSnapshot(
     }
   }
 
-  const [knownFactionRecords, factionRelations, pendingWorldEvents, pendingFactionMoves] = await Promise.all([
-    knownFactionIds.size
-      ? prisma.faction.findMany({
-          where: {
-            campaignId,
-            id: {
-              in: Array.from(knownFactionIds),
-            },
+  const knownFactionRecords = knownFactionIds.size
+    ? await prisma.faction.findMany({
+        where: {
+          campaignId,
+          id: {
+            in: Array.from(knownFactionIds),
           },
-          orderBy: { name: "asc" },
-        })
-      : Promise.resolve([]),
-    knownFactionIds.size
-      ? prisma.factionRelation.findMany({
-          where: {
-            campaignId,
-            factionAId: {
-              in: Array.from(knownFactionIds),
-            },
-            factionBId: {
-              in: Array.from(knownFactionIds),
-            },
+        },
+        orderBy: { name: "asc" },
+      })
+    : [];
+  const factionRelations = knownFactionIds.size
+    ? await prisma.factionRelation.findMany({
+        where: {
+          campaignId,
+          factionAId: {
+            in: Array.from(knownFactionIds),
           },
-          orderBy: { createdAt: "asc" },
-        })
-      : Promise.resolve([]),
-    prisma.worldEvent.findMany({
-      where: {
-        campaignId,
-        locationId: state.currentLocationId,
-        isProcessed: false,
-        isCancelled: false,
-      },
-      orderBy: { triggerTime: "desc" },
-      take: 30,
-    }),
-    knownFactionIds.size
-      ? prisma.factionMove.findMany({
-          where: {
-            campaignId,
-            factionId: {
-              in: Array.from(knownFactionIds),
-            },
-            isExecuted: false,
-            isCancelled: false,
+          factionBId: {
+            in: Array.from(knownFactionIds),
           },
-          orderBy: { scheduledAtTime: "asc" },
-          take: 30,
-        })
-      : Promise.resolve([]),
-  ]);
+        },
+        orderBy: { createdAt: "asc" },
+      })
+    : [];
+  const pendingWorldEvents = await prisma.worldEvent.findMany({
+    where: {
+      campaignId,
+      locationId: state.currentLocationId,
+      isProcessed: false,
+      isCancelled: false,
+    },
+    orderBy: { triggerTime: "desc" },
+    take: 30,
+  });
+  const pendingFactionMoves = knownFactionIds.size
+    ? await prisma.factionMove.findMany({
+        where: {
+          campaignId,
+          factionId: {
+            in: Array.from(knownFactionIds),
+          },
+          isExecuted: false,
+          isCancelled: false,
+        },
+        orderBy: { scheduledAtTime: "asc" },
+        take: 30,
+      })
+    : [];
 
   const knownFactions = knownFactionRecords.map(toFactionSummary);
   const normalizedFactionRecords = knownFactionRecords.length ? knownFactionRecords : factionRecords;

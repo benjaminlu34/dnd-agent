@@ -95,11 +95,26 @@ export async function POST(request: Request) {
         });
       }
 
-      const snapshot = await getTurnSnapshot(campaignId, sessionId);
-      if (snapshot) {
+      try {
+        const snapshot = await getTurnSnapshot(campaignId, sessionId);
+        if (snapshot) {
+          send({
+            type: "state",
+            snapshot: toPlayerCampaignSnapshot(snapshot),
+          });
+        } else {
+          send({
+            type: "warning",
+            message: "Turn resolved, but the latest campaign state was unavailable for refresh.",
+          });
+        }
+      } catch (error) {
         send({
-          type: "state",
-          snapshot: toPlayerCampaignSnapshot(snapshot),
+          type: "warning",
+          message:
+            error instanceof Error
+              ? `Turn resolved, but refreshing the latest campaign state failed: ${error.message}`
+              : "Turn resolved, but refreshing the latest campaign state failed.",
         });
       }
     });

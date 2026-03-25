@@ -341,10 +341,13 @@ export function AdventureApp({
       const nextWarnings: string[] = [];
       let nextSnapshot: PlayerCampaignSnapshot | null = null;
       let nextActions: string[] = [];
+      let receivedClarification = false;
+      let streamErrorMessage: string | null = null;
       await consumeNdjson(response, (event) => {
         if (event.type === "warning") {
           nextWarnings.push(event.message);
         } else if (event.type === "clarification") {
+          receivedClarification = true;
           setClarification({
             question: event.question,
             options: event.options,
@@ -354,20 +357,47 @@ export function AdventureApp({
         } else if (event.type === "actions") {
           nextActions = event.actions;
         } else if (event.type === "error") {
+          streamErrorMessage = event.message;
           setTurnError(event.message);
         } else if (event.type === "check_result") {
           setLatestCheck(event.result);
         }
       });
 
+      if (!nextSnapshot && !receivedClarification) {
+        try {
+          const snapshotResponse = await fetch(`/api/campaigns/${campaignId}`);
+          const snapshotData = (await snapshotResponse.json()) as {
+            snapshot?: PlayerCampaignSnapshot;
+            error?: string;
+          };
+
+          if (snapshotResponse.ok && snapshotData.snapshot) {
+            nextSnapshot = snapshotData.snapshot;
+          } else if (!streamErrorMessage) {
+            setTurnError(snapshotData.error ?? "Turn resolved, but refreshing the campaign failed.");
+          }
+        } catch (error) {
+          if (!streamErrorMessage) {
+            setTurnError(error instanceof Error ? error.message : "Turn resolved, but refreshing the campaign failed.");
+          }
+        }
+      }
+
       if (nextSnapshot) {
         setSnapshot(nextSnapshot);
+        setMissedTurnDigests([]);
+        setAction("");
+      } else if (receivedClarification) {
+        setAction("");
       }
 
       setWarnings(nextWarnings);
-      setSuggestedActions(nextActions);
-      setMissedTurnDigests([]);
-      setAction("");
+      if (nextSnapshot) {
+        setSuggestedActions(nextActions.length ? nextActions : extractSuggestedActions(nextSnapshot));
+      } else {
+        setSuggestedActions(nextActions);
+      }
     } catch (error) {
       setTurnError(error instanceof Error ? error.message : "Turn submission failed.");
     } finally {

@@ -510,84 +510,82 @@ async function hydratePromotedNpcRecord(input: {
     throw new Error("Promoted NPC has no current location for hydration.");
   }
 
-  const [location, localNpcs, localInformation, temporaryActor, nearbyEdges] = await Promise.all([
-    prisma.locationNode.findFirst({
-      where: { id: npc.currentLocationId, campaignId: input.campaignId },
-      select: {
-        id: true,
-        name: true,
-        type: true,
-        summary: true,
-        state: true,
-        controllingFactionId: true,
-        localTextureJson: true,
-      },
-    }),
-    prisma.nPC.findMany({
-      where: {
-        campaignId: input.campaignId,
-        currentLocationId: npc.currentLocationId,
-      },
-      orderBy: { name: "asc" },
-      select: {
-        id: true,
-        name: true,
-        role: true,
-        factionId: true,
-      },
-      take: 8,
-    }),
-    prisma.information.findMany({
-      where: {
-        campaignId: input.campaignId,
-        locationId: npc.currentLocationId,
-      },
-      orderBy: { updatedAt: "desc" },
-      select: {
-        id: true,
-        title: true,
-        summary: true,
-        truthfulness: true,
-        accessibility: true,
-        factionId: true,
-      },
-      take: 8,
-    }),
-    prisma.temporaryActor.findFirst({
-      where: {
-        campaignId: input.campaignId,
-        promotedNpcId: npc.id,
-      },
-      select: {
-        label: true,
-        interactionCount: true,
-        recentTopics: true,
-        lastSummary: true,
-      },
-    }),
-    prisma.locationEdge.findMany({
-      where: {
-        campaignId: input.campaignId,
-        OR: [{ sourceId: npc.currentLocationId }, { targetId: npc.currentLocationId }],
-      },
-      include: {
-        source: {
-          select: {
-            id: true,
-            name: true,
-          },
-        },
-        target: {
-          select: {
-            id: true,
-            name: true,
-          },
+  const location = await prisma.locationNode.findFirst({
+    where: { id: npc.currentLocationId, campaignId: input.campaignId },
+    select: {
+      id: true,
+      name: true,
+      type: true,
+      summary: true,
+      state: true,
+      controllingFactionId: true,
+      localTextureJson: true,
+    },
+  });
+  const localNpcs = await prisma.nPC.findMany({
+    where: {
+      campaignId: input.campaignId,
+      currentLocationId: npc.currentLocationId,
+    },
+    orderBy: { name: "asc" },
+    select: {
+      id: true,
+      name: true,
+      role: true,
+      factionId: true,
+    },
+    take: 8,
+  });
+  const localInformation = await prisma.information.findMany({
+    where: {
+      campaignId: input.campaignId,
+      locationId: npc.currentLocationId,
+    },
+    orderBy: { updatedAt: "desc" },
+    select: {
+      id: true,
+      title: true,
+      summary: true,
+      truthfulness: true,
+      accessibility: true,
+      factionId: true,
+    },
+    take: 8,
+  });
+  const temporaryActor = await prisma.temporaryActor.findFirst({
+    where: {
+      campaignId: input.campaignId,
+      promotedNpcId: npc.id,
+    },
+    select: {
+      label: true,
+      interactionCount: true,
+      recentTopics: true,
+      lastSummary: true,
+    },
+  });
+  const nearbyEdges = await prisma.locationEdge.findMany({
+    where: {
+      campaignId: input.campaignId,
+      OR: [{ sourceId: npc.currentLocationId }, { targetId: npc.currentLocationId }],
+    },
+    include: {
+      source: {
+        select: {
+          id: true,
+          name: true,
         },
       },
-      orderBy: [{ travelTimeMinutes: "asc" }, { dangerLevel: "asc" }],
-      take: 6,
-    }),
-  ]);
+      target: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
+    },
+    orderBy: [{ travelTimeMinutes: "asc" }, { dangerLevel: "asc" }],
+    take: 6,
+  });
 
   if (!location) {
     throw new Error("Promoted NPC location not found.");
