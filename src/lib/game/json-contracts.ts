@@ -2,6 +2,7 @@ import { z } from "zod";
 import type {
   CampaignRuntimeState,
   FactionResourcePool,
+  StateCommitLogEntry,
   TurnCausalityCode,
   TurnCausalityCodeName,
   TurnNarrationBounds,
@@ -90,6 +91,27 @@ const turnNarrationBoundsSchema: z.ZodType<TurnNarrationBounds> = z.object({
   overrideText: z.string().trim().min(1).nullable(),
 });
 
+const stateCommitLogEntrySchema: z.ZodType<StateCommitLogEntry> = z.object({
+  kind: z.enum(["check", "mutation"]),
+  mutationType: z
+    .enum([
+      "advance_time",
+      "move_player",
+      "adjust_gold",
+      "commit_market_trade",
+      "adjust_relationship",
+      "discover_information",
+      "set_npc_state",
+      "restore_health",
+    ])
+    .optional()
+    .nullable(),
+  status: z.enum(["applied", "rejected", "noop"]),
+  reasonCode: z.string().trim().min(1),
+  summary: z.string().trim().min(1),
+  metadata: z.record(z.string(), z.unknown()).optional().nullable(),
+});
+
 const turnResultPayloadSchema: z.ZodType<TurnResultPayload> = z.object({
   stateVersionAfter: z.number().int().nullable(),
   changeCodes: z.array(turnCausalityCodeSchema),
@@ -97,6 +119,7 @@ const turnResultPayloadSchema: z.ZodType<TurnResultPayload> = z.object({
   whatChanged: z.array(z.string()),
   why: z.array(z.string()),
   warnings: z.array(z.string()),
+  stateCommitLog: z.array(stateCommitLogEntrySchema).optional().default([]),
   narrationBounds: turnNarrationBoundsSchema.optional().nullable(),
   checkResult: z
     .object({
@@ -264,6 +287,7 @@ export function parseTurnResultPayloadJson(value: unknown): TurnResultPayload | 
     whatChanged: [],
     why: [],
     warnings: legacy.data.warnings,
+    stateCommitLog: [],
     checkResult: legacy.data.checkResult ?? null,
     rollback: legacy.data.rollback ?? null,
     clarification: null,

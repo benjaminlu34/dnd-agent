@@ -849,6 +849,7 @@ export type TurnResultPayload = {
   whatChanged: string[];
   why: string[];
   warnings: string[];
+  stateCommitLog?: StateCommitLog;
   narrationBounds?: TurnNarrationBounds | null;
   checkResult?: CheckResult | null;
   rollback?: TurnRollbackData | null;
@@ -950,25 +951,45 @@ export type TurnRouterContext = Pick<
   | "activeThreads"
 >;
 
-export type RouterAuthorizedCommitment =
-  | "trade"
-  | "combat"
-  | "investigate"
-  | "converse";
+export type RouterAuthorizedVector =
+  | "economy_light"
+  | "economy_strict"
+  | "violence"
+  | "converse"
+  | "investigate";
 
-export type RouterClassification = {
+export type RequiredPrerequisite =
+  | {
+      type: "market_prices";
+      locationId: string;
+    }
+  | {
+      type: "npc_detail";
+      npcId: string;
+    }
+  | {
+      type: "faction_intel";
+      factionId: string;
+    }
+  | {
+      type: "information_detail";
+      informationId: string;
+    }
+  | {
+      type: "information_connections";
+      informationIds: string[];
+    }
+  | {
+      type: "relationship_history";
+      npcId: string;
+    };
+
+export type RouterDecision = {
   profile: PromptContextProfile;
   confidence: "high" | "low";
-  authorizedCommitments: RouterAuthorizedCommitment[];
+  authorizedVectors: RouterAuthorizedVector[];
+  requiredPrerequisites: RequiredPrerequisite[];
   reason: string;
-};
-
-export type CitedEntities = {
-  npcIds: string[];
-  locationIds: string[];
-  factionIds: string[];
-  commodityIds: string[];
-  informationIds: string[];
 };
 
 export type CheckResult = {
@@ -1150,148 +1171,94 @@ export type TurnFetchToolResult =
       result: RelationshipHistory;
     };
 
-export type ExecuteTravelToolCall = {
-  type: "execute_travel";
-  routeEdgeId: string;
-  targetLocationId: string;
-  narration: string;
-  suggestedActions: string[];
-  timeMode: "travel";
-  citedEntities: CitedEntities;
-};
+export type CheckIntent =
+  | {
+      type: "challenge";
+      reason: string;
+      challengeApproach: ChallengeApproach;
+      citedNpcId?: string;
+      mode?: CheckMode;
+    }
+  | {
+      type: "combat";
+      reason: string;
+      targetNpcId: string;
+      approach: CombatApproach;
+      mode?: CheckMode;
+    };
 
-export type ExecuteCombatToolCall = {
-  type: "execute_combat";
-  targetNpcId: string;
-  approach: CombatApproach;
+export type MechanicsMutation =
+  | {
+      type: "advance_time";
+      durationMinutes?: number;
+    }
+  | {
+      type: "move_player";
+      routeEdgeId: string;
+      targetLocationId: string;
+    }
+  | {
+      type: "adjust_gold";
+      delta: number;
+      reason: string;
+    }
+  | {
+      type: "commit_market_trade";
+      action: TradeAction;
+      marketPriceId: string;
+      commodityId: string;
+      quantity: number;
+    }
+  | {
+      type: "adjust_relationship";
+      npcId: string;
+      delta: number;
+      reason: string;
+    }
+  | {
+      type: "discover_information";
+      informationId: string;
+    }
+  | {
+      type: "set_npc_state";
+      npcId: string;
+      newState: NpcState;
+    }
+  | {
+      type: "restore_health";
+      mode: "light_rest" | "full_rest" | "amount";
+      amount?: number;
+    };
+
+export type ResolveMechanicsResponse = {
+  type: "resolve_mechanics";
+  timeMode: TimeMode;
   durationMagnitude?: DurationMagnitude;
-  challengeApproach?: ChallengeApproach;
-  narration: string;
   suggestedActions: string[];
-  timeMode: "combat" | "exploration";
-  citedEntities: CitedEntities;
   memorySummary?: string;
+  checkIntent?: CheckIntent;
+  mutations: MechanicsMutation[];
 };
 
-export type ExecuteConverseToolCall = {
-  type: "execute_converse";
-  interlocutor: string;
-  npcId?: string;
-  topic: string;
-  narration: string;
-  suggestedActions: string[];
-  timeMode: Exclude<TimeMode, "travel" | "rest">;
-  durationMagnitude?: DurationMagnitude;
-  citedEntities: CitedEntities;
-  relationshipMove?: RelationshipMove;
-  discoveryIntent?: DiscoveryIntent;
-  memorySummary?: string;
+export type StateCommitLogStatus = "applied" | "rejected" | "noop";
+
+export type StateCommitLogEntry = {
+  kind: "check" | "mutation";
+  mutationType?: MechanicsMutation["type"] | null;
+  status: StateCommitLogStatus;
+  reasonCode: string;
+  summary: string;
+  metadata?: Record<string, unknown> | null;
 };
 
-export type ExecuteInvestigateToolCall = {
-  type: "execute_investigate";
-  targetType: "location" | "npc" | "route" | "information";
-  targetId: string;
-  method: string;
-  narration: string;
-  suggestedActions: string[];
-  timeMode: Exclude<TimeMode, "travel" | "rest">;
-  durationMagnitude?: DurationMagnitude;
-  citedEntities: CitedEntities;
-  discoveryIntent?: DiscoveryIntent;
-  memorySummary?: string;
-};
+export type StateCommitLog = StateCommitLogEntry[];
 
-export type ExecuteObserveToolCall = {
-  type: "execute_observe";
-  targetType: "location" | "npc" | "route" | "faction";
-  targetId: string;
-  narration: string;
-  suggestedActions: string[];
-  timeMode: Exclude<TimeMode, "travel" | "rest">;
-  durationMagnitude?: DurationMagnitude;
-  citedEntities: CitedEntities;
-  discoveryIntent?: DiscoveryIntent;
-  memorySummary?: string;
-};
+export type TurnActionToolCall = RequestClarificationToolCall | ResolveMechanicsResponse;
 
-export type ExecuteSceneInteractionToolCall = {
-  type: "execute_scene_interaction";
-  targetType: "location" | "npc";
-  targetId: string;
-  approach: string;
-  narration: string;
-  suggestedActions: string[];
-  timeMode: "exploration" | "downtime";
-  durationMagnitude?: DurationMagnitude;
-  citedEntities: CitedEntities;
-  memorySummary?: string;
-};
-
-export type ExecuteWaitToolCall = {
-  type: "execute_wait";
-  durationMinutes: number;
-  narration: string;
-  suggestedActions: string[];
-  timeMode: "exploration" | "downtime";
-  durationMagnitude?: DurationMagnitude;
-  citedEntities: CitedEntities;
-  memorySummary?: string;
-};
-
-export type ExecuteTradeToolCall = {
-  type: "execute_trade";
-  action: TradeAction;
-  marketPriceId: string;
-  commodityId: string;
-  quantity: number;
-  narration: string;
-  suggestedActions: string[];
-  timeMode: "exploration" | "downtime";
-  durationMagnitude?: DurationMagnitude;
-  citedEntities: CitedEntities;
-  memorySummary?: string;
-};
-
-export type ExecuteRestToolCall = {
-  type: "execute_rest";
-  restType: RestType;
-  narration: string;
-  suggestedActions: string[];
-  timeMode: "rest";
-  citedEntities: CitedEntities;
-  memorySummary?: string;
-};
-
-export type ExecuteFreeformToolCall = {
-  type: "execute_freeform";
-  actionDescription: string;
-  timeMode: Exclude<TimeMode, "travel" | "rest">;
-  durationMagnitude?: DurationMagnitude;
-  requiresCheck?: boolean;
-  intendedMechanicalOutcome: string;
-  challengeApproach: ChallengeApproach;
-  failureConsequence?: string;
-  narration: string;
-  suggestedActions: string[];
-  citedEntities: CitedEntities;
-  memorySummary?: string;
-};
-
-export type TurnActionToolCall =
+export type TurnModelToolCall =
+  | TurnFetchToolCall
   | RequestClarificationToolCall
-  | ExecuteTravelToolCall
-  | ExecuteCombatToolCall
-  | ExecuteConverseToolCall
-  | ExecuteInvestigateToolCall
-  | ExecuteObserveToolCall
-  | ExecuteSceneInteractionToolCall
-  | ExecuteTradeToolCall
-  | ExecuteRestToolCall
-  | ExecuteWaitToolCall
-  | ExecuteFreeformToolCall;
-
-export type TurnModelToolCall = TurnFetchToolCall | TurnActionToolCall;
+  | ResolveMechanicsResponse;
 
 export type TurnResolution = {
   command: TurnActionToolCall;
@@ -1300,11 +1267,9 @@ export type TurnResolution = {
 
 export type ValidatedTurnCommand =
   | RequestClarificationToolCall
-  | (Exclude<TurnActionToolCall, RequestClarificationToolCall> & {
+  | (ResolveMechanicsResponse & {
       warnings: string[];
       timeElapsed: number;
-      relationshipDelta?: number;
-      discoverInformationIds?: string[];
       narrationBounds?: TurnNarrationBounds | null;
       checkResult?: CheckResult;
     });

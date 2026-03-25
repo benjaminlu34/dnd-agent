@@ -1,18 +1,14 @@
 import { rollCheck } from "@/lib/game/checks";
 import type {
   CampaignSnapshot,
-  CitedEntities,
   ChallengeApproach,
-  DiscoveryIntent,
-  ExecuteCombatToolCall,
-  ExecuteFreeformToolCall,
-  RelationshipMove,
-  RouterClassification,
+  CheckIntent,
+  CheckResult,
+  ResolveMechanicsResponse,
   TimeMode,
   TurnActionToolCall,
   TurnFetchToolResult,
   ValidatedTurnCommand,
-  WorldFidelityIssue,
 } from "@/lib/game/types";
 
 export const TIME_MODE_BOUNDS: Record<TimeMode, { min: number; max: number }> = {
@@ -24,8 +20,8 @@ export const TIME_MODE_BOUNDS: Record<TimeMode, { min: number; max: number }> = 
 };
 
 const REST_DURATIONS = {
-  light: 360,
-  full: 480,
+  light_rest: 360,
+  full_rest: 480,
 } as const;
 
 const DURATION_MAGNITUDE_MINUTES: Record<
@@ -55,24 +51,6 @@ const DURATION_MAGNITUDE_MINUTES: Record<
   },
 };
 
-function normalizeLooseText(value: string) {
-  return value.trim().replace(/\s+/g, " ");
-}
-
-function normalizedEntityId(value: string) {
-  const trimmed = value.trim();
-  const parts = trimmed.split(":");
-  return parts.length >= 3 ? parts.slice(2).join(":") : trimmed;
-}
-
-function idsReferToSameEntity(left: string | null | undefined, right: string | null | undefined) {
-  if (!left || !right) {
-    return false;
-  }
-
-  return left === right || normalizedEntityId(left) === normalizedEntityId(right);
-}
-
 function normalizedSuggestedActions(actions: string[] | undefined) {
   return Array.from(new Set((actions ?? []).map((entry) => entry.trim()).filter(Boolean))).slice(
     0,
@@ -80,217 +58,43 @@ function normalizedSuggestedActions(actions: string[] | undefined) {
   );
 }
 
-function findPresentNpc(snapshot: CampaignSnapshot, npcId: string) {
-  return snapshot.presentNpcs.find((npc) => idsReferToSameEntity(npc.id, npcId)) ?? null;
+function requestedDurationMinutes(command: ResolveMechanicsResponse) {
+  for (const mutation of command.mutations) {
+    if (mutation.type === "advance_time" && typeof mutation.durationMinutes === "number") {
+      return mutation.durationMinutes;
+    }
+  }
+
+  return null;
 }
 
-function npcRequiresDetailFetch(snapshot: CampaignSnapshot, npcId: string) {
-  const npc = findPresentNpc(snapshot, npcId);
-  if (!npc) {
-    return null;
+function deriveTimeElapsed(command: ResolveMechanicsResponse, snapshot: CampaignSnapshot) {
+  const explicitDuration = requestedDurationMinutes(command);
+  if (explicitDuration != null) {
+    return explicitDuration;
   }
 
-  return npc.socialLayer === "promoted_local" && !npc.isNarrativelyHydrated ? npc : null;
-}
-
-function hasHydratedNpcDetailFact(fetchedFacts: TurnFetchToolResult[], npcId: string) {
-  return fetchedFacts.some(
-    (fact) =>
-      fact.type === "fetch_npc_detail"
-      && idsReferToSameEntity(fact.result.id, npcId)
-      && fact.result.isNarrativelyHydrated,
-  );
-}
-
-function assertNpcDetailFetchedIfRequired(
-  snapshot: CampaignSnapshot,
-  npcId: string,
-  fetchedFacts: TurnFetchToolResult[],
-) {
-  const npc = npcRequiresDetailFetch(snapshot, npcId);
-  if (npc && !hasHydratedNpcDetailFact(fetchedFacts, npc.id)) {
-    throw new Error(`NPC detail must be fetched before acting on ${npc.name}.`);
+  const moveMutation = command.mutations.find((mutation) => mutation.type === "move_player");
+  if (moveMutation?.type === "move_player") {
+    const route = snapshot.adjacentRoutes.find((entry) => entry.id === moveMutation.routeEdgeId);
+    if (route && route.targetLocationId === moveMutation.targetLocationId) {
+      return route.travelTimeMinutes;
+    }
+    return 0;
   }
-}
 
-function fetchedMarketPrices(fetchedFacts: TurnFetchToolResult[]) {
-  return fetchedFacts.flatMap((fact) =>
-    fact.type === "fetch_market_prices" ? fact.result : [],
-  );
-}
-
-function getAllowedEntities(snapshot: CampaignSnapshot, fetchedFacts: TurnFetchToolResult[]) {
-  const locationIds = new Set<string>([
-    snapshot.currentLocation.id,
-    ...snapshot.adjacentRoutes.map((route) => route.targetLocationId),
-  ]);
-  const npcIds = new Set(snapshot.presentNpcs.map((npc) => npc.id));
-  const factionIds = new Set(snapshot.knownFactions.map((faction) => faction.id));
-  const informationIds = new Set(
-    snapshot.localInformation
-      .map((information) => information.id)
-      .concat(snapshot.discoveredInformation.map((information) => information.id))
-      .concat(snapshot.connectedLeads.map((lead) => lead.information.id)),
-  );
-  const commodityIds = new Set<string>();
-
-  for (const fact of fetchedFacts) {
-    if (fact.type === "fetch_npc_detail") {
-      npcIds.add(fact.result.id);
-      if (fact.result.currentLocationId) {
-        locationIds.add(fact.result.currentLocationId);
-      }
-      if (fact.result.factionId) {
-        factionIds.add(fact.result.factionId);
-      }
-      for (const information of fact.result.knownInformation) {
-        informationIds.add(information.id);
-      }
+  const restoreMutation = command.mutations.find((mutation) => mutation.type === "restore_health");
+  if (command.timeMode === "rest" && restoreMutation?.type === "restore_health") {
+    if (restoreMutation.mode === "light_rest") {
+      return REST_DURATIONS.light_rest;
     }
-
-    if (fact.type === "fetch_market_prices") {
-      for (const price of fact.result) {
-        commodityIds.add(price.commodityId);
-        locationIds.add(price.locationId);
-        if (price.vendorNpcId) {
-          npcIds.add(price.vendorNpcId);
-        }
-      }
-    }
-
-    if (fact.type === "fetch_faction_intel") {
-      factionIds.add(fact.result.id);
-      for (const relation of fact.result.relations) {
-        factionIds.add(relation.factionAId);
-        factionIds.add(relation.factionBId);
-      }
-      for (const locationId of fact.result.controlledLocationIds) {
-        locationIds.add(locationId);
-      }
-    }
-
-    if (fact.type === "fetch_information_detail") {
-      informationIds.add(fact.result.id);
-      if (fact.result.locationId) {
-        locationIds.add(fact.result.locationId);
-      }
-      if (fact.result.factionId) {
-        factionIds.add(fact.result.factionId);
-      }
-      if (fact.result.sourceNpcId) {
-        npcIds.add(fact.result.sourceNpcId);
-      }
-    }
-
-    if (fact.type === "fetch_information_connections") {
-      for (const lead of fact.result) {
-        informationIds.add(lead.information.id);
-        if (lead.information.locationId) {
-          locationIds.add(lead.information.locationId);
-        }
-        if (lead.information.factionId) {
-          factionIds.add(lead.information.factionId);
-        }
-        if (lead.information.sourceNpcId) {
-          npcIds.add(lead.information.sourceNpcId);
-        }
-      }
-    }
-
-    if (fact.type === "fetch_relationship_history") {
-      npcIds.add(fact.result.npcId);
+    if (restoreMutation.mode === "full_rest") {
+      return REST_DURATIONS.full_rest;
     }
   }
 
-  return { locationIds, npcIds, factionIds, informationIds, commodityIds };
-}
-
-function assertCitedEntities(
-  citedEntities: CitedEntities,
-  snapshot: CampaignSnapshot,
-  fetchedFacts: TurnFetchToolResult[],
-) {
-  const allowed = getAllowedEntities(snapshot, fetchedFacts);
-
-  for (const npcId of citedEntities.npcIds) {
-    if (!allowed.npcIds.has(npcId)) {
-      throw new Error(`Hallucinated NPC citation: ${npcId}.`);
-    }
-  }
-
-  for (const locationId of citedEntities.locationIds) {
-    if (!allowed.locationIds.has(locationId)) {
-      throw new Error(`Hallucinated location citation: ${locationId}.`);
-    }
-  }
-
-  for (const factionId of citedEntities.factionIds) {
-    if (!allowed.factionIds.has(factionId)) {
-      throw new Error(`Hallucinated faction citation: ${factionId}.`);
-    }
-  }
-
-  for (const informationId of citedEntities.informationIds) {
-    if (!allowed.informationIds.has(informationId)) {
-      throw new Error(`Hallucinated information citation: ${informationId}.`);
-    }
-  }
-
-  for (const commodityId of citedEntities.commodityIds) {
-    if (!allowed.commodityIds.has(commodityId)) {
-      throw new Error(`Hallucinated commodity citation: ${commodityId}.`);
-    }
-  }
-}
-
-function deriveTimeElapsed(
-  command: Exclude<TurnActionToolCall, { type: "request_clarification" }>,
-  snapshot: CampaignSnapshot,
-) {
-  if (command.type === "execute_travel") {
-    const route = snapshot.adjacentRoutes.find((entry) => entry.id === command.routeEdgeId);
-
-    if (!route) {
-      throw new Error("Travel route is not adjacent to the player's current location.");
-    }
-
-    if (route.targetLocationId !== command.targetLocationId) {
-      throw new Error("Travel target does not match the selected route.");
-    }
-
-    const explicitTimeElapsed =
-      "timeElapsed" in command && typeof command.timeElapsed === "number"
-        ? command.timeElapsed
-        : null;
-    if (explicitTimeElapsed != null && explicitTimeElapsed !== route.travelTimeMinutes) {
-      throw new Error("Travel time must match the authoritative route time.");
-    }
-
-    return route.travelTimeMinutes;
-  }
-
-  if (command.type === "execute_rest") {
-    const explicitTimeElapsed =
-      "timeElapsed" in command && typeof command.timeElapsed === "number"
-        ? command.timeElapsed
-        : null;
-    if (explicitTimeElapsed != null && explicitTimeElapsed !== REST_DURATIONS[command.restType]) {
-      throw new Error("Rest time must be engine-owned.");
-    }
-
-    return REST_DURATIONS[command.restType];
-  }
-
-  if (command.type === "execute_wait") {
-    if (!Number.isInteger(command.durationMinutes) || command.durationMinutes <= 0) {
-      throw new Error("Wait durationMinutes must be a positive integer.");
-    }
-    return command.durationMinutes;
-  }
-
-  const bounds = TIME_MODE_BOUNDS[command.timeMode];
-  if (!bounds) {
-    throw new Error(`Unknown time mode: ${String(command.timeMode)}.`);
+  if (command.timeMode === "travel" || command.timeMode === "rest") {
+    return 0;
   }
 
   const magnitude = command.durationMagnitude ?? "standard";
@@ -299,284 +103,7 @@ function deriveTimeElapsed(
     throw new Error(`Unknown duration magnitude ${magnitude} for ${command.timeMode}.`);
   }
 
-  if (minutes < bounds.min || minutes > bounds.max) {
-    throw new Error(
-      `${command.type} produced ${minutes} minutes, outside ${command.timeMode} bounds.`,
-    );
-  }
-
   return minutes;
-}
-
-function requireFetchedMarketPrice(command: {
-  marketPriceId: string;
-  commodityId: string;
-}, fetchedFacts: TurnFetchToolResult[]) {
-  const price = fetchedMarketPrices(fetchedFacts).find(
-    (entry) =>
-      entry.marketPriceId === command.marketPriceId && entry.commodityId === command.commodityId,
-  );
-
-  if (!price) {
-    throw new Error("Trading requires fetched market detail for the selected commodity.");
-  }
-
-  return price;
-}
-
-function validateInteractionTarget(
-  snapshot: CampaignSnapshot,
-  command: TurnActionToolCall,
-  fetchedFacts: TurnFetchToolResult[],
-) {
-  if (command.type === "execute_travel") {
-    const citedPresentNpc = command.citedEntities.npcIds.find((npcId) => findPresentNpc(snapshot, npcId));
-    const citesCurrentLocation = command.citedEntities.locationIds.includes(snapshot.currentLocation.id);
-    const citesDestination = command.citedEntities.locationIds.includes(command.targetLocationId);
-
-    if (citedPresentNpc && citesCurrentLocation && !citesDestination) {
-      throw new Error("Approaching a present NPC within the current scene is not execute_travel.");
-    }
-  }
-
-  if (command.type === "execute_converse") {
-    if (command.npcId) {
-      if (!findPresentNpc(snapshot, command.npcId)) {
-        throw new Error("Cannot converse with an NPC who is not present.");
-      }
-      assertNpcDetailFetchedIfRequired(snapshot, command.npcId, fetchedFacts);
-    } else if (!command.interlocutor.trim()) {
-      throw new Error("Converse actions without npcId must name the local interlocutor.");
-    } else {
-      const interlocutor = normalizeLooseText(command.interlocutor).toLowerCase();
-      if (
-        snapshot.presentNpcs.some(
-          (npc) => normalizeLooseText(npc.name).toLowerCase() === interlocutor,
-        )
-      ) {
-        throw new Error("Unnamed local labels cannot reuse a present NPC's name.");
-      }
-    }
-  }
-
-  if (command.type === "execute_investigate" && command.targetType === "npc") {
-    if (!findPresentNpc(snapshot, command.targetId)) {
-      throw new Error("Cannot investigate an NPC who is not present.");
-    }
-    assertNpcDetailFetchedIfRequired(snapshot, command.targetId, fetchedFacts);
-  }
-
-  if (command.type === "execute_observe" && command.targetType === "npc") {
-    if (!findPresentNpc(snapshot, command.targetId)) {
-      throw new Error("Cannot observe an NPC who is not present.");
-    }
-    assertNpcDetailFetchedIfRequired(snapshot, command.targetId, fetchedFacts);
-  }
-
-  if (command.type === "execute_scene_interaction") {
-    if (command.targetType === "npc") {
-      if (!findPresentNpc(snapshot, command.targetId)) {
-        throw new Error("Cannot interact with an NPC who is not present.");
-      }
-      if (!command.citedEntities.npcIds.includes(command.targetId)) {
-        throw new Error("Scene interaction targeting an NPC must cite that NPC.");
-      }
-    }
-
-    if (command.targetType === "location") {
-      if (!idsReferToSameEntity(command.targetId, snapshot.currentLocation.id)) {
-        throw new Error("Scene interaction locations must stay in the current scene.");
-      }
-      if (!command.citedEntities.locationIds.includes(snapshot.currentLocation.id)) {
-        throw new Error("Scene interaction targeting the current location must cite it.");
-      }
-    }
-  }
-
-  if (command.type === "execute_combat") {
-    const target = findPresentNpc(snapshot, command.targetNpcId);
-    if (!target) {
-      throw new Error("Combat target must be present.");
-    }
-    assertNpcDetailFetchedIfRequired(snapshot, command.targetNpcId, fetchedFacts);
-    if (target.state === "dead") {
-      throw new Error("Combat target is already dead.");
-    }
-  }
-
-  if (command.type === "execute_trade") {
-    const price = requireFetchedMarketPrice(command, fetchedFacts);
-    if (price.locationId !== snapshot.currentLocation.id) {
-      throw new Error("Market price is not for the current location.");
-    }
-    if (!Number.isInteger(command.quantity) || command.quantity <= 0) {
-      throw new Error("Trade quantity must be a positive integer.");
-    }
-
-    if (command.action === "buy") {
-      const totalCost = price.price * command.quantity;
-      if (price.stock !== -1 && price.stock < command.quantity) {
-        throw new Error("Insufficient stock for requested trade quantity.");
-      }
-      if (snapshot.character.gold < totalCost) {
-        throw new Error("Insufficient gold for requested trade quantity.");
-      }
-    }
-
-    if (command.action === "sell") {
-      const owned = snapshot.character.commodityStacks.find(
-        (stack) => stack.commodityId === command.commodityId,
-      );
-
-      if (!owned || owned.quantity < command.quantity) {
-        throw new Error("Cannot sell more commodity than the player owns.");
-      }
-    }
-  }
-}
-
-function looksLikeTypedCombatOrTrade(text: string) {
-  const normalized = text.toLowerCase();
-  return /(buy|sell|barter|trade|price|stock|kill|slay|murder|stab|attack|subdue|assassinate|knock out)/.test(
-    normalized,
-  );
-}
-
-function looksLikeTypedConverse(text: string) {
-  return /\b(ask|asks|tell|tells|say|says|speak|speaks|greet|greets|greeting|question|questions|negotiat|bargain|chat|talk)\b/i.test(
-    text,
-  );
-}
-
-function looksLikeTypedInvestigation(text: string) {
-  return /\b(investigat|search|examin|inspect|study|probe|track|uncover|look for clues|close look)\b/i.test(
-    text,
-  );
-}
-
-function looksLikeFirstPersonNarration(text: string) {
-  return /(^|[.!?]\s+)(i|i'm|i’ve|i've|i’d|i'd|i’ll|i'll|my|we|we’re|we're|we’ve|we've|we’d|we'd|we’ll|we'll|our)\b/i.test(
-    text.trim(),
-  );
-}
-
-function validateNarrationVoice(
-  command: Exclude<TurnActionToolCall, { type: "request_clarification" }>,
-) {
-  if (looksLikeFirstPersonNarration(command.narration)) {
-    throw new Error("narration_voice_first_person: Narration must be written in second person from the Dungeon Master perspective.");
-  }
-}
-
-function sentenceCount(text: string) {
-  return text
-    .split(/(?<=[.!?])\s+/)
-    .map((sentence) => sentence.trim())
-    .filter(Boolean)
-    .length;
-}
-
-function validateNarrationRichness(
-  command: Exclude<TurnActionToolCall, { type: "request_clarification" }>,
-) {
-  if (
-    (command.type === "execute_scene_interaction" || command.type === "execute_observe")
-    && (sentenceCount(command.narration) < 2 || command.narration.trim().length < 100)
-  ) {
-    throw new Error(
-      "narration_too_thin: Scene-forward narration should usually give at least two sentences with some concrete texture, not just a bare action summary.",
-    );
-  }
-}
-
-function extractQuotedSegments(text: string) {
-  return Array.from(text.matchAll(/["“”]([^"“”]+)["“”]/g))
-    .map((match) => match[1]?.trim().toLowerCase())
-    .filter((entry): entry is string => Boolean(entry));
-}
-
-function hasNpcReplyOrReactionCue(narration: string) {
-  return /\b(replies?|responds?|answers?|greets?|nods?|laughs?|smiles back|frowns?|glances?|looks up|meets your eyes|slides|offers|gestures|waves|calls back|says)\b/i.test(
-    narration,
-  );
-}
-
-function validateNarrationAdvancement(
-  command: Exclude<TurnActionToolCall, { type: "request_clarification" }>,
-  playerAction: string | undefined,
-) {
-  if (!playerAction?.trim()) {
-    return;
-  }
-
-  if (command.type !== "execute_converse") {
-    return;
-  }
-
-  const playerQuotes = extractQuotedSegments(playerAction);
-  const narrationQuotes = extractQuotedSegments(command.narration);
-  const repeatedPlayerQuote = playerQuotes.some((quote) => narrationQuotes.includes(quote));
-  const hasDistinctNarrationQuote = narrationQuotes.some((quote) => !playerQuotes.includes(quote));
-
-  if (
-    repeatedPlayerQuote
-    && !hasDistinctNarrationQuote
-    && !hasNpcReplyOrReactionCue(command.narration)
-  ) {
-    throw new Error(
-      "narration_parroting_player_action: Converse narration must advance past the player's own line with an NPC reply or visible reaction.",
-    );
-  }
-}
-
-function validateFreeform(command: ExecuteFreeformToolCall) {
-  if (!command.intendedMechanicalOutcome.trim()) {
-    throw new Error("execute_freeform requires intendedMechanicalOutcome.");
-  }
-
-  if (command.requiresCheck && !command.failureConsequence?.trim()) {
-    throw new Error("execute_freeform requires failureConsequence when requiresCheck is true.");
-  }
-
-  if (looksLikeTypedCombatOrTrade(`${command.actionDescription} ${command.intendedMechanicalOutcome}`)) {
-    throw new Error("execute_freeform cannot replace typed combat or trade actions.");
-  }
-}
-
-function validateSceneInteraction(
-  command: Extract<TurnActionToolCall, { type: "execute_scene_interaction" }>,
-) {
-  const combined = `${command.approach} ${command.narration}`;
-
-  if (looksLikeTypedCombatOrTrade(combined)) {
-    throw new Error("execute_scene_interaction cannot replace typed trade or combat actions.");
-  }
-
-  if (looksLikeTypedConverse(combined)) {
-    throw new Error("execute_scene_interaction cannot replace explicit conversation or negotiation.");
-  }
-
-  if (looksLikeTypedInvestigation(combined)) {
-    throw new Error("execute_scene_interaction cannot replace explicit investigation.");
-  }
-}
-
-function deriveCombatCheck(command: ExecuteCombatToolCall, snapshot: CampaignSnapshot) {
-  const target = findPresentNpc(snapshot, command.targetNpcId);
-  if (!target) {
-    throw new Error("Combat target must be present.");
-  }
-
-  const stat = command.approach === "assassinate" ? "dexterity" : "strength";
-  const dc = 7 + Math.max(1, target.threatLevel);
-
-  return rollCheck({
-    stat,
-    mode: "normal",
-    reason: `${command.approach} ${target.name}`,
-    character: snapshot.character,
-    dc,
-  });
 }
 
 function statForChallengeApproach(challengeApproach: ChallengeApproach) {
@@ -596,162 +123,85 @@ function statForChallengeApproach(challengeApproach: ChallengeApproach) {
   }
 }
 
-function deriveRelationshipDelta(move: RelationshipMove | undefined) {
-  switch (move) {
-    case "worsen":
-      return -2;
-    case "slip":
-      return -1;
-    case "warm":
-      return 1;
-    case "bond":
-      return 2;
-    default:
-      return 0;
+function findFetchedNpc(
+  fetchedFacts: TurnFetchToolResult[],
+  npcId: string | undefined,
+) {
+  if (!npcId) {
+    return null;
   }
+
+  for (const fact of fetchedFacts) {
+    if (fact.type === "fetch_npc_detail" && fact.result.id === npcId) {
+      return fact.result;
+    }
+  }
+
+  return null;
 }
 
-function deriveDiscoveryIntent(
-  command: Exclude<TurnActionToolCall, { type: "request_clarification" }>,
-): DiscoveryIntent {
-  if ("discoveryIntent" in command && command.discoveryIntent) {
-    return command.discoveryIntent;
+function findPresentNpc(snapshot: CampaignSnapshot, npcId: string | undefined) {
+  if (!npcId) {
+    return null;
   }
 
-  if (command.type === "execute_investigate") {
-    return "focused";
-  }
-
-  return "none";
+  return snapshot.presentNpcs.find((npc) => npc.id === npcId) ?? null;
 }
 
-function deriveFreeformCheck(command: ExecuteFreeformToolCall, snapshot: CampaignSnapshot) {
-  const citedNpcId = command.citedEntities.npcIds.find((npcId) => findPresentNpc(snapshot, npcId));
-  const citedNpc = citedNpcId ? findPresentNpc(snapshot, citedNpcId) : null;
+function deriveCheckResult(
+  snapshot: CampaignSnapshot,
+  command: ResolveMechanicsResponse,
+  fetchedFacts: TurnFetchToolResult[],
+): CheckResult | undefined {
+  const checkIntent = command.checkIntent;
+  if (!checkIntent) {
+    return undefined;
+  }
+
+  if (checkIntent.type === "combat") {
+    const target =
+      findPresentNpc(snapshot, checkIntent.targetNpcId)
+      ?? findFetchedNpc(fetchedFacts, checkIntent.targetNpcId);
+    const stat = checkIntent.approach === "assassinate" ? "dexterity" : "strength";
+    const dc = 7 + Math.max(1, target?.threatLevel ?? 2);
+
+    return rollCheck({
+      stat,
+      mode: checkIntent.mode ?? "normal",
+      reason: checkIntent.reason,
+      character: snapshot.character,
+      dc,
+    });
+  }
+
+  const citedNpc =
+    findPresentNpc(snapshot, checkIntent.citedNpcId)
+    ?? findFetchedNpc(fetchedFacts, checkIntent.citedNpcId);
   const dc =
     citedNpc
       ? 7 + Math.max(1, citedNpc.threatLevel)
       : command.timeMode === "combat"
         ? 9
-        : command.challengeApproach === "analyze" || command.challengeApproach === "notice"
+        : checkIntent.challengeApproach === "analyze" || checkIntent.challengeApproach === "notice"
           ? 8
           : 7;
 
   return rollCheck({
-    stat: statForChallengeApproach(command.challengeApproach),
-    mode: "normal",
-    reason: command.actionDescription,
+    stat: statForChallengeApproach(checkIntent.challengeApproach),
+    mode: checkIntent.mode ?? "normal",
+    reason: checkIntent.reason,
     character: snapshot.character,
     dc,
   });
-}
-
-function extractQuotedGoldAmounts(narration: string) {
-  return Array.from(narration.matchAll(/(\d+)\s+gold/gi)).map((match) => Number(match[1]));
-}
-
-function auditWorldFidelity(input: {
-  snapshot: CampaignSnapshot;
-  command: Exclude<TurnActionToolCall, { type: "request_clarification" }> & { timeElapsed: number };
-  fetchedFacts: TurnFetchToolResult[];
-}): WorldFidelityIssue[] {
-  const { snapshot, command, fetchedFacts } = input;
-  const issues: WorldFidelityIssue[] = [];
-
-  if (command.type === "execute_trade") {
-    const price = requireFetchedMarketPrice(command, fetchedFacts);
-    if (!command.citedEntities.commodityIds.includes(command.commodityId)) {
-      issues.push({
-        code: "uncited_mechanical_entity",
-        severity: "block",
-        evidence: "Trade commands must cite the traded commodity.",
-      });
-    }
-
-    const quotedGoldAmounts = extractQuotedGoldAmounts(command.narration);
-    const total = price.price * command.quantity;
-    if (quotedGoldAmounts.length > 0 && !quotedGoldAmounts.includes(total)) {
-      issues.push({
-        code: "invented_price",
-        severity: "block",
-        evidence: `Narration quoted a gold amount that did not match the authoritative total of ${total}.`,
-      });
-    }
-  }
-
-  if (command.type === "execute_combat" && !command.citedEntities.npcIds.includes(command.targetNpcId)) {
-    issues.push({
-      code: "uncited_mechanical_entity",
-      severity: "block",
-      evidence: "Combat commands must cite the target NPC.",
-    });
-  }
-
-  if (command.type === "execute_travel" && !command.citedEntities.locationIds.includes(command.targetLocationId)) {
-    issues.push({
-      code: "uncited_mechanical_entity",
-      severity: "block",
-      evidence: "Travel commands must cite the destination location.",
-    });
-  }
-
-  if (command.type === "execute_rest" && command.timeElapsed > 480) {
-    issues.push({
-      code: "temporal_inconsistency",
-      severity: "block",
-      evidence: "Rest duration exceeded the engine-owned maximum.",
-    });
-  }
-
-  if (command.type === "execute_trade") {
-    const price = requireFetchedMarketPrice(command, fetchedFacts);
-    if (price.locationId !== snapshot.currentLocation.id) {
-      issues.push({
-        code: "spatial_inconsistency",
-        severity: "block",
-        evidence: "Trade attempted against a market outside the current location.",
-      });
-    }
-  }
-
-  return issues;
-}
-
-function assertRouterAuthorization(
-  command: Exclude<TurnActionToolCall, { type: "request_clarification" }>,
-  routerClassification: RouterClassification | undefined,
-) {
-  if (!routerClassification) {
-    return;
-  }
-
-  const authorized = new Set(routerClassification.authorizedCommitments);
-
-  if (command.type === "execute_trade" && !authorized.has("trade")) {
-    throw new Error("intent_overcommit_trade: Router did not authorize execute_trade for this turn.");
-  }
-
-  if (command.type === "execute_combat" && !authorized.has("combat")) {
-    throw new Error("intent_overcommit_combat: Router did not authorize execute_combat for this turn.");
-  }
-
-  if (command.type === "execute_investigate" && !authorized.has("investigate")) {
-    throw new Error("intent_overcommit_investigate: Router did not authorize execute_investigate for this turn.");
-  }
-
-  if (command.type === "execute_converse" && !authorized.has("converse")) {
-    throw new Error("intent_overcommit_converse: Router did not authorize execute_converse for this turn.");
-  }
 }
 
 export function validateTurnCommand(input: {
   snapshot: CampaignSnapshot;
   command: TurnActionToolCall;
   fetchedFacts?: TurnFetchToolResult[];
-  routerClassification?: RouterClassification;
   playerAction?: string;
 }): ValidatedTurnCommand {
-  const { snapshot, command, fetchedFacts = [], routerClassification, playerAction } = input;
+  const { snapshot, command, fetchedFacts = [] } = input;
 
   if (command.type === "request_clarification") {
     return {
@@ -762,73 +212,16 @@ export function validateTurnCommand(input: {
   }
 
   const warnings: string[] = [];
-  const timeElapsed = deriveTimeElapsed(command, snapshot);
-  validateInteractionTarget(snapshot, command, fetchedFacts);
-  assertCitedEntities(command.citedEntities, snapshot, fetchedFacts);
-  assertRouterAuthorization(command, routerClassification);
-  validateNarrationVoice(command);
-  validateNarrationAdvancement(command, playerAction);
-
-  if (command.type === "execute_scene_interaction") {
-    validateSceneInteraction(command);
-  }
-
-  validateNarrationRichness(command);
-
-  const commandWithMechanics = {
-    ...command,
-    timeElapsed,
-  } as Exclude<ValidatedTurnCommand, { type: "request_clarification" }>;
-
-  const fidelityIssues = auditWorldFidelity({
-    snapshot,
-    command: commandWithMechanics,
-    fetchedFacts,
-  });
-  const blockingIssue = fidelityIssues.find((issue) => issue.severity === "block");
-  if (blockingIssue) {
-    throw new Error(`${blockingIssue.code}: ${blockingIssue.evidence}`);
-  }
-
-  warnings.push(
-    ...fidelityIssues
-      .filter((issue) => issue.severity === "warn")
-      .map((issue) => `${issue.code}: ${issue.evidence}`),
-  );
-
   const suggestedActions = normalizedSuggestedActions(command.suggestedActions);
   if (!suggestedActions.length) {
-    warnings.push("Tool call returned no suggested actions; engine provided none.");
-  }
-
-  if (command.type === "execute_combat") {
-    return {
-      ...commandWithMechanics,
-      suggestedActions,
-      warnings,
-      checkResult: deriveCombatCheck(command, snapshot),
-    };
-  }
-
-  if (command.type === "execute_freeform") {
-    validateFreeform(command);
-    const checkResult = command.requiresCheck ? deriveFreeformCheck(command, snapshot) : undefined;
-
-    return {
-      ...commandWithMechanics,
-      suggestedActions,
-      warnings,
-      checkResult,
-    };
+    warnings.push("Mechanics response returned no suggested actions; engine provided none.");
   }
 
   return {
-    ...commandWithMechanics,
+    ...command,
     suggestedActions,
     warnings,
-    relationshipDelta:
-      command.type === "execute_converse" ? deriveRelationshipDelta(command.relationshipMove) : undefined,
-    discoverInformationIds:
-      deriveDiscoveryIntent(command) === "none" ? [] : undefined,
+    timeElapsed: deriveTimeElapsed(command, snapshot),
+    checkResult: deriveCheckResult(snapshot, command, fetchedFacts),
   };
 }

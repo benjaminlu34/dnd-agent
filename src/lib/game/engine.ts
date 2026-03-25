@@ -38,11 +38,18 @@ import type {
   CheckResult,
   InfrastructureFailureCode,
   LocalTextureSummary,
+  MechanicsMutation,
+  NpcDetail,
+  NpcSummary,
   PromotedNpcHydrationDraft,
   RequestClarificationToolCall,
-  RouterClassification,
+  RelationshipHistory,
+  ResolveMechanicsResponse,
+  RouterDecision,
   RetryRequiredResponse,
   StateConflictResponse,
+  StateCommitLog,
+  StateCommitLogEntry,
   TurnCausalityCode,
   TurnFetchToolCall,
   TurnFetchToolResult,
@@ -191,22 +198,8 @@ function applyCommittedTimeWindow(input: {
   } satisfies Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
 }
 
-function promptContextProfileForRouter(classification: RouterClassification) {
-  return classification.confidence === "high" ? classification.profile : "full";
-}
-
-function isRepairableTurnValidationError(message: string) {
-  return (
-    /intent_overcommit_(trade|combat|investigate|converse)/i.test(message)
-    || /narration_voice_first_person/i.test(message)
-    || /narration_parroting_player_action/i.test(message)
-    || /narration_too_thin/i.test(message)
-    || /execute_freeform cannot replace typed combat or trade actions/i.test(message)
-    || /execute_scene_interaction cannot replace typed trade or combat actions/i.test(message)
-    || /execute_scene_interaction cannot replace explicit conversation or negotiation/i.test(message)
-    || /execute_scene_interaction cannot replace explicit investigation/i.test(message)
-    || /Approaching a present NPC within the current scene is not execute_travel/i.test(message)
-  );
+function promptContextProfileForRouter(decision: RouterDecision) {
+  return decision.confidence === "high" ? decision.profile : "full";
 }
 
 async function cleanupTurnLock(input: {
@@ -342,24 +335,6 @@ function shouldPromoteTemporaryActor(input: {
     input.affectedWorldState ||
     input.isInMemoryGraph
   );
-}
-
-function nextStateFromCommand(
-  snapshot: CampaignSnapshot,
-  command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>,
-): CampaignRuntimeState {
-  const locationId =
-    command.type === "execute_travel" ? command.targetLocationId : snapshot.state.currentLocationId;
-
-  return {
-    currentLocationId: locationId,
-    globalTime: snapshot.state.globalTime + command.timeElapsed,
-    pendingTurnId: null,
-    lastActionSummary:
-      command.type === "execute_freeform"
-        ? command.intendedMechanicalOutcome
-        : command.narration,
-  };
 }
 
 function recordInverse(
@@ -783,142 +758,6 @@ async function createTestingMoveForFaction(input: {
   recordCreated(input.rollback, "factionMove", moveId);
 }
 
-async function trackUnnamedLocalInteraction(input: {
-  tx: Prisma.TransactionClient;
-  snapshot: CampaignSnapshot;
-  command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
-  rollback: TurnRollbackData;
-}) {
-  if (input.command.type !== "execute_converse" || input.command.npcId) {
-    return;
-  }
-
-  const label = normalizeTemporaryActorLabel(input.command.interlocutor);
-  const lastSeenAtTurn = input.snapshot.sessionTurnCount + 1;
-  const lastSeenAtTime = input.snapshot.state.globalTime + input.command.timeElapsed;
-  const nextLastSummary = input.command.memorySummary ?? input.command.narration;
-  const nextIsInMemoryGraph = Boolean(input.command.memorySummary?.trim());
-  let actor:
-    | Prisma.TemporaryActorGetPayload<Record<string, never>>
-    | null = null;
-
-  const existing = await input.tx.temporaryActor.findUnique({
-    where: {
-      campaignId_currentLocationId_label: {
-        campaignId: input.snapshot.campaignId,
-        currentLocationId: input.snapshot.state.currentLocationId,
-        label,
-      },
-    },
-  });
-
-  if (!existing) {
-    actor = await input.tx.temporaryActor.create({
-      data: {
-        campaignId: input.snapshot.campaignId,
-        label,
-        currentLocationId: input.snapshot.state.currentLocationId,
-        interactionCount: 1,
-        firstSeenAtTurn: lastSeenAtTurn,
-        lastSeenAtTurn,
-        lastSeenAtTime,
-        recentTopics: [input.command.topic],
-        lastSummary: nextLastSummary,
-        isInMemoryGraph: nextIsInMemoryGraph,
-      },
-    });
-
-    input.rollback.createdTemporaryActorIds.push(actor.id);
-    recordCreated(input.rollback, "temporaryActor", actor.id);
-  } else {
-    recordInverse(
-      input.rollback,
-      "temporaryActor",
-      existing.id,
-      "interactionCount",
-      existing.interactionCount,
-    );
-    recordInverse(input.rollback, "temporaryActor", existing.id, "lastSeenAtTurn", existing.lastSeenAtTurn);
-    recordInverse(input.rollback, "temporaryActor", existing.id, "lastSeenAtTime", existing.lastSeenAtTime);
-    recordInverse(input.rollback, "temporaryActor", existing.id, "recentTopics", existing.recentTopics);
-    recordInverse(input.rollback, "temporaryActor", existing.id, "lastSummary", existing.lastSummary);
-    recordInverse(
-      input.rollback,
-      "temporaryActor",
-      existing.id,
-      "isInMemoryGraph",
-      existing.isInMemoryGraph,
-    );
-
-    actor = await input.tx.temporaryActor.update({
-      where: { id: existing.id },
-      data: {
-        interactionCount: {
-          increment: 1,
-        },
-        lastSeenAtTurn,
-        lastSeenAtTime,
-        recentTopics: dedupeStrings([...existing.recentTopics, input.command.topic]).slice(-4),
-        lastSummary: nextLastSummary,
-        isInMemoryGraph: existing.isInMemoryGraph || nextIsInMemoryGraph,
-      },
-    });
-  }
-
-  if (!actor) {
-    return;
-  }
-
-  if (
-    !shouldPromoteTemporaryActor({
-      interactionCount: actor.interactionCount,
-      holdsInventory: actor.holdsInventory,
-      affectedWorldState: actor.affectedWorldState,
-      isInMemoryGraph: actor.isInMemoryGraph,
-      promotedNpcId: actor.promotedNpcId,
-    })
-  ) {
-    return;
-  }
-
-  const promotedNpcId = `npc_local_${randomUUID()}`;
-  const promotedRole = toPromotedTemporaryActorRole(actor.label);
-  const promotedSeed = buildPromotedTemporaryActorSeedText({
-    actor,
-    role: promotedRole,
-    locationName: input.snapshot.currentLocation.name,
-  });
-  await input.tx.nPC.create({
-    data: {
-      id: promotedNpcId,
-      campaignId: input.snapshot.campaignId,
-      name: toPromotedTemporaryActorName(actor.label),
-      role: promotedRole,
-      summary: promotedSeed.summary,
-      description: promotedSeed.description,
-      socialLayer: "promoted_local",
-      isNarrativelyHydrated: false,
-      hydrationClaimRequestId: null,
-      hydrationClaimExpiresAt: null,
-      factionId: null,
-      currentLocationId: actor.currentLocationId,
-      approval: 0,
-      isCompanion: false,
-      state: "active",
-      threatLevel: 1,
-    },
-  });
-  recordCreated(input.rollback, "nPC", promotedNpcId);
-  recordInverse(input.rollback, "temporaryActor", actor.id, "promotedNpcId", actor.promotedNpcId);
-
-  await input.tx.temporaryActor.update({
-    where: { id: actor.id },
-    data: {
-      promotedNpcId,
-    },
-  });
-}
-
 async function applyInformationDiscoveries(input: {
   tx: Prisma.TransactionClient;
   snapshot: CampaignSnapshot;
@@ -966,40 +805,525 @@ async function applyInformationDiscoveries(input: {
   });
 }
 
-async function applyTradeEffects(input: {
+type AppliedMutationRecord = {
+  mutation: MechanicsMutation;
+  entry: StateCommitLogEntry;
+};
+
+function knownInformationIds(snapshot: CampaignSnapshot, fetchedFacts: TurnFetchToolResult[]) {
+  const ids = new Set<string>(
+    snapshot.localInformation
+      .map((information) => information.id)
+      .concat(snapshot.discoveredInformation.map((information) => information.id))
+      .concat(snapshot.connectedLeads.map((lead) => lead.information.id)),
+  );
+
+  for (const fact of fetchedFacts) {
+    if (fact.type === "fetch_npc_detail") {
+      for (const information of fact.result.knownInformation) {
+        ids.add(information.id);
+      }
+    }
+    if (fact.type === "fetch_information_detail") {
+      ids.add(fact.result.id);
+    }
+    if (fact.type === "fetch_information_connections") {
+      for (const lead of fact.result) {
+        ids.add(lead.information.id);
+      }
+    }
+  }
+
+  return ids;
+}
+
+function knownNpc(snapshot: CampaignSnapshot, fetchedFacts: TurnFetchToolResult[], npcId: string) {
+  const presentNpc = snapshot.presentNpcs.find((npc) => npc.id === npcId);
+  if (presentNpc) {
+    return presentNpc as NpcSummary;
+  }
+
+  for (const fact of fetchedFacts) {
+    if (fact.type === "fetch_npc_detail" && fact.result.id === npcId) {
+      return fact.result as NpcDetail;
+    }
+  }
+
+  return null;
+}
+
+function findRelationshipHistoryNpc(fetchedFacts: TurnFetchToolResult[], npcId: string) {
+  for (const fact of fetchedFacts) {
+    if (fact.type === "fetch_relationship_history" && fact.result.npcId === npcId) {
+      return fact.result as RelationshipHistory;
+    }
+  }
+
+  return null;
+}
+
+function hasVector(decision: RouterDecision, vector: RouterDecision["authorizedVectors"][number]) {
+  return decision.authorizedVectors.includes(vector);
+}
+
+function evaluateResolvedCommand(input: {
+  snapshot: CampaignSnapshot;
+  command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
+  fetchedFacts: TurnFetchToolResult[];
+  routerDecision: RouterDecision;
+}) {
+  const stateCommitLog: StateCommitLog = [];
+  const appliedMutations: AppliedMutationRecord[] = [];
+  const projectedCommodityQuantities = new Map(
+    input.snapshot.character.commodityStacks.map((stack) => [stack.commodityId, stack.quantity]),
+  );
+  const projectedMarketStock = new Map<string, number>();
+  const projectedRelationshipDelta = new Map<string, number>();
+  const discoveredInformationIds = new Set<string>();
+  let projectedGold = input.snapshot.character.gold;
+  let projectedLocationId = input.snapshot.state.currentLocationId;
+  let projectedHealth = input.snapshot.character.health;
+  let hasAppliedMove = false;
+  const knownInformation = knownInformationIds(input.snapshot, input.fetchedFacts);
+  const checkOutcome = input.command.checkResult?.outcome;
+
+  if (input.command.checkResult) {
+    stateCommitLog.push({
+      kind: "check",
+      mutationType: null,
+      status: "applied",
+      reasonCode: `check_${input.command.checkResult.outcome}`,
+      summary: `${input.command.checkResult.stat.toUpperCase()} ${input.command.checkResult.outcome} (${input.command.checkResult.total})`,
+      metadata: input.command.checkResult as unknown as Record<string, unknown>,
+    });
+  }
+
+  for (const mutation of input.command.mutations) {
+    if (mutation.type !== "advance_time" && input.command.checkResult && checkOutcome !== "success") {
+      stateCommitLog.push({
+        kind: "mutation",
+        mutationType: mutation.type,
+        status: "rejected",
+        reasonCode: checkOutcome === "partial" ? "check_partial_blocked" : "check_failed",
+        summary: `The attempted ${mutation.type.replace(/_/g, " ")} does not take effect.`,
+        metadata: mutation as unknown as Record<string, unknown>,
+      });
+      continue;
+    }
+
+    if (mutation.type === "advance_time") {
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "time_advanced",
+        summary:
+          typeof mutation.durationMinutes === "number"
+            ? `Time passes for ${mutation.durationMinutes} minutes.`
+            : "Time passes.",
+        metadata: mutation as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({ mutation, entry });
+      continue;
+    }
+
+    if (mutation.type === "move_player") {
+      const route = input.snapshot.adjacentRoutes.find((entry) => entry.id === mutation.routeEdgeId);
+      if (!route || route.targetLocationId !== mutation.targetLocationId) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "The requested travel route could not be applied.",
+          metadata: mutation as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (hasAppliedMove) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "conflicting_mutation",
+          summary: "Only one location change can apply in a single turn.",
+          metadata: mutation as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      projectedLocationId = mutation.targetLocationId;
+      hasAppliedMove = true;
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "moved_player",
+        summary: `You travel to ${route.targetLocationName}.`,
+        metadata: mutation as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({ mutation, entry });
+      continue;
+    }
+
+    if (mutation.type === "adjust_gold") {
+      const authorized =
+        mutation.delta < 0
+          ? hasVector(input.routerDecision, "economy_light") || hasVector(input.routerDecision, "economy_strict")
+          : hasVector(input.routerDecision, "economy_light")
+            || hasVector(input.routerDecision, "converse")
+            || hasVector(input.routerDecision, "violence")
+            || hasVector(input.routerDecision, "investigate");
+      if (!authorized) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "unauthorized_vector",
+          summary: "The requested gold change is not authorized for this turn.",
+          metadata: mutation as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (projectedGold + mutation.delta < 0) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "insufficient_gold",
+          summary: "You do not have enough gold for that cost.",
+          metadata: mutation as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      projectedGold += mutation.delta;
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "gold_adjusted",
+        summary:
+          mutation.delta >= 0
+            ? `You gain ${mutation.delta} gold.`
+            : `You spend ${Math.abs(mutation.delta)} gold.`,
+        metadata: mutation as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({ mutation, entry });
+      continue;
+    }
+
+    if (mutation.type === "commit_market_trade") {
+      if (!hasVector(input.routerDecision, "economy_strict")) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "unauthorized_vector",
+          summary: "Commodity trade is not authorized for this turn.",
+          metadata: mutation as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      const price = findFetchedMarketPrice(
+        input.fetchedFacts,
+        mutation.marketPriceId,
+        mutation.commodityId,
+      );
+      if (!price) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "missing_prerequisite",
+          summary: "Authoritative market prices were not fetched for that trade.",
+          metadata: mutation as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+
+      const stockKey = price.marketPriceId;
+      const projectedStock =
+        projectedMarketStock.get(stockKey)
+        ?? price.stock;
+      const total = price.price * mutation.quantity;
+      const ownedQuantity = projectedCommodityQuantities.get(mutation.commodityId) ?? 0;
+
+      if (mutation.action === "buy") {
+        if (projectedStock !== -1 && projectedStock < mutation.quantity) {
+          stateCommitLog.push({
+            kind: "mutation",
+            mutationType: mutation.type,
+            status: "rejected",
+            reasonCode: "insufficient_stock",
+            summary: "The market does not have enough stock for that trade.",
+            metadata: mutation as unknown as Record<string, unknown>,
+          });
+          continue;
+        }
+        if (projectedGold < total) {
+          stateCommitLog.push({
+            kind: "mutation",
+            mutationType: mutation.type,
+            status: "rejected",
+            reasonCode: "insufficient_gold",
+            summary: "You do not have enough gold to complete that trade.",
+            metadata: mutation as unknown as Record<string, unknown>,
+          });
+          continue;
+        }
+        projectedGold -= total;
+        projectedCommodityQuantities.set(mutation.commodityId, ownedQuantity + mutation.quantity);
+        if (projectedStock !== -1) {
+          projectedMarketStock.set(stockKey, projectedStock - mutation.quantity);
+        }
+      } else {
+        if (ownedQuantity < mutation.quantity) {
+          stateCommitLog.push({
+            kind: "mutation",
+            mutationType: mutation.type,
+            status: "rejected",
+            reasonCode: "insufficient_inventory",
+            summary: "You cannot sell more of that commodity than you own.",
+            metadata: mutation as unknown as Record<string, unknown>,
+          });
+          continue;
+        }
+        projectedGold += total;
+        projectedCommodityQuantities.set(mutation.commodityId, ownedQuantity - mutation.quantity);
+        if (projectedStock !== -1) {
+          projectedMarketStock.set(stockKey, projectedStock + mutation.quantity);
+        }
+      }
+
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "market_trade_committed",
+        summary: `${mutation.action === "buy" ? "Buy" : "Sell"} ${mutation.quantity} commodity units for ${total} gold.`,
+        metadata: {
+          ...mutation,
+          total,
+        },
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({ mutation, entry });
+      continue;
+    }
+
+    if (mutation.type === "adjust_relationship") {
+      if (!hasVector(input.routerDecision, "converse")) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "unauthorized_vector",
+          summary: "Relationship shifts are not authorized for this turn.",
+          metadata: mutation as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      const npc =
+        knownNpc(input.snapshot, input.fetchedFacts, mutation.npcId)
+        ?? findRelationshipHistoryNpc(input.fetchedFacts, mutation.npcId);
+      if (!npc) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "That relationship target is not available here.",
+          metadata: mutation as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      projectedRelationshipDelta.set(
+        mutation.npcId,
+        (projectedRelationshipDelta.get(mutation.npcId) ?? 0) + mutation.delta,
+      );
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "relationship_adjusted",
+        summary: `Your standing with ${"name" in npc ? npc.name : npc.npcName} shifts.`,
+        metadata: mutation as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({ mutation, entry });
+      continue;
+    }
+
+    if (mutation.type === "discover_information") {
+      if (!hasVector(input.routerDecision, "investigate") && !hasVector(input.routerDecision, "converse")) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "unauthorized_vector",
+          summary: "New discoveries are not authorized for this turn.",
+          metadata: mutation as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (!knownInformation.has(mutation.informationId)) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "That information is not grounded in the current turn context.",
+          metadata: mutation as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (discoveredInformationIds.has(mutation.informationId)) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "noop",
+          reasonCode: "already_applied",
+          summary: "That discovery was already recorded this turn.",
+          metadata: mutation as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      discoveredInformationIds.add(mutation.informationId);
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "information_discovered",
+        summary: `You uncover information ${mutation.informationId}.`,
+        metadata: mutation as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({ mutation, entry });
+      continue;
+    }
+
+    if (mutation.type === "set_npc_state") {
+      if (!hasVector(input.routerDecision, "violence")) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "unauthorized_vector",
+          summary: "Violent state changes are not authorized for this turn.",
+          metadata: mutation as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      const npc = knownNpc(input.snapshot, input.fetchedFacts, mutation.npcId);
+      if (!npc) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "That NPC target is not available here.",
+          metadata: mutation as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (npc.state === mutation.newState) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "noop",
+          reasonCode: "already_applied",
+          summary: `${npc.name} is already ${mutation.newState}.`,
+          metadata: mutation as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "npc_state_changed",
+        summary: `${npc.name} becomes ${mutation.newState}.`,
+        metadata: mutation as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({ mutation, entry });
+      continue;
+    }
+
+    if (mutation.type === "restore_health") {
+      if (mutation.mode === "light_rest") {
+        projectedHealth = Math.max(projectedHealth, Math.ceil(input.snapshot.character.maxHealth * 0.5));
+      } else if (mutation.mode === "full_rest") {
+        projectedHealth = input.snapshot.character.maxHealth;
+      } else {
+        projectedHealth = Math.min(input.snapshot.character.maxHealth, projectedHealth + (mutation.amount ?? 0));
+      }
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "health_restored",
+        summary:
+          mutation.mode === "amount"
+            ? `You recover ${mutation.amount ?? 0} health.`
+            : "You regain your strength.",
+        metadata: mutation as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({ mutation, entry });
+    }
+  }
+
+  return {
+    stateCommitLog,
+    appliedMutations,
+    discoveredInformationIds: Array.from(discoveredInformationIds),
+    nextState: {
+      currentLocationId: projectedLocationId,
+      globalTime: input.snapshot.state.globalTime + input.command.timeElapsed,
+      pendingTurnId: null,
+      lastActionSummary:
+        input.command.memorySummary
+        ?? stateCommitLog.find((entry) => entry.status !== "noop")?.summary
+        ?? "The situation changes.",
+    } satisfies CampaignRuntimeState,
+  };
+}
+
+async function applyMarketTradeMutation(input: {
   tx: Prisma.TransactionClient;
   snapshot: CampaignSnapshot;
-  command: Extract<ValidatedTurnCommand, { type: "execute_trade" }>;
+  mutation: Extract<MechanicsMutation, { type: "commit_market_trade" }>;
   fetchedFacts: TurnFetchToolResult[];
   rollback: TurnRollbackData;
 }) {
   const price = findFetchedMarketPrice(
     input.fetchedFacts,
-    input.command.marketPriceId,
-    input.command.commodityId,
+    input.mutation.marketPriceId,
+    input.mutation.commodityId,
   );
-
   if (!price) {
     throw new Error("Trade commit missing fetched market price.");
   }
 
-  const total = price.price * input.command.quantity;
+  const total = price.price * input.mutation.quantity;
   const characterInstance = await input.tx.characterInstance.findUnique({
     where: { campaignId: input.snapshot.campaignId },
     include: {
       commodityStacks: {
-        where: { commodityId: input.command.commodityId },
+        where: { commodityId: input.mutation.commodityId },
       },
     },
   });
-
   if (!characterInstance) {
     throw new Error("Character instance not found.");
   }
 
   recordInverse(input.rollback, "characterInstance", characterInstance.id, "gold", characterInstance.gold);
 
-  if (input.command.action === "buy") {
+  if (input.mutation.action === "buy") {
     await input.tx.characterInstance.update({
       where: { id: characterInstance.id },
       data: {
@@ -1008,66 +1332,19 @@ async function applyTradeEffects(input: {
         },
       },
     });
-
-    const marketPrice = await input.tx.marketPrice.findUnique({
-      where: { id: input.command.marketPriceId },
-      select: { id: true, stock: true },
+  } else {
+    await input.tx.characterInstance.update({
+      where: { id: characterInstance.id },
+      data: {
+        gold: {
+          increment: total,
+        },
+      },
     });
-    if (marketPrice && marketPrice.stock !== -1) {
-      recordInverse(input.rollback, "marketPrice", marketPrice.id, "stock", marketPrice.stock);
-      await input.tx.marketPrice.update({
-        where: { id: marketPrice.id },
-        data: {
-          stock: {
-            decrement: input.command.quantity,
-          },
-          restockTime: input.snapshot.state.globalTime + 720,
-        },
-      });
-    }
-
-    const existingStack = characterInstance.commodityStacks[0];
-    if (existingStack) {
-      recordInverse(
-        input.rollback,
-        "characterCommodityStack",
-        existingStack.id,
-        "quantity",
-        existingStack.quantity,
-      );
-      await input.tx.characterCommodityStack.update({
-        where: { id: existingStack.id },
-        data: {
-          quantity: {
-            increment: input.command.quantity,
-          },
-        },
-      });
-    } else {
-      const created = await input.tx.characterCommodityStack.create({
-        data: {
-          characterInstanceId: characterInstance.id,
-          commodityId: input.command.commodityId,
-          quantity: input.command.quantity,
-        },
-      });
-      input.rollback.createdCommodityStackIds.push(created.id);
-      recordCreated(input.rollback, "characterCommodityStack", created.id);
-    }
-    return;
   }
 
-  await input.tx.characterInstance.update({
-    where: { id: characterInstance.id },
-    data: {
-      gold: {
-        increment: total,
-      },
-    },
-  });
-
   const marketPrice = await input.tx.marketPrice.findUnique({
-    where: { id: input.command.marketPriceId },
+    where: { id: input.mutation.marketPriceId },
     select: { id: true, stock: true },
   });
   if (marketPrice && marketPrice.stock !== -1) {
@@ -1076,344 +1353,198 @@ async function applyTradeEffects(input: {
       where: { id: marketPrice.id },
       data: {
         stock: {
-          increment: input.command.quantity,
+          [input.mutation.action === "buy" ? "decrement" : "increment"]: input.mutation.quantity,
         },
-      },
+        ...(input.mutation.action === "buy"
+          ? { restockTime: input.snapshot.state.globalTime + 720 }
+          : {}),
+      } as Prisma.MarketPriceUpdateInput,
     });
   }
 
   const existingStack = characterInstance.commodityStacks[0];
+  if (input.mutation.action === "buy") {
+    if (existingStack) {
+      recordInverse(input.rollback, "characterCommodityStack", existingStack.id, "quantity", existingStack.quantity);
+      await input.tx.characterCommodityStack.update({
+        where: { id: existingStack.id },
+        data: {
+          quantity: {
+            increment: input.mutation.quantity,
+          },
+        },
+      });
+    } else {
+      const created = await input.tx.characterCommodityStack.create({
+        data: {
+          characterInstanceId: characterInstance.id,
+          commodityId: input.mutation.commodityId,
+          quantity: input.mutation.quantity,
+        },
+      });
+      input.rollback.createdCommodityStackIds.push(created.id);
+      recordCreated(input.rollback, "characterCommodityStack", created.id);
+    }
+    return;
+  }
+
   if (!existingStack) {
     throw new Error("Commodity stack missing during sell.");
   }
-
-  recordInverse(
-    input.rollback,
-    "characterCommodityStack",
-    existingStack.id,
-    "quantity",
-    existingStack.quantity,
-  );
+  recordInverse(input.rollback, "characterCommodityStack", existingStack.id, "quantity", existingStack.quantity);
   await input.tx.characterCommodityStack.update({
     where: { id: existingStack.id },
     data: {
       quantity: {
-        decrement: input.command.quantity,
+        decrement: input.mutation.quantity,
       },
     },
   });
 }
 
-async function applyCombatEffects(input: {
+async function applyResolvedMutations(input: {
   tx: Prisma.TransactionClient;
   snapshot: CampaignSnapshot;
-  command: Extract<ValidatedTurnCommand, { type: "execute_combat" }>;
-  rollback: TurnRollbackData;
-}) {
-  if (!input.command.checkResult || input.command.checkResult.outcome === "failure") {
-    return [];
-  }
-
-  const target = await input.tx.nPC.findUnique({
-    where: { id: input.command.targetNpcId },
-    select: {
-      id: true,
-      state: true,
-      factionId: true,
-      name: true,
-    },
-  });
-
-  if (!target) {
-    throw new Error("Combat target not found.");
-  }
-
-  let nextState = target.state;
-  if (input.command.approach === "attack") {
-    nextState =
-      target.state === "active"
-        ? "wounded"
-        : target.state === "wounded" || target.state === "incapacitated"
-          ? "dead"
-          : target.state;
-  } else if (input.command.approach === "subdue") {
-    nextState = target.state === "dead" ? "dead" : "incapacitated";
-  } else if (input.command.approach === "assassinate") {
-    nextState = "dead";
-  }
-
-  if (nextState !== target.state) {
-    recordInverse(input.rollback, "nPC", target.id, "state", target.state);
-    await input.tx.nPC.update({
-      where: { id: target.id },
-      data: {
-        state: nextState,
-      },
-    });
-  }
-
-  if (!target.factionId) {
-    return [];
-  }
-
-  await createTestingMoveForFaction({
-    tx: input.tx,
-    campaignId: input.snapshot.campaignId,
-    factionId: target.factionId,
-    scheduledAtTime: input.snapshot.state.globalTime + input.command.timeElapsed + 30,
-    description: `${target.name}'s faction reacts to violence in the area.`,
-    rollback: input.rollback,
-  });
-
-  return [target.factionId];
-}
-
-async function applyRestEffects(input: {
-  tx: Prisma.TransactionClient;
-  snapshot: CampaignSnapshot;
-  command: Extract<ValidatedTurnCommand, { type: "execute_rest" }>;
-  rollback: TurnRollbackData;
-}) {
-  const requiredDuration = input.command.restType === "full" ? 480 : 360;
-  if (input.command.timeElapsed < requiredDuration) {
-    return;
-  }
-
-  const characterInstance = await input.tx.characterInstance.findUnique({
-    where: { campaignId: input.snapshot.campaignId },
-    select: { id: true, health: true },
-  });
-
-  if (!characterInstance) {
-    throw new Error("Character instance not found.");
-  }
-
-  const minimumLightRestHealth = Math.ceil(input.snapshot.character.maxHealth * 0.5);
-  const restoredHealth =
-    input.command.restType === "full"
-      ? input.snapshot.character.maxHealth
-      : Math.max(characterInstance.health, minimumLightRestHealth);
-
-  if (restoredHealth === characterInstance.health) {
-    return;
-  }
-
-  recordInverse(input.rollback, "characterInstance", characterInstance.id, "health", characterInstance.health);
-  await input.tx.characterInstance.update({
-    where: { id: characterInstance.id },
-    data: {
-      health: restoredHealth,
-    },
-  });
-}
-
-async function resolveDiscoveryIds(input: {
-  tx: Prisma.TransactionClient;
-  snapshot: CampaignSnapshot;
-  command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
-}) {
-  const discoveryIntent =
-    "discoveryIntent" in input.command && input.command.discoveryIntent
-      ? input.command.discoveryIntent
-      : "none";
-
-  if (discoveryIntent === "none") {
-    return [];
-  }
-
-  const locationIds = new Set<string>([input.snapshot.currentLocation.id]);
-  const factionIds = new Set<string>();
-  const npcIds = new Set<string>();
-
-  if (input.command.type === "execute_converse" && input.command.npcId) {
-    npcIds.add(input.command.npcId);
-  }
-  if (input.command.type === "execute_investigate" && input.command.targetType === "npc") {
-    npcIds.add(input.command.targetId);
-  }
-  if (input.command.type === "execute_observe" && input.command.targetType === "npc") {
-    npcIds.add(input.command.targetId);
-  }
-  if (input.command.type === "execute_observe" && input.command.targetType === "faction") {
-    factionIds.add(input.command.targetId);
-  }
-  if (input.command.type === "execute_investigate" && input.command.targetType === "location") {
-    locationIds.add(input.command.targetId);
-  }
-
-  for (const npc of input.snapshot.presentNpcs) {
-    if (npc.factionId) {
-      factionIds.add(npc.factionId);
-    }
-  }
-  if (input.snapshot.currentLocation.controllingFactionId) {
-    factionIds.add(input.snapshot.currentLocation.controllingFactionId);
-  }
-
-  const [locationKnowledge, factionKnowledge, npcKnowledge] = await Promise.all([
-    input.tx.locationKnowledge.findMany({
-      where: {
-        campaignId: input.snapshot.campaignId,
-        locationId: {
-          in: Array.from(locationIds),
-        },
-      },
-      select: { informationId: true },
-    }),
-    input.tx.factionKnowledge.findMany({
-      where: {
-        campaignId: input.snapshot.campaignId,
-        factionId: {
-          in: Array.from(factionIds),
-        },
-      },
-      select: { informationId: true },
-    }),
-    input.tx.npcKnowledge.findMany({
-      where: {
-        campaignId: input.snapshot.campaignId,
-        npcId: {
-          in: Array.from(npcIds),
-        },
-        ...(discoveryIntent === "deep"
-          ? {}
-          : {
-              shareability: {
-                not: "private",
-              },
-            }),
-      },
-      select: { informationId: true },
-    }),
-  ]);
-
-  const candidateIds = Array.from(
-    new Set(
-      [...locationKnowledge, ...factionKnowledge, ...npcKnowledge].map(
-        (entry) => entry.informationId,
-      ),
-    ),
-  );
-  if (!candidateIds.length) {
-    return [];
-  }
-
-  const candidates = await input.tx.information.findMany({
-    where: {
-      campaignId: input.snapshot.campaignId,
-      id: {
-        in: candidateIds,
-      },
-      isDiscovered: false,
-    },
-    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
-  });
-
-  const maxDiscoveries = discoveryIntent === "surface" ? 1 : 2;
-
-  return candidates
-    .filter((information) => {
-      if (information.accessibility === "public") {
-        return true;
-      }
-      if (information.accessibility === "guarded") {
-        return true;
-      }
-      return discoveryIntent === "deep" || input.command.type === "execute_investigate";
-    })
-    .slice(0, maxDiscoveries)
-    .map((information) => information.id);
-}
-
-async function applyPlayerActionEffects(input: {
-  tx: Prisma.TransactionClient;
-  snapshot: CampaignSnapshot;
-  command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
+  appliedMutations: AppliedMutationRecord[];
   fetchedFacts: TurnFetchToolResult[];
   rollback: TurnRollbackData;
   nextTurnCount: number;
 }) {
   const affectedFactionIds = new Set<string>();
+  const discoveredInformationIds: string[] = [];
 
-  if (input.command.type === "execute_converse" && input.command.npcId && typeof input.command.relationshipDelta === "number") {
-    const npc = await input.tx.nPC.findUnique({
-      where: { id: input.command.npcId },
-      select: { id: true, approval: true, factionId: true },
-    });
-
-    if (npc) {
+  for (const { mutation } of input.appliedMutations) {
+    if (mutation.type === "adjust_relationship") {
+      const npc = await input.tx.nPC.findUnique({
+        where: { id: mutation.npcId },
+        select: { id: true, approval: true, factionId: true },
+      });
+      if (!npc) {
+        continue;
+      }
       recordInverse(input.rollback, "nPC", npc.id, "approval", npc.approval);
       await input.tx.nPC.update({
         where: { id: npc.id },
         data: {
           approval: {
-            increment: input.command.relationshipDelta,
+            increment: mutation.delta,
           },
         },
       });
       if (npc.factionId) {
         affectedFactionIds.add(npc.factionId);
       }
+      continue;
+    }
+
+    if (mutation.type === "adjust_gold") {
+      const characterInstance = await input.tx.characterInstance.findUnique({
+        where: { campaignId: input.snapshot.campaignId },
+        select: { id: true, gold: true },
+      });
+      if (!characterInstance) {
+        throw new Error("Character instance not found.");
+      }
+      recordInverse(input.rollback, "characterInstance", characterInstance.id, "gold", characterInstance.gold);
+      await input.tx.characterInstance.update({
+        where: { id: characterInstance.id },
+        data: {
+          gold: {
+            increment: mutation.delta,
+          },
+        },
+      });
+      continue;
+    }
+
+    if (mutation.type === "commit_market_trade") {
+      await applyMarketTradeMutation({
+        tx: input.tx,
+        snapshot: input.snapshot,
+        mutation,
+        fetchedFacts: input.fetchedFacts,
+        rollback: input.rollback,
+      });
+      continue;
+    }
+
+    if (mutation.type === "discover_information") {
+      discoveredInformationIds.push(mutation.informationId);
+      continue;
+    }
+
+    if (mutation.type === "set_npc_state") {
+      const npc = await input.tx.nPC.findUnique({
+        where: { id: mutation.npcId },
+        select: { id: true, state: true, factionId: true, name: true },
+      });
+      if (!npc) {
+        continue;
+      }
+      recordInverse(input.rollback, "nPC", npc.id, "state", npc.state);
+      await input.tx.nPC.update({
+        where: { id: npc.id },
+        data: {
+          state: mutation.newState,
+        },
+      });
+      if (npc.factionId) {
+        affectedFactionIds.add(npc.factionId);
+        await createTestingMoveForFaction({
+          tx: input.tx,
+          campaignId: input.snapshot.campaignId,
+          factionId: npc.factionId,
+          scheduledAtTime: input.snapshot.state.globalTime + 30,
+          description: `${npc.name}'s faction reacts to violence in the area.`,
+          rollback: input.rollback,
+        });
+      }
+      continue;
+    }
+
+    if (mutation.type === "restore_health") {
+      const characterInstance = await input.tx.characterInstance.findUnique({
+        where: { campaignId: input.snapshot.campaignId },
+        select: { id: true, health: true },
+      });
+      if (!characterInstance) {
+        throw new Error("Character instance not found.");
+      }
+
+      let restoredHealth = characterInstance.health;
+      if (mutation.mode === "light_rest") {
+        restoredHealth = Math.max(characterInstance.health, Math.ceil(input.snapshot.character.maxHealth * 0.5));
+      } else if (mutation.mode === "full_rest") {
+        restoredHealth = input.snapshot.character.maxHealth;
+      } else {
+        restoredHealth = Math.min(input.snapshot.character.maxHealth, characterInstance.health + (mutation.amount ?? 0));
+      }
+
+      if (restoredHealth !== characterInstance.health) {
+        recordInverse(input.rollback, "characterInstance", characterInstance.id, "health", characterInstance.health);
+        await input.tx.characterInstance.update({
+          where: { id: characterInstance.id },
+          data: {
+            health: restoredHealth,
+          },
+        });
+      }
     }
   }
 
-  const discoverInformationIds = await resolveDiscoveryIds({
-    tx: input.tx,
-    snapshot: input.snapshot,
-    command: input.command,
-  });
-
-  if (discoverInformationIds.length) {
+  if (discoveredInformationIds.length) {
     await applyInformationDiscoveries({
       tx: input.tx,
       snapshot: input.snapshot,
-      ids: discoverInformationIds,
+      ids: discoveredInformationIds,
       nextTurnCount: input.nextTurnCount,
-      rollback: input.rollback,
-    });
-  }
-
-  await trackUnnamedLocalInteraction({
-    tx: input.tx,
-    snapshot: input.snapshot,
-    command: input.command,
-    rollback: input.rollback,
-  });
-
-  if (input.command.type === "execute_trade") {
-    await applyTradeEffects({
-      tx: input.tx,
-      snapshot: input.snapshot,
-      command: input.command,
-      fetchedFacts: input.fetchedFacts,
-      rollback: input.rollback,
-    });
-  }
-
-  if (input.command.type === "execute_combat") {
-    const combatFactions = await applyCombatEffects({
-      tx: input.tx,
-      snapshot: input.snapshot,
-      command: input.command,
-      rollback: input.rollback,
-    });
-    for (const factionId of combatFactions) {
-      affectedFactionIds.add(factionId);
-    }
-  }
-
-  if (input.command.type === "execute_rest") {
-    await applyRestEffects({
-      tx: input.tx,
-      snapshot: input.snapshot,
-      command: input.command,
       rollback: input.rollback,
     });
   }
 
   return {
     affectedFactionIds: Array.from(affectedFactionIds),
-    discoveredInformationIds: discoverInformationIds,
+    discoveredInformationIds,
   };
 }
 
@@ -1620,37 +1751,6 @@ async function runTemporalSimulation(input: {
   }
 }
 
-function determineMemoryKind(command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>) {
-  if (command.type === "execute_combat") {
-    return "conflict" as const;
-  }
-  if (command.type === "execute_trade") {
-    return "trade" as const;
-  }
-  if (command.type === "execute_travel") {
-    return "travel" as const;
-  }
-  if ("discoverInformationIds" in command && command.discoverInformationIds?.length) {
-    return "discovery" as const;
-  }
-  if (command.type === "execute_converse" && (command.relationshipDelta ?? 0) !== 0) {
-    return "relationship_shift" as const;
-  }
-
-  const promiseText = [
-    "memorySummary" in command ? command.memorySummary : null,
-    command.narration,
-  ]
-    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-    .join(" ")
-    .toLowerCase();
-  if (/\b(promise|promised|swear|swore|vow|vowed|agree|agreed|deal|owed|owe|return with|meet again)\b/.test(promiseText)) {
-    return "promise" as const;
-  }
-
-  return "world_change" as const;
-}
-
 function normalizeMemorySummary(value: string | undefined) {
   if (!value) {
     return null;
@@ -1667,7 +1767,7 @@ function normalizeMemorySummary(value: string | undefined) {
 function isSalientMemory(input: {
   command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
   memoryKind: ReturnType<typeof determineMemoryKind>;
-  discoveredInformationIds: string[];
+  stateCommitLog: StateCommitLog;
   scheduleChangeCodes: TurnCausalityCode[];
 }) {
   if (input.memoryKind !== "world_change") {
@@ -1675,59 +1775,79 @@ function isSalientMemory(input: {
   }
 
   return (
-    input.discoveredInformationIds.length > 0
+    input.stateCommitLog.some((entry) => entry.status === "applied" && entry.mutationType === "discover_information")
     || input.scheduleChangeCodes.length > 0
     || input.command.narrationBounds?.wasCapped === true
     || input.command.checkResult?.outcome === "failure"
   );
 }
 
+function determineMemoryKind(input: {
+  command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
+  stateCommitLog: StateCommitLog;
+}) {
+  if (input.stateCommitLog.some((entry) => entry.status === "applied" && entry.mutationType === "set_npc_state")) {
+    return "conflict" as const;
+  }
+  if (input.stateCommitLog.some((entry) => entry.status === "applied" && entry.mutationType === "commit_market_trade")) {
+    return "trade" as const;
+  }
+  if (input.stateCommitLog.some((entry) => entry.status === "applied" && entry.mutationType === "move_player")) {
+    return "travel" as const;
+  }
+  if (input.stateCommitLog.some((entry) => entry.status === "applied" && entry.mutationType === "discover_information")) {
+    return "discovery" as const;
+  }
+  if (input.stateCommitLog.some((entry) => entry.status === "applied" && entry.mutationType === "adjust_relationship")) {
+    return "relationship_shift" as const;
+  }
+
+  const promiseText = input.command.memorySummary?.toLowerCase() ?? "";
+  if (/\b(promise|promised|swear|swore|vow|vowed|agree|agreed|deal|owed|owe|return with|meet again)\b/.test(promiseText)) {
+    return "promise" as const;
+  }
+
+  return "world_change" as const;
+}
+
 function buildSystemFallbackMemorySummary(input: {
   snapshot: CampaignSnapshot;
   command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
   memoryKind: ReturnType<typeof determineMemoryKind>;
-  discoveredInformationIds: string[];
+  stateCommitLog: StateCommitLog;
 }) {
   const locationName = input.snapshot.currentLocation.name;
+  const firstApplied = input.stateCommitLog.find((entry) => entry.status === "applied");
 
   switch (input.memoryKind) {
     case "conflict":
-      return input.command.type === "execute_combat"
-        ? `Violence broke out with ${input.command.targetNpcId} in ${locationName}.`
-        : `Conflict erupted in ${locationName}.`;
+      return `Violence broke out in ${locationName}.`;
     case "promise":
       return `A new obligation took shape in ${locationName}.`;
     case "relationship_shift":
-      return input.command.type === "execute_converse" && input.command.npcId
-        ? `Your exchange with ${input.command.npcId} shifted the relationship in ${locationName}.`
-        : `A relationship shifted in ${locationName}.`;
+      return `A relationship shifted in ${locationName}.`;
     case "discovery":
-      return input.discoveredInformationIds.length === 1
+      return input.stateCommitLog.filter((entry) => entry.status === "applied" && entry.mutationType === "discover_information").length === 1
         ? `You uncovered a new lead in ${locationName}.`
         : `You uncovered new information in ${locationName}.`;
     case "travel":
-      return input.command.type === "execute_travel"
-        ? `You traveled from ${locationName} to ${input.command.targetLocationId}.`
-        : `You traveled onward from ${locationName}.`;
+      return `You traveled onward from ${locationName}.`;
     case "trade":
-      return input.command.type === "execute_trade"
-        ? `You completed a trade involving ${input.command.commodityId} in ${locationName}.`
-        : `Trade shifted the scene in ${locationName}.`;
+      return `Trade shifted the scene in ${locationName}.`;
     case "world_change":
       if (input.command.narrationBounds?.wasCapped) {
         return `Time advanced only to the edge of the committed world window in ${locationName}.`;
       }
-      return `The situation changed in ${locationName}.`;
+      return firstApplied?.summary ?? `The situation changed in ${locationName}.`;
   }
 }
 
 function collectMemoryEntityLinks(input: {
   snapshot: CampaignSnapshot;
-  command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
+  stateCommitLog: StateCommitLog;
   changeCodes: TurnCausalityCode[];
   reasonCodes: TurnCausalityCode[];
   affectedFactionIds: string[];
-  discoveredInformationIds: string[];
 }) {
   const keys: string[] = [];
   const pushKey = (entityType: string, entityId: string | null | undefined) => {
@@ -1736,34 +1856,29 @@ function collectMemoryEntityLinks(input: {
     }
   };
 
-  if (input.command.type === "execute_travel") {
-    pushKey("location", input.command.targetLocationId);
-    pushKey("route", input.command.routeEdgeId);
-  } else {
-    pushKey("location", input.snapshot.currentLocation.id);
-  }
+  pushKey("location", input.snapshot.currentLocation.id);
 
-  if (input.command.type === "execute_converse" && input.command.npcId) {
-    pushKey("npc", input.command.npcId);
-  }
-  if (input.command.type === "execute_combat") {
-    pushKey("npc", input.command.targetNpcId);
-  }
-  if (input.command.type === "execute_trade") {
-    pushKey("commodity", input.command.commodityId);
-  }
-  if (input.command.type === "execute_scene_interaction") {
-    pushKey(input.command.targetType, input.command.targetId);
-  }
-  if (input.command.type === "execute_investigate" || input.command.type === "execute_observe") {
-    pushKey(input.command.targetType === "route" ? "route" : input.command.targetType, input.command.targetId);
+  for (const entry of input.stateCommitLog) {
+    if (!entry.metadata) {
+      continue;
+    }
+    if (entry.mutationType === "move_player") {
+      pushKey("location", typeof entry.metadata.targetLocationId === "string" ? entry.metadata.targetLocationId : null);
+      pushKey("route", typeof entry.metadata.routeEdgeId === "string" ? entry.metadata.routeEdgeId : null);
+    }
+    if (entry.mutationType === "adjust_relationship" || entry.mutationType === "set_npc_state") {
+      pushKey("npc", typeof entry.metadata.npcId === "string" ? entry.metadata.npcId : null);
+    }
+    if (entry.mutationType === "commit_market_trade") {
+      pushKey("commodity", typeof entry.metadata.commodityId === "string" ? entry.metadata.commodityId : null);
+    }
+    if (entry.mutationType === "discover_information") {
+      pushKey("information", typeof entry.metadata.informationId === "string" ? entry.metadata.informationId : null);
+    }
   }
 
   for (const factionId of input.affectedFactionIds) {
     pushKey("faction", factionId);
-  }
-  for (const informationId of input.discoveredInformationIds) {
-    pushKey("information", informationId);
   }
   for (const code of [...input.changeCodes, ...input.reasonCodes]) {
     pushKey(code.entityType, code.targetId);
@@ -1781,10 +1896,10 @@ function collectMemoryEntityLinks(input: {
 function buildTurnCausality(input: {
   snapshot: CampaignSnapshot;
   command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
-  discoveredInformationIds: string[];
+  stateCommitLog: StateCommitLog;
+  nextState: CampaignRuntimeState;
   scheduleChangeCodes: TurnCausalityCode[];
 }) {
-  const nextState = nextStateFromCommand(input.snapshot, input.command);
   const changeCodes: TurnCausalityCode[] = [
     {
       code: "TIME_ADVANCED",
@@ -1796,115 +1911,90 @@ function buildTurnCausality(input: {
   ];
   const reasonCodes: TurnCausalityCode[] = [];
 
-  if (nextState.currentLocationId !== input.snapshot.state.currentLocationId) {
+  if (input.nextState.currentLocationId !== input.snapshot.state.currentLocationId) {
     changeCodes.push({
       code: "LOCATION_CHANGED",
       entityType: "location",
-      targetId: nextState.currentLocationId,
-      metadata: { label: nextState.currentLocationId },
+      targetId: input.nextState.currentLocationId,
+      metadata: { label: input.nextState.currentLocationId },
     });
     reasonCodes.push({
       code: "PLAYER_TRAVEL",
       entityType: "location",
-      targetId: nextState.currentLocationId,
+      targetId: input.nextState.currentLocationId,
       metadata: null,
     });
   }
 
-  if (input.command.type === "execute_converse" && input.command.npcId && (input.command.relationshipDelta ?? 0) !== 0) {
-    changeCodes.push({
-      code: "NPC_APPROVAL_CHANGED",
-      entityType: "npc",
-      targetId: input.command.npcId,
-      delta: input.command.relationshipDelta ?? 0,
-      metadata: { label: input.command.interlocutor },
-    });
-    reasonCodes.push({
-      code: "PLAYER_CONVERSATION",
-      entityType: "npc",
-      targetId: input.command.npcId,
-      metadata: { label: input.command.interlocutor },
-    });
-  }
-
-  if (input.command.type === "execute_combat") {
-    reasonCodes.push({
-      code: "PLAYER_COMBAT",
-      entityType: "npc",
-      targetId: input.command.targetNpcId,
-      metadata: null,
-    });
-    changeCodes.push({
-      code: "NPC_STATE_CHANGED",
-      entityType: "npc",
-      targetId: input.command.targetNpcId,
-      metadata: null,
-    });
-  }
-
-  if (input.command.type === "execute_trade") {
-    reasonCodes.push({
-      code: "PLAYER_TRADE",
-      entityType: "commodity",
-      targetId: input.command.commodityId,
-      metadata: null,
-    });
-  }
-
-  if (input.command.type === "execute_scene_interaction") {
-    reasonCodes.push({
-      code: "PLAYER_SCENE_INTERACTION",
-      entityType: input.command.targetType,
-      targetId: input.command.targetId,
-      metadata: null,
-    });
-  }
-
-  if (input.command.type === "execute_rest") {
-    reasonCodes.push({
-      code: "PLAYER_REST",
-      entityType: "character",
-      targetId: input.snapshot.character.id,
-      minutes: input.command.timeElapsed,
-      metadata: null,
-    });
-  }
-
-  if (input.command.type === "execute_wait") {
-    reasonCodes.push({
-      code: "PLAYER_WAIT",
-      entityType: "campaign",
-      targetId: input.snapshot.campaignId,
-      minutes: input.command.timeElapsed,
-      metadata: null,
-    });
-  }
-
-  if (input.command.type === "execute_investigate") {
-    reasonCodes.push({
-      code: "PLAYER_INVESTIGATION",
-      entityType: input.command.targetType === "route" ? "route" : input.command.targetType,
-      targetId: input.command.targetId,
-      metadata: null,
-    });
-  }
-
-  if (input.command.type === "execute_observe") {
-    reasonCodes.push({
-      code: "PLAYER_OBSERVATION",
-      entityType: input.command.targetType === "route" ? "route" : input.command.targetType,
-      targetId: input.command.targetId,
-      metadata: null,
-    });
-  }
-
-  for (const informationId of input.discoveredInformationIds) {
-    changeCodes.push({
-      code: "INFORMATION_DISCOVERED",
-      entityType: "information",
-      targetId: informationId,
-      metadata: { label: informationId },
-    });
+  for (const entry of input.stateCommitLog) {
+    if (entry.status !== "applied") {
+      continue;
+    }
+    if (entry.mutationType === "adjust_relationship") {
+      changeCodes.push({
+        code: "NPC_APPROVAL_CHANGED",
+        entityType: "npc",
+        targetId: typeof entry.metadata?.npcId === "string" ? entry.metadata.npcId : null,
+        delta: typeof entry.metadata?.delta === "number" ? entry.metadata.delta : null,
+        metadata: null,
+      });
+      reasonCodes.push({
+        code: "PLAYER_CONVERSATION",
+        entityType: "npc",
+        targetId: typeof entry.metadata?.npcId === "string" ? entry.metadata.npcId : null,
+        metadata: null,
+      });
+    }
+    if (entry.mutationType === "set_npc_state") {
+      changeCodes.push({
+        code: "NPC_STATE_CHANGED",
+        entityType: "npc",
+        targetId: typeof entry.metadata?.npcId === "string" ? entry.metadata.npcId : null,
+        metadata: null,
+      });
+      reasonCodes.push({
+        code: "PLAYER_COMBAT",
+        entityType: "npc",
+        targetId: typeof entry.metadata?.npcId === "string" ? entry.metadata.npcId : null,
+        metadata: null,
+      });
+    }
+    if (entry.mutationType === "commit_market_trade") {
+      reasonCodes.push({
+        code: "PLAYER_TRADE",
+        entityType: "commodity",
+        targetId: typeof entry.metadata?.commodityId === "string" ? entry.metadata.commodityId : null,
+        metadata: null,
+      });
+    }
+    if (entry.mutationType === "discover_information") {
+      changeCodes.push({
+        code: "INFORMATION_DISCOVERED",
+        entityType: "information",
+        targetId: typeof entry.metadata?.informationId === "string" ? entry.metadata.informationId : null,
+        metadata: null,
+      });
+      reasonCodes.push({
+        code: "PLAYER_INVESTIGATION",
+        entityType: "information",
+        targetId: typeof entry.metadata?.informationId === "string" ? entry.metadata.informationId : null,
+        metadata: null,
+      });
+    }
+    if (entry.mutationType === "restore_health") {
+      changeCodes.push({
+        code: "CHARACTER_HEALTH_CHANGED",
+        entityType: "character",
+        targetId: input.snapshot.character.id,
+        metadata: null,
+      });
+      reasonCodes.push({
+        code: input.command.timeMode === "rest" ? "PLAYER_REST" : "PLAYER_ACTION",
+        entityType: "character",
+        targetId: input.snapshot.character.id,
+        metadata: null,
+      });
+    }
   }
 
   if (input.command.narrationBounds?.wasCapped) {
@@ -1929,7 +2019,12 @@ function buildTurnCausality(input: {
 
   if (!reasonCodes.length) {
     reasonCodes.push({
-      code: "PLAYER_ACTION",
+      code:
+        input.command.timeMode === "rest"
+          ? "PLAYER_REST"
+          : input.command.timeMode === "combat"
+            ? "PLAYER_COMBAT"
+            : "PLAYER_ACTION",
       entityType: "campaign",
       targetId: input.snapshot.campaignId,
       metadata: null,
@@ -1937,7 +2032,7 @@ function buildTurnCausality(input: {
   }
 
   return {
-    nextState,
+    nextState: input.nextState,
     changeCodes,
     reasonCodes,
   };
@@ -1953,7 +2048,8 @@ async function commitResolvedTurn(input: {
   turnMode: TurnMode;
   command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
   fetchedFacts: TurnFetchToolResult[];
-}): Promise<TurnResultPayload> {
+  routerDecision: RouterDecision;
+}): Promise<{ resultPayload: TurnResultPayload; memoryEntryId: string | null }> {
   const {
     snapshot,
     sessionId,
@@ -1964,16 +2060,25 @@ async function commitResolvedTurn(input: {
     turnMode,
     command,
     fetchedFacts,
+    routerDecision,
   } = input;
   const nextTurnCount = snapshot.sessionTurnCount + 1;
   const rollback = emptyRollback(snapshot);
   let resultPayload: TurnResultPayload | null = null;
+  let memoryEntryId: string | null = null;
 
   await prisma.$transaction(async (tx) => {
-    const actionEffects = await applyPlayerActionEffects({
-      tx,
+    const evaluated = evaluateResolvedCommand({
       snapshot,
       command,
+      fetchedFacts,
+      routerDecision,
+    });
+
+    const actionEffects = await applyResolvedMutations({
+      tx,
+      snapshot,
+      appliedMutations: evaluated.appliedMutations,
       fetchedFacts,
       rollback,
       nextTurnCount,
@@ -1982,15 +2087,15 @@ async function commitResolvedTurn(input: {
     const causality = buildTurnCausality({
       snapshot,
       command,
-      discoveredInformationIds: actionEffects.discoveredInformationIds,
+      stateCommitLog: evaluated.stateCommitLog,
+      nextState: evaluated.nextState,
       scheduleChangeCodes: [],
     });
-    const nextState = causality.nextState;
 
     await runTemporalSimulation({
       tx,
       snapshot,
-      nextState,
+      nextState: evaluated.nextState,
       rollback,
       initialAffectedFactionIds: actionEffects.affectedFactionIds,
     });
@@ -1998,7 +2103,7 @@ async function commitResolvedTurn(input: {
     const scheduleChangeCodes = await enqueueFutureScheduleBuffer({
       tx,
       snapshot,
-      nextState,
+      nextState: evaluated.nextState,
       turnId,
       rollback,
     });
@@ -2006,7 +2111,8 @@ async function commitResolvedTurn(input: {
     const finalCausality = buildTurnCausality({
       snapshot,
       command,
-      discoveredInformationIds: actionEffects.discoveredInformationIds,
+      stateCommitLog: evaluated.stateCommitLog,
+      nextState: evaluated.nextState,
       scheduleChangeCodes,
     });
 
@@ -2020,7 +2126,7 @@ async function commitResolvedTurn(input: {
         stateVersion: {
           increment: 1,
         },
-        stateJson: toCampaignRuntimeStateJson(nextState),
+        stateJson: toCampaignRuntimeStateJson(evaluated.nextState),
         turnLockRequestId: null,
         turnLockSessionId: null,
         turnLockExpiresAt: null,
@@ -2065,25 +2171,6 @@ async function commitResolvedTurn(input: {
       });
     }
 
-    await createMessage({
-      tx,
-      sessionId,
-      role: "assistant",
-      kind: "narration",
-      content:
-        command.type === "execute_freeform" && command.checkResult?.outcome === "failure"
-          ? `${command.narration}\n\n${command.failureConsequence ?? "The attempt costs time and exposes a new complication."}`
-          : command.narration,
-      payload: {
-        suggestedActions: command.suggestedActions,
-        fetchedFacts,
-        checkResult: command.checkResult ?? null,
-        whatChanged: renderWhatChanged(finalCausality.changeCodes),
-        why: renderWhy(finalCausality.reasonCodes),
-      } as unknown as Prisma.JsonObject,
-      rollback,
-    });
-
     for (const warning of command.warnings) {
       await createMessage({
         tx,
@@ -2095,14 +2182,15 @@ async function commitResolvedTurn(input: {
       });
     }
 
-    const memoryKind = determineMemoryKind(command);
-    const modelMemorySummary = "memorySummary" in command
-      ? normalizeMemorySummary(command.memorySummary)
-      : null;
+    const memoryKind = determineMemoryKind({
+      command,
+      stateCommitLog: evaluated.stateCommitLog,
+    });
+    const modelMemorySummary = normalizeMemorySummary(command.memorySummary);
     const shouldRecordMemory = modelMemorySummary != null || isSalientMemory({
       command,
       memoryKind,
-      discoveredInformationIds: actionEffects.discoveredInformationIds,
+      stateCommitLog: evaluated.stateCommitLog,
       scheduleChangeCodes,
     });
 
@@ -2111,15 +2199,14 @@ async function commitResolvedTurn(input: {
         snapshot,
         command,
         memoryKind,
-        discoveredInformationIds: actionEffects.discoveredInformationIds,
+        stateCommitLog: evaluated.stateCommitLog,
       });
       const memoryEntityLinks = collectMemoryEntityLinks({
         snapshot,
-        command,
+        stateCommitLog: evaluated.stateCommitLog,
         changeCodes: finalCausality.changeCodes,
         reasonCodes: finalCausality.reasonCodes,
         affectedFactionIds: actionEffects.affectedFactionIds,
-        discoveredInformationIds: actionEffects.discoveredInformationIds,
       });
 
       if (!memorySummary) {
@@ -2139,10 +2226,11 @@ async function commitResolvedTurn(input: {
             || memoryKind === "relationship_shift",
           summary: memorySummary,
           summarySource: modelMemorySummary ? "model" : "system_fallback",
-          narrativeNote: command.narration,
+          narrativeNote: null,
         },
       });
       rollback.createdMemoryIds.push(memory.id);
+      memoryEntryId = memory.id;
 
       for (const [index, entityLink] of memoryEntityLinks.entries()) {
         const link = await tx.memoryEntityLink.create({
@@ -2165,6 +2253,7 @@ async function commitResolvedTurn(input: {
       whatChanged: renderWhatChanged(finalCausality.changeCodes),
       why: renderWhy(finalCausality.reasonCodes),
       warnings: command.warnings,
+      stateCommitLog: evaluated.stateCommitLog,
       narrationBounds: command.narrationBounds ?? null,
       checkResult: command.checkResult ?? null,
       rollback,
@@ -2187,7 +2276,10 @@ async function commitResolvedTurn(input: {
     throw new Error("Resolved turn commit did not produce a result payload.");
   }
 
-  return resultPayload;
+  return {
+    resultPayload,
+    memoryEntryId,
+  };
 }
 
 async function executeFetchTool(
@@ -2304,6 +2396,96 @@ async function executeFetchTool(
   return { type: call.type, result };
 }
 
+async function executeRequiredPrerequisites(input: {
+  snapshot: CampaignSnapshot;
+  prerequisites: RouterDecision["requiredPrerequisites"];
+}) {
+  const fetchedFacts: TurnFetchToolResult[] = [];
+
+  for (const prerequisite of input.prerequisites) {
+    const call: TurnFetchToolCall =
+      prerequisite.type === "market_prices"
+        ? { type: "fetch_market_prices", locationId: prerequisite.locationId }
+        : prerequisite.type === "npc_detail"
+          ? { type: "fetch_npc_detail", npcId: prerequisite.npcId }
+          : prerequisite.type === "faction_intel"
+            ? { type: "fetch_faction_intel", factionId: prerequisite.factionId }
+            : prerequisite.type === "information_detail"
+              ? { type: "fetch_information_detail", informationId: prerequisite.informationId }
+              : prerequisite.type === "information_connections"
+                ? { type: "fetch_information_connections", informationIds: prerequisite.informationIds }
+                : { type: "fetch_relationship_history", npcId: prerequisite.npcId };
+
+    fetchedFacts.push(await executeFetchTool(input.snapshot, call));
+  }
+
+  return fetchedFacts;
+}
+
+function deterministicNarrationFallback(input: {
+  playerAction: string;
+  stateCommitLog: StateCommitLog;
+  checkResult?: CheckResult | null;
+}) {
+  const applied = input.stateCommitLog
+    .filter((entry) => entry.status === "applied" && entry.kind === "mutation")
+    .map((entry) => entry.summary);
+  const rejected = input.stateCommitLog
+    .filter((entry) => entry.status === "rejected")
+    .map((entry) => entry.summary);
+
+  const sentences: string[] = [];
+  if (applied.length) {
+    sentences.push(applied.join(" "));
+  } else if (input.checkResult?.outcome === "failure") {
+    sentences.push("Your attempt does not take hold.");
+  } else {
+    sentences.push("The turn resolves without a lasting change.");
+  }
+  if (rejected.length) {
+    sentences.push(rejected.join(" "));
+  }
+
+  return sentences.join(" ").trim();
+}
+
+async function persistResolvedTurnNarration(input: {
+  sessionId: string;
+  turnId: string;
+  narration: string;
+  suggestedActions: string[];
+  fetchedFacts: TurnFetchToolResult[];
+  checkResult: CheckResult | null;
+  whatChanged: string[];
+  why: string[];
+  memoryEntryId: string | null;
+}) {
+  await prisma.message.create({
+    data: {
+      sessionId: input.sessionId,
+      role: "assistant",
+      kind: "narration",
+      content: input.narration,
+      payload: {
+        suggestedActions: input.suggestedActions,
+        fetchedFacts: input.fetchedFacts,
+        checkResult: input.checkResult,
+        whatChanged: input.whatChanged,
+        why: input.why,
+      } as unknown as Prisma.JsonObject,
+    },
+  });
+
+  if (input.memoryEntryId) {
+    await prisma.memoryEntry.update({
+      where: { id: input.memoryEntryId },
+      data: {
+        narrativeNote: input.narration,
+      },
+    });
+  }
+}
+
 export { TIME_MODE_BOUNDS };
 export const engineTestUtils = {
   toPromotedTemporaryActorDescriptor,
@@ -2311,7 +2493,8 @@ export const engineTestUtils = {
   toPromotedTemporaryActorRole,
   requestHashForSubmission,
   promptContextProfileForRouter,
-  isRepairableTurnValidationError,
+  deterministicNarrationFallback,
+  evaluateResolvedCommand,
 };
 
 async function buildStateConflictPayload(input: {
@@ -2756,14 +2939,15 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       activeThreadCount: snapshot.activeThreads.length,
     });
 
-    const routerClassification =
+    const routerDecision =
       turnMode === "observe" || intent?.type === "travel_route"
         ? ({
             profile: "full",
             confidence: "low",
-            authorizedCommitments: [],
+            authorizedVectors: [],
+            requiredPrerequisites: [],
             reason: "Router classification skipped for observe mode or explicitly committed travel.",
-          } satisfies RouterClassification)
+          } satisfies RouterDecision)
         : await dmClient.classifyTurnIntent({
             playerAction,
             turnMode,
@@ -2775,14 +2959,15 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       sessionId: input.sessionId,
       requestId: input.requestId,
       turnId: turn.id,
-      profile: routerClassification.profile,
-      confidence: routerClassification.confidence,
-      authorizedCommitments: routerClassification.authorizedCommitments,
-      reason: routerClassification.reason,
+      profile: routerDecision.profile,
+      confidence: routerDecision.confidence,
+      authorizedVectors: routerDecision.authorizedVectors,
+      requiredPrerequisites: routerDecision.requiredPrerequisites,
+      reason: routerDecision.reason,
     });
     const promptContext = await getPromptContext(
       snapshot,
-      promptContextProfileForRouter(routerClassification),
+      promptContextProfileForRouter(routerDecision),
     );
     const narrationOverride =
       intent?.type === "travel_route"
@@ -2796,6 +2981,59 @@ export async function triageTurn(input: TurnSubmissionRequest & {
             playerAction,
             snapshot,
           });
+    let fetchedFacts: TurnFetchToolResult[] = [];
+    if (intent?.type !== "travel_route") {
+      try {
+        fetchedFacts = await executeRequiredPrerequisites({
+          snapshot,
+          prerequisites: routerDecision.requiredPrerequisites,
+        });
+      } catch (error) {
+        if (
+          error instanceof FetchSynchronizationError
+          || (error instanceof Error && error.name === "FetchSynchronizationError")
+        ) {
+          await prisma.turn.update({
+            where: { id: turn.id },
+            data: {
+              status: "clarification_requested",
+              resultJson: toPrismaJsonValue(toTurnResultPayloadJson({
+                stateVersionAfter: snapshot.stateVersion,
+                changeCodes: [],
+                reasonCodes: [],
+                whatChanged: [],
+                why: [],
+                warnings: [],
+                stateCommitLog: [],
+                narrationBounds: null,
+                checkResult: null,
+                rollback: null,
+                clarification: {
+                  question:
+                    "That detail is still synchronizing into the world. Do you want to try again in a moment or do something else first?",
+                  options: ["Try again", "Wait a moment", "Do something else"],
+                },
+                error: null,
+              })),
+            },
+          });
+          await cleanupTurnLock({
+            campaignId: input.campaignId,
+            requestId: input.requestId,
+          });
+
+          return {
+            type: "clarification" as const,
+            turnId: turn.id,
+            question:
+              "That detail is still synchronizing into the world. Do you want to try again in a moment or do something else first?",
+            options: ["Try again", "Wait a moment", "Do something else"],
+            warnings: [],
+          };
+        }
+        throw error;
+      }
+    }
     const resolution: TurnResolution =
       intent?.type === "travel_route"
         ? await (async () => {
@@ -2807,21 +3045,34 @@ export async function triageTurn(input: TurnSubmissionRequest & {
               throw new Error("Travel intent target does not match the selected route.");
             }
 
-            return dmClient.runExplicitTravelTurn({
-              promptContext,
-              character: snapshot.character,
-              playerAction,
-              route,
-              signal: abortController.signal,
-            });
+            return {
+              command: {
+                type: "resolve_mechanics",
+                timeMode: "travel",
+                suggestedActions: [],
+                memorySummary: `You travel to ${route.targetLocationName}.`,
+                mutations: [
+                  {
+                    type: "move_player",
+                    routeEdgeId: route.id,
+                    targetLocationId: route.targetLocationId,
+                  },
+                  {
+                    type: "advance_time",
+                    durationMinutes: route.travelTimeMinutes,
+                  },
+                ],
+              },
+              fetchedFacts: [],
+            } satisfies TurnResolution;
           })()
         : await dmClient.runTurn({
             promptContext,
-            routerClassification,
+            routerDecision,
             character: snapshot.character,
             playerAction: narrationOverride.playerActionForModel,
             turnMode,
-            executeFetchTool: (call) => executeFetchTool(snapshot, call),
+            fetchedFacts,
             signal: abortController.signal,
           });
     logBackendDiagnostic("turn.provider.resolved", {
@@ -2837,59 +3088,12 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       throw new TurnAbandonedError("Turn resolution was aborted before commit.");
     }
 
-    let resolvedCommand = resolution.command;
-    let validated: ValidatedTurnCommand;
-    try {
-      validated = validateTurnCommand({
-        snapshot,
-        command: resolvedCommand,
-        fetchedFacts: resolution.fetchedFacts,
-        routerClassification,
-        playerAction,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (
-        resolvedCommand.type !== "request_clarification"
-        && isRepairableTurnValidationError(message)
-      ) {
-        logBackendDiagnostic("turn.repair.start", {
-          campaignId: input.campaignId,
-          sessionId: input.sessionId,
-          requestId: input.requestId,
-          turnId: turn.id,
-          previousCommandType: resolvedCommand.type,
-          validationError: message,
-        });
-        resolvedCommand = await dmClient.repairTurn({
-          promptContext,
-          routerClassification,
-          character: snapshot.character,
-          playerAction,
-          turnMode,
-          fetchedFacts: resolution.fetchedFacts,
-          previousCommand: resolvedCommand,
-          validationError: message,
-          signal: abortController.signal,
-        });
-        logBackendDiagnostic("turn.repair.resolved", {
-          campaignId: input.campaignId,
-          sessionId: input.sessionId,
-          requestId: input.requestId,
-          turnId: turn.id,
-          repairedCommandType: resolvedCommand.type,
-        });
-        validated = validateTurnCommand({
-          snapshot,
-          command: resolvedCommand,
-          fetchedFacts: resolution.fetchedFacts,
-          routerClassification,
-          playerAction,
-        });
-      } else {
-        throw error;
-      }
-    }
+    const validated = validateTurnCommand({
+      snapshot,
+      command: resolution.command,
+      fetchedFacts: resolution.fetchedFacts,
+      playerAction,
+    });
 
     if (validated.type === "request_clarification") {
       logBackendDiagnostic("turn.clarification_requested", {
@@ -2942,7 +3146,6 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       requestedAdvanceMinutes: narrationOverride.requestedAdvanceMinutes,
     });
 
-    input.stream?.narration?.(committedCommand.narration);
     if (committedCommand.checkResult) {
       input.stream?.checkResult?.(committedCommand.checkResult);
     }
@@ -2957,7 +3160,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       commandType: committedCommand.type,
       expectedStateVersion: input.expectedStateVersion,
     });
-    const resultPayload = await commitResolvedTurn({
+    const committed = await commitResolvedTurn({
       snapshot,
       sessionId: input.sessionId,
       turnId: turn.id,
@@ -2967,6 +3170,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       turnMode,
       command: committedCommand,
       fetchedFacts: resolution.fetchedFacts,
+      routerDecision,
     });
     commitStarted = false;
     activeCommitTurnKeys.delete(turnKey);
@@ -2975,9 +3179,9 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       sessionId: input.sessionId,
       requestId: input.requestId,
       turnId: turn.id,
-      stateVersionAfter: resultPayload.stateVersionAfter,
-      changeCount: resultPayload.changeCodes.length,
-      reasonCount: resultPayload.reasonCodes.length,
+      stateVersionAfter: committed.resultPayload.stateVersionAfter,
+      changeCount: committed.resultPayload.changeCodes.length,
+      reasonCount: committed.resultPayload.reasonCodes.length,
     });
     void wakeScheduleGenerationJobs().catch((error) => {
       console.error("[schedule-jobs] Wake failed after commit.", error);
@@ -2989,14 +3193,50 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       });
     });
 
+    let narration: string;
+    try {
+      narration = await dmClient.narrateResolvedTurn({
+        playerAction,
+        stateCommitLog: committed.resultPayload.stateCommitLog ?? [],
+        checkResult: committed.resultPayload.checkResult ?? null,
+        suggestedActions: dedupeStrings(committedCommand.suggestedActions),
+        signal: abortController.signal,
+      });
+    } catch (error) {
+      narration = deterministicNarrationFallback({
+        playerAction,
+        stateCommitLog: committed.resultPayload.stateCommitLog ?? [],
+        checkResult: committed.resultPayload.checkResult ?? null,
+      });
+      logBackendDiagnostic("turn.narration.fallback", {
+        campaignId: input.campaignId,
+        requestId: input.requestId,
+        turnId: turn.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    await persistResolvedTurnNarration({
+      sessionId: input.sessionId,
+      turnId: turn.id,
+      narration,
+      suggestedActions: dedupeStrings(committedCommand.suggestedActions),
+      fetchedFacts: resolution.fetchedFacts,
+      checkResult: committed.resultPayload.checkResult ?? null,
+      whatChanged: committed.resultPayload.whatChanged,
+      why: committed.resultPayload.why,
+      memoryEntryId: committed.memoryEntryId,
+    });
+    input.stream?.narration?.(narration);
+
     return {
       type: "resolved" as const,
       turnId: turn.id,
-      narration: committedCommand.narration,
+      narration,
       suggestedActions: dedupeStrings(committedCommand.suggestedActions),
       warnings: committedCommand.warnings,
       checkResult: committedCommand.checkResult,
-      result: resultPayload,
+      result: committed.resultPayload,
     };
   } catch (error) {
     if (error instanceof StateConflictError) {

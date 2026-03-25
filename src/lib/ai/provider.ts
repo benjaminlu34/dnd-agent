@@ -20,6 +20,7 @@ import {
 } from "@/lib/game/session-zero";
 import type {
   CampaignCharacter,
+  CheckResult,
   CharacterTemplate,
   CharacterTemplateDraft,
   GeneratedDailySchedule,
@@ -31,17 +32,17 @@ import type {
   PromotedNpcHydrationDraft,
   PromptContextProfile,
   ResolvedLaunchEntry,
-  RouterAuthorizedCommitment,
-  RouterClassification,
-  RouteSummary,
+  ResolveMechanicsResponse,
+  RouterAuthorizedVector,
+  RouterDecision,
   SpatialPromptContext,
   TurnActionToolCall,
-  TurnFetchToolCall,
   TurnFetchToolResult,
   TurnMode,
   TurnModelToolCall,
   TurnRouterContext,
   TurnResolution,
+  StateCommitLog,
   WorldGenerationStageName,
 } from "@/lib/game/types";
 import {
@@ -60,7 +61,6 @@ import {
   getWorldGenerationStageRunningMessage,
   type WorldGenerationProgressUpdate,
 } from "@/lib/game/world-generation-progress";
-import { FetchSynchronizationError } from "@/lib/game/errors";
 
 type CampaignOpeningInput = {
   module: GeneratedWorldModule;
@@ -140,31 +140,19 @@ type PromotedNpcHydrationInput = {
 
 type TurnInput = {
   promptContext: SpatialPromptContext;
-  routerClassification: RouterClassification;
-  character: CampaignCharacter;
-  playerAction: string;
-  turnMode: TurnMode;
-  executeFetchTool: (call: TurnFetchToolCall) => Promise<TurnFetchToolResult>;
-  signal?: AbortSignal;
-};
-
-type TurnRepairInput = {
-  promptContext: SpatialPromptContext;
-  routerClassification: RouterClassification;
+  routerDecision: RouterDecision;
   character: CampaignCharacter;
   playerAction: string;
   turnMode: TurnMode;
   fetchedFacts: TurnFetchToolResult[];
-  previousCommand: TurnActionToolCall;
-  validationError: string;
   signal?: AbortSignal;
 };
 
-type ExplicitTravelTurnInput = {
-  promptContext: SpatialPromptContext;
-  character: CampaignCharacter;
+type ResolvedTurnNarrationInput = {
   playerAction: string;
-  route: RouteSummary;
+  stateCommitLog: StateCommitLog;
+  checkResult?: CheckResult | null;
+  suggestedActions: string[];
   signal?: AbortSignal;
 };
 
@@ -1242,83 +1230,6 @@ function normalizeSchedulePayloadIds(
   );
 }
 
-function canonicalizeRecentUnnamedLocalLabel(
-  label: string,
-  promptContext: SpatialPromptContext,
-) {
-  const normalized = label.trim().replace(/\s+/g, " ");
-  if (!normalized) {
-    return normalized;
-  }
-
-  const match = promptContext.recentUnnamedLocals.find(
-    (entry) => entry.label.trim().toLowerCase() === normalized.toLowerCase(),
-  );
-
-  return match?.label ?? normalized;
-}
-
-function hasHydratedNpcDetailFact(
-  fetchedFacts: TurnFetchToolResult[],
-  npcId: string,
-) {
-  return fetchedFacts.some(
-    (fact) =>
-      fact.type === "fetch_npc_detail"
-      && idsReferToSameEntity(fact.result.id, npcId)
-      && fact.result.isNarrativelyHydrated,
-  );
-}
-
-function findNpcRequiringDetailFetch(
-  command: TurnActionToolCall,
-  promptContext: SpatialPromptContext,
-) {
-  const findPresentNpc = (npcId: string) =>
-    promptContext.presentNpcs.find((npc) => idsReferToSameEntity(npc.id, npcId)) ?? null;
-
-  if (command.type === "execute_converse" && command.npcId) {
-    const npc = findPresentNpc(command.npcId);
-    return npc?.requiresDetailFetch ? npc : null;
-  }
-
-  if (command.type === "execute_combat") {
-    const npc = findPresentNpc(command.targetNpcId);
-    return npc?.requiresDetailFetch ? npc : null;
-  }
-
-  if (
-    (command.type === "execute_investigate" || command.type === "execute_observe")
-    && command.targetType === "npc"
-  ) {
-    const npc = findPresentNpc(command.targetId);
-    return npc?.requiresDetailFetch ? npc : null;
-  }
-
-  return null;
-}
-
-function isSameSceneNpcApproachMisroutedAsTravel(
-  command: TurnActionToolCall,
-  promptContext: SpatialPromptContext,
-) {
-  if (command.type !== "execute_travel") {
-    return false;
-  }
-
-  const citedPresentNpc = command.citedEntities.npcIds.find((npcId) =>
-    promptContext.presentNpcs.some((npc) => idsReferToSameEntity(npc.id, npcId)),
-  );
-  const citesCurrentLocation = command.citedEntities.locationIds.some((locationId) =>
-    idsReferToSameEntity(locationId, promptContext.currentLocation.id),
-  );
-  const citesDestination = command.citedEntities.locationIds.some((locationId) =>
-    idsReferToSameEntity(locationId, command.targetLocationId),
-  );
-
-  return Boolean(citedPresentNpc && citesCurrentLocation && !citesDestination);
-}
-
 function formatCorrectionNotes(stage: WorldGenerationStageName, category: StageValidation["category"], issues: string[]) {
   return [
     `<correction stage="${stage}" category="${category}">`,
@@ -2256,585 +2167,183 @@ const dailyWorldScheduleTool = {
   input_schema: z.toJSONSchema(dailyWorldScheduleSchema),
 };
 
-const citedEntitiesInputSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    npcIds: { type: "array", items: { type: "string" } },
-    locationIds: { type: "array", items: { type: "string" } },
-    factionIds: { type: "array", items: { type: "string" } },
-    commodityIds: { type: "array", items: { type: "string" } },
-    informationIds: { type: "array", items: { type: "string" } },
-  },
-  required: ["npcIds", "locationIds", "factionIds", "commodityIds", "informationIds"],
-} satisfies Record<string, unknown>;
-
-const citedEntitiesSchema = z.object({
-  npcIds: z.array(z.string().trim().min(1)),
-  locationIds: z.array(z.string().trim().min(1)),
-  factionIds: z.array(z.string().trim().min(1)),
-  commodityIds: z.array(z.string().trim().min(1)),
-  informationIds: z.array(z.string().trim().min(1)),
-});
-
 const requestClarificationSchema = z.object({
   type: z.literal("request_clarification"),
   question: z.string().trim().min(1),
   options: z.array(z.string().trim().min(1)).max(4),
 });
 
-const executeTravelSchema = z.object({
-  type: z.literal("execute_travel"),
-  routeEdgeId: z.string().trim().min(1),
-  targetLocationId: z.string().trim().min(1),
-  narration: z.string().trim().min(1).max(800),
-  suggestedActions: z.array(z.string().trim().min(1)).max(4),
-  timeMode: z.enum(["travel"]),
-  citedEntities: citedEntitiesSchema,
+const requestClarificationTool = createStructuredTool(
+  "request_clarification",
+  "Ask the player to clarify when the action cannot be safely mapped.",
+  requestClarificationSchema.omit({ type: true }),
+);
+
+const requiredPrerequisiteSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("market_prices"),
+    locationId: z.string().trim().min(1),
+  }),
+  z.object({
+    type: z.literal("npc_detail"),
+    npcId: z.string().trim().min(1),
+  }),
+  z.object({
+    type: z.literal("faction_intel"),
+    factionId: z.string().trim().min(1),
+  }),
+  z.object({
+    type: z.literal("information_detail"),
+    informationId: z.string().trim().min(1),
+  }),
+  z.object({
+    type: z.literal("information_connections"),
+    informationIds: z.array(z.string().trim().min(1)).min(1).max(4),
+  }),
+  z.object({
+    type: z.literal("relationship_history"),
+    npcId: z.string().trim().min(1),
+  }),
+]);
+
+const routerDecisionSchema = z.object({
+  profile: z.enum(["local", "full"]),
+  confidence: z.enum(["high", "low"]),
+  authorizedVectors: z
+    .array(z.enum(["economy_light", "economy_strict", "violence", "converse", "investigate"]))
+    .max(5)
+    .default([]),
+  requiredPrerequisites: z.array(requiredPrerequisiteSchema).max(3).default([]),
+  reason: z.string().trim().min(1).max(240),
 });
 
-const executeCombatSchema = z.object({
-  type: z.literal("execute_combat"),
-  targetNpcId: z.string().trim().min(1),
-  approach: z.enum(["attack", "subdue", "assassinate"]),
+const checkIntentSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("challenge"),
+    reason: z.string().trim().min(1).max(240),
+    challengeApproach: z.enum(["force", "finesse", "endure", "analyze", "notice", "influence"]),
+    citedNpcId: z.string().trim().min(1).optional(),
+    mode: z.enum(["normal", "advantage", "disadvantage"]).optional(),
+  }),
+  z.object({
+    type: z.literal("combat"),
+    reason: z.string().trim().min(1).max(240),
+    targetNpcId: z.string().trim().min(1),
+    approach: z.enum(["attack", "subdue", "assassinate"]),
+    mode: z.enum(["normal", "advantage", "disadvantage"]).optional(),
+  }),
+]);
+
+const mechanicsMutationSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("advance_time"),
+    durationMinutes: z.number().int().positive().max(2880).optional(),
+  }),
+  z.object({
+    type: z.literal("move_player"),
+    routeEdgeId: z.string().trim().min(1),
+    targetLocationId: z.string().trim().min(1),
+  }),
+  z.object({
+    type: z.literal("adjust_gold"),
+    delta: z.number().int(),
+    reason: z.string().trim().min(1).max(120),
+  }),
+  z.object({
+    type: z.literal("commit_market_trade"),
+    action: z.enum(["buy", "sell"]),
+    marketPriceId: z.string().trim().min(1),
+    commodityId: z.string().trim().min(1),
+    quantity: z.number().int().positive(),
+  }),
+  z.object({
+    type: z.literal("adjust_relationship"),
+    npcId: z.string().trim().min(1),
+    delta: z.number().int(),
+    reason: z.string().trim().min(1).max(120),
+  }),
+  z.object({
+    type: z.literal("discover_information"),
+    informationId: z.string().trim().min(1),
+  }),
+  z.object({
+    type: z.literal("set_npc_state"),
+    npcId: z.string().trim().min(1),
+    newState: z.enum(["active", "wounded", "incapacitated", "dead"]),
+  }),
+  z.object({
+    type: z.literal("restore_health"),
+    mode: z.enum(["light_rest", "full_rest", "amount"]),
+    amount: z.number().int().positive().optional(),
+  }),
+]);
+
+const resolveMechanicsSchema = z.object({
+  type: z.literal("resolve_mechanics"),
+  timeMode: z.enum(["combat", "exploration", "travel", "rest", "downtime"]),
   durationMagnitude: z.enum(["instant", "brief", "standard", "extended", "long"]).optional(),
-  challengeApproach: z.enum(["force", "finesse", "endure", "analyze", "notice", "influence"]).optional(),
-  narration: z.string().trim().min(1).max(800),
-  suggestedActions: z.array(z.string().trim().min(1)).max(4),
-  timeMode: z.enum(["combat", "exploration"]),
-  citedEntities: citedEntitiesSchema,
+  suggestedActions: z.array(z.string().trim().min(1)).max(4).default([]),
   memorySummary: z.string().trim().min(1).max(240).optional(),
-});
-
-const executeConverseSchema = z.object({
-  type: z.literal("execute_converse"),
-  interlocutor: z.string().trim().min(1),
-  npcId: z.string().trim().min(1).optional(),
-  topic: z.string().trim().min(1),
-  narration: z.string().trim().min(1).max(800),
-  suggestedActions: z.array(z.string().trim().min(1)).max(4),
-  timeMode: z.enum(["combat", "exploration", "downtime"]),
-  durationMagnitude: z.enum(["instant", "brief", "standard", "extended", "long"]).optional(),
-  citedEntities: citedEntitiesSchema,
-  relationshipMove: z.enum(["worsen", "slip", "steady", "warm", "bond"]).optional(),
-  discoveryIntent: z.enum(["none", "surface", "focused", "deep"]).optional(),
-  memorySummary: z.string().trim().min(1).max(240).optional(),
-});
-
-const executeInvestigateSchema = z.object({
-  type: z.literal("execute_investigate"),
-  targetType: z.enum(["location", "npc", "route", "information"]),
-  targetId: z.string().trim().min(1),
-  method: z.string().trim().min(1),
-  narration: z.string().trim().min(1).max(800),
-  suggestedActions: z.array(z.string().trim().min(1)).max(4),
-  timeMode: z.enum(["combat", "exploration", "downtime"]),
-  durationMagnitude: z.enum(["instant", "brief", "standard", "extended", "long"]).optional(),
-  citedEntities: citedEntitiesSchema,
-  discoveryIntent: z.enum(["none", "surface", "focused", "deep"]).optional(),
-  memorySummary: z.string().trim().min(1).max(240).optional(),
-});
-
-const executeObserveSchema = z.object({
-  type: z.literal("execute_observe"),
-  targetType: z.enum(["location", "npc", "route", "faction"]),
-  targetId: z.string().trim().min(1),
-  narration: z.string().trim().min(1).max(800),
-  suggestedActions: z.array(z.string().trim().min(1)).max(4),
-  timeMode: z.enum(["combat", "exploration", "downtime"]),
-  durationMagnitude: z.enum(["instant", "brief", "standard", "extended", "long"]).optional(),
-  citedEntities: citedEntitiesSchema,
-  discoveryIntent: z.enum(["none", "surface", "focused", "deep"]).optional(),
-  memorySummary: z.string().trim().min(1).max(240).optional(),
-});
-
-const executeSceneInteractionSchema = z.object({
-  type: z.literal("execute_scene_interaction"),
-  targetType: z.enum(["location", "npc"]),
-  targetId: z.string().trim().min(1),
-  approach: z.string().trim().min(1),
-  narration: z.string().trim().min(1).max(800),
-  suggestedActions: z.array(z.string().trim().min(1)).max(4),
-  timeMode: z.enum(["exploration", "downtime"]),
-  durationMagnitude: z.enum(["instant", "brief", "standard", "extended", "long"]).optional(),
-  citedEntities: citedEntitiesSchema,
-  memorySummary: z.string().trim().min(1).max(240).optional(),
-});
-
-const executeWaitSchema = z.object({
-  type: z.literal("execute_wait"),
-  durationMinutes: z.number().int().positive(),
-  narration: z.string().trim().min(1).max(800),
-  suggestedActions: z.array(z.string().trim().min(1)).max(4),
-  timeMode: z.enum(["exploration", "downtime"]),
-  durationMagnitude: z.enum(["instant", "brief", "standard", "extended", "long"]).optional(),
-  citedEntities: citedEntitiesSchema,
-  memorySummary: z.string().trim().min(1).max(240).optional(),
-});
-
-const executeTradeSchema = z.object({
-  type: z.literal("execute_trade"),
-  action: z.enum(["buy", "sell"]),
-  marketPriceId: z.string().trim().min(1),
-  commodityId: z.string().trim().min(1),
-  quantity: z.number().int().positive(),
-  narration: z.string().trim().min(1).max(800),
-  suggestedActions: z.array(z.string().trim().min(1)).max(4),
-  timeMode: z.enum(["exploration", "downtime"]),
-  durationMagnitude: z.enum(["instant", "brief", "standard", "extended", "long"]).optional(),
-  citedEntities: citedEntitiesSchema,
-  memorySummary: z.string().trim().min(1).max(240).optional(),
-});
-
-const executeRestSchema = z.object({
-  type: z.literal("execute_rest"),
-  restType: z.enum(["light", "full"]),
-  narration: z.string().trim().min(1).max(800),
-  suggestedActions: z.array(z.string().trim().min(1)).max(4),
-  timeMode: z.enum(["rest"]),
-  citedEntities: citedEntitiesSchema,
-  memorySummary: z.string().trim().min(1).max(240).optional(),
-});
-
-const executeFreeformSchema = z.object({
-  type: z.literal("execute_freeform"),
-  actionDescription: z.string().trim().min(1),
-  timeMode: z.enum(["combat", "exploration", "downtime"]),
-  durationMagnitude: z.enum(["instant", "brief", "standard", "extended", "long"]).optional(),
-  requiresCheck: z.boolean().optional(),
-  intendedMechanicalOutcome: z.string().trim().min(1),
-  challengeApproach: z.enum(["force", "finesse", "endure", "analyze", "notice", "influence"]),
-  failureConsequence: z.string().trim().min(1).optional(),
-  narration: z.string().trim().min(1).max(800),
-  suggestedActions: z.array(z.string().trim().min(1)).max(4),
-  citedEntities: citedEntitiesSchema,
-  memorySummary: z.string().trim().min(1).max(240).optional(),
+  checkIntent: checkIntentSchema.optional(),
+  mutations: z.array(mechanicsMutationSchema).max(8).default([]),
 });
 
 const turnActionToolCallSchema = z.discriminatedUnion("type", [
   requestClarificationSchema,
-  executeTravelSchema,
-  executeCombatSchema,
-  executeConverseSchema,
-  executeInvestigateSchema,
-  executeObserveSchema,
-  executeSceneInteractionSchema,
-  executeWaitSchema,
-  executeTradeSchema,
-  executeRestSchema,
-  executeFreeformSchema,
+  resolveMechanicsSchema,
 ]);
 
-const routerClassificationSchema = z.object({
-  profile: z.enum(["local", "full"]),
-  confidence: z.enum(["high", "low"]),
-  authorizedCommitments: z
-    .array(z.enum(["trade", "combat", "investigate", "converse"]))
-    .max(4)
-    .default([]),
-  reason: z.string().trim().min(1).max(240),
-});
-
-const fetchTools = [
-  {
-    name: "fetch_npc_detail",
-    description: "Fetch deeper detail for a visible NPC before choosing the final action.",
-    input_schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        npcId: { type: "string" },
-      },
-      required: ["npcId"],
-    },
-  },
-  {
-    name: "fetch_market_prices",
-    description: "Fetch authoritative commodity prices, stock, and legality for a location before trading.",
-    input_schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        locationId: { type: "string" },
-      },
-      required: ["locationId"],
-    },
-  },
-  {
-    name: "fetch_faction_intel",
-    description: "Fetch faction relations, controlled locations, and visible scheduled moves.",
-    input_schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        factionId: { type: "string" },
-      },
-      required: ["factionId"],
-    },
-  },
-  {
-    name: "fetch_information_detail",
-    description: "Fetch the full content of already discovered information.",
-    input_schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        informationId: { type: "string" },
-      },
-      required: ["informationId"],
-    },
-  },
-  {
-    name: "fetch_information_connections",
-    description: "Follow known information links up to two hops without auto-discovering anything.",
-    input_schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        informationIds: {
-          type: "array",
-          items: { type: "string" },
-        },
-      },
-      required: ["informationIds"],
-    },
-  },
-  {
-    name: "fetch_relationship_history",
-    description: "Fetch the player's prior remembered relationship history with an NPC.",
-    input_schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        npcId: { type: "string" },
-      },
-      required: ["npcId"],
-    },
-  },
-] as const;
-
-const actionTools = [
-  {
-    name: "execute_travel",
-    description: "Travel along a known adjacent route.",
-    input_schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        routeEdgeId: { type: "string" },
-        targetLocationId: { type: "string" },
-        narration: { type: "string" },
-        suggestedActions: { type: "array", items: { type: "string" } },
-        timeMode: { type: "string", enum: ["travel"] },
-        citedEntities: citedEntitiesInputSchema,
-      },
-      required: [
-        "routeEdgeId",
-        "targetLocationId",
-        "narration",
-        "suggestedActions",
-        "timeMode",
-        "citedEntities",
-      ],
-    },
-  },
-  {
-    name: "execute_combat",
-    description: "Handle direct violence or subdual against a present NPC target.",
-    input_schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        targetNpcId: { type: "string" },
-        approach: { type: "string", enum: ["attack", "subdue", "assassinate"] },
-        durationMagnitude: { type: "string", enum: ["instant", "brief", "standard", "extended", "long"] },
-        challengeApproach: { type: "string", enum: ["force", "finesse", "endure", "analyze", "notice", "influence"] },
-        memorySummary: { type: "string" },
-        narration: { type: "string" },
-        suggestedActions: { type: "array", items: { type: "string" } },
-        timeMode: { type: "string", enum: ["combat", "exploration"] },
-        citedEntities: citedEntitiesInputSchema,
-      },
-      required: [
-        "targetNpcId",
-        "approach",
-        "narration",
-        "suggestedActions",
-        "timeMode",
-        "citedEntities",
-      ],
-    },
-  },
-  {
-    name: "execute_converse",
-    description: "Speak with a named present NPC or an unnamed local person in the current scene about a specific topic.",
-    input_schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        interlocutor: {
-          type: "string",
-          description: "Short label for who answers, such as a present NPC name or an unnamed local like 'nearest harvester'.",
-        },
-        npcId: { type: "string" },
-        topic: { type: "string" },
-        durationMagnitude: { type: "string", enum: ["instant", "brief", "standard", "extended", "long"] },
-        relationshipMove: { type: "string", enum: ["worsen", "slip", "steady", "warm", "bond"] },
-        discoveryIntent: { type: "string", enum: ["none", "surface", "focused", "deep"] },
-        memorySummary: { type: "string" },
-        narration: { type: "string" },
-        suggestedActions: { type: "array", items: { type: "string" } },
-        timeMode: { type: "string", enum: ["exploration", "downtime", "combat"] },
-        citedEntities: citedEntitiesInputSchema,
-      },
-      required: ["interlocutor", "topic", "narration", "suggestedActions", "timeMode", "citedEntities"],
-    },
-  },
-  {
-    name: "execute_investigate",
-    description: "Investigate a location, NPC, route, or information lead.",
-    input_schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        targetType: { type: "string", enum: ["location", "npc", "route", "information"] },
-        targetId: { type: "string" },
-        method: { type: "string" },
-        durationMagnitude: { type: "string", enum: ["instant", "brief", "standard", "extended", "long"] },
-        discoveryIntent: { type: "string", enum: ["none", "surface", "focused", "deep"] },
-        memorySummary: { type: "string" },
-        narration: { type: "string" },
-        suggestedActions: { type: "array", items: { type: "string" } },
-        timeMode: { type: "string", enum: ["exploration", "downtime", "combat"] },
-        citedEntities: citedEntitiesInputSchema,
-      },
-      required: [
-        "targetType",
-        "targetId",
-        "method",
-        "narration",
-        "suggestedActions",
-        "timeMode",
-        "citedEntities",
-      ],
-    },
-  },
-  {
-    name: "execute_observe",
-    description: "Observe a place, route, faction presence, or NPC.",
-    input_schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        targetType: { type: "string", enum: ["location", "npc", "route", "faction"] },
-        targetId: { type: "string" },
-        durationMagnitude: { type: "string", enum: ["instant", "brief", "standard", "extended", "long"] },
-        discoveryIntent: { type: "string", enum: ["none", "surface", "focused", "deep"] },
-        memorySummary: { type: "string" },
-        narration: { type: "string" },
-        suggestedActions: { type: "array", items: { type: "string" } },
-        timeMode: { type: "string", enum: ["exploration", "downtime", "combat"] },
-        citedEntities: citedEntitiesInputSchema,
-      },
-      required: [
-        "targetType",
-        "targetId",
-        "narration",
-        "suggestedActions",
-        "timeMode",
-        "citedEntities",
-      ],
-    },
-  },
-  {
-    name: "execute_scene_interaction",
-    description: "Initiate low-commitment interaction with a present NPC or the current location without committing to trade, questioning, or investigation.",
-    input_schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        targetType: { type: "string", enum: ["location", "npc"] },
-        targetId: { type: "string" },
-        approach: { type: "string" },
-        durationMagnitude: { type: "string", enum: ["instant", "brief", "standard", "extended", "long"] },
-        memorySummary: { type: "string" },
-        narration: { type: "string" },
-        suggestedActions: { type: "array", items: { type: "string" } },
-        timeMode: { type: "string", enum: ["exploration", "downtime"] },
-        citedEntities: citedEntitiesInputSchema,
-      },
-      required: [
-        "targetType",
-        "targetId",
-        "approach",
-        "narration",
-        "suggestedActions",
-        "timeMode",
-        "citedEntities",
-      ],
-    },
-  },
-  {
-    name: "execute_wait",
-    description: "Wait and let time pass.",
-    input_schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        durationMinutes: { type: "number" },
-        durationMagnitude: { type: "string", enum: ["instant", "brief", "standard", "extended", "long"] },
-        memorySummary: { type: "string" },
-        narration: { type: "string" },
-        suggestedActions: { type: "array", items: { type: "string" } },
-        timeMode: { type: "string", enum: ["exploration", "downtime"] },
-        citedEntities: citedEntitiesInputSchema,
-      },
-      required: [
-        "durationMinutes",
-        "narration",
-        "suggestedActions",
-        "timeMode",
-        "citedEntities",
-      ],
-    },
-  },
-  {
-    name: "execute_trade",
-    description: "Buy or sell a commodity using an authoritative fetched market price record.",
-    input_schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        action: { type: "string", enum: ["buy", "sell"] },
-        marketPriceId: { type: "string" },
-        commodityId: { type: "string" },
-        quantity: { type: "number" },
-        durationMagnitude: { type: "string", enum: ["instant", "brief", "standard", "extended", "long"] },
-        memorySummary: { type: "string" },
-        narration: { type: "string" },
-        suggestedActions: { type: "array", items: { type: "string" } },
-        timeMode: { type: "string", enum: ["exploration", "downtime"] },
-        citedEntities: citedEntitiesInputSchema,
-      },
-      required: [
-        "action",
-        "marketPriceId",
-        "commodityId",
-        "quantity",
-        "narration",
-        "suggestedActions",
-        "timeMode",
-        "citedEntities",
-      ],
-    },
-  },
-  {
-    name: "execute_rest",
-    description: "Take a fixed engine-owned light or full rest.",
-    input_schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        restType: { type: "string", enum: ["light", "full"] },
-        memorySummary: { type: "string" },
-        narration: { type: "string" },
-        suggestedActions: { type: "array", items: { type: "string" } },
-        timeMode: { type: "string", enum: ["rest"] },
-        citedEntities: citedEntitiesInputSchema,
-      },
-      required: [
-        "restType",
-        "narration",
-        "suggestedActions",
-        "timeMode",
-        "citedEntities",
-      ],
-    },
-  },
-  {
-    name: "execute_freeform",
-    description: "Handle a creative action outside the standard typed tools.",
-    input_schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        actionDescription: { type: "string" },
-        timeMode: { type: "string", enum: ["combat", "exploration", "downtime"] },
-        durationMagnitude: { type: "string", enum: ["instant", "brief", "standard", "extended", "long"] },
-        requiresCheck: { type: "boolean" },
-        intendedMechanicalOutcome: { type: "string" },
-        challengeApproach: { type: "string", enum: ["force", "finesse", "endure", "analyze", "notice", "influence"] },
-        failureConsequence: { type: "string" },
-        memorySummary: { type: "string" },
-        narration: { type: "string" },
-        suggestedActions: { type: "array", items: { type: "string" } },
-        citedEntities: citedEntitiesInputSchema,
-      },
-      required: [
-        "actionDescription",
-        "timeMode",
-        "challengeApproach",
-        "intendedMechanicalOutcome",
-        "narration",
-        "suggestedActions",
-        "citedEntities",
-      ],
-    },
-  },
-  {
-    name: "request_clarification",
-    description: "Ask for clarification when the player's intent cannot be safely mapped.",
-    input_schema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        question: { type: "string" },
-        options: {
-          type: "array",
-          items: { type: "string" },
-        },
-      },
-      required: ["question", "options"],
-    },
-  },
-];
-
-const turnTools = [...fetchTools, ...actionTools];
-const repairTurnTools = actionTools.filter((tool) => tool.name !== "fetch_market_prices");
-
-const explicitTravelNarrationSchema = z.object({
-  narration: z.string().trim().min(1).max(800),
-  suggestedActions: z.array(z.string().trim().min(1)).max(4).default([]),
-  memorySummary: z.string().trim().min(1).max(240).optional(),
-});
-
-const explicitTravelNarrationTool = createStructuredTool(
-  "narrate_explicit_travel",
-  "Narrate a player-committed departure, journey, and arrival for the fixed route already chosen by the player.",
-  explicitTravelNarrationSchema,
+const resolveMechanicsTool = createStructuredTool(
+  "resolve_mechanics",
+  "Return the bounded mechanical plan for this turn using only engine-validated mutations.",
+  resolveMechanicsSchema.omit({ type: true }),
 );
 
 const classifyTurnIntentTool = createStructuredTool(
   "classify_turn_intent",
-  "Classify the turn's context scope and which strong commitment types are explicitly authorized by the player's wording.",
-  routerClassificationSchema,
+  "Choose prompt scope, authorization vectors, and deterministic prerequisite fetches for the turn.",
+  routerDecisionSchema,
 );
 
-function normalizeRouterClassification(value: RouterClassification): RouterClassification {
-  const deduped = Array.from(new Set(value.authorizedCommitments));
+const resolvedTurnNarrationSchema = z.object({
+  narration: z.string().trim().min(1).max(800),
+});
+
+const resolvedTurnNarrationTool = createStructuredTool(
+  "narrate_resolved_turn",
+  "Generate player-facing Dungeon Master narration using only the committed state log and the player's action.",
+  resolvedTurnNarrationSchema,
+);
+
+function normalizeRouterDecision(value: RouterDecision): RouterDecision {
+  const dedupedVectors = Array.from(new Set(value.authorizedVectors));
+  const seenPrerequisites = new Set<string>();
+  const requiredPrerequisites = value.requiredPrerequisites.filter((entry) => {
+    const key =
+      entry.type === "information_connections"
+        ? `${entry.type}:${entry.informationIds.join(",")}`
+        : `${entry.type}:${Object.values(entry).slice(1).join(",")}`;
+    if (seenPrerequisites.has(key)) {
+      return false;
+    }
+    seenPrerequisites.add(key);
+    return true;
+  });
   return {
     profile: value.profile,
     confidence: value.confidence,
-    authorizedCommitments: deduped,
+    authorizedVectors: dedupedVectors,
+    requiredPrerequisites,
     reason: value.reason.trim(),
   };
 }
 
-function fallbackRouterClassification(reason: string): RouterClassification {
+function fallbackRouterDecision(reason: string): RouterDecision {
   return {
     profile: "full",
     confidence: "low",
-    authorizedCommitments: [],
+    authorizedVectors: [],
+    requiredPrerequisites: [],
     reason,
   };
 }
@@ -2845,41 +2354,21 @@ function zodIssuesToText(issues: z.ZodIssue[]) {
     .join("; ");
 }
 
-function selectPromptContextProfile(classification: RouterClassification): PromptContextProfile {
-  return classification.confidence === "high" ? classification.profile : "full";
+function selectPromptContextProfile(decision: RouterDecision): PromptContextProfile {
+  return decision.confidence === "high" ? decision.profile : "full";
 }
 
-function forbiddenStrongTools(classification: RouterClassification) {
-  const authorized = new Set(classification.authorizedCommitments);
-  const forbidden: string[] = [];
-
-  if (!authorized.has("trade")) {
-    forbidden.push("execute_trade", "fetch_market_prices");
-  }
-  if (!authorized.has("combat")) {
-    forbidden.push("execute_combat");
-  }
-  if (!authorized.has("investigate")) {
-    forbidden.push("execute_investigate");
-  }
-  if (!authorized.has("converse")) {
-    forbidden.push("execute_converse");
-  }
-
-  return forbidden;
-}
-
-function buildRouterConstraintsBlock(classification: RouterClassification) {
+function buildRouterConstraintsBlock(decision: RouterDecision) {
   return {
-    profile: classification.profile,
-    profileConfidence: classification.confidence,
-    authorizedCommitments: classification.authorizedCommitments,
-    forbiddenStrongTools: forbiddenStrongTools(classification),
-    reason: classification.reason,
+    profile: decision.profile,
+    profileConfidence: decision.confidence,
+    authorizedVectors: decision.authorizedVectors,
+    requiredPrerequisites: decision.requiredPrerequisites,
+    reason: decision.reason,
   };
 }
 
-function parseFinalActionToolCall(command: TurnActionToolCall | null) {
+function parseFinalActionToolCall(command: unknown) {
   return turnActionToolCallSchema.safeParse(command);
 }
 
@@ -2932,294 +2421,57 @@ function extractToolInput(response: OpenAI.Chat.Completions.ChatCompletion) {
   };
 }
 
-function normalizeFetchToolCall(input: {
-  toolName: string | null;
-  payload: unknown;
-}): TurnFetchToolCall | null {
-  const { toolName, payload } = input;
-
-  if (!toolName || !payload || typeof payload !== "object" || Array.isArray(payload)) {
-    return null;
-  }
-
-  const record = payload as Record<string, unknown>;
-
-  if (toolName === "fetch_npc_detail" && typeof record.npcId === "string") {
-    return {
-      type: toolName,
-      npcId: normalizeScopedEntityId(record.npcId, "npc", "npc"),
-    };
-  }
-
-  if (toolName === "fetch_market_prices" && typeof record.locationId === "string") {
-    return {
-      type: toolName,
-      locationId: normalizeScopedEntityId(record.locationId, "location", "loc"),
-    };
-  }
-
-  if (toolName === "fetch_faction_intel" && typeof record.factionId === "string") {
-    return {
-      type: toolName,
-      factionId: normalizeScopedEntityId(record.factionId, "faction", "fac"),
-    };
-  }
-
-  if (toolName === "fetch_information_detail" && typeof record.informationId === "string") {
-    return {
-      type: toolName,
-      informationId: normalizeScopedEntityId(record.informationId, "information", "info"),
-    };
-  }
-
-  if (toolName === "fetch_information_connections" && Array.isArray(record.informationIds)) {
-    return {
-      type: toolName,
-      informationIds: record.informationIds
-        .filter((entry): entry is string => typeof entry === "string")
-        .map((entry) => normalizeScopedEntityId(entry, "information", "info"))
-        .filter(Boolean),
-    };
-  }
-
-  if (toolName === "fetch_relationship_history" && typeof record.npcId === "string") {
-    return {
-      type: toolName,
-      npcId: normalizeScopedEntityId(record.npcId, "npc", "npc"),
-    };
-  }
-
-  return null;
-}
-
-function normalizeTurnToolCall(input: {
-  toolName: string | null;
-  payload: unknown;
-  promptContext: SpatialPromptContext;
-}): TurnActionToolCall | null {
-  const { toolName, payload, promptContext } = input;
-
-  if (!toolName || !payload || typeof payload !== "object" || Array.isArray(payload)) {
-    return null;
-  }
-
-  const record = payload as Record<string, unknown>;
-  const sanitizedCitedEntities = sanitizeCitedEntities(record.citedEntities);
-  const normalizedRecord = sanitizedCitedEntities
-    ? {
-        ...record,
-        citedEntities: sanitizedCitedEntities,
-      }
-    : record;
-
-  if (toolName === "execute_converse") {
-    const npcId =
-      typeof normalizedRecord.npcId === "string" && normalizedRecord.npcId.trim()
-        ? normalizeScopedEntityId(normalizedRecord.npcId, "npc", "npc")
-        : undefined;
-    const namedNpc = npcId
-      ? promptContext.presentNpcs.find((npc) => idsReferToSameEntity(npc.id, npcId)) ?? null
-      : null;
-    const interlocutor = npcId
-      ? namedNpc?.name ?? "unnamed local"
-      : typeof normalizedRecord.interlocutor === "string" && normalizedRecord.interlocutor.trim()
-        ? canonicalizeRecentUnnamedLocalLabel(normalizedRecord.interlocutor, promptContext)
-        : "unnamed local";
-
-    return {
-      type: toolName,
-      ...normalizedRecord,
-      interlocutor,
-      npcId,
-    } as TurnActionToolCall;
-  }
-
-  if (toolName === "execute_combat" && typeof normalizedRecord.targetNpcId === "string") {
-    return {
-      type: toolName,
-      ...normalizedRecord,
-      targetNpcId: normalizeScopedEntityId(normalizedRecord.targetNpcId, "npc", "npc"),
-    } as TurnActionToolCall;
-  }
-
-  if (toolName === "execute_travel" && typeof normalizedRecord.targetLocationId === "string") {
-    return {
-      type: toolName,
-      ...normalizedRecord,
-      targetLocationId: normalizeScopedEntityId(normalizedRecord.targetLocationId, "location", "loc"),
-    } as TurnActionToolCall;
-  }
-
-  if (
-    toolName === "execute_investigate"
-    && typeof normalizedRecord.targetType === "string"
-    && typeof normalizedRecord.targetId === "string"
-  ) {
-    const targetId =
-      normalizedRecord.targetType === "npc"
-        ? normalizeScopedEntityId(normalizedRecord.targetId, "npc", "npc")
-        : normalizedRecord.targetType === "location"
-          ? normalizeScopedEntityId(normalizedRecord.targetId, "location", "loc")
-          : normalizedRecord.targetType === "information"
-            ? normalizeScopedEntityId(normalizedRecord.targetId, "information", "info")
-            : normalizedRecord.targetId.trim();
-
-    return {
-      type: toolName,
-      ...normalizedRecord,
-      targetId,
-    } as TurnActionToolCall;
-  }
-
-  if (
-    toolName === "execute_observe"
-    && typeof normalizedRecord.targetType === "string"
-    && typeof normalizedRecord.targetId === "string"
-  ) {
-    const targetId =
-      normalizedRecord.targetType === "npc"
-        ? normalizeScopedEntityId(normalizedRecord.targetId, "npc", "npc")
-        : normalizedRecord.targetType === "location"
-          ? normalizeScopedEntityId(normalizedRecord.targetId, "location", "loc")
-          : normalizedRecord.targetType === "faction"
-            ? normalizeScopedEntityId(normalizedRecord.targetId, "faction", "fac")
-            : normalizedRecord.targetId.trim();
-
-    return {
-      type: toolName,
-      ...normalizedRecord,
-      targetId,
-    } as TurnActionToolCall;
-  }
-
-  if (
-    toolName === "execute_scene_interaction"
-    && typeof normalizedRecord.targetType === "string"
-    && typeof normalizedRecord.targetId === "string"
-  ) {
-    const targetId =
-      normalizedRecord.targetType === "npc"
-        ? normalizeScopedEntityId(normalizedRecord.targetId, "npc", "npc")
-        : normalizeScopedEntityId(normalizedRecord.targetId, "location", "loc");
-
-    return {
-      type: toolName,
-      ...normalizedRecord,
-      targetId,
-    } as TurnActionToolCall;
-  }
-
-  return {
-    type: toolName,
-    ...normalizedRecord,
-  } as TurnActionToolCall;
-}
-
-function normalizeModelToolCall(input: {
-  toolName: string | null;
-  payload: unknown;
-  promptContext: SpatialPromptContext;
-}): TurnModelToolCall | null {
-  const fetchToolCall = normalizeFetchToolCall({
-    toolName: input.toolName,
-    payload: input.payload,
-  });
-
-  if (fetchToolCall) {
-    return fetchToolCall;
-  }
-
-  return normalizeTurnToolCall(input);
-}
-
 function isObservePermittedFinalTool(command: TurnModelToolCall | null) {
   return (
-    command?.type === "execute_observe"
-    || command?.type === "execute_wait"
+    command?.type === "resolve_mechanics"
     || command?.type === "request_clarification"
+  );
+}
+
+function isObserveMechanicsPayloadSafe(command: ResolveMechanicsResponse) {
+  if (command.timeMode === "combat" || command.timeMode === "travel" || command.timeMode === "rest") {
+    return false;
+  }
+
+  return command.mutations.every((mutation) =>
+    mutation.type === "advance_time" || mutation.type === "discover_information",
   );
 }
 
 function buildTurnSystemPrompt(turnMode: TurnMode) {
   return turnMode === "observe"
     ? [
-        "You are the player's senses and passive scene router in a simulated world.",
-        "The player character takes no chosen action and speaks no dialogue in this turn.",
-        "You may call up to 3 fetch tools before the final action tool.",
-        "After any fetches, end with exactly one action tool or request_clarification.",
-        "Do not invent named mechanical entities outside the provided context.",
-        "Keep payloads compact: narration should be 2-5 sentences, topic/method/actionDescription should be short phrases, memorySummary should be one short sentence, and suggestedActions should contain at most 4 short actions.",
-        "Every executable tool call must include timeMode, narration, suggestedActions, and citedEntities.",
-        "Narration is always player-facing Dungeon Master prose written in second person. Describe the player character as 'you'. Do not narrate the player character's actions in first person.",
-        "For execute_observe and execute_scene_interaction, narration should usually be 2-5 sentences and include at least one concrete sensory or environmental detail beyond the bare action summary.",
-        "Make the prose feel immediate and embodied. Favor specific sensory details, memorable scene texture, and natural sentence rhythm over flat summary.",
-        "Show mood, tone, and tension through concrete detail, pacing, and behavior rather than abstract labels.",
-        "When dialogue or quoted speech appears, make it sound natural and characterful while staying grounded in the provided context.",
-        "Do not merely restate or paraphrase the player's submitted action. Resolve it into at least one new concrete development, reaction, reply, obstacle, offer, or newly noticed detail.",
-        "Every turn should leave the scene in a more specific, changed, or newly clarified state than it was before the player acted.",
-        "After the setup beat, deliver a forward-moving beat and advance the story: a reaction, answer, reveal, offer, obstacle, or changed opportunity, forming new plot,",
-        "End narration at a natural handoff point that preserves the player's agency for the next move.",
-        "Use durationMagnitude only as a bounded hint when the action is not travel or fixed rest.",
+        "You are the mechanical planner for a passive observation turn in a simulated world.",
+        "Return exactly one structured payload using resolve_mechanics or request_clarification.",
+        "Do not output narration or any freeform prose.",
+        "The router has already chosen scope and prerequisite fetches. Do not ask for more fetches.",
+        "Use only bounded mutations. The engine will validate, filter, and commit them.",
         "Advance the scene or world only through passive observation or waiting.",
-        "Describe only what the player character notices, what changes around them, or what unfolds without player initiative.",
-        "You MUST invoke exactly one of execute_observe or execute_wait.",
-        "You are STRICTLY FORBIDDEN from invoking execute_combat, execute_converse, execute_scene_interaction, execute_trade, execute_freeform, execute_travel, execute_investigate, or execute_rest.",
+        "Do not create combat, market trade, or deliberate social escalation in observe mode.",
+        "If a check is needed, set checkIntent and list only the success-state mutations. The engine will reject them on failure.",
+        "Use advance_time for passive waiting or observation windows.",
+        "Suggested actions should stay short and concrete.",
         "Use request_clarification only if the world state is too invalid to produce any passive progression.",
       ].join("\n")
     : [
-        "You are the player's senses and action router in a simulated world.",
-        "You may call up to 3 fetch tools before the final action tool.",
-        "After any fetches, end with exactly one action tool or request_clarification.",
-        "Do not invent named mechanical entities outside the provided context.",
-        "Obey the router_constraints block. If a strong typed action is forbidden there, you must not use it on this turn.",
-        "Keep payloads compact: narration should be 2-5 sentences, topic/method/actionDescription should be short phrases, memorySummary should be one short sentence, and suggestedActions should contain at most 4 short actions.",
-        "Every executable tool call must include timeMode, narration, suggestedActions, and citedEntities.",
-        "Narration is always player-facing Dungeon Master prose written in second person. Describe the player character as 'you'. Do not narrate the player character's actions in first person.",
-        "For execute_observe and execute_scene_interaction, narration should usually be 2-5 sentences and include at least one concrete sensory or environmental detail beyond the bare action summary.",
-        "Make the prose feel immediate and embodied. Favor specific sensory details, memorable scene texture, and natural sentence rhythm over flat summary.",
-        "Show mood, tone, and tension through concrete detail, pacing, and behavior rather than abstract labels.",
-        "When dialogue or quoted speech appears, make it sound natural and characterful while staying grounded in the provided context and fetched facts.",
-        "Do not merely restate or paraphrase the player's submitted action. Resolve it into at least one new concrete development, reaction, reply, obstacle, offer, or newly noticed detail.",
-        "For execute_converse, do not stop at the player's greeting or question. Usually include the other party's immediate reply or visible reaction unless they truly give none.",
-        "Every turn should leave the scene in a more specific, changed, or newly clarified state than it was before the player acted.",
-        "After the setup beat, usually deliver a forward-moving beat: a reaction, answer, reveal, offer, obstacle, or changed opportunity.",
-        "End narration at a natural handoff point that preserves the player's agency for the next move.",
-        "Use durationMagnitude only as a bounded hint when the action is not travel or fixed rest.",
-        "Preserve the player's commitment level. Do not upgrade curiosity, browsing, approach, or appetite into stronger mechanics unless the player's wording clearly commits to them.",
-        "If the player talks to an unnamed local person or bystander implied by the scene, use execute_converse with a short lower-case descriptive role label and leave npcId empty.",
-        "If the player continues a conversation with an unnamed local from recentUnnamedLocals, reuse that exact label and still leave npcId empty.",
-        "Do not redirect an unnamed bystander interaction to a named NPC unless the player's action clearly points to that NPC.",
-        "When inventing a brand-new unnamed local, make the label and implied role plausible for localTexture. Do not invent scene actors with no basis in that local texture.",
-        "If a present NPC has requiresDetailFetch=true, call fetch_npc_detail for that NPC before any detailed interaction, investigation, observation, or combat targeting that NPC.",
-        "Use fetch_market_prices before any execute_trade.",
-        "Use execute_combat for attacks, subdual, or assassination attempts against NPCs. Do not hide those actions in execute_freeform.",
-        "Use execute_trade for buy, sell, barter, or price-negotiation actions that clearly trade commodities. Do not hide those actions in execute_freeform.",
-        "Use execute_rest for explicit light or full rest.",
-        "Tool routing hierarchy:",
-        "1. Use execute_travel only when the player clearly leaves the current location for a known adjacent node or route.",
-        "2. Use execute_combat when the player attacks, subdues, or assassinates a present NPC.",
-        "3. Use execute_trade when the player buys or sells commodities using fetched market data.",
-        "4. Use execute_converse when the player addresses, questions, bargains with, or negotiates with a named NPC or an unnamed local speaker.",
-        "5. Use execute_investigate when the player searches, examines closely, tracks evidence, or tries to uncover hidden information.",
-        "6. Use execute_scene_interaction when the player initiates same-scene contact, browsing, greeting, or low-commitment interaction without clearly committing to trade, questioning, or investigation.",
-        "7. Use execute_observe when the player is mainly looking, listening, waiting, or taking in the current scene without initiating contact.",
-        "8. Use execute_rest for explicit light or full rest.",
-        "9. Use execute_freeform only for concrete actions that do not fit the typed tools and do not directly change combat, trade, faction resources, prices, or control.",
-        "10. Do not choose stats, DCs, approval numbers, discovery ids, or exact elapsed minutes. The engine owns those mechanics.",
-        "11. Use request_clarification only if the action is too ambiguous, impossible to map, or missing a required target.",
-        "12. For execute_freeform, set requiresCheck=true only when the action is genuinely uncertain, contested, dangerous, or meaningfully risky. Leave it false or omit it for routine, harmless, or automatic actions the character can simply do.",
-        "13. Routine scene-management actions like arranging goods, walking across a room, greeting someone, or other ordinary handling should stay purely narrative and should not become checks.",
-        "14. Walking across the current scene to a nearby stall, doorway, corner, or present NPC is not travel. Treat that as execute_scene_interaction, execute_converse, execute_observe, or execute_freeform inside the current location.",
-        "15. Never use execute_travel just because the player says 'walk over', 'head over', or 'go over' when the destination is a person or place already inside the current scene.",
-        "16. Going to a named present NPC's stall, shop, table, cart, or post within the current location is not travel.",
+        "You are the mechanical planner for a simulated world turn.",
+        "Return exactly one structured payload using resolve_mechanics or request_clarification.",
+        "Do not output narration or any freeform prose.",
+        "The router has already chosen scope and prerequisite fetches. Do not ask for more fetches.",
+        "Obey the router_constraints block. If a vector is not authorized, do not rely on it.",
+        "Use only bounded mutations. The engine will validate, filter, and commit them deterministically.",
+        "If a check is needed, set checkIntent and list only the success-state mutations. The engine will reject them automatically on failure or partial success.",
+        "Use commit_market_trade only for strict commodity trade backed by fetched market prices.",
+        "Use adjust_gold for incidental payments, rewards, bribes, tips, fees, or other non-market gold movement.",
+        "Use move_player only for actual route travel to a known adjacent location.",
+        "Use set_npc_state only for direct violence, subdual, or comparable physical outcomes.",
+        "Use adjust_relationship for meaningful social shifts with a present NPC.",
+        "Use discover_information only for specific known information ids grounded in context or fetched facts.",
+        "Use restore_health for rest recovery or explicit healing outcomes the engine should apply.",
+        "Use advance_time when the action necessarily consumes time. Suggested actions should stay short and concrete.",
+        "Preserve the player's commitment level. Do not upgrade browsing or approach into stronger mechanics unless the wording clearly commits to them.",
+        "Use request_clarification only if the action is too ambiguous, impossible to map safely, or missing a required target.",
       ].join("\n");
-}
-
-function hasAuthorizedCommitment(
-  classification: RouterClassification,
-  commitment: RouterAuthorizedCommitment,
-) {
-  return classification.authorizedCommitments.includes(commitment);
 }
 
 function buildTurnUserPrompt(input: {
@@ -3227,36 +2479,11 @@ function buildTurnUserPrompt(input: {
   promptContext: SpatialPromptContext;
   character: CampaignCharacter;
   fetchedFacts: TurnFetchToolResult[];
-  routerClassification: RouterClassification;
+  routerDecision: RouterDecision;
 }) {
   return [
     formatPromptBlock("action", input.playerAction),
-    formatPromptBlock("router_constraints", buildRouterConstraintsBlock(input.routerClassification)),
-    formatPromptBlock("context", input.promptContext),
-    formatPromptBlock("character", {
-      name: input.character.name,
-      archetype: input.character.archetype,
-      stats: input.character.stats,
-    }),
-    formatPromptBlock("fetched_facts", input.fetchedFacts),
-    formatPromptBlock("fetch_budget_remaining", Math.max(0, 3 - input.fetchedFacts.length)),
-  ].join("\n\n");
-}
-
-function buildRepairUserPrompt(input: {
-  playerAction: string;
-  promptContext: SpatialPromptContext;
-  character: CampaignCharacter;
-  fetchedFacts: TurnFetchToolResult[];
-  routerClassification: RouterClassification;
-  previousCommand: TurnActionToolCall;
-  validationError: string;
-}) {
-  return [
-    formatPromptBlock("action", input.playerAction),
-    formatPromptBlock("router_constraints", buildRouterConstraintsBlock(input.routerClassification)),
-    formatPromptBlock("validation_error", input.validationError),
-    formatPromptBlock("previous_command", input.previousCommand),
+    formatPromptBlock("router_constraints", buildRouterConstraintsBlock(input.routerDecision)),
     formatPromptBlock("context", input.promptContext),
     formatPromptBlock("character", {
       name: input.character.name,
@@ -5588,11 +4815,11 @@ class DungeonMasterClient {
     }
   }
 
-  async classifyTurnIntent(input: TurnIntentClassificationInput): Promise<RouterClassification> {
+  async classifyTurnIntent(input: TurnIntentClassificationInput): Promise<RouterDecision> {
     const plannerModel = env.openRouterPlannerModel.trim();
     if (!plannerModel) {
-      return fallbackRouterClassification(
-        "Planner model is unavailable, so the turn falls back to full context and low-commitment routing.",
+      return fallbackRouterDecision(
+        "Planner model is unavailable, so the turn falls back to full context and no explicit vectors.",
       );
     }
 
@@ -5602,9 +4829,15 @@ class DungeonMasterClient {
         "Return exactly one structured payload using the provided tool.",
         "Choose profile=local only when the action can be resolved from immediate same-scene context alone.",
         "Choose profile=full whenever the action depends on prior clues, rumors, factions, active pressures, broader world state, travel, strategy, or you are unsure.",
-        "authorizedCommitments should contain only the strong action types the player's wording clearly commits to on this turn.",
-        "Do not literalize the wording so hard that obvious committed speech, purchase, violence, or investigation is missed.",
-        "Confidence governs profile only. authorizedCommitments should still reflect the best conservative reading even when confidence is low.",
+        "authorizedVectors should contain only the commitment vectors the player's wording clearly authorizes on this turn.",
+        "economy_light covers incidental spending like meals, drinks, tips, entry fees, and small service payments.",
+        "economy_strict covers commodity trade, barter, or anything that depends on authoritative market prices.",
+        "violence covers direct attack, subdual, assassination, or clear threat-of-harm escalation.",
+        "converse covers explicit questioning, negotiation, persuasion, or socially consequential dialogue.",
+        "investigate covers explicit searching, clue-seeking, examination, tracking, or analysis.",
+        "requiredPrerequisites must list every authoritative fetch the mechanics pass will need before it can safely resolve the turn.",
+        "Use market_prices before strict commodity trade, npc_detail before detailed interaction with a present NPC that needs it, and relationship_history only when prior rapport materially matters.",
+        "Confidence governs profile only. authorizedVectors and requiredPrerequisites should still reflect the best conservative reading even when confidence is low.",
       ].join("\n");
       const user = [
         formatPromptBlock("action", input.playerAction),
@@ -5635,24 +4868,24 @@ class DungeonMasterClient {
         inputPreview: toPreview(response?.input),
       });
 
-      const parsed = routerClassificationSchema.safeParse(response?.input);
+      const parsed = routerDecisionSchema.safeParse(response?.input);
       if (!parsed.success) {
         logNarrationDebug("turn_router.parse_failed", {
           issues: zodIssuesToText(parsed.error.issues),
           inputPreview: toPreview(response?.input),
         });
-        return fallbackRouterClassification(
-          "Planner output was invalid, so the turn falls back to full context and low-commitment routing.",
+        return fallbackRouterDecision(
+          "Planner output was invalid, so the turn falls back to full context and no explicit vectors.",
         );
       }
 
-      return normalizeRouterClassification(parsed.data);
+      return normalizeRouterDecision(parsed.data);
     } catch (error) {
       logNarrationDebug("turn_router.error", {
         message: error instanceof Error ? error.message : String(error),
       });
-      return fallbackRouterClassification(
-        "Planner classification failed, so the turn falls back to full context and low-commitment routing.",
+      return fallbackRouterDecision(
+        "Planner classification failed, so the turn falls back to full context and no explicit vectors.",
       );
     }
   }
@@ -5662,12 +4895,11 @@ class DungeonMasterClient {
       const baseSystem = buildTurnSystemPrompt(input.turnMode);
 
       let correctionNotes: string | null = null;
-      const fetchedFacts: TurnFetchToolResult[] = [];
 
-      for (let attempt = 1; attempt <= MAX_TURN_ATTEMPTS + 3; attempt += 1) {
+      for (let attempt = 1; attempt <= MAX_TURN_ATTEMPTS; attempt += 1) {
         logOpenRouterResponse("turn.attempt", {
           attempt,
-          maxAttempts: MAX_TURN_ATTEMPTS + 3,
+          maxAttempts: MAX_TURN_ATTEMPTS,
           correctionNotes,
         });
 
@@ -5675,8 +4907,8 @@ class DungeonMasterClient {
           playerAction: input.playerAction,
           promptContext: input.promptContext,
           character: input.character,
-          fetchedFacts,
-          routerClassification: input.routerClassification,
+          fetchedFacts: input.fetchedFacts,
+          routerDecision: input.routerDecision,
         });
         const system = correctionNotes ? `${baseSystem}\n${correctionNotes}` : baseSystem;
 
@@ -5687,21 +4919,20 @@ class DungeonMasterClient {
           user,
         });
 
-      const response = await runCompletion({
-        system,
-        user,
-        tools: turnTools,
-        maxTokens: 1500,
-        signal: input.signal,
-      });
+        const response = await runCompletion({
+          system,
+          user,
+          tools: [resolveMechanicsTool, requestClarificationTool],
+          maxTokens: 1200,
+          signal: input.signal,
+        });
 
         const toolName = response?.name;
         const inputPayload = response?.input;
-        const normalized = normalizeModelToolCall({
-          toolName,
-          payload: inputPayload,
-          promptContext: input.promptContext,
-        });
+        const normalized =
+          toolName && inputPayload && typeof inputPayload === "object" && !Array.isArray(inputPayload)
+            ? { type: toolName, ...(inputPayload as Record<string, unknown>) }
+            : null;
 
         logOpenRouterResponse("turn.raw_input", {
           attempt,
@@ -5719,86 +4950,6 @@ class DungeonMasterClient {
         });
 
         if (normalized) {
-          if (
-            normalized.type === "fetch_npc_detail"
-            || normalized.type === "fetch_market_prices"
-            || normalized.type === "fetch_faction_intel"
-            || normalized.type === "fetch_information_detail"
-            || normalized.type === "fetch_information_connections"
-            || normalized.type === "fetch_relationship_history"
-          ) {
-            if (
-              normalized.type === "fetch_market_prices"
-              && !hasAuthorizedCommitment(input.routerClassification, "trade")
-            ) {
-              correctionNotes = [
-                "Trade is not authorized on this turn.",
-                "Do not call fetch_market_prices or execute_trade.",
-                "Choose a lower-commitment action that preserves the player's original intent.",
-              ].join("\n");
-              continue;
-            }
-
-            if (fetchedFacts.length >= 3) {
-              logNarrationDebug("turn.fetch_budget_exceeded", {
-                attempt,
-                fetchedFactsPreview: toPreview(fetchedFacts),
-              });
-              return {
-                command: {
-                  type: "request_clarification",
-                  question:
-                    "I need more authoritative detail than the current scene summary safely supports. What should I focus on first?",
-                  options: [
-                    "Ask about one NPC",
-                    "Check the market",
-                    "Investigate one clue",
-                    "Take a simpler action",
-                  ],
-                },
-                fetchedFacts,
-              };
-            }
-
-            let fetchedResult: TurnFetchToolResult;
-            try {
-              fetchedResult = await input.executeFetchTool(normalized);
-            } catch (error) {
-              if (
-                error instanceof FetchSynchronizationError
-                || (error instanceof Error && error.name === "FetchSynchronizationError")
-              ) {
-                logNarrationDebug("turn.fetch_sync_conflict", {
-                  attempt,
-                  toolName: normalized.type,
-                  npcId: normalized.type === "fetch_npc_detail" ? normalized.npcId : null,
-                  message: error instanceof Error ? error.message : String(error),
-                });
-
-                return {
-                  command: {
-                    type: "request_clarification",
-                    question:
-                      "That person's details are still loading into the world. Do you want to try again in a moment or do something else first?",
-                    options: ["Try again", "Wait a moment", "Do something else"],
-                  },
-                  fetchedFacts,
-                };
-              }
-
-              throw error;
-            }
-            fetchedFacts.push(fetchedResult);
-            logNarrationDebug("turn.fetch", {
-              attempt,
-              toolName: normalized.type,
-              fetchedCount: fetchedFacts.length,
-              resultPreview: toPreview(fetchedResult),
-            });
-            correctionNotes = null;
-            continue;
-          }
-
           const parsedAction = parseFinalActionToolCall(normalized);
           if (!parsedAction.success) {
             correctionNotes = [
@@ -5814,30 +4965,22 @@ class DungeonMasterClient {
           if (input.turnMode === "observe" && !isObservePermittedFinalTool(parsedAction.data)) {
             correctionNotes = [
               "Observe mode is active.",
-              "Return exactly one final action tool call using execute_observe or execute_wait only.",
+              "Return exactly one final action tool call using resolve_mechanics or request_clarification only.",
               "Use request_clarification only if the world state is too invalid to produce passive progression.",
-              "Do not invoke execute_combat, execute_converse, execute_trade, execute_freeform, execute_travel, execute_investigate, or execute_rest.",
+              "Do not emit any combat, trade, travel, or deliberate social escalation in observe mode.",
               "Do not give the player character dialogue or chosen actions.",
             ].join("\n");
             continue;
           }
 
-          const requiredFetchNpc = findNpcRequiringDetailFetch(parsedAction.data, input.promptContext);
-          if (requiredFetchNpc && !hasHydratedNpcDetailFact(fetchedFacts, requiredFetchNpc.id)) {
+          if (
+            parsedAction.data.type === "resolve_mechanics"
+            && input.turnMode === "observe"
+            && !isObserveMechanicsPayloadSafe(parsedAction.data)
+          ) {
             correctionNotes = [
-              `The NPC ${requiredFetchNpc.name} requires authoritative detail before that action.`,
-              `Call fetch_npc_detail for npcId ${requiredFetchNpc.id} first, then return the final action.`,
-              "Do not pick a different target unless the player explicitly changes intent.",
-            ].join("\n");
-            continue;
-          }
-
-          if (isSameSceneNpcApproachMisroutedAsTravel(parsedAction.data, input.promptContext)) {
-            correctionNotes = [
-              "The previous tool call treated an approach to a present NPC inside the current scene as travel.",
-              "That is not execute_travel.",
-              "If the player is heading over to a present NPC's stall or position in the same location, return execute_scene_interaction, execute_converse, execute_observe, or execute_freeform instead.",
-              "Keep the action inside the current location and do not choose any route or destination node.",
+              "Observe mode may only wait, passively notice things, or request clarification.",
+              "Remove any travel, combat, trade, relationship, or deliberate player-initiated mutations.",
             ].join("\n");
             continue;
           }
@@ -5851,21 +4994,20 @@ class DungeonMasterClient {
             attempt,
             toolName,
             inputPreview: toPreview(parsedAction.data),
-            fetchedFactsPreview: toPreview(fetchedFacts),
+            fetchedFactsPreview: toPreview(input.fetchedFacts),
           });
           return {
             command: parsedAction.data,
-            fetchedFacts,
+            fetchedFacts: input.fetchedFacts,
           };
         }
 
         correctionNotes = [
           "Your previous reply did not produce a complete valid tool payload.",
           response?.likelyTruncated
-            ? "The previous payload was cut off. Return a complete replacement payload with much shorter narration."
+            ? "The previous payload was cut off. Return a complete replacement payload with fewer mutations."
             : "Return a complete replacement payload that exactly matches one tool schema.",
           "Do not include assistant prose before the tool call.",
-          "If using execute_converse for an unnamed local, fill interlocutor with a short lower-case descriptive role label and omit npcId.",
         ].join("\n");
       }
 
@@ -5881,31 +5023,31 @@ class DungeonMasterClient {
     }
   }
 
-  async repairTurn(input: TurnRepairInput): Promise<TurnActionToolCall> {
+  async narrateResolvedTurn(input: ResolvedTurnNarrationInput): Promise<string> {
     try {
-      const baseSystem = [
-        buildTurnSystemPrompt(input.turnMode),
-        "You are repairing a previously invalid turn tool call.",
-        "Return exactly one corrected final action tool call or request_clarification.",
-        "Do not use fetch tools during repair.",
-        "Preserve the player's original commitment level.",
-        "If the previous action overcommitted the intent, prefer execute_scene_interaction when it honestly fits.",
-      ].join("\n");
       let correctionNotes: string | null = null;
 
       for (let attempt = 1; attempt <= MAX_TURN_ATTEMPTS; attempt += 1) {
-        const system = correctionNotes ? `${baseSystem}\n${correctionNotes}` : baseSystem;
-        const user = buildRepairUserPrompt({
-          playerAction: input.playerAction,
-          promptContext: input.promptContext,
-          character: input.character,
-          fetchedFacts: input.fetchedFacts,
-          routerClassification: input.routerClassification,
-          previousCommand: input.previousCommand,
-          validationError: input.validationError,
-        });
+        const system = [
+          "You are the Dungeon Master narrator for a resolved simulated-world turn.",
+          "Return exactly one structured payload using the provided tool.",
+          "Narrate only what is grounded in the committed state_commit_log and the player's action.",
+          "Do not invent successful outcomes, prices, discoveries, NPC reactions, travel, or social shifts that are not supported by the log.",
+          "If a mutation was rejected or a check failed, make that failure legible in the narration.",
+          "Write in second person to the player character as 'you'.",
+          "Keep the narration compact, concrete, and forward-moving.",
+          correctionNotes,
+        ]
+          .filter((line): line is string => Boolean(line))
+          .join("\n");
+        const user = [
+          formatPromptBlock("player_action", input.playerAction),
+          formatPromptBlock("state_commit_log", input.stateCommitLog),
+          formatPromptBlock("check_result", input.checkResult ?? null),
+          formatPromptBlock("suggested_actions", input.suggestedActions),
+        ].join("\n\n");
 
-        logNarrationDebug("turn_repair.request", {
+        logNarrationDebug("resolved_turn_narration.request", {
           attempt,
           correctionNotes,
           system,
@@ -5915,18 +5057,12 @@ class DungeonMasterClient {
         const response = await runCompletion({
           system,
           user,
-          tools: repairTurnTools,
-          maxTokens: 1000,
+          tools: [resolvedTurnNarrationTool],
+          maxTokens: 900,
           signal: input.signal,
         });
 
-        const normalized = normalizeTurnToolCall({
-          toolName: response?.name ?? null,
-          payload: response?.input,
-          promptContext: input.promptContext,
-        });
-
-        logNarrationDebug("turn_repair.raw_input", {
+        logNarrationDebug("resolved_turn_narration.raw_input", {
           attempt,
           toolName: response?.name ?? null,
           finishReason: response?.finishReason ?? null,
@@ -5934,10 +5070,10 @@ class DungeonMasterClient {
           inputPreview: toPreview(response?.input),
         });
 
-        const parsed = parseFinalActionToolCall(normalized);
+        const parsed = resolvedTurnNarrationSchema.safeParse(response?.input);
         if (!parsed.success) {
           correctionNotes = [
-            "Your previous repair reply did not match a final action schema.",
+            "Your previous reply did not match the narration schema.",
             response?.likelyTruncated
               ? "Return a much shorter complete replacement payload."
               : `Return a complete replacement payload. Validation issues: ${zodIssuesToText(parsed.error.issues)}`,
@@ -5945,133 +5081,15 @@ class DungeonMasterClient {
           continue;
         }
 
-        return parsed.data;
+        return parsed.data.narration.trim();
       }
 
-      throw new Error("Turn repair did not return a valid tool call after retries.");
+      throw new Error("Resolved-turn narration did not return a valid payload after retries.");
     } catch (error) {
-      logNarrationDebug("turn_repair.error", {
+      logNarrationDebug("resolved_turn_narration.error", {
         message: error instanceof Error ? error.message : String(error),
       });
-      throw new Error(error instanceof Error ? error.message : "Turn repair failed.");
-    }
-  }
-
-  async runExplicitTravelTurn(input: ExplicitTravelTurnInput): Promise<TurnResolution> {
-    try {
-      let correctionNotes: string | null = null;
-
-      for (let attempt = 1; attempt <= MAX_TURN_ATTEMPTS; attempt += 1) {
-        const system = [
-          "You are resolving a committed travel turn in a simulated world.",
-          "The player has already decided to set out on the specified visible route.",
-          "Do not choose a different destination, route, or action.",
-          "Do not ask for clarification unless the provided travel route is internally contradictory.",
-          "Write 2-5 sentences that make the turn feel like setting out and traveling along the route rather than teleportation.",
-          "Use present-tense, second-person Dungeon Master prose with specific travel texture and a natural sense of movement.",
-          "Favor concrete landmarks, weather, motion, or passing signs of life over generic summary.",
-          "You may include arrival if it fits the resolved travel turn, but do not rush past the sense of departure and movement.",
-          "You may mention soft leads, passing landmarks, rumors, patrols, or nearby minor local places as travel color, but do not treat them as mechanically discovered destinations or unlocked routes.",
-          "Suggested actions should fit what the player can do on arrival or from anything immediately noticed at the destination.",
-          "Keep memorySummary to one short sentence if provided.",
-          correctionNotes,
-        ]
-          .filter((line): line is string => Boolean(line))
-          .join("\n");
-        const user = [
-          formatPromptBlock("action", input.playerAction),
-          formatPromptBlock("committed_travel", {
-            currentLocationId: input.promptContext.currentLocation.id,
-            currentLocationName: input.promptContext.currentLocation.name,
-            routeEdgeId: input.route.id,
-            targetLocationId: input.route.targetLocationId,
-            targetLocationName: input.route.targetLocationName,
-            travelTimeMinutes: input.route.travelTimeMinutes,
-            dangerLevel: input.route.dangerLevel,
-            currentStatus: input.route.currentStatus,
-            description: input.route.description,
-          }),
-          formatPromptBlock("context", input.promptContext),
-          formatPromptBlock("character", {
-            name: input.character.name,
-            archetype: input.character.archetype,
-            stats: input.character.stats,
-          }),
-        ].join("\n\n");
-
-        logNarrationDebug("explicit_travel.request", {
-          attempt,
-          correctionNotes,
-          system,
-          user,
-        });
-
-        const response = await runCompletion({
-          system,
-          user,
-          tools: [explicitTravelNarrationTool],
-          maxTokens: 900,
-          signal: input.signal,
-        });
-
-        logOpenRouterResponse("explicit_travel.raw_input", {
-          attempt,
-          toolName: response?.name ?? null,
-          finishReason: response?.finishReason ?? null,
-          likelyTruncated: response?.likelyTruncated ?? false,
-          inputPreview: toPreview(response?.input),
-        });
-        logNarrationDebug("explicit_travel.raw_input", {
-          attempt,
-          toolName: response?.name ?? null,
-          finishReason: response?.finishReason ?? null,
-          likelyTruncated: response?.likelyTruncated ?? false,
-          inputPreview: toPreview(response?.input),
-        });
-
-        const parsed = explicitTravelNarrationSchema.safeParse(response?.input);
-        if (!parsed.success) {
-          correctionNotes = [
-            "Your previous reply did not match the narration schema.",
-            response?.likelyTruncated
-              ? "The previous payload was cut off. Return a much shorter complete replacement payload."
-              : "Return a complete replacement payload with narration, suggestedActions, and optional memorySummary only.",
-          ].join("\n");
-          continue;
-        }
-
-        return {
-          command: {
-            type: "execute_travel",
-            routeEdgeId: input.route.id,
-            targetLocationId: input.route.targetLocationId,
-            narration: parsed.data.narration.trim(),
-            suggestedActions: parsed.data.suggestedActions.map((entry) => entry.trim()).filter(Boolean),
-            timeMode: "travel",
-            citedEntities: {
-              npcIds: [],
-              locationIds: [
-                input.promptContext.currentLocation.id,
-                input.route.targetLocationId,
-              ],
-              factionIds: [],
-              commodityIds: [],
-              informationIds: [],
-            },
-          },
-          fetchedFacts: [],
-        };
-      }
-
-      throw new Error("Explicit travel narration did not return a valid payload after retries.");
-    } catch (error) {
-      logOpenRouterResponse("explicit_travel.error", {
-        message: error instanceof Error ? error.message : String(error),
-      });
-      logNarrationDebug("explicit_travel.error", {
-        message: error instanceof Error ? error.message : String(error),
-      });
-      throw new Error(error instanceof Error ? error.message : "Explicit travel narration failed.");
+      throw new Error(error instanceof Error ? error.message : "Resolved-turn narration failed.");
     }
   }
 
@@ -6090,13 +5108,11 @@ export const aiProviderTestUtils = {
   buildRouterConstraintsBlock,
   extractToolInput,
   isObservePermittedFinalTool,
-  isSameSceneNpcApproachMisroutedAsTravel,
+  isObserveMechanicsPayloadSafe,
   normalizeSocialCastInput,
   normalizeScheduleEntityId,
   normalizeSchedulePayloadIds,
-  normalizeRouterClassification,
-  normalizeModelToolCall,
-  normalizeTurnToolCall,
+  normalizeRouterDecision,
   parseFinalActionToolCall,
   selectPromptContextProfile,
 };
