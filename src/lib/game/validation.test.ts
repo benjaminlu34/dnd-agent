@@ -591,6 +591,122 @@ test("validateTurnCommand rejects freeform calls that are really typed trade or 
   );
 });
 
+test("validateTurnCommand rejects travel commands that are really same-scene NPC approaches", () => {
+  const command: ExecuteTravelToolCall = {
+    type: "execute_travel",
+    routeEdgeId: "edge_gate_market",
+    targetLocationId: "loc_market",
+    narration: "You walk over to Tarin and ask what changed at the gate.",
+    suggestedActions: ["Ask what changed"],
+    timeMode: "travel",
+    citedEntities: {
+      npcIds: ["npc_guide"],
+      locationIds: ["loc_gate"],
+      factionIds: [],
+      commodityIds: [],
+      informationIds: [],
+    },
+  };
+
+  assert.throws(
+    () =>
+      validateTurnCommand({
+        snapshot: createSnapshot(),
+        command,
+      }),
+    /not execute_travel/,
+  );
+});
+
+test("validateTurnCommand leaves routine freeform actions checkless by default", () => {
+  const command: ExecuteFreeformToolCall = {
+    type: "execute_freeform",
+    actionDescription: "Arrange the spidersilk bolts neatly across the center of the stall",
+    timeMode: "downtime",
+    challengeApproach: "finesse",
+    durationMagnitude: "brief",
+    intendedMechanicalOutcome: "Present the newest fabric attractively for browsing customers.",
+    narration: "You spread the spidersilk where the dawn light catches it best.",
+    suggestedActions: ["Call out the new arrival"],
+    citedEntities: {
+      npcIds: [],
+      locationIds: ["loc_gate"],
+      factionIds: [],
+      commodityIds: [],
+      informationIds: [],
+    },
+  };
+
+  const validated = validateTurnCommand({
+    snapshot: createSnapshot(),
+    command,
+  });
+
+  assert.equal(validated.type, "execute_freeform");
+  assert.equal(validated.checkResult, undefined);
+});
+
+test("validateTurnCommand requires a failure consequence for freeform checks", () => {
+  const command: ExecuteFreeformToolCall = {
+    type: "execute_freeform",
+    actionDescription: "Slip through the crowd and palm the ledger from the guard's belt",
+    timeMode: "exploration",
+    challengeApproach: "finesse",
+    durationMagnitude: "brief",
+    requiresCheck: true,
+    intendedMechanicalOutcome: "Steal the ledger without drawing attention.",
+    narration: "You drift with the crowd and reach for the ledger at the right moment.",
+    suggestedActions: ["Break off before anyone notices"],
+    citedEntities: {
+      npcIds: [],
+      locationIds: ["loc_gate"],
+      factionIds: [],
+      commodityIds: [],
+      informationIds: [],
+    },
+  };
+
+  assert.throws(
+    () =>
+      validateTurnCommand({
+        snapshot: createSnapshot(),
+        command,
+      }),
+    /requires failureConsequence/,
+  );
+});
+
+test("validateTurnCommand rolls a freeform check when requiresCheck is true", () => {
+  const command: ExecuteFreeformToolCall = {
+    type: "execute_freeform",
+    actionDescription: "Slip through the crowd and palm the ledger from the guard's belt",
+    timeMode: "exploration",
+    challengeApproach: "finesse",
+    durationMagnitude: "brief",
+    requiresCheck: true,
+    intendedMechanicalOutcome: "Steal the ledger without drawing attention.",
+    failureConsequence: "The guard catches the motion and raises the alarm.",
+    narration: "You drift with the crowd and reach for the ledger at the right moment.",
+    suggestedActions: ["Break off before anyone notices"],
+    citedEntities: {
+      npcIds: [],
+      locationIds: ["loc_gate"],
+      factionIds: [],
+      commodityIds: [],
+      informationIds: [],
+    },
+  };
+
+  const validated = validateTurnCommand({
+    snapshot: createSnapshot(),
+    command,
+  });
+
+  assert.equal(validated.type, "execute_freeform");
+  assert.ok(validated.checkResult);
+  assert.equal(validated.checkResult?.stat, "dexterity");
+});
+
 test("validateTurnCommand caps suggested actions at four items", () => {
   const command: ExecuteObserveToolCall = {
     type: "execute_observe",
@@ -619,6 +735,9 @@ test("validateTurnCommand caps suggested actions at four items", () => {
     command,
   });
 
+  if (validated.type === "request_clarification") {
+    assert.fail("Expected observe command to validate without clarification.");
+  }
   assert.equal(validated.suggestedActions.length, 4);
   assert.deepEqual(validated.suggestedActions, [
     "Ask Tarin what changed",

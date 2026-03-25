@@ -261,6 +261,14 @@ export function AdventureApp({
   }, [latestNarrationPayload]);
 
   async function submitTurn(nextAction: string, mode?: TurnSubmissionRequest["mode"]) {
+    return submitTurnWithIntent(nextAction, mode);
+  }
+
+  async function submitTurnWithIntent(
+    nextAction: string,
+    mode?: TurnSubmissionRequest["mode"],
+    intent?: TurnSubmissionRequest["intent"],
+  ) {
     if (!campaignId || !sessionId || !nextAction.trim() || submitting) {
       return;
     }
@@ -278,6 +286,7 @@ export function AdventureApp({
         requestId: crypto.randomUUID(),
         expectedStateVersion: snapshot?.stateVersion ?? 0,
         action: nextAction.trim(),
+        ...(intent ? { intent } : {}),
         ...(mode ? { mode } : {}),
       };
 
@@ -752,6 +761,26 @@ export function AdventureApp({
                       <p className="mt-2 text-sm leading-relaxed text-zinc-400">
                         {route.travelTimeMinutes} min · danger {route.dangerLevel} · {route.currentStatus}
                       </p>
+                      {route.description ? (
+                        <p className="mt-2 text-sm leading-relaxed text-zinc-500">{route.description}</p>
+                      ) : null}
+                      <button
+                        type="button"
+                        className="button-press mt-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm font-semibold text-amber-50 transition hover:border-amber-400/60 hover:bg-amber-400/15 disabled:cursor-not-allowed disabled:opacity-60"
+                        onClick={() =>
+                          void submitTurnWithIntent(
+                            `I set out for ${route.targetLocationName}.`,
+                            undefined,
+                            {
+                              type: "travel_route",
+                              routeEdgeId: route.id,
+                              targetLocationId: route.targetLocationId,
+                            },
+                          )}
+                        disabled={submitting}
+                      >
+                        Set Out
+                      </button>
                     </div>
                   ))}
                 </div>

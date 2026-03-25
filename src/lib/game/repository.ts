@@ -1738,6 +1738,7 @@ export async function listCampaigns(): Promise<CampaignListItem[]> {
      orderBy: { updatedAt: "desc" },
      select: {
        id: true,
+       createdAt: true,
        updatedAt: true,
        stateJson: true,
        module: {

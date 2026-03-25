@@ -328,6 +328,16 @@ function validateInteractionTarget(
   command: TurnActionToolCall,
   fetchedFacts: TurnFetchToolResult[],
 ) {
+  if (command.type === "execute_travel") {
+    const citedPresentNpc = command.citedEntities.npcIds.find((npcId) => findPresentNpc(snapshot, npcId));
+    const citesCurrentLocation = command.citedEntities.locationIds.includes(snapshot.currentLocation.id);
+    const citesDestination = command.citedEntities.locationIds.includes(command.targetLocationId);
+
+    if (citedPresentNpc && citesCurrentLocation && !citesDestination) {
+      throw new Error("Approaching a present NPC within the current scene is not execute_travel.");
+    }
+  }
+
   if (command.type === "execute_converse") {
     if (command.npcId) {
       if (!findPresentNpc(snapshot, command.npcId)) {
@@ -414,6 +424,10 @@ function looksLikeTypedCombatOrTrade(text: string) {
 function validateFreeform(command: ExecuteFreeformToolCall) {
   if (!command.intendedMechanicalOutcome.trim()) {
     throw new Error("execute_freeform requires intendedMechanicalOutcome.");
+  }
+
+  if (command.requiresCheck && !command.failureConsequence?.trim()) {
+    throw new Error("execute_freeform requires failureConsequence when requiresCheck is true.");
   }
 
   if (looksLikeTypedCombatOrTrade(`${command.actionDescription} ${command.intendedMechanicalOutcome}`)) {
@@ -634,7 +648,7 @@ export function validateTurnCommand(input: {
 
   if (command.type === "execute_freeform") {
     validateFreeform(command);
-    const checkResult = deriveFreeformCheck(command, snapshot);
+    const checkResult = command.requiresCheck ? deriveFreeformCheck(command, snapshot) : undefined;
 
     return {
       ...commandWithMechanics,

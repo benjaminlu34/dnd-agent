@@ -185,6 +185,61 @@ test("buildTurnSystemPrompt hard-locks observe mode to passive tools", () => {
   assert.match(prompt, /at most 4 short actions/);
 });
 
+test("buildTurnSystemPrompt distinguishes same-scene approach from travel", () => {
+  const prompt = aiProviderTestUtils.buildTurnSystemPrompt("player_input");
+
+  assert.match(prompt, /leaves the current location for a known adjacent node or route/);
+  assert.match(prompt, /Walking across the current scene to a nearby stall, doorway, corner, or present NPC is not travel/);
+  assert.match(prompt, /Never use execute_travel just because the player says 'walk over'/);
+  assert.match(prompt, /named present NPC's stall, shop, table, cart, or post within the current location is not travel/);
+});
+
+test("same-scene approach to a present NPC is recognized as misrouted travel", () => {
+  assert.equal(
+    aiProviderTestUtils.isSameSceneNpcApproachMisroutedAsTravel(
+      {
+        type: "execute_travel",
+        routeEdgeId: "edge_gate_market",
+        targetLocationId: "loc_market",
+        narration: "You head over to Tarin to ask what changed.",
+        suggestedActions: ["Ask what changed"],
+        timeMode: "travel",
+        citedEntities: {
+          npcIds: ["npc_guide"],
+          locationIds: ["loc_gate"],
+          factionIds: [],
+          commodityIds: [],
+          informationIds: [],
+        },
+      },
+      createPromptContext(),
+    ),
+    true,
+  );
+
+  assert.equal(
+    aiProviderTestUtils.isSameSceneNpcApproachMisroutedAsTravel(
+      {
+        type: "execute_travel",
+        routeEdgeId: "edge_gate_market",
+        targetLocationId: "loc_market",
+        narration: "You set out for Lantern Market.",
+        suggestedActions: ["Look for cover"],
+        timeMode: "travel",
+        citedEntities: {
+          npcIds: [],
+          locationIds: ["loc_gate", "loc_market"],
+          factionIds: [],
+          commodityIds: [],
+          informationIds: [],
+        },
+      },
+      createPromptContext(),
+    ),
+    false,
+  );
+});
+
 test("observe mode only permits observe, wait, or clarification as final tools", () => {
   assert.equal(
     aiProviderTestUtils.isObservePermittedFinalTool({

@@ -75,6 +75,7 @@ function requestHashForSubmission(input: {
   sessionId: string;
   expectedStateVersion: number;
   playerAction: string;
+  intent?: TurnSubmissionRequest["intent"];
   turnMode: TurnMode;
 }) {
   return createHash("sha256")
@@ -84,6 +85,7 @@ function requestHashForSubmission(input: {
         sessionId: input.sessionId,
         expectedStateVersion: input.expectedStateVersion,
         action: input.playerAction.trim(),
+        intent: input.intent ?? null,
         turnMode: input.turnMode,
       }),
     )
@@ -1919,7 +1921,7 @@ async function commitResolvedTurn(input: {
   turnMode: TurnMode;
   command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
   fetchedFacts: TurnFetchToolResult[];
-}) {
+}): Promise<TurnResultPayload> {
   const {
     snapshot,
     sessionId,
@@ -2495,6 +2497,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
   stream?: TurnStream;
 }) {
   const playerAction = input.action.trim();
+  const intent = input.intent;
   const turnMode: TurnMode = input.mode === "observe" ? "observe" : "player_input";
   logBackendDiagnostic("turn.triage.start", {
     campaignId: input.campaignId,
@@ -2502,6 +2505,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
     requestId: input.requestId,
     expectedStateVersion: input.expectedStateVersion,
     turnMode,
+    intentType: intent?.type ?? null,
     playerActionPreview: playerAction.slice(0, 240),
   });
   const requestHash = requestHashForSubmission({
@@ -2509,6 +2513,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
     sessionId: input.sessionId,
     expectedStateVersion: input.expectedStateVersion,
     playerAction,
+    intent,
     turnMode,
   });
   const existingTurn = await prisma.turn.findUnique({
@@ -2718,18 +2723,45 @@ export async function triageTurn(input: TurnSubmissionRequest & {
     });
 
     const promptContext = await getPromptContext(snapshot);
-    const narrationOverride = buildNarrationOverride({
-      playerAction,
-      snapshot,
-    });
-    const resolution: TurnResolution = await dmClient.runTurn({
-      promptContext,
-      character: snapshot.character,
-      playerAction: narrationOverride.playerActionForModel,
-      turnMode,
-      executeFetchTool: (call) => executeFetchTool(snapshot, call),
-      signal: abortController.signal,
-    });
+    const narrationOverride =
+      intent?.type === "travel_route"
+        ? {
+            playerActionForModel: playerAction,
+            overrideText: null,
+            requestedAdvanceMinutes: null,
+            availableAdvanceMinutes: availableAdvanceMinutes(snapshot),
+          }
+        : buildNarrationOverride({
+            playerAction,
+            snapshot,
+          });
+    const resolution: TurnResolution =
+      intent?.type === "travel_route"
+        ? await (async () => {
+            const route = snapshot.adjacentRoutes.find((entry) => entry.id === intent.routeEdgeId);
+            if (!route) {
+              throw new Error("Travel intent route is not adjacent to the player's current location.");
+            }
+            if (route.targetLocationId !== intent.targetLocationId) {
+              throw new Error("Travel intent target does not match the selected route.");
+            }
+
+            return dmClient.runExplicitTravelTurn({
+              promptContext,
+              character: snapshot.character,
+              playerAction,
+              route,
+              signal: abortController.signal,
+            });
+          })()
+        : await dmClient.runTurn({
+            promptContext,
+            character: snapshot.character,
+            playerAction: narrationOverride.playerActionForModel,
+            turnMode,
+            executeFetchTool: (call) => executeFetchTool(snapshot, call),
+            signal: abortController.signal,
+          });
     logBackendDiagnostic("turn.provider.resolved", {
       campaignId: input.campaignId,
       sessionId: input.sessionId,

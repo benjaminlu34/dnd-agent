@@ -17,6 +17,7 @@ export async function GET() {
 export async function POST(request: Request) {
   const body = (await request.json()) as Partial<TurnSubmissionRequest>;
   const mode = body.mode;
+  const intent = body.intent;
 
   if (
     !body.campaignId
@@ -31,9 +32,30 @@ export async function POST(request: Request) {
     );
   }
 
+  if (
+    intent !== undefined
+    && (
+      intent.type !== "travel_route"
+      || !intent.routeEdgeId?.trim()
+      || !intent.targetLocationId?.trim()
+    )
+  ) {
+    return NextResponse.json(
+      { error: "intent must be omitted or be a valid travel_route payload." },
+      { status: 400 },
+    );
+  }
+
   if (mode !== undefined && mode !== "observe") {
     return NextResponse.json(
       { error: "mode must be omitted or set to 'observe'." },
+      { status: 400 },
+    );
+  }
+
+  if (mode === "observe" && intent) {
+    return NextResponse.json(
+      { error: "observe mode cannot be combined with a structured intent." },
       { status: 400 },
     );
   }
@@ -52,6 +74,7 @@ export async function POST(request: Request) {
       requestId,
       expectedStateVersion,
       action,
+      intent,
       mode,
       stream: {
         narration: (chunk) => bufferedNarration.push(chunk),

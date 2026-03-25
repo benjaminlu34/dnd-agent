@@ -71,9 +71,10 @@ Promotable minor locations are in scope. Arbitrary world invention is not. The i
 2. Phase 2: Add structured hidden-route support to the world graph
 3. Phase 3: Let information reveal places and unlock hidden routes
 4. Phase 4: Replace over-rigid knowledge validation with discoverability rules
-5. Phase 5: Make runtime route visibility and minor-location promotion depend on discovered information and play
-6. Phase 6: Improve player-facing discovery UX
-7. Phase 7: Deepen access requirements only if the first six phases prove valuable
+5. Phase 5A: Add an in-transit travel state and route-scene turns
+6. Phase 5B: Make runtime route visibility and minor-location promotion depend on discovered information and play
+7. Phase 6: Improve player-facing discovery UX
+8. Phase 7: Deepen access requirements only if the earlier phases prove valuable
 
 ## Phase 1: Promotable Minor Locations
 
@@ -282,7 +283,67 @@ Replace simplistic location-level rules with world-level discoverability rules:
   - minor place that can neither remain ambient nor ever be promoted
   - route that cannot ever become visible
 
-## Phase 5: Runtime Route Visibility and Minor-Location Promotion
+## Phase 5A: In-Transit Travel State
+
+### Objective
+
+Make travel feel like actually setting out across the world instead of teleporting between nodes.
+
+This phase gives the engine a playable road state:
+
+- starting travel does not immediately place the player at the destination
+- route travel becomes an in-progress scene that can span multiple turns
+- the road becomes a legitimate place for pressure, flavor, and discoverability
+- later discovery systems gain a natural place to surface rumors, landmarks, patrols, and nearby minor local leads
+
+### Runtime Behavior
+
+When the player commits to a revealed and traversable route:
+
+- the engine enters an explicit in-transit state instead of immediately swapping to the destination location
+- the route choice remains authoritative and fixed unless the player later turns back or another route event explicitly changes it
+- time advances on the route, but arrival is not instant by default
+- narration should make the player feel that they set out, are moving through the route, and have not simply teleported
+- route travel can surface soft content such as landmarks, rumors, patrols, weather shifts, road hazards, and nearby minor places without automatically promoting them into full destinations
+
+The first version can stay simple:
+
+- `execute_travel` means "begin this journey now"
+- the campaign enters a route-scene state tied to one revealed edge
+- subsequent turns may continue the journey, stay alert, pause, make camp, or turn back
+- arrival happens only after enough route time is actually spent on the journey
+
+### Data Handling
+
+Campaign state should gain a lightweight travel-state record that captures at least:
+
+- route edge id
+- origin location id
+- destination location id
+- departure time
+- total route duration
+- progress so far
+- whether the player is currently in transit
+
+Snapshot assembly should support an in-transit view that exposes:
+
+- the committed route
+- elapsed and remaining travel time
+- route danger / access pressure
+- any route-scene facts that became relevant during transit
+
+This should stay additive and should not require a full procedural travel-event engine in the first pass.
+
+### Acceptance Criteria
+
+- Starting travel does not instantly relocate the player to the destination.
+- A committed route can remain in progress across multiple turns.
+- The engine can tell the difference between "at a location" and "currently traveling."
+- Travel narration reflects departure and movement rather than instant arrival.
+- Route travel can surface soft leads, rumors, or nearby minor-place hints without auto-promoting them.
+- This phase leaves a clean integration point for later secret-route reveals and minor-location promotion.
+
+## Phase 5B: Runtime Route Visibility and Minor-Location Promotion
 
 ### Objective
 
@@ -303,11 +364,13 @@ The first version can be simple:
 - if discovered info contains `unlocksEdgeKey`, mark that edge as known
 - if info points to a location but does not unlock a route, expose it in journals/rumors without making travel available yet
 - if a minor location crosses a promotion threshold, instantiate it as a real location node plus at least one explicit route connecting it to the authoritative graph
+- while in transit, the route scene may expose soft leads or nearby minor-place signals without auto-promoting them
 
 ### Data Handling
 
 Campaign state will likely need a lightweight notion of:
 
+- travel-state data for in-progress route scenes
 - discovered information ids
 - revealed edge ids or route ids
 - minor-location candidates by parent location
@@ -321,6 +384,7 @@ This should be additive and minimal.
 - Discovering an information node can reveal at least one secret route.
 - `execute_travel` cannot use a hidden route before it is revealed.
 - `execute_travel` can use a revealed route afterward.
+- Revealed-route travel can begin before destination arrival and can remain in transit across turns.
 - A minor location can exist first as rumor or local texture and later become a real travel destination.
 - Promotion produces explicit graph support instead of freeform one-off narration.
 - Player-facing context shows the difference between:
@@ -339,6 +403,7 @@ Make gated discovery feel exciting rather than confusing.
 
 Add lightweight UX for:
 
+- being in transit on a known route
 - rumored places
 - newly revealed routes
 - nearby minor places that are still only partially known
@@ -348,6 +413,7 @@ Add lightweight UX for:
 
 The UI should tell the player:
 
+- "You are on the road to this destination"
 - "You know this place exists"
 - "You know how to get there"
 - "This is a nearby lead, not yet a fully charted destination"
@@ -357,6 +423,7 @@ without requiring them to parse raw internal mechanics.
 
 ### Acceptance Criteria
 
+- The player can tell when they are traveling versus when they have actually arrived.
 - The player can tell why a route is hidden or unavailable.
 - A newly discovered route or place is surfaced clearly in the UI.
 - The player can distinguish a rumor, a nearby local lead, and a promoted destination.

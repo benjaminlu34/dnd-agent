@@ -30,6 +30,7 @@ import type {
   OpenWorldGenerationArtifacts,
   PromotedNpcHydrationDraft,
   ResolvedLaunchEntry,
+  RouteSummary,
   SpatialPromptContext,
   TurnActionToolCall,
   TurnFetchToolCall,
@@ -139,6 +140,14 @@ type TurnInput = {
   playerAction: string;
   turnMode: TurnMode;
   executeFetchTool: (call: TurnFetchToolCall) => Promise<TurnFetchToolResult>;
+  signal?: AbortSignal;
+};
+
+type ExplicitTravelTurnInput = {
+  promptContext: SpatialPromptContext;
+  character: CampaignCharacter;
+  playerAction: string;
+  route: RouteSummary;
   signal?: AbortSignal;
 };
 
@@ -1234,6 +1243,27 @@ function findNpcRequiringDetailFetch(
   }
 
   return null;
+}
+
+function isSameSceneNpcApproachMisroutedAsTravel(
+  command: TurnActionToolCall,
+  promptContext: SpatialPromptContext,
+) {
+  if (command.type !== "execute_travel") {
+    return false;
+  }
+
+  const citedPresentNpc = command.citedEntities.npcIds.find((npcId) =>
+    promptContext.presentNpcs.some((npc) => idsReferToSameEntity(npc.id, npcId)),
+  );
+  const citesCurrentLocation = command.citedEntities.locationIds.some((locationId) =>
+    idsReferToSameEntity(locationId, promptContext.currentLocation.id),
+  );
+  const citesDestination = command.citedEntities.locationIds.some((locationId) =>
+    idsReferToSameEntity(locationId, command.targetLocationId),
+  );
+
+  return Boolean(citedPresentNpc && citesCurrentLocation && !citesDestination);
 }
 
 function formatCorrectionNotes(stage: WorldGenerationStageName, category: StageValidation["category"], issues: string[]) {
@@ -2484,6 +2514,7 @@ const actionTools = [
         actionDescription: { type: "string" },
         timeMode: { type: "string", enum: ["combat", "exploration", "downtime"] },
         durationMagnitude: { type: "string", enum: ["instant", "brief", "standard", "extended", "long"] },
+        requiresCheck: { type: "boolean" },
         intendedMechanicalOutcome: { type: "string" },
         challengeApproach: { type: "string", enum: ["force", "finesse", "endure", "analyze", "notice", "influence"] },
         failureConsequence: { type: "string" },
@@ -2522,6 +2553,18 @@ const actionTools = [
 ];
 
 const turnTools = [...fetchTools, ...actionTools];
+
+const explicitTravelNarrationSchema = z.object({
+  narration: z.string().trim().min(1).max(800),
+  suggestedActions: z.array(z.string().trim().min(1)).max(4).default([]),
+  memorySummary: z.string().trim().min(1).max(240).optional(),
+});
+
+const explicitTravelNarrationTool = createStructuredTool(
+  "narrate_explicit_travel",
+  "Narrate a player-committed departure, journey, and arrival for the fixed route already chosen by the player.",
+  explicitTravelNarrationSchema,
+);
 
 function extractToolInput(response: OpenAI.Chat.Completions.ChatCompletion) {
   const toolCall = response.choices[0]?.message?.tool_calls?.[0];
@@ -2791,7 +2834,7 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Use execute_trade for buy, sell, barter, or price-negotiation actions that clearly trade commodities. Do not hide those actions in execute_freeform.",
         "Use execute_rest for explicit light or full rest.",
         "Tool routing hierarchy:",
-        "1. Use execute_travel when the player clearly moves to a known adjacent node or route.",
+        "1. Use execute_travel only when the player clearly leaves the current location for a known adjacent node or route.",
         "2. Use execute_combat when the player attacks, subdues, or assassinates a present NPC.",
         "3. Use execute_trade when the player buys or sells commodities using fetched market data.",
         "4. Use execute_converse when the player addresses, questions, bargains with, or negotiates with a named NPC or an unnamed local speaker.",
@@ -2801,6 +2844,11 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "8. Use execute_freeform only for concrete actions that do not fit the typed tools and do not directly change combat, trade, faction resources, prices, or control.",
         "9. Do not choose stats, DCs, approval numbers, discovery ids, or exact elapsed minutes. The engine owns those mechanics.",
         "10. Use request_clarification only if the action is too ambiguous, impossible to map, or missing a required target.",
+        "11. For execute_freeform, set requiresCheck=true only when the action is genuinely uncertain, contested, dangerous, or meaningfully risky. Leave it false or omit it for routine, harmless, or automatic actions the character can simply do.",
+        "12. Routine scene-management actions like arranging goods, walking across a room, greeting someone, or other ordinary handling should stay purely narrative and should not become checks.",
+        "13. Walking across the current scene to a nearby stall, doorway, corner, or present NPC is not travel. Treat that as converse, observe, or freeform inside the current location.",
+        "14. Never use execute_travel just because the player says 'walk over', 'head over', or 'go over' when the destination is a person or place already inside the current scene.",
+        "15. Going to a named present NPC's stall, shop, table, cart, or post within the current location is not travel.",
       ].join("\n");
 }
 
@@ -5275,6 +5323,16 @@ class DungeonMasterClient {
             continue;
           }
 
+          if (isSameSceneNpcApproachMisroutedAsTravel(normalized, input.promptContext)) {
+            correctionNotes = [
+              "The previous tool call treated an approach to a present NPC inside the current scene as travel.",
+              "That is not execute_travel.",
+              "If the player is heading over to a present NPC's stall or position in the same location, return execute_converse, execute_observe, or execute_freeform instead.",
+              "Keep the action inside the current location and do not choose any route or destination node.",
+            ].join("\n");
+            continue;
+          }
+
           logOpenRouterResponse("turn.success", {
             attempt,
             toolName,
@@ -5314,6 +5372,122 @@ class DungeonMasterClient {
     }
   }
 
+  async runExplicitTravelTurn(input: ExplicitTravelTurnInput): Promise<TurnResolution> {
+    try {
+      let correctionNotes: string | null = null;
+
+      for (let attempt = 1; attempt <= MAX_TURN_ATTEMPTS; attempt += 1) {
+        const system = [
+          "You are resolving a committed travel turn in a simulated world.",
+          "The player has already decided to set out on the specified visible route.",
+          "Do not choose a different destination, route, or action.",
+          "Do not ask for clarification unless the provided travel route is internally contradictory.",
+          "Write 1-3 sentences that make the turn feel like setting out and traveling along the route rather than teleportation.",
+          "You may include arrival if it fits the resolved travel turn, but do not rush past the sense of departure and movement.",
+          "You may mention soft leads, passing landmarks, rumors, patrols, or nearby minor local places as travel color, but do not treat them as mechanically discovered destinations or unlocked routes.",
+          "Suggested actions should fit what the player can do on arrival or from anything immediately noticed at the destination.",
+          "Keep memorySummary to one short sentence if provided.",
+          correctionNotes,
+        ]
+          .filter((line): line is string => Boolean(line))
+          .join("\n");
+        const user = [
+          formatPromptBlock("action", input.playerAction),
+          formatPromptBlock("committed_travel", {
+            currentLocationId: input.promptContext.currentLocation.id,
+            currentLocationName: input.promptContext.currentLocation.name,
+            routeEdgeId: input.route.id,
+            targetLocationId: input.route.targetLocationId,
+            targetLocationName: input.route.targetLocationName,
+            travelTimeMinutes: input.route.travelTimeMinutes,
+            dangerLevel: input.route.dangerLevel,
+            currentStatus: input.route.currentStatus,
+            description: input.route.description,
+          }),
+          formatPromptBlock("context", input.promptContext),
+          formatPromptBlock("character", {
+            name: input.character.name,
+            archetype: input.character.archetype,
+            stats: input.character.stats,
+          }),
+        ].join("\n\n");
+
+        logNarrationDebug("explicit_travel.request", {
+          attempt,
+          correctionNotes,
+          system,
+          user,
+        });
+
+        const response = await runCompletion({
+          system,
+          user,
+          tools: [explicitTravelNarrationTool],
+          maxTokens: 900,
+          signal: input.signal,
+        });
+
+        logOpenRouterResponse("explicit_travel.raw_input", {
+          attempt,
+          toolName: response?.name ?? null,
+          finishReason: response?.finishReason ?? null,
+          likelyTruncated: response?.likelyTruncated ?? false,
+          inputPreview: toPreview(response?.input),
+        });
+        logNarrationDebug("explicit_travel.raw_input", {
+          attempt,
+          toolName: response?.name ?? null,
+          finishReason: response?.finishReason ?? null,
+          likelyTruncated: response?.likelyTruncated ?? false,
+          inputPreview: toPreview(response?.input),
+        });
+
+        const parsed = explicitTravelNarrationSchema.safeParse(response?.input);
+        if (!parsed.success) {
+          correctionNotes = [
+            "Your previous reply did not match the narration schema.",
+            response?.likelyTruncated
+              ? "The previous payload was cut off. Return a much shorter complete replacement payload."
+              : "Return a complete replacement payload with narration, suggestedActions, and optional memorySummary only.",
+          ].join("\n");
+          continue;
+        }
+
+        return {
+          command: {
+            type: "execute_travel",
+            routeEdgeId: input.route.id,
+            targetLocationId: input.route.targetLocationId,
+            narration: parsed.data.narration.trim(),
+            suggestedActions: parsed.data.suggestedActions.map((entry) => entry.trim()).filter(Boolean),
+            timeMode: "travel",
+            citedEntities: {
+              npcIds: [],
+              locationIds: [
+                input.promptContext.currentLocation.id,
+                input.route.targetLocationId,
+              ],
+              factionIds: [],
+              commodityIds: [],
+              informationIds: [],
+            },
+          },
+          fetchedFacts: [],
+        };
+      }
+
+      throw new Error("Explicit travel narration did not return a valid payload after retries.");
+    } catch (error) {
+      logOpenRouterResponse("explicit_travel.error", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      logNarrationDebug("explicit_travel.error", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      throw new Error(error instanceof Error ? error.message : "Explicit travel narration failed.");
+    }
+  }
+
   async summarizeSession(lines: string[]) {
     if (!lines.length) {
       return "No memorable events were recorded this session.";
@@ -5328,6 +5502,7 @@ export const aiProviderTestUtils = {
   buildTurnSystemPrompt,
   extractToolInput,
   isObservePermittedFinalTool,
+  isSameSceneNpcApproachMisroutedAsTravel,
   normalizeSocialCastInput,
   normalizeScheduleEntityId,
   normalizeSchedulePayloadIds,

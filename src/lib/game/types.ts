@@ -1023,6 +1023,11 @@ export type TurnSubmissionRequest = {
   requestId: string;
   expectedStateVersion: number;
   action: string;
+  intent?: {
+    type: "travel_route";
+    routeEdgeId: string;
+    targetLocationId: string;
+  };
   mode?: "observe";
 };
 
@@ -1222,6 +1227,7 @@ export type ExecuteFreeformToolCall = {
   actionDescription: string;
   timeMode: Exclude<TimeMode, "travel" | "rest">;
   durationMagnitude?: DurationMagnitude;
+  requiresCheck?: boolean;
   intendedMechanicalOutcome: string;
   challengeApproach: ChallengeApproach;
   failureConsequence?: string;
