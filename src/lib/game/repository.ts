@@ -244,6 +244,151 @@ function normalizeActorSurfaceText(value: string) {
     .trim();
 }
 
+function similarityTokens(value: string) {
+  const stopWords = new Set([
+    "the",
+    "and",
+    "for",
+    "with",
+    "that",
+    "this",
+    "into",
+    "from",
+    "your",
+    "you",
+    "are",
+    "already",
+    "while",
+    "they",
+    "them",
+    "their",
+    "have",
+    "just",
+    "through",
+    "before",
+    "after",
+    "about",
+    "another",
+    "what",
+    "when",
+    "where",
+    "down",
+    "over",
+    "more",
+    "than",
+    "then",
+  ]);
+
+  return normalizeActorSurfaceText(value)
+    .split(" ")
+    .filter((token) => token.length >= 4 && !stopWords.has(token));
+}
+
+function tokenOverlapRatio(a: string, b: string) {
+  const aTokens = new Set(similarityTokens(a));
+  const bTokens = new Set(similarityTokens(b));
+
+  if (!aTokens.size || !bTokens.size) {
+    return 0;
+  }
+
+  let overlap = 0;
+  for (const token of aTokens) {
+    if (bTokens.has(token)) {
+      overlap += 1;
+    }
+  }
+
+  return overlap / Math.min(aTokens.size, bTokens.size);
+}
+
+function overlapCount(left: string[], right: string[]) {
+  const rightSet = new Set(right);
+  return left.filter((value) => rightSet.has(value)).length;
+}
+
+type SimilarStockEntryMatch = {
+  entryPoint: GeneratedWorldModule["entryPoints"][number];
+  score: number;
+  reasons: string[];
+};
+
+function findSimilarStockEntry(input: {
+  customEntryPoint: ResolvedLaunchEntry;
+  world: GeneratedWorldModule;
+}): SimilarStockEntryMatch | null {
+  const custom = input.customEntryPoint;
+  const customSurface = [
+    custom.title,
+    custom.summary,
+    custom.immediatePressure,
+    custom.publicLead,
+    custom.mundaneActionPath,
+  ].join(" ");
+
+  let bestMatch: SimilarStockEntryMatch | null = null;
+
+  for (const stockEntry of input.world.entryPoints) {
+    let score = 0;
+    const reasons: string[] = [];
+
+    if (stockEntry.startLocationId === custom.startLocationId) {
+      score += 2;
+      reasons.push("same_start_location");
+    }
+
+    const presentNpcOverlap = overlapCount(custom.presentNpcIds, stockEntry.presentNpcIds);
+    if (presentNpcOverlap > 0) {
+      score += presentNpcOverlap >= Math.min(stockEntry.presentNpcIds.length, 2) ? 2 : 1;
+      reasons.push("overlapping_present_npcs");
+    }
+
+    if (custom.localContactNpcId && stockEntry.presentNpcIds.includes(custom.localContactNpcId)) {
+      score += 2;
+      reasons.push("same_named_contact");
+    }
+
+    const informationOverlap = overlapCount(custom.initialInformationIds, stockEntry.initialInformationIds);
+    if (informationOverlap > 0) {
+      score += informationOverlap >= Math.min(stockEntry.initialInformationIds.length, 1) ? 2 : 1;
+      reasons.push("overlapping_seeded_information");
+    }
+
+    const surfaceOverlap = tokenOverlapRatio(customSurface, `${stockEntry.title} ${stockEntry.summary}`);
+    if (surfaceOverlap >= 0.5) {
+      score += 3;
+      reasons.push("high_surface_overlap");
+    } else if (surfaceOverlap >= 0.3) {
+      score += 2;
+      reasons.push("moderate_surface_overlap");
+    }
+
+    if (score >= 7 && (!bestMatch || score > bestMatch.score)) {
+      bestMatch = {
+        entryPoint: stockEntry,
+        score,
+        reasons,
+      };
+    }
+  }
+
+  return bestMatch;
+}
+
+function buildCustomEntrySimilarityCorrection(input: {
+  similarStockEntry: SimilarStockEntryMatch;
+  prompt: string;
+}) {
+  return [
+    `The previous custom-entry attempt collapsed too close to the authored stock entry "${input.similarStockEntry.entryPoint.title}".`,
+    `Similarity signals: ${input.similarStockEntry.reasons.join(", ")}.`,
+    "Keep the player's custom premise, but choose a more distinct social hinge and pressure shape.",
+    "Do not reuse the same named contact and seeded information package unless the player's request clearly demands that exact authored hook.",
+    "Prefer routine texture, ordinary locals, and player-authored work or domestic details over inheriting the nearest stock crisis.",
+    `Player request to preserve: ${input.prompt.trim()}`,
+  ].join("\n");
+}
+
 function temporaryActorMatchesStartingLocal(input: {
   actor: { label: string; summary: string };
   npc: Pick<GeneratedWorldModule["npcs"][number], "role" | "summary" | "description">;
@@ -1054,24 +1199,60 @@ export async function resolveCustomEntryPointForUser(input: {
   }
 
   const world = parseWorldTemplate(adventureModule.openWorldTemplateJson);
-  const resolvedDraft = await dmClient.resolveCustomEntryPoint({
-    module: world,
-    character: toTemplateRecord(template),
-    prompt: input.prompt,
-  });
-  const resolvedEntryPoint = resolvedLaunchEntrySchema.parse({
-    id: `custom_entry_${randomUUID()}`,
-    ...resolvedDraft,
-    isCustom: true,
-    customRequestPrompt: input.prompt.trim(),
-  });
-  const issues = validateResolvedLaunchEntryAgainstWorld(resolvedEntryPoint, world);
+  let correctionNotes: string | null = null;
 
-  if (issues.length) {
-    throw new Error(`Resolved custom entry failed validation: ${issues.map((issue) => issue.message).join("; ")}`);
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const resolvedDraft = await dmClient.resolveCustomEntryPoint({
+      module: world,
+      character: toTemplateRecord(template),
+      prompt: input.prompt,
+      correctionNotes,
+    });
+    const resolvedEntryPoint = resolvedLaunchEntrySchema.parse({
+      id: `custom_entry_${randomUUID()}`,
+      ...resolvedDraft,
+      isCustom: true,
+      customRequestPrompt: input.prompt.trim(),
+    });
+    const issues = validateResolvedLaunchEntryAgainstWorld(resolvedEntryPoint, world);
+
+    if (issues.length) {
+      throw new Error(`Resolved custom entry failed validation: ${issues.map((issue) => issue.message).join("; ")}`);
+    }
+
+    const similarStockEntry = findSimilarStockEntry({
+      customEntryPoint: resolvedEntryPoint,
+      world,
+    });
+
+    if (!similarStockEntry) {
+      return { entryPoint: resolvedEntryPoint };
+    }
+
+    logBackendDiagnostic("campaign.custom_entry.too_similar_to_stock", {
+      moduleId: input.moduleId,
+      templateId: input.templateId,
+      attempt,
+      customEntryTitle: resolvedEntryPoint.title,
+      similarStockEntryId: similarStockEntry.entryPoint.id,
+      similarStockEntryTitle: similarStockEntry.entryPoint.title,
+      score: similarStockEntry.score,
+      reasons: similarStockEntry.reasons,
+    });
+
+    if (attempt === 2) {
+      throw new Error(
+        `Custom entry kept collapsing into the existing entry "${similarStockEntry.entryPoint.title}". Try re-resolving with a more specific daily-routine setup.`,
+      );
+    }
+
+    correctionNotes = buildCustomEntrySimilarityCorrection({
+      similarStockEntry,
+      prompt: input.prompt,
+    });
   }
 
-  return { entryPoint: resolvedEntryPoint };
+  throw new Error("Custom entry resolution exhausted retry attempts.");
 }
 
 export async function createAdventureModule(input: {
@@ -1305,7 +1486,7 @@ async function createCampaignInTx(
     currentLocationId: input.instancedEntryPoint.startLocationId,
     globalTime: 480,
     pendingTurnId: null,
-    lastActionSummary: input.opening.activeThreat,
+    lastActionSummary: input.opening.activeThreat ?? input.opening.scene.summary,
     sceneObjectStates: {},
   };
 
@@ -1692,45 +1873,54 @@ export async function createCampaignFromModuleForUser(input: {
     world,
     entryPoint,
   );
-  const preparedLaunch = input.preparedLaunch
-    ? (() => {
-        if (!preparedLaunchMatchesSelection({
-          preparedLaunch: input.preparedLaunch,
-          normalizedEntryPoint: entryPoint,
-        })) {
-          throw new Error("Prepared launch bundle no longer matches the selected entry point.");
+  const preparedLaunchSelectionMatches = input.preparedLaunch
+    ? preparedLaunchMatchesSelection({
+        preparedLaunch: input.preparedLaunch,
+        normalizedEntryPoint: entryPoint,
+      })
+    : false;
+  const preparedLaunch = input.preparedLaunch && preparedLaunchSelectionMatches
+    ? {
+        ...input.preparedLaunch,
+        entryPoint: {
+          ...instancedEntryPoint,
+          ...input.preparedLaunch.entryPoint,
+          startLocationId: rescopeScopedEntityId(input.preparedLaunch.entryPoint.startLocationId, campaignId),
+          presentNpcIds: input.preparedLaunch.entryPoint.presentNpcIds.map((id) =>
+            rescopeScopedEntityId(id, campaignId),
+          ),
+          initialInformationIds: input.preparedLaunch.entryPoint.initialInformationIds.map((id) =>
+            rescopeScopedEntityId(id, campaignId),
+          ),
+          localContactNpcId: input.preparedLaunch.entryPoint.localContactNpcId
+            ? rescopeScopedEntityId(input.preparedLaunch.entryPoint.localContactNpcId, campaignId)
+            : null,
+        },
+        startingLocals: input.preparedLaunch.startingLocals.map((npc) =>
+          rescopeGeneratedNpcToCampaign(npc, campaignId),
+        ),
+        opening: rescopeOpeningToCampaign(input.preparedLaunch.opening, campaignId),
+      }
+    : await (async () => {
+        if (input.preparedLaunch && !preparedLaunchSelectionMatches) {
+          logBackendDiagnostic("campaign.create.prepared_launch_mismatch", {
+            moduleId: input.moduleId,
+            templateId: input.templateId,
+            campaignId,
+            selectedEntryPointId: entryPoint.id,
+            preparedEntryPointId: input.preparedLaunch.entryPoint.id,
+          });
         }
 
-        return {
-          ...input.preparedLaunch,
-          entryPoint: {
-            ...instancedEntryPoint,
-            ...input.preparedLaunch.entryPoint,
-            startLocationId: rescopeScopedEntityId(input.preparedLaunch.entryPoint.startLocationId, campaignId),
-            presentNpcIds: input.preparedLaunch.entryPoint.presentNpcIds.map((id) =>
-              rescopeScopedEntityId(id, campaignId),
-            ),
-            initialInformationIds: input.preparedLaunch.entryPoint.initialInformationIds.map((id) =>
-              rescopeScopedEntityId(id, campaignId),
-            ),
-            localContactNpcId: input.preparedLaunch.entryPoint.localContactNpcId
-              ? rescopeScopedEntityId(input.preparedLaunch.entryPoint.localContactNpcId, campaignId)
-              : null,
-          },
-          startingLocals: input.preparedLaunch.startingLocals.map((npc) =>
-            rescopeGeneratedNpcToCampaign(npc, campaignId),
-          ),
-          opening: rescopeOpeningToCampaign(input.preparedLaunch.opening, campaignId),
-        };
-      })()
-    : await prepareCampaignLaunch({
-        campaignId,
-        world,
-        entryPoint,
-        template: templateRecord,
-        artifacts: generationArtifacts,
-        previousDraft: input.opening,
-      });
+        return prepareCampaignLaunch({
+          campaignId,
+          world,
+          entryPoint,
+          template: templateRecord,
+          artifacts: generationArtifacts,
+          previousDraft: input.opening,
+        });
+      })();
   const openingInput = buildOpeningWorldWithStartingLocals({
     module: instancedWorld,
     entryPoint: instancedEntryPoint,
@@ -3517,6 +3707,7 @@ export const repositoryTestUtils = {
   normalizeLaunchEntrySelection,
   resolveStockLaunchEntry,
   stripScopedEntityId,
+  findSimilarStockEntry,
   assignStartingLocalNpcIds,
   buildOpeningWorldWithStartingLocals,
   rescopeOpeningToCampaign,

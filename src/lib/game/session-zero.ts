@@ -982,7 +982,10 @@ export const openWorldGenerationArtifactsSchema = z.object({
 
 export const generatedCampaignOpeningSchema = z.object({
   narration: z.string().trim().min(1),
-  activeThreat: z.string().trim().min(1),
+  activeThreat: z.preprocess(
+    (value) => (typeof value === "string" && value.trim().length === 0 ? null : value),
+    z.string().trim().min(1).nullable(),
+  ),
   entryPointId: z.string().trim().min(1),
   locationNodeId: z.string().trim().min(1),
   presentNpcIds: z.array(z.string().trim().min(1)),

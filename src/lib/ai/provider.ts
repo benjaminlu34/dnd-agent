@@ -77,6 +77,7 @@ type CustomEntryResolutionInput = {
   module: GeneratedWorldModule;
   character: CharacterTemplate;
   prompt: string;
+  correctionNotes?: string | null;
 };
 
 type StartingLocalHydrationInput = {
@@ -2076,6 +2077,19 @@ const openingTool = {
   input_schema: z.toJSONSchema(generatedCampaignOpeningSchema),
 };
 
+const openingRewriteIntentSchema = z.object({
+  canonicalScope: z.enum(["opening_only", "wants_entry_change", "unclear"]),
+  tensionDirection: z.enum(["calmer", "tenser", "same"]),
+  confrontationCarryForward: z.enum(["remove", "preserve", "unclear"]),
+  notes: z.string().trim().min(1),
+});
+
+const openingRewriteIntentTool = createStructuredTool(
+  "interpret_opening_rewrite",
+  "Interpret what a player's opening-scene rewrite prompt is actually trying to change.",
+  openingRewriteIntentSchema,
+);
+
 const customEntryResolutionTool = createStructuredTool(
   "resolve_custom_entry_point",
   "Resolve a player-authored custom entry into an existing grounded launch entry using only provided ids.",
@@ -2646,6 +2660,57 @@ export function getTurnQualityMeta() {
 }
 
 class DungeonMasterClient {
+  async interpretOpeningRewriteIntent(input: {
+    prompt: string;
+    previousDraft: GeneratedCampaignOpening;
+    entryPoint: ResolvedLaunchEntry;
+  }): Promise<z.infer<typeof openingRewriteIntentSchema> | null> {
+    try {
+      const response = await runCompletion({
+        system: [
+          "Interpret what the player is trying to change when they ask to rewrite an opening scene.",
+          "Distinguish between changes to prose/tone within the same entry versus requests that really want a different entry setup or start location.",
+          "Treat creative phrasing semantically, not literally.",
+          "If the player is steering away from prior conflict, interruption, confrontation, or urgent hooks, mark confrontationCarryForward as remove even if they do not use those exact words.",
+          "If the player wants a calmer, more routine, more domestic, more ordinary, or more slice-of-life opening, mark tensionDirection as calmer.",
+          "Return only the structured interpretation payload.",
+        ].join("\n"),
+        user: [
+          formatPromptBlock("rewrite_prompt", input.prompt),
+          formatPromptBlock("current_entry_point", {
+            title: input.entryPoint.title,
+            summary: input.entryPoint.summary,
+            immediatePressure: input.entryPoint.immediatePressure,
+            publicLead: input.entryPoint.publicLead,
+            startLocationId: input.entryPoint.startLocationId,
+          }),
+          formatPromptBlock("previous_draft", input.previousDraft),
+        ].join("\n\n"),
+        tools: [openingRewriteIntentTool],
+        maxTokens: 500,
+      });
+
+      const parsed = openingRewriteIntentSchema.safeParse(response?.input);
+      if (!parsed.success) {
+        logOpenRouterResponse("opening_rewrite_intent.schema_failure", {
+          issues: parsed.error.issues,
+          inputPreview: toPreview(response?.input),
+        });
+        return null;
+      }
+
+      logOpenRouterResponse("opening_rewrite_intent.success", {
+        preview: toPreview(parsed.data),
+      });
+      return parsed.data;
+    } catch (error) {
+      logOpenRouterResponse("opening_rewrite_intent.error", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
+  }
+
   async generateCharacter(prompt: string): Promise<{ character: CharacterTemplateDraft; source: "openrouter" }> {
     try {
       const response = await runCompletion({
@@ -4429,18 +4494,45 @@ class DungeonMasterClient {
       input.entryPoint.initialInformationIds.includes(info.id),
     );
     const temporaryLocals = input.entryPoint.temporaryLocalActors;
+    const rewriteIntent = input.prompt?.trim() && input.previousDraft
+      ? await this.interpretOpeningRewriteIntent({
+          prompt: input.prompt,
+          previousDraft: input.previousDraft,
+          entryPoint: input.entryPoint,
+        })
+      : null;
+    const shouldDeintensifyRewrite =
+      rewriteIntent?.tensionDirection === "calmer"
+      || rewriteIntent?.confrontationCarryForward === "remove";
     const system = [
       "Write the opening scene for a chosen entry point in an open-world solo RPG.",
       "Stay inside the selected entry-point bubble and do not invent off-screen mechanical facts.",
       "Open on immediate lived circumstance, sensory detail, and a situation a normal person can act on right now.",
       "The opening does not need to be grand, exceptional, or high drama. Ordinary work, travel, errands, routine obligations, or a quiet departure are all valid starts.",
       "Immediate pressure may be mundane and local: being late, a shift starting, weather turning, a line forming, a supervisor watching, stock running short, a cart breaking down, or neighbors noticing something off.",
+      "If the opening is peaceful or slice-of-life, set activeThreat to null instead of inventing danger.",
       "Do not force a quest-giver, crisis escalation, conspiracy reveal, or dramatic named-NPC confrontation if the launch entry is grounded in ordinary life.",
       "Avoid prophecy, trailer voiceover, destiny framing, and broad setting-summary prose.",
+      "Treat start_location as the authoritative physical setting for the scene.",
+      "If the player prompt or custom entry text contains an unsupported place name that conflicts with start_location, ignore the unsupported place name and ground the scene at start_location.name.",
       "If the launch entry uses unnamed temporary locals instead of named NPCs, treat them as real scene participants and do not force a named contact into the opening.",
       "If the launch entry has no localContactNpcId, no localContactTemporaryActorLabel, and no temporary locals, preserve that solitude or privacy instead of inventing an immediate social interaction.",
+      ...(rewriteIntent?.canonicalScope === "wants_entry_change"
+        ? [
+            "The player's rewrite intent partly points at changing the underlying entry setup or start location.",
+            "Opening regeneration cannot change the canonical entry selection, so keep the same entry point but satisfy the requested mood and surface details as honestly as possible within that fixed setup.",
+          ]
+        : []),
+      ...(shouldDeintensifyRewrite
+        ? [
+            "The rewrite intent is steering the scene toward a calmer, more routine mood.",
+            "When revising away from a prior draft, remove leftover confrontation beats instead of preserving them by inertia.",
+            "Avoid interruption framing like urgent knocks, demands, summons, alarms, grim arrivals, or sudden handoffs unless the rewrite explicitly asks to keep them.",
+            "Prefer work rhythm, nearby passersby, small talk, craft decisions, observations, and ordinary choices as the playable affordances.",
+          ]
+        : []),
       "Scene summary must be 40 words or fewer.",
-      "Return narration, an active threat, a scene summary, and exact ids for the starting location, present NPCs, and cited information via the provided tool schema.",
+      "Return narration, activeThreat, a scene summary, and exact ids for the starting location, present NPCs, and cited information via the provided tool schema.",
     ].join("\n");
     const user = [
       formatPromptBlock("module_summary", summarizeWorld(input.module)),
@@ -4492,6 +4584,7 @@ class DungeonMasterClient {
         archetype: input.character.archetype,
         backstory: input.character.backstory,
       }),
+      formatPromptBlock("rewrite_intent", rewriteIntent),
       formatPromptBlock("prompt", input.prompt ?? null),
       formatPromptBlock("previous_draft", input.previousDraft ?? null),
     ].join("\n\n");
@@ -4585,18 +4678,25 @@ class DungeonMasterClient {
           "If no suitable named local is needed, you may leave presentNpcIds empty and instead seed temporary unnamed locals.",
           "If the opening is solitary or private, you may leave presentNpcIds empty and set both localContactNpcId and localContactTemporaryActorLabel to null.",
           "Use localContactNpcId only when the opening should hinge on a named NPC already authored in the world.",
+          "A custom entry should feel distinct from an authored stock entry point, not like a paraphrase of the same hook with the serial numbers filed off.",
+          "Do not simply inherit the exact named contact, pressure package, and public lead of a stock entry when a more routine or more player-authored interpretation is available.",
+          "If the player premise is ordinary work or daily life, preserve that as the main affordance instead of escalating to the location's default crisis.",
           "You may use temporaryLocalActors for scene texture even when no single unnamed local is the opening hinge.",
           "Use localContactTemporaryActorLabel and temporaryLocalActors when the opening should hinge on unnamed locals or ordinary roles already implied by the place.",
           "If localContactNpcId is null, localContactTemporaryActorLabel must match one temporaryLocalActors label.",
           "Do not invent named NPCs to satisfy the request when unnamed locals are enough.",
           "initialInformationIds may include only public or guarded information, never secret information.",
           "If the player's request is unsupported, repair it into the nearest honest version the world can support.",
+          "Once you choose startLocationId, every player-facing surface field must honestly reflect that exact place.",
+          "Do not keep or echo unsupported player-supplied place names in the title, summary, immediatePressure, publicLead, mundaneActionPath, or evidenceWorldAlreadyMoving.",
+          "If you map the request to Waterdeep, say Waterdeep. If you map it to Daggerford, say Daggerford. Do not preserve a conflicting place name just because the player used it.",
           "Keep title and summary concrete, local, and player-facing.",
           "Return only the structured launch entry payload.",
         ].join("\n"),
         user: [
           formatPromptBlock("module_summary", summarizeWorld(input.module)),
           formatPromptBlock("player_request", input.prompt),
+          formatPromptBlock("correction_notes", input.correctionNotes ?? null),
           formatPromptBlock("character", {
             name: input.character.name,
             archetype: input.character.archetype,

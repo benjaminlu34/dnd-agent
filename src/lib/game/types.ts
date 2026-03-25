@@ -607,7 +607,7 @@ export type GeneratedWorldModuleDraft = {
 
 export type GeneratedCampaignOpening = {
   narration: string;
-  activeThreat: string;
+  activeThreat: string | null;
   entryPointId: string;
   locationNodeId: string;
   presentNpcIds: string[];

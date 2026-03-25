@@ -108,7 +108,7 @@ export function CampaignCreationApp({
     return {
       ...input,
       narration: input.narration.trim(),
-      activeThreat: input.activeThreat.trim(),
+      activeThreat: input.activeThreat?.trim() || null,
       scene: {
         ...input.scene,
         title: input.scene.title.trim(),
@@ -424,50 +424,22 @@ export function CampaignCreationApp({
               </div>
 
               {launchMode === "custom" && customEntryPoint ? (
-                <div className="mt-6 rounded-2xl border border-zinc-800 p-4">
-                  <p className="ui-label">Resolved Custom Entry</p>
-                  <h3 className="ui-title mt-3 text-xl">{customEntryPoint.title}</h3>
-                  <p className="ui-body mt-2">{customEntryPoint.summary}</p>
-                  <div className="mt-4 grid gap-4 md:grid-cols-2">
+                <div className="mt-6 rounded-2xl border border-zinc-800 bg-black/40 p-4">
+                  <p className="ui-label">Grounded From Your Prompt</p>
+                  <p className="ui-body mt-2 text-zinc-300">
+                    Your custom arrival has been grounded into{" "}
+                    <span className="text-zinc-100">{customEntryPoint.title}</span>.
+                  </p>
+                  <div className="mt-4 grid gap-4 md:grid-cols-3">
                     <div className="rounded-2xl border border-zinc-800 p-4">
-                      <p className="ui-label">Start Location</p>
-                      <p className="ui-body mt-2 text-zinc-300">{customEntryPoint.startLocationId}</p>
-                    </div>
-                    <div className="rounded-2xl border border-zinc-800 p-4">
-                      <p className="ui-label">Scene Anchor</p>
+                      <p className="ui-label">Anchor</p>
                       <p className="ui-body mt-2 text-zinc-300">
-                        {customEntryPoint.localContactNpcId
-                          ?? customEntryPoint.localContactTemporaryActorLabel
-                          ?? "No immediate contact required"}
+                        {customEntryPoint.localContactTemporaryActorLabel
+                          ?? (customEntryPoint.localContactNpcId ? "A named local contact" : "No immediate contact required")}
                       </p>
                     </div>
-                  </div>
-                  <div className="mt-4 grid gap-4 md:grid-cols-2">
                     <div className="rounded-2xl border border-zinc-800 p-4">
-                      <p className="ui-label">Routine Path</p>
-                      <p className="ui-body mt-2 text-zinc-300">{customEntryPoint.mundaneActionPath}</p>
-                    </div>
-                    <div className="rounded-2xl border border-zinc-800 p-4">
-                      <p className="ui-label">World In Motion</p>
-                      <p className="ui-body mt-2 text-zinc-300">{customEntryPoint.evidenceWorldAlreadyMoving}</p>
-                    </div>
-                  </div>
-                  {customEntryPoint.temporaryLocalActors.length ? (
-                    <div className="mt-4 rounded-2xl border border-zinc-800 p-4">
-                      <p className="ui-label">Unnamed Locals</p>
-                      <div className="mt-3 space-y-2">
-                        {customEntryPoint.temporaryLocalActors.map((actor) => (
-                          <div key={actor.label}>
-                            <p className="ui-title text-sm">{actor.label}</p>
-                            <p className="ui-body mt-1 text-zinc-300">{actor.summary}</p>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
-                  <div className="mt-4 grid gap-4 md:grid-cols-2">
-                    <div className="rounded-2xl border border-zinc-800 p-4">
-                      <p className="ui-label">Immediate Situation</p>
+                      <p className="ui-label">Pressure</p>
                       <p className="ui-body mt-2 text-zinc-300">{customEntryPoint.immediatePressure}</p>
                     </div>
                     <div className="rounded-2xl border border-zinc-800 p-4">
@@ -479,11 +451,17 @@ export function CampaignCreationApp({
               ) : null}
 
               <div className="mt-6">
+                <p className="ui-label mb-3">Rewrite Notes</p>
+                <p className="ui-body mb-3 text-sm text-zinc-400">
+                  This rewrites the opening draft only. To change the resolved entry, start
+                  location, or arrival setup, use <span className="text-zinc-200">Re-resolve Entry</span>{" "}
+                  above.
+                </p>
                 <textarea
                   className={fieldClassName(true)}
                   value={followUpPrompt}
                   onChange={(event) => setFollowUpPrompt(event.target.value)}
-                  placeholder="Lean harder into the market panic, or make the opening feel more suspicious and covert..."
+                  placeholder="Make the scene quieter, warmer, more routine, or more suspicious without changing where or how the campaign starts..."
                 />
               </div>
 
@@ -495,8 +473,10 @@ export function CampaignCreationApp({
                   </div>
                   <div className="grid gap-4 md:grid-cols-2">
                     <div className="rounded-2xl border border-zinc-800 p-4">
-                      <p className="ui-label">Active Threat</p>
-                      <p className="ui-body mt-2 text-zinc-300">{draft.activeThreat}</p>
+                      <p className="ui-label">{draft.activeThreat ? "Active Threat" : "Immediate Pace"}</p>
+                      <p className="ui-body mt-2 text-zinc-300">
+                        {draft.activeThreat ?? "No immediate threat. The scene is grounded in daily routine."}
+                      </p>
                     </div>
                     <div className="rounded-2xl border border-zinc-800 p-4">
                       <p className="ui-label">Location</p>

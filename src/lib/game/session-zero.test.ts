@@ -4,6 +4,7 @@ import {
   campaignCreateRequestSchema,
   campaignOpeningDraftRequestSchema,
   customResolvedLaunchEntryDraftSchema,
+  generatedCampaignOpeningSchema,
   generatedWorldModuleSchema,
   validateResolvedLaunchEntryAgainstWorld,
 } from "./session-zero";
@@ -340,6 +341,26 @@ test("campaign launch request schemas enforce strict XOR for entry selection", (
     }).success,
     true,
   );
+});
+
+test("generated campaign opening schema allows peaceful openings without an active threat", () => {
+  const peacefulOpening = generatedCampaignOpeningSchema.parse({
+    narration: "Dawn light reaches the market awnings as you start your work.",
+    activeThreat: "",
+    entryPointId: "entry_2",
+    locationNodeId: "loc_market",
+    presentNpcIds: [],
+    citedInformationIds: [],
+    scene: {
+      title: "Before the Stalls Open",
+      summary: "You settle into the first quiet work of the morning before the square fills.",
+      location: "Market",
+      atmosphere: "Cool air, canvas creak, and the smell of fresh bread.",
+      suggestedActions: ["Finish setting out the stall"],
+    },
+  });
+
+  assert.equal(peacefulOpening.activeThreat, null);
 });
 
 test("campaign create request schema accepts a prepared launch bundle without an opening draft", () => {

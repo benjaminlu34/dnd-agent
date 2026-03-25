@@ -409,3 +409,59 @@ test("preparedLaunchMatchesSelection rejects stale bundles from a different laun
     false,
   );
 });
+
+test("findSimilarStockEntry flags custom entries that collapse into an authored stock hook", () => {
+  const world = createWorld();
+  const similarCustomEntry: ResolvedLaunchEntry = {
+    id: "custom_entry_gate_1",
+    title: "Gate Trouble",
+    summary: "You arrive under watchful eyes as the checkpoint tightens around you.",
+    startLocationId: "loc_gate",
+    presentNpcIds: ["npc_guide"],
+    initialInformationIds: ["info_watch"],
+    immediatePressure: "The gate line is tightening and the guide is already looking for your signal.",
+    publicLead: "The guide says the checkpoint is about to search the line.",
+    localContactNpcId: "npc_guide",
+    localContactTemporaryActorLabel: null,
+    temporaryLocalActors: [],
+    mundaneActionPath: "Join the queue and play your role.",
+    evidenceWorldAlreadyMoving: "Guards are already questioning arrivals at the gate.",
+    isCustom: true,
+    customRequestPrompt: "I want to start at the gate with a tense checkpoint scene.",
+  };
+
+  const match = repositoryTestUtils.findSimilarStockEntry({
+    customEntryPoint: similarCustomEntry,
+    world,
+  });
+
+  assert.equal(match?.entryPoint.id, "entry_1");
+});
+
+test("findSimilarStockEntry allows routine custom entries in the same place when the hook is materially different", () => {
+  const world = createWorld();
+  const distinctCustomEntry: ResolvedLaunchEntry = {
+    id: "custom_entry_gate_2",
+    title: "Before the Stall Opens",
+    summary: "You are sweeping grit away from your little awning before the first customers arrive.",
+    startLocationId: "loc_gate",
+    presentNpcIds: [],
+    initialInformationIds: [],
+    immediatePressure: "A gust keeps lifting the canvas while you try to tie it down properly.",
+    publicLead: "Nearby porters and cart-drivers are beginning their morning rounds.",
+    localContactNpcId: null,
+    localContactTemporaryActorLabel: null,
+    temporaryLocalActors: [],
+    mundaneActionPath: "Secure the awning, lay out your tools, and decide what job to tackle first.",
+    evidenceWorldAlreadyMoving: "Morning traffic is starting to build beyond the gate.",
+    isCustom: true,
+    customRequestPrompt: "I want an ordinary workday opening near the gate.",
+  };
+
+  const match = repositoryTestUtils.findSimilarStockEntry({
+    customEntryPoint: distinctCustomEntry,
+    world,
+  });
+
+  assert.equal(match, null);
+});
