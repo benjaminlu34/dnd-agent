@@ -2,6 +2,7 @@ import { z } from "zod";
 import type {
   CampaignRuntimeState,
   FactionResourcePool,
+  SceneAspectDuration,
   StateCommitLogEntry,
   TurnCausalityCode,
   TurnCausalityCodeName,
@@ -9,13 +10,46 @@ import type {
   TurnResultPayload,
 } from "@/lib/game/types";
 
-const campaignRuntimeStateSchema = z.object({
+const sceneAspectDurationValues = ["scene", "permanent"] as const satisfies readonly SceneAspectDuration[];
+
+const sceneAspectSchema = z.object({
+  label: z.string().trim().min(1),
+  state: z.string().trim().min(1),
+  duration: z.enum(sceneAspectDurationValues),
+});
+
+const rawCampaignRuntimeStateSchema = z.object({
   currentLocationId: z.string().trim().min(1),
   globalTime: z.number().int().min(0),
   pendingTurnId: z.string().trim().min(1).nullable(),
   lastActionSummary: z.string().trim().min(1).nullable(),
+  sceneAspects: z.record(z.string(), sceneAspectSchema).optional().default({}),
   sceneObjectStates: z.record(z.string(), z.string()).optional().default({}),
   customTitle: z.string().trim().min(1).nullable().optional(),
+});
+
+const campaignRuntimeStateSchema: z.ZodType<CampaignRuntimeState> = rawCampaignRuntimeStateSchema.transform((value) => {
+  const normalizedAspects = Object.keys(value.sceneAspects).length
+    ? value.sceneAspects
+    : Object.fromEntries(
+        Object.entries(value.sceneObjectStates).map(([key, state]) => [
+          key,
+          {
+            label: key.replace(/[_-]+/g, " ").trim() || key,
+            state,
+            duration: "permanent" as const,
+          },
+        ]),
+      );
+
+  return {
+    currentLocationId: value.currentLocationId,
+    globalTime: value.globalTime,
+    pendingTurnId: value.pendingTurnId,
+    lastActionSummary: value.lastActionSummary,
+    sceneAspects: normalizedAspects,
+    customTitle: value.customTitle ?? null,
+  } satisfies CampaignRuntimeState;
 });
 
 const factionResourcesSchema = z.object({
@@ -107,11 +141,15 @@ const stateCommitLogEntrySchema: z.ZodType<StateCommitLogEntry> = z.object({
       "move_player",
       "adjust_gold",
       "record_local_interaction",
+      "spawn_scene_aspect",
+      "spawn_temporary_actor",
+      "spawn_environmental_item",
       "commit_market_trade",
       "adjust_inventory",
       "adjust_relationship",
       "discover_information",
       "set_npc_state",
+      "set_scene_actor_presence",
       "update_scene_object",
       "restore_health",
     ])

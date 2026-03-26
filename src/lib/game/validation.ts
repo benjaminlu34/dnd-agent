@@ -161,6 +161,14 @@ function mutationPhaseForCheckStakes(mutation: MechanicsMutation): "immediate" |
   if (mutation.type === "record_local_interaction") {
     return "immediate";
   }
+  if (
+    mutation.type === "spawn_scene_aspect"
+    || mutation.type === "spawn_temporary_actor"
+    || mutation.type === "spawn_environmental_item"
+    || mutation.type === "set_scene_actor_presence"
+  ) {
+    return "immediate";
+  }
   if (mutation.type === "adjust_inventory" && mutation.action === "remove") {
     return "immediate";
   }

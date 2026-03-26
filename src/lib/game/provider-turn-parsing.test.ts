@@ -94,9 +94,13 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   assert.match(prompt, /Mark resource costs, fees, and other upfront expenditures as phase immediate/);
   assert.match(prompt, /Mark success-only rewards or outcomes as phase conditional/);
   assert.match(prompt, /Use commit_market_trade only for strict commodity trade backed by fetched market prices/);
+  assert.match(prompt, /Use sceneActors.actorRef values exactly when targeting on-screen actors/);
   assert.match(prompt, /Use record_local_interaction for current-scene unnamed locals instead of adjust_relationship/);
+  assert.match(prompt, /Use spawn_temporary_actor before record_local_interaction/);
+  assert.match(prompt, /Use spawn_environmental_item before adjust_inventory/);
+  assert.match(prompt, /Use set_scene_actor_presence whenever someone leaves the current scene/);
   assert.match(prompt, /Use adjust_inventory for gaining, losing, consuming, or handing over grounded inventory items/);
-  assert.match(prompt, /Use update_scene_object for simple persistent object or scene state changes/);
+  assert.match(prompt, /Use spawn_scene_aspect for smoke, damage, noise/);
 });
 
 test("buildTurnRouterSystemPrompt distinguishes self-talk from on-screen social commitment", () => {
@@ -131,14 +135,14 @@ test("buildResolvedTurnNarrationPrompt includes prompt context and fetched facts
         state: "tense",
       },
       adjacentRoutes: [],
-      presentNpcs: [],
-      recentUnnamedLocals: [
+      sceneActors: [
         {
-          id: "temp_dockhand",
-          label: "dockhand",
-          interactionCount: 1,
+          actorRef: "temp:temp_dockhand",
+          kind: "temporary_actor",
+          displayLabel: "dockhand",
+          role: "dockhand",
+          detailFetchHint: null,
           lastSummary: "He kept glancing toward the sealed pier.",
-          lastSeenAtTurn: 3,
         },
       ],
       recentLocalEvents: [],
@@ -148,7 +152,7 @@ test("buildResolvedTurnNarrationPrompt includes prompt context and fetched facts
       recentWorldShifts: [],
       activeThreads: [],
       inventory: [],
-      sceneObjectStates: {},
+      sceneAspects: {},
       localTexture: null,
       globalTime: 270,
       timeOfDay: "pre-dawn",
@@ -213,6 +217,55 @@ test("buildResolvedTurnNarrationPrompt includes prompt context and fetched facts
   assert.match(prompt.user, /Blackwater Docks/);
   assert.match(prompt.user, /fetched_facts/);
   assert.match(prompt.user, /Pier Nine Closure/);
+});
+
+test("buildResolvedTurnNarrationPrompt does not treat departures as waited-for arrivals", () => {
+  const prompt = aiProviderTestUtils.buildResolvedTurnNarrationPrompt({
+    playerAction: "Wait until the apprentice returns.",
+    promptContext: {
+      currentLocation: {
+        id: "loc_gate",
+        name: "Ash Gate",
+        type: "district",
+        summary: "Rain-dark stone and watchfires.",
+        state: "active",
+      },
+      adjacentRoutes: [],
+      sceneActors: [],
+      recentLocalEvents: [],
+      recentTurnLedger: [],
+      discoveredInformation: [],
+      activePressures: [],
+      recentWorldShifts: [],
+      activeThreads: [],
+      inventory: [],
+      sceneAspects: {},
+      localTexture: null,
+      globalTime: 480,
+      timeOfDay: "morning",
+      dayCount: 1,
+    },
+    fetchedFacts: [],
+    stateCommitLog: [
+      {
+        kind: "mutation",
+        mutationType: "set_scene_actor_presence",
+        status: "applied",
+        reasonCode: "scene_actor_presence_updated",
+        summary: "The dockhand leaves the scene.",
+        metadata: {
+          actorRef: "temp:temp_dockhand",
+          newLocationId: null,
+          arrivesInCurrentScene: false,
+        },
+      },
+    ],
+    checkResult: null,
+    suggestedActions: [],
+  });
+
+  assert.match(prompt.user, /waitingForArrival: true/);
+  assert.match(prompt.user, /hasArrivalCommit: false/);
 });
 
 test("normalizeRouterDecision dedupes vectors and prerequisites", () => {
