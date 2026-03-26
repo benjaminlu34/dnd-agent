@@ -465,3 +465,46 @@ test("findSimilarStockEntry allows routine custom entries in the same place when
 
   assert.equal(match, null);
 });
+
+test("toPlayerCampaignSnapshot preserves latest retryable turn metadata", () => {
+  const playerSnapshot = repositoryTestUtils.toPlayerCampaignSnapshot({
+    campaignId: "camp_1",
+    sessionId: "sess_1",
+    sessionTurnCount: 4,
+    stateVersion: 7,
+    generatedThroughDay: 1,
+    moduleId: "mod_1",
+    selectedEntryPointId: "entry_1",
+    title: "Harbor of Knives",
+    premise: "A harbor city where rival powers are preparing to move.",
+    tone: "Tense and investigative",
+    setting: "A rain-dark trade port",
+    state: {
+      currentLocationId: "loc_gate",
+      globalTime: 480,
+      pendingTurnId: null,
+      lastActionSummary: null,
+      sceneObjectStates: {},
+    },
+    character: {} as never,
+    currentLocation: {} as never,
+    adjacentRoutes: [],
+    presentNpcs: [],
+    knownFactions: [],
+    factionRelations: [],
+    localInformation: [],
+    discoveredInformation: [],
+    connectedLeads: [],
+    temporaryActors: [],
+    memories: [],
+    activePressures: [],
+    recentWorldShifts: [],
+    activeThreads: [],
+    recentMessages: [],
+    canRetryLatestTurn: true,
+    latestRetryableTurnId: "turn_latest",
+  });
+
+  assert.equal(playerSnapshot.canRetryLatestTurn, true);
+  assert.equal(playerSnapshot.latestRetryableTurnId, "turn_latest");
+});

@@ -6,6 +6,7 @@ import {
   customResolvedLaunchEntryDraftSchema,
   generatedCampaignOpeningSchema,
   generatedWorldModuleSchema,
+  normalizeCustomResolvedLaunchEntryDraft,
   validateResolvedLaunchEntryAgainstWorld,
 } from "./session-zero";
 import type { GeneratedWorldModule } from "./types";
@@ -513,6 +514,64 @@ test("custom resolved launch entry draft schema rejects simultaneous named and t
 
   assert.equal(parsed.success, false);
   assert.match(JSON.stringify(parsed.error?.flatten()), /named and temporary local contact anchors/);
+});
+
+test("normalizeCustomResolvedLaunchEntryDraft drops temporary contact labels when a named contact is present", () => {
+  const normalized = normalizeCustomResolvedLaunchEntryDraft({
+    title: "Busy Market Morning",
+    summary: "Open the stall while the market swells around you.",
+    startLocationId: "loc_market",
+    presentNpcIds: ["npc_4"],
+    initialInformationIds: ["info_2"],
+    immediatePressure: "A surprise inspection is working its way down the lane.",
+    publicLead: "A runner nearby is already whispering about which booths to avoid.",
+    localContactNpcId: "npc_4",
+    localContactTemporaryActorLabel: "runner",
+    temporaryLocalActors: [
+      {
+        label: "runner",
+        summary: "A quick-footed local errand runner weaving between stalls.",
+      },
+    ],
+    mundaneActionPath: "Unpack the morning stock and keep your head down.",
+    evidenceWorldAlreadyMoving: "Tarps are snapping overhead while merchants argue over space.",
+  });
+
+  const parsed = customResolvedLaunchEntryDraftSchema.safeParse(normalized);
+  assert.equal(parsed.success, true);
+  assert.equal(parsed.data.localContactNpcId, "npc_4");
+  assert.equal(parsed.data.localContactTemporaryActorLabel, null);
+});
+
+test("normalizeCustomResolvedLaunchEntryDraft clears unmatched temporary contact labels", () => {
+  const normalized = normalizeCustomResolvedLaunchEntryDraft({
+    title: "Smithy Dawn",
+    summary: "The street wakes while the forge is already hot.",
+    startLocationId: "loc_market",
+    presentNpcIds: [],
+    initialInformationIds: ["info_2"],
+    immediatePressure: "The first order is already half-finished on the anvil.",
+    publicLead: "Neighbors are already filtering past on their morning errands.",
+    localContactNpcId: null,
+    localContactTemporaryActorLabel: "baker",
+    temporaryLocalActors: [
+      {
+        label: "farmer",
+        summary: "A farmer rolling a cart toward the square.",
+      },
+      {
+        label: "night watch guard",
+        summary: "A tired guard heading home at the end of the shift.",
+      },
+    ],
+    mundaneActionPath: "Finish the order before deciding whether to open the front shutters wider.",
+    evidenceWorldAlreadyMoving: "Cart wheels and morning voices are already carrying down the lane.",
+  });
+
+  const parsed = customResolvedLaunchEntryDraftSchema.safeParse(normalized);
+  assert.equal(parsed.success, true);
+  assert.equal(parsed.data.localContactNpcId, null);
+  assert.equal(parsed.data.localContactTemporaryActorLabel, null);
 });
 
 test("validateResolvedLaunchEntryAgainstWorld rejects NPC/location mismatch and secret starting information", () => {

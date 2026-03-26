@@ -133,6 +133,7 @@ export function AdventureApp({
     options: string[];
   } | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [retryingTurn, setRetryingTurn] = useState(false);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [latestCheck, setLatestCheck] = useState<CheckResult | null>(null);
   const [streamedNarration, setStreamedNarration] = useState("");
@@ -251,6 +252,61 @@ export function AdventureApp({
     const value = latestNarrationPayload?.why;
     return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
   }, [latestNarrationPayload]);
+  const latestRetryableTurnId = snapshot?.latestRetryableTurnId ?? null;
+
+  async function refreshCurrentSnapshot(targetCampaignId: string, preserveAction = false) {
+    const response = await fetch(`/api/campaigns/${targetCampaignId}`);
+    const data = (await response.json()) as {
+      snapshot?: PlayerCampaignSnapshot;
+      error?: string;
+    };
+
+    if (!response.ok || !data.snapshot) {
+      throw new Error(data.error ?? "Failed to load campaign.");
+    }
+
+    setSnapshot(data.snapshot);
+    setSuggestedActions(extractSuggestedActions(data.snapshot));
+    setMissedTurnDigests([]);
+    setStreamedNarration("");
+    setLatestCheck(null);
+    if (!preserveAction) {
+      setAction("");
+    }
+  }
+
+  async function undoLatestTurn() {
+    if (!campaignId || !latestRetryableTurnId || retryingTurn || submitting) {
+      return;
+    }
+
+    setRetryingTurn(true);
+    setTurnError(null);
+    setWarnings([]);
+    setClarification(null);
+    setLatestCheck(null);
+    setStreamedNarration("");
+
+    try {
+      const response = await fetch(`/api/turns/${latestRetryableTurnId}/retry`, {
+        method: "POST",
+      });
+      const data = (await response.json()) as {
+        ok?: boolean;
+        error?: string;
+      };
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "Turn undo failed.");
+      }
+
+      await refreshCurrentSnapshot(campaignId);
+    } catch (error) {
+      setTurnError(error instanceof Error ? error.message : "Turn undo failed.");
+    } finally {
+      setRetryingTurn(false);
+    }
+  }
 
   async function submitTurn(nextAction: string, mode?: TurnSubmissionRequest["mode"]) {
     return submitTurnWithIntent(nextAction, mode);
@@ -651,7 +707,7 @@ export function AdventureApp({
                       type="button"
                       className="button-press rounded-2xl bg-zinc-100 px-5 py-3 text-sm font-semibold text-zinc-950 transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
                       onClick={() => void submitTurn(action)}
-                      disabled={!action.trim() || submitting}
+                      disabled={!action.trim() || submitting || retryingTurn}
                     >
                       {submitting ? "Resolving..." : "Submit turn"}
                     </button>
@@ -659,10 +715,20 @@ export function AdventureApp({
                       type="button"
                       className="button-press rounded-2xl border border-zinc-700 bg-zinc-900 px-5 py-3 text-sm font-semibold text-zinc-100 transition hover:border-zinc-500 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-60"
                       onClick={() => void submitTurn("Observe", "observe")}
-                      disabled={submitting || !snapshot || Boolean(action.trim())}
+                      disabled={submitting || retryingTurn || !snapshot || Boolean(action.trim())}
                     >
                       Observe
                     </button>
+                    {snapshot?.canRetryLatestTurn && latestRetryableTurnId ? (
+                      <button
+                        type="button"
+                        className="button-press rounded-2xl border border-amber-500/30 bg-amber-500/10 px-5 py-3 text-sm font-semibold text-amber-50 transition hover:border-amber-400/60 hover:bg-amber-400/15 disabled:cursor-not-allowed disabled:opacity-60"
+                        onClick={() => void undoLatestTurn()}
+                        disabled={submitting || retryingTurn}
+                      >
+                        {retryingTurn ? "Undoing..." : "Undo Last Turn"}
+                      </button>
+                    ) : null}
                   </div>
 
                   {clarification ? (

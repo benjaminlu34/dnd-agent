@@ -85,7 +85,12 @@ export function CampaignCreationApp({
 
         setModule(moduleData.module ?? null);
         setCharacter(characterData.character ?? null);
-        setSelectedEntryPointId(moduleData.module?.entryPoints[0]?.id ?? null);
+        setLaunchMode("stock");
+        setSelectedEntryPointId(null);
+        setCustomEntryPoint(null);
+        setDraft(null);
+        setPreparedLaunch(null);
+        setFollowUpPrompt("");
       } catch (loadError) {
         if (active) {
           setError(loadError instanceof Error ? loadError.message : "Failed to load launch context.");
@@ -410,7 +415,9 @@ export function CampaignCreationApp({
                     {draft?.scene.title
                       ?? (launchMode === "custom" && !customEntryPoint
                         ? "Resolve a custom entry to preview the opening."
-                        : "Generating entry-point opening...")}
+                        : hasActiveLaunchSelection
+                          ? "Generating entry-point opening..."
+                          : "Choose an entry point to preview the opening.")}
                   </h2>
                 </div>
                 <button

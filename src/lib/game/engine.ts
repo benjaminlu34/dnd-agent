@@ -949,7 +949,7 @@ function findRelationshipHistoryNpc(fetchedFacts: TurnFetchToolResult[], npcId: 
 }
 
 function hasVector(decision: RouterDecision, vector: RouterDecision["authorizedVectors"][number]) {
-  return decision.authorizedVectors.includes(vector);
+  return decision.authorizedVectors.length === 0 || decision.authorizedVectors.includes(vector);
 }
 
 function hasAnyAuthorizedVector(decision: RouterDecision) {

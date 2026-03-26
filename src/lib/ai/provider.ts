@@ -16,6 +16,7 @@ import {
   generatedSocialLayerInputSchema,
   generatedWorldBibleSchema,
   generatedWorldSpineSchema,
+  normalizeCustomResolvedLaunchEntryDraft,
   worldSpineLocationSchema,
 } from "@/lib/game/session-zero";
 import type {
@@ -78,6 +79,12 @@ type CustomEntryResolutionInput = {
   character: CharacterTemplate;
   prompt: string;
   correctionNotes?: string | null;
+  interpretedIntent?: {
+    activityFrame: "routine_work" | "private_project" | "travel_prep" | "urgent_hook" | "unclear";
+    socialAnchorPreference: "solitary" | "ambient_locals" | "named_contact" | "unclear";
+    informationLeadPreference: "none" | "ambient_public" | "named_hook" | "unclear";
+    notes: string;
+  } | null;
 };
 
 type StartingLocalHydrationInput = {
@@ -772,6 +779,7 @@ type StageValidation = {
 
 const MAX_WORLD_STAGE_ATTEMPTS = 3;
 const MAX_TURN_ATTEMPTS = 3;
+const MAX_ROUTER_ATTEMPTS = 2;
 const WORLD_SPINE_LOCATION_BATCH_SIZE = 3;
 const REGIONAL_LIFE_BATCH_SIZE = 3;
 const SOCIAL_CAST_BATCH_SIZE = 3;
@@ -2090,6 +2098,19 @@ const openingRewriteIntentTool = createStructuredTool(
   openingRewriteIntentSchema,
 );
 
+const customEntryIntentSchema = z.object({
+  activityFrame: z.enum(["routine_work", "private_project", "travel_prep", "urgent_hook", "unclear"]),
+  socialAnchorPreference: z.enum(["solitary", "ambient_locals", "named_contact", "unclear"]),
+  informationLeadPreference: z.enum(["none", "ambient_public", "named_hook", "unclear"]),
+  notes: z.string().trim().min(1),
+});
+
+const customEntryIntentTool = createStructuredTool(
+  "interpret_custom_entry_intent",
+  "Interpret the desired shape of a player-authored custom entry before resolving it into world data.",
+  customEntryIntentSchema,
+);
+
 const customEntryResolutionTool = createStructuredTool(
   "resolve_custom_entry_point",
   "Resolve a player-authored custom entry into an existing grounded launch entry using only provided ids.",
@@ -2475,12 +2496,19 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "You are the mechanical planner for a passive observation turn in a simulated world.",
         "Return exactly one structured payload using resolve_mechanics or request_clarification.",
         "Do not output narration or any freeform prose.",
+        "If you use resolve_mechanics, always include top-level timeMode, suggestedActions, and mutations.",
+        "timeMode must be exactly one of: combat, exploration, travel, rest, downtime.",
+        "Use exploration for passive noticing, investigation, searching, or cautious local movement within the current scene.",
+        "Use downtime for routine work, crafting, errands, waiting, or other non-travel non-combat activity.",
+        "Do not treat internal thoughts, mutters to yourself, or naming an item as dialogue with another character unless the words are explicitly addressed to them.",
+        "Giving a present subordinate or ally a routine instruction to fetch someone, pass along a message, or help with ordinary work is usually a grounded local interaction, not a social challenge.",
         "The router has already chosen scope and prerequisite fetches. Do not ask for more fetches.",
         "Use only bounded mutations. The engine will validate, filter, and commit them.",
         "Mark resource costs, fees, and other upfront expenditures as phase immediate.",
         "Mark success-only rewards or outcomes as phase conditional.",
         "Advance the scene or world only through passive observation or waiting.",
         "Do not create combat, market trade, or deliberate social escalation in observe mode.",
+        "Only include checkIntent when success or failure meaningfully changes which mutations can happen. If the turn is routine and should simply create a local interaction or consume time, omit checkIntent.",
         "If a check is needed, set checkIntent and list only the success-state mutations. The engine will reject them on failure.",
         "Use advance_time for passive waiting or observation windows.",
         "Suggested actions should stay short and concrete.",
@@ -2490,10 +2518,21 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "You are the mechanical planner for a simulated world turn.",
         "Return exactly one structured payload using resolve_mechanics or request_clarification.",
         "Do not output narration or any freeform prose.",
+        "If you use resolve_mechanics, always include top-level timeMode, suggestedActions, and mutations.",
+        "timeMode must be exactly one of: combat, exploration, travel, rest, downtime.",
+        "Use combat for an active fight or immediate violence.",
+        "Use travel only for route movement between known adjacent locations.",
+        "Use rest for sleep, recovery, or explicit healing downtime.",
+        "Use exploration for investigation, searching, scouting, talking within the current scene, or cautious local movement.",
+        "Use downtime for crafting, routine work, commissioning help, shopping, administration, or other settled non-travel activity.",
+        "Do not treat internal thoughts, mutters to yourself, or naming an item as dialogue with another character unless the words are explicitly addressed to them.",
+        "Giving a present subordinate or ally a routine instruction to fetch someone, pass along a message, or help with ordinary work is usually a grounded local interaction, not a social challenge.",
         "The router has already chosen scope and prerequisite fetches. Do not ask for more fetches.",
         "Obey the router_constraints block. If a vector is not authorized, do not rely on it.",
         "Use only bounded mutations. The engine will validate, filter, and commit them deterministically.",
+        "Only include checkIntent when success or failure meaningfully changes which mutations can happen. If the turn is routine and should simply create a local interaction, spend time, or ask a subordinate to fetch someone, omit checkIntent.",
         "If a check is needed, set checkIntent and list only the success-state mutations. The engine will reject them automatically on failure or partial success.",
+        "Only set citedNpcId when the player is directly engaging that NPC on-screen this turn.",
         "Mark resource costs, fees, and other upfront expenditures as phase immediate.",
         "Mark success-only rewards or outcomes as phase conditional.",
         "Use commit_market_trade only for strict commodity trade backed by fetched market prices.",
@@ -2510,6 +2549,61 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Preserve the player's commitment level. Do not upgrade browsing or approach into stronger mechanics unless the wording clearly commits to them.",
         "Use request_clarification only if the action is too ambiguous, impossible to map safely, or missing a required target.",
       ].join("\n");
+}
+
+function buildTurnActionCorrectionNotes(input: {
+  likelyTruncated: boolean;
+  validationIssues: string | null;
+}) {
+  if (input.likelyTruncated) {
+    return [
+      "Your previous reply did not match the final action schema.",
+      "The previous payload was cut off. Return a much shorter complete replacement payload.",
+      "If you use resolve_mechanics, include top-level timeMode, suggestedActions, and mutations.",
+      "Do not include assistant prose before the tool call.",
+    ].join("\n");
+  }
+
+  const notes = [
+    "Your previous reply did not match the final action schema.",
+    `Return a complete replacement payload that matches one final action schema exactly. Validation issues: ${input.validationIssues ?? "unknown"}`,
+  ];
+
+  if ((input.validationIssues ?? "").includes("timeMode")) {
+    notes.push(
+      "For resolve_mechanics, always include top-level timeMode as exactly one of: combat, exploration, travel, rest, downtime.",
+      "Choose timeMode before writing mutations. Use downtime for crafting, routine work, errands, or commissioning help. Use exploration for investigation, searching, talking within the current scene, or cautious local movement.",
+    );
+  }
+
+  if ((input.validationIssues ?? "").includes("suggestedActions")) {
+    notes.push("suggestedActions must be an array of at most 4 short concrete strings. Use [] if none are appropriate.");
+  }
+
+  notes.push("Do not include assistant prose before the tool call.");
+  return notes.join("\n");
+}
+
+function buildTurnRouterSystemPrompt(correctionNotes?: string | null) {
+  const base = [
+    "You classify player intent for a simulated world turn.",
+    "Return exactly one structured payload using the provided tool.",
+    "Choose profile=local only when the action can be resolved from immediate same-scene context alone.",
+    "Choose profile=full whenever the action depends on prior clues, rumors, factions, active pressures, broader world state, travel, strategy, or you are unsure.",
+    "authorizedVectors should contain only the commitment vectors the player's wording clearly authorizes on this turn.",
+    "economy_light covers incidental spending like meals, drinks, tips, entry fees, and small service payments.",
+    "economy_strict covers commodity trade, barter, or anything that depends on authoritative market prices.",
+    "violence covers direct attack, subdual, assassination, or clear threat-of-harm escalation.",
+    "converse covers explicit questioning, negotiation, persuasion, or socially consequential dialogue.",
+    "investigate covers explicit searching, clue-seeking, examination, tracking, or analysis.",
+    "Internal thoughts, mutters to yourself, and naming an item are not converse.",
+    "Directing a present subordinate or ally to pass along a message or fetch someone is a local in-scene action, not automatically persuasion with the off-screen target.",
+    "requiredPrerequisites must list every authoritative fetch the mechanics pass will need before it can safely resolve the turn.",
+    "Use market_prices before strict commodity trade, npc_detail before detailed interaction with a present NPC that needs it, and relationship_history only when prior rapport materially matters.",
+    "Confidence governs profile only. authorizedVectors and requiredPrerequisites should still reflect the best conservative reading even when confidence is low.",
+  ].join("\n");
+
+  return correctionNotes ? `${base}\n${correctionNotes}` : base;
 }
 
 function buildTurnUserPrompt(input: {
@@ -2659,6 +2753,92 @@ export function getTurnQualityMeta() {
   return null;
 }
 
+function normalizeIntentSurfaceText(value: string) {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function findCustomEntryIntentConflicts(input: {
+  intent: z.infer<typeof customEntryIntentSchema>;
+  resolvedDraft: z.infer<typeof customResolvedLaunchEntryDraftSchema>;
+  validInformation: Array<{
+    id: string;
+    title: string;
+    sourceNpcId: string | null;
+  }>;
+  validNpcs: Array<{
+    id: string;
+    name: string;
+  }>;
+}) {
+  const issues: string[] = [];
+  const normalizedPublicLead = normalizeIntentSurfaceText(input.resolvedDraft.publicLead);
+  const chosenInformation = input.validInformation.filter((information) =>
+    input.resolvedDraft.initialInformationIds.includes(information.id),
+  );
+
+  if (
+    input.intent.socialAnchorPreference !== "named_contact"
+    && input.resolvedDraft.localContactNpcId
+  ) {
+    issues.push(
+      "This request reads as self-directed or ambient, so do not hinge the opening on a named NPC contact.",
+    );
+  }
+
+  if (
+    input.intent.socialAnchorPreference === "ambient_locals"
+    && !input.resolvedDraft.temporaryLocalActors.length
+    && !input.resolvedDraft.localContactTemporaryActorLabel
+  ) {
+    issues.push(
+      "Prefer ambient unnamed locals or ordinary passersby for scene texture instead of centering a named contact.",
+    );
+  }
+
+  if (
+    input.intent.informationLeadPreference === "none"
+    && input.resolvedDraft.initialInformationIds.length > 0
+  ) {
+    issues.push(
+      "Do not seed a formal information hook here; keep the opening grounded in routine action and visible local motion.",
+    );
+  }
+
+  if (
+    input.intent.informationLeadPreference === "ambient_public"
+    && chosenInformation.some((information) => information.sourceNpcId)
+  ) {
+    issues.push(
+      "If you include starting information, keep it ambient and public rather than tied to a named NPC briefing or faction hook.",
+    );
+  }
+
+  if (
+    input.intent.informationLeadPreference !== "named_hook"
+    && input.validNpcs.some((npc) => normalizedPublicLead.includes(normalizeIntentSurfaceText(npc.name)))
+  ) {
+    issues.push(
+      "The public lead should describe observable street life or local motion, not a named NPC handing out the opening hook.",
+    );
+  }
+
+  return issues;
+}
+
+function buildCustomEntryIntentCorrectionNotes(input: {
+  priorCorrectionNotes?: string | null;
+  intent: z.infer<typeof customEntryIntentSchema>;
+  issues: string[];
+}) {
+  return [
+    input.priorCorrectionNotes?.trim() || null,
+    "The previous custom-entry attempt drifted away from the player's intended opening shape.",
+    `Interpreted intent to preserve: ${input.intent.notes}`,
+    ...input.issues,
+    "Keep the start self-directed, ordinary, and locally playable unless the player clearly asked for a named quest contact.",
+  ].filter((value): value is string => Boolean(value)).join("\n");
+}
+
 class DungeonMasterClient {
   async interpretOpeningRewriteIntent(input: {
     prompt: string;
@@ -2705,6 +2885,53 @@ class DungeonMasterClient {
       return parsed.data;
     } catch (error) {
       logOpenRouterResponse("opening_rewrite_intent.error", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
+  }
+
+  async interpretCustomEntryIntent(input: {
+    prompt: string;
+    character: CharacterTemplate;
+  }): Promise<z.infer<typeof customEntryIntentSchema> | null> {
+    try {
+      const response = await runCompletion({
+        system: [
+          "Interpret the shape of the opening the player actually wants from a custom-entry prompt.",
+          "Reason semantically about routine, privacy, daily work, ambient locals, social scale, and whether the player is asking for a named contact or explicit hook.",
+          "If the prompt is centered on ordinary work, home life, craft, errands, or a personal project, prefer activityFrame routine_work or private_project.",
+          "If the prompt does not ask for a specific named NPC to approach, prefer socialAnchorPreference ambient_locals or solitary over named_contact.",
+          "If the prompt already supplies enough lived circumstance to act on, prefer informationLeadPreference none or ambient_public over named_hook.",
+          "Return only the structured interpretation payload.",
+        ].join("\n"),
+        user: [
+          formatPromptBlock("player_request", input.prompt),
+          formatPromptBlock("character", {
+            name: input.character.name,
+            archetype: input.character.archetype,
+            backstory: input.character.backstory,
+          }),
+        ].join("\n\n"),
+        tools: [customEntryIntentTool],
+        maxTokens: 500,
+      });
+
+      const parsed = customEntryIntentSchema.safeParse(response?.input);
+      if (!parsed.success) {
+        logOpenRouterResponse("custom_entry_intent.schema_failure", {
+          issues: parsed.error.issues,
+          inputPreview: toPreview(response?.input),
+        });
+        return null;
+      }
+
+      logOpenRouterResponse("custom_entry_intent.success", {
+        preview: toPreview(parsed.data),
+      });
+      return parsed.data;
+    } catch (error) {
+      logOpenRouterResponse("custom_entry_intent.error", {
         message: error instanceof Error ? error.message : String(error),
       });
       return null;
@@ -4601,10 +4828,6 @@ class DungeonMasterClient {
         tools: [openingTool],
       });
 
-      logNarrationDebug("opening.raw_input", {
-        preview: toPreview(response?.input),
-      });
-
       logOpenRouterResponse("opening.raw_input", {
         preview: toPreview(response?.input),
       });
@@ -4621,16 +4844,10 @@ class DungeonMasterClient {
       logOpenRouterResponse("opening.success", {
         preview: toPreview(parsed.data),
       });
-      logNarrationDebug("opening.success", {
-        preview: toPreview(parsed.data),
-      });
 
       return parsed.data;
     } catch (error) {
       logOpenRouterResponse("opening.error", {
-        message: error instanceof Error ? error.message : String(error),
-      });
-      logNarrationDebug("opening.error", {
         message: error instanceof Error ? error.message : String(error),
       });
       throw new Error(error instanceof Error ? error.message : "Opening generation failed.");
@@ -4660,62 +4877,114 @@ class DungeonMasterClient {
       factionId: information.factionId,
       sourceNpcId: information.sourceNpcId,
     }));
+    const interpretedIntent = input.interpretedIntent
+      ?? await this.interpretCustomEntryIntent({
+        prompt: input.prompt,
+        character: input.character,
+      });
+    let correctionNotes = input.correctionNotes ?? null;
 
     try {
-      const response = await runCompletion({
-        system: [
-          "Resolve a player's desired campaign opening into a grounded launch entry for an open-world solo RPG.",
-          "Treat the player's examples as signals about social scale, anonymity, routine, and tone, not as nouns you must mirror literally.",
-          "A valid start may be ordinary and low-status: regular work, local routine, private obligations, travel preparation, or leaving a familiar place without spectacle.",
-          "Do not bias toward dramatic intrigue, combat readiness, elite roles, or special destiny framing.",
-          "Use only the provided canonical ids exactly as written.",
-          "Do not invent locations, NPCs, factions, information, or new ids.",
-          "Do not move NPCs from their authored currentLocationId.",
-          "Choose present NPCs only from the selected start location.",
-          "A viable start needs immediate playable affordances, not necessarily an immediate person to interact with.",
-          "Playable affordances may come from routine work, visible public movement, private obligations, environmental pressure, travel preparation, nearby named NPCs, or unnamed locals already implied by the place.",
-          "You may include presentNpcIds even when the opening does not hinge on directly interacting with them.",
-          "If no suitable named local is needed, you may leave presentNpcIds empty and instead seed temporary unnamed locals.",
-          "If the opening is solitary or private, you may leave presentNpcIds empty and set both localContactNpcId and localContactTemporaryActorLabel to null.",
-          "Use localContactNpcId only when the opening should hinge on a named NPC already authored in the world.",
-          "A custom entry should feel distinct from an authored stock entry point, not like a paraphrase of the same hook with the serial numbers filed off.",
-          "Do not simply inherit the exact named contact, pressure package, and public lead of a stock entry when a more routine or more player-authored interpretation is available.",
-          "If the player premise is ordinary work or daily life, preserve that as the main affordance instead of escalating to the location's default crisis.",
-          "You may use temporaryLocalActors for scene texture even when no single unnamed local is the opening hinge.",
-          "Use localContactTemporaryActorLabel and temporaryLocalActors when the opening should hinge on unnamed locals or ordinary roles already implied by the place.",
-          "If localContactNpcId is null, localContactTemporaryActorLabel must match one temporaryLocalActors label.",
-          "Do not invent named NPCs to satisfy the request when unnamed locals are enough.",
-          "initialInformationIds may include only public or guarded information, never secret information.",
-          "If the player's request is unsupported, repair it into the nearest honest version the world can support.",
-          "Once you choose startLocationId, every player-facing surface field must honestly reflect that exact place.",
-          "Do not keep or echo unsupported player-supplied place names in the title, summary, immediatePressure, publicLead, mundaneActionPath, or evidenceWorldAlreadyMoving.",
-          "If you map the request to Waterdeep, say Waterdeep. If you map it to Daggerford, say Daggerford. Do not preserve a conflicting place name just because the player used it.",
-          "Keep title and summary concrete, local, and player-facing.",
-          "Return only the structured launch entry payload.",
-        ].join("\n"),
-        user: [
-          formatPromptBlock("module_summary", summarizeWorld(input.module)),
-          formatPromptBlock("player_request", input.prompt),
-          formatPromptBlock("correction_notes", input.correctionNotes ?? null),
-          formatPromptBlock("character", {
-            name: input.character.name,
-            archetype: input.character.archetype,
-            backstory: input.character.backstory,
-          }),
-          formatPromptBlock("valid_locations", locationOptions),
-          formatPromptBlock("valid_npcs", npcOptions),
-          formatPromptBlock("valid_information", informationOptions),
-        ].join("\n\n"),
-        tools: [customEntryResolutionTool],
-        maxTokens: 1400,
-      });
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        const response = await runCompletion({
+          system: [
+            "Resolve a player's desired campaign opening into a grounded launch entry for an open-world solo RPG.",
+            "Treat the player's examples as signals about social scale, anonymity, routine, and tone, not as nouns you must mirror literally.",
+            "A valid start may be ordinary and low-status: regular work, local routine, private obligations, travel preparation, or leaving a familiar place without spectacle.",
+            "Do not bias toward dramatic intrigue, combat readiness, elite roles, or special destiny framing.",
+            "If an interpreted_player_intent block is present, follow its desired opening shape over the nearest authored stock hook at that location.",
+            "Use only the provided canonical ids exactly as written.",
+            "Do not invent locations, NPCs, factions, information, or new ids.",
+            "Do not move NPCs from their authored currentLocationId.",
+            "Choose present NPCs only from the selected start location.",
+            "A viable start needs immediate playable affordances, not necessarily an immediate person to interact with.",
+            "Playable affordances may come from routine work, visible public movement, private obligations, environmental pressure, travel preparation, nearby named NPCs, or unnamed locals already implied by the place.",
+            "You may include presentNpcIds even when the opening does not hinge on directly interacting with them.",
+            "If no suitable named local is needed, you may leave presentNpcIds empty and instead seed temporary unnamed locals.",
+            "If the opening is solitary or private, you may leave presentNpcIds empty and set both localContactNpcId and localContactTemporaryActorLabel to null.",
+            "Use localContactNpcId only when the opening should hinge on a named NPC already authored in the world.",
+            "Never set localContactTemporaryActorLabel when localContactNpcId is non-null.",
+            "When the interpreted player intent is routine_work or private_project, prefer self-directed action, ordinary timing pressure, and local texture over named briefings.",
+            "When the interpreted socialAnchorPreference is ambient_locals or solitary, prefer localContactNpcId null unless the player clearly asked for a specific named person.",
+            "When the interpreted informationLeadPreference is none or ambient_public, prefer no initialInformationIds or only broad ambient public knowledge that does not depend on a named NPC briefing.",
+            "A custom entry should feel distinct from an authored stock entry point, not like a paraphrase of the same hook with the serial numbers filed off.",
+            "Do not simply inherit the exact named contact, pressure package, and public lead of a stock entry when a more routine or more player-authored interpretation is available.",
+            "If the player premise is ordinary work or daily life, preserve that as the main affordance instead of escalating to the location's default crisis.",
+            "You may use temporaryLocalActors for scene texture even when no single unnamed local is the opening hinge.",
+            "Use localContactTemporaryActorLabel and temporaryLocalActors when the opening should hinge on unnamed locals or ordinary roles already implied by the place.",
+            "If localContactNpcId is null, localContactTemporaryActorLabel must match one temporaryLocalActors label.",
+            "Do not invent named NPCs to satisfy the request when unnamed locals are enough.",
+            "initialInformationIds may include only public or guarded information, never secret information.",
+            "If the player's request is unsupported, repair it into the nearest honest version the world can support.",
+            "Once you choose startLocationId, every player-facing surface field must honestly reflect that exact place.",
+            "Do not keep or echo unsupported player-supplied place names in the title, summary, immediatePressure, publicLead, mundaneActionPath, or evidenceWorldAlreadyMoving.",
+            "If you map the request to Waterdeep, say Waterdeep. If you map it to Daggerford, say Daggerford. Do not preserve a conflicting place name just because the player used it.",
+            "Keep title and summary concrete, local, and player-facing.",
+            "Return only the structured launch entry payload.",
+          ].join("\n"),
+          user: [
+            formatPromptBlock("module_summary", summarizeWorld(input.module)),
+            formatPromptBlock("player_request", input.prompt),
+            formatPromptBlock("interpreted_player_intent", interpretedIntent),
+            formatPromptBlock("correction_notes", correctionNotes),
+            formatPromptBlock("character", {
+              name: input.character.name,
+              archetype: input.character.archetype,
+              backstory: input.character.backstory,
+            }),
+            formatPromptBlock("valid_locations", locationOptions),
+            formatPromptBlock("valid_npcs", npcOptions),
+            formatPromptBlock("valid_information", informationOptions),
+          ].join("\n\n"),
+          tools: [customEntryResolutionTool],
+          maxTokens: 1400,
+        });
 
-      const parsed = customResolvedLaunchEntryDraftSchema.safeParse(response?.input);
-      if (!parsed.success) {
-        throw new Error(`Custom entry resolution returned invalid structured data: ${parsed.error.message}`);
+        const normalizedInput = normalizeCustomResolvedLaunchEntryDraft(response?.input);
+        if (normalizedInput !== response?.input) {
+          logOpenRouterResponse("custom_entry.normalized_input", {
+            preview: toPreview(normalizedInput),
+          });
+        }
+
+        const parsed = customResolvedLaunchEntryDraftSchema.safeParse(normalizedInput);
+        if (!parsed.success) {
+          throw new Error(`Custom entry resolution returned invalid structured data: ${parsed.error.message}`);
+        }
+
+        if (interpretedIntent) {
+          const intentConflicts = findCustomEntryIntentConflicts({
+            intent: interpretedIntent,
+            resolvedDraft: parsed.data,
+            validInformation: informationOptions,
+            validNpcs: npcOptions,
+          });
+
+          if (intentConflicts.length) {
+            logOpenRouterResponse("custom_entry.intent_conflict", {
+              attempt,
+              preview: toPreview({
+                interpretedIntent,
+                intentConflicts,
+                resolvedDraft: parsed.data,
+              }),
+            });
+
+            if (attempt < 2) {
+              correctionNotes = buildCustomEntryIntentCorrectionNotes({
+                priorCorrectionNotes: correctionNotes,
+                intent: interpretedIntent,
+                issues: intentConflicts,
+              });
+              continue;
+            }
+          }
+        }
+
+        return parsed.data;
       }
 
-      return parsed.data;
+      throw new Error("Custom entry resolution did not honor the interpreted player intent after retry.");
     } catch (error) {
       throw new Error(error instanceof Error ? error.message : "Custom entry resolution failed.");
     }
@@ -4971,62 +5240,63 @@ class DungeonMasterClient {
     }
 
     try {
-      const system = [
-        "You classify player intent for a simulated world turn.",
-        "Return exactly one structured payload using the provided tool.",
-        "Choose profile=local only when the action can be resolved from immediate same-scene context alone.",
-        "Choose profile=full whenever the action depends on prior clues, rumors, factions, active pressures, broader world state, travel, strategy, or you are unsure.",
-        "authorizedVectors should contain only the commitment vectors the player's wording clearly authorizes on this turn.",
-        "economy_light covers incidental spending like meals, drinks, tips, entry fees, and small service payments.",
-        "economy_strict covers commodity trade, barter, or anything that depends on authoritative market prices.",
-        "violence covers direct attack, subdual, assassination, or clear threat-of-harm escalation.",
-        "converse covers explicit questioning, negotiation, persuasion, or socially consequential dialogue.",
-        "investigate covers explicit searching, clue-seeking, examination, tracking, or analysis.",
-        "requiredPrerequisites must list every authoritative fetch the mechanics pass will need before it can safely resolve the turn.",
-        "Use market_prices before strict commodity trade, npc_detail before detailed interaction with a present NPC that needs it, and relationship_history only when prior rapport materially matters.",
-        "Confidence governs profile only. authorizedVectors and requiredPrerequisites should still reflect the best conservative reading even when confidence is low.",
-      ].join("\n");
       const user = [
         formatPromptBlock("action", input.playerAction),
         formatPromptBlock("turn_mode", input.turnMode),
         formatPromptBlock("router_context", input.context),
       ].join("\n\n");
 
-      logNarrationDebug("turn_router.request", {
-        system,
-        user,
-        plannerModel,
-      });
+      let correctionNotes: string | null = null;
+      for (let attempt = 1; attempt <= MAX_ROUTER_ATTEMPTS; attempt += 1) {
+        const system = buildTurnRouterSystemPrompt(correctionNotes);
+        logNarrationDebug("turn_router.request", {
+          attempt,
+          system,
+          user,
+          plannerModel,
+        });
 
-      const response = await runCompletion({
-        system,
-        user,
-        tools: [classifyTurnIntentTool],
-        model: plannerModel,
-        temperature: 0.1,
-        maxTokens: 500,
-        signal: input.signal,
-      });
+        const response = await runCompletion({
+          system,
+          user,
+          tools: [classifyTurnIntentTool],
+          model: plannerModel,
+          temperature: 0.1,
+          maxTokens: 650,
+          signal: input.signal,
+        });
 
-      logNarrationDebug("turn_router.raw_input", {
-        toolName: response?.name ?? null,
-        finishReason: response?.finishReason ?? null,
-        likelyTruncated: response?.likelyTruncated ?? false,
-        inputPreview: toPreview(response?.input),
-      });
-
-      const parsed = routerDecisionSchema.safeParse(response?.input);
-      if (!parsed.success) {
-        logNarrationDebug("turn_router.parse_failed", {
-          issues: zodIssuesToText(parsed.error.issues),
+        logNarrationDebug("turn_router.raw_input", {
+          attempt,
+          toolName: response?.name ?? null,
+          finishReason: response?.finishReason ?? null,
+          likelyTruncated: response?.likelyTruncated ?? false,
           inputPreview: toPreview(response?.input),
         });
-        return fallbackRouterDecision(
-          "Planner output was invalid, so the turn falls back to full context and no explicit vectors.",
-        );
+
+        const parsed = routerDecisionSchema.safeParse(response?.input);
+        if (parsed.success) {
+          return normalizeRouterDecision(parsed.data);
+        }
+
+        const issues = zodIssuesToText(parsed.error.issues);
+        logNarrationDebug("turn_router.parse_failed", {
+          attempt,
+          issues,
+          inputPreview: toPreview(response?.input),
+        });
+        correctionNotes = [
+          "Your previous reply did not match the router schema.",
+          response?.likelyTruncated
+            ? "The previous payload was cut off. Return a much shorter complete replacement payload."
+            : `Return a complete replacement payload that matches the router schema exactly. Validation issues: ${issues}`,
+          "Return only the tool payload with profile, confidence, authorizedVectors, requiredPrerequisites, and reason.",
+        ].join("\n");
       }
 
-      return normalizeRouterDecision(parsed.data);
+      return fallbackRouterDecision(
+        "Planner output was invalid, so the turn falls back to full context and no explicit vectors.",
+      );
     } catch (error) {
       logNarrationDebug("turn_router.error", {
         message: error instanceof Error ? error.message : String(error),
@@ -5042,6 +5312,7 @@ class DungeonMasterClient {
       const baseSystem = buildTurnSystemPrompt(input.turnMode);
 
       let correctionNotes: string | null = null;
+      let lastFailureSummary: string | null = null;
 
       for (let attempt = 1; attempt <= MAX_TURN_ATTEMPTS; attempt += 1) {
         logOpenRouterResponse("turn.attempt", {
@@ -5099,13 +5370,14 @@ class DungeonMasterClient {
         if (normalized) {
           const parsedAction = parseFinalActionToolCall(normalized);
           if (!parsedAction.success) {
-            correctionNotes = [
-              "Your previous reply did not match the final action schema.",
-              response?.likelyTruncated
-                ? "The previous payload was cut off. Return a much shorter complete replacement payload."
-                : `Return a complete replacement payload that matches one final action schema exactly. Validation issues: ${zodIssuesToText(parsedAction.error.issues)}`,
-              "Do not include assistant prose before the tool call.",
-            ].join("\n");
+            const validationIssues = zodIssuesToText(parsedAction.error.issues);
+            lastFailureSummary = response?.likelyTruncated
+              ? "The previous payload was cut off."
+              : `Last validation issues: ${validationIssues}`;
+            correctionNotes = buildTurnActionCorrectionNotes({
+              likelyTruncated: response?.likelyTruncated ?? false,
+              validationIssues,
+            });
             continue;
           }
 
@@ -5149,16 +5421,24 @@ class DungeonMasterClient {
           };
         }
 
+        lastFailureSummary = response?.likelyTruncated
+          ? "The previous payload was cut off before a complete tool payload could be read."
+          : "The model did not produce a complete valid tool payload.";
         correctionNotes = [
           "Your previous reply did not produce a complete valid tool payload.",
           response?.likelyTruncated
             ? "The previous payload was cut off. Return a complete replacement payload with fewer mutations."
             : "Return a complete replacement payload that exactly matches one tool schema.",
+          "If you use resolve_mechanics, include top-level timeMode, suggestedActions, and mutations.",
           "Do not include assistant prose before the tool call.",
         ].join("\n");
       }
 
-      throw new Error("Turn generation did not return a valid tool call after retries.");
+      throw new Error(
+        lastFailureSummary
+          ? `Turn generation produced tool output, but none matched the final action schema after retries. ${lastFailureSummary}`
+          : "Turn generation did not return a valid tool call after retries.",
+      );
     } catch (error) {
       logOpenRouterResponse("turn.error", {
         message: error instanceof Error ? error.message : String(error),
@@ -5236,10 +5516,14 @@ class DungeonMasterClient {
 
 export const dmClient = new DungeonMasterClient();
 export const aiProviderTestUtils = {
+  buildTurnRouterSystemPrompt,
+  buildTurnActionCorrectionNotes,
   buildTurnSystemPrompt,
   buildResolvedTurnNarrationPrompt,
   buildRouterConstraintsBlock,
+  buildCustomEntryIntentCorrectionNotes,
   extractToolInput,
+  findCustomEntryIntentConflicts,
   isObservePermittedFinalTool,
   isObserveMechanicsPayloadSafe,
   normalizeSocialCastInput,

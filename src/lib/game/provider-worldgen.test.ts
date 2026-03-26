@@ -109,3 +109,65 @@ test("normalizeSchedulePayloadIds upgrades bare payload ids to campaign-scoped i
     untouched: "market_day",
   });
 });
+
+test("findCustomEntryIntentConflicts flags named-hook drift for routine ambient openings", () => {
+  const conflicts = aiProviderTestUtils.findCustomEntryIntentConflicts({
+    intent: {
+      activityFrame: "routine_work",
+      socialAnchorPreference: "ambient_locals",
+      informationLeadPreference: "ambient_public",
+      notes: "Routine smithy morning with ambient townsfolk and no named quest-giver.",
+    },
+    resolvedDraft: {
+      title: "Anvil & Ember",
+      summary: "A blacksmith starts the day at the forge.",
+      startLocationId: "loc_waterdeep",
+      presentNpcIds: ["npc_captain_thorne_waterdeep"],
+      initialInformationIds: ["info_waterdeep_guild_rivalries"],
+      immediatePressure: "The morning order still needs finishing before the customer returns.",
+      publicLead: "Captain Thorne passes by and mentions smugglers at the docks.",
+      localContactNpcId: "npc_captain_thorne_waterdeep",
+      localContactTemporaryActorLabel: null,
+      temporaryLocalActors: [],
+      mundaneActionPath: "Finish the horseshoes and check the star-iron blade in the back corner.",
+      evidenceWorldAlreadyMoving: "Bread carts and laborers are already moving along the street.",
+    },
+    validInformation: [
+      {
+        id: "info_waterdeep_guild_rivalries",
+        title: "Guild Rivalries",
+        sourceNpcId: "npc_captain_thorne_waterdeep",
+      },
+    ],
+    validNpcs: [
+      {
+        id: "npc_captain_thorne_waterdeep",
+        name: "Captain Thorne",
+      },
+    ],
+  });
+
+  assert.ok(conflicts.some((issue) => issue.includes("named NPC contact")));
+  assert.ok(conflicts.some((issue) => issue.includes("ambient and public")));
+  assert.ok(conflicts.some((issue) => issue.includes("observable street life")));
+});
+
+test("buildCustomEntryIntentCorrectionNotes preserves prior correction notes and intent guidance", () => {
+  const correctionNotes = aiProviderTestUtils.buildCustomEntryIntentCorrectionNotes({
+    priorCorrectionNotes: "Do not collapse into the stock Waterdeep debt hook.",
+    intent: {
+      activityFrame: "private_project",
+      socialAnchorPreference: "ambient_locals",
+      informationLeadPreference: "none",
+      notes: "Personal craft project first, with ambient passersby but no named briefing.",
+    },
+    issues: [
+      "Do not hinge the opening on a named NPC contact.",
+      "Do not seed a formal information hook here.",
+    ],
+  });
+
+  assert.match(correctionNotes, /stock Waterdeep debt hook/);
+  assert.match(correctionNotes, /Personal craft project first/);
+  assert.match(correctionNotes, /Do not hinge the opening on a named NPC contact/);
+});

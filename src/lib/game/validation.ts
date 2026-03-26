@@ -2,8 +2,8 @@ import { rollCheck } from "@/lib/game/checks";
 import type {
   CampaignSnapshot,
   ChallengeApproach,
-  CheckIntent,
   CheckResult,
+  MechanicsMutation,
   ResolveMechanicsResponse,
   TimeMode,
   TurnActionToolCall,
@@ -148,6 +148,35 @@ function findPresentNpc(snapshot: CampaignSnapshot, npcId: string | undefined) {
   return snapshot.presentNpcs.find((npc) => npc.id === npcId) ?? null;
 }
 
+function mutationPhaseForCheckStakes(mutation: MechanicsMutation): "immediate" | "conditional" {
+  if (mutation.phase) {
+    return mutation.phase;
+  }
+  if (mutation.type === "advance_time") {
+    return "immediate";
+  }
+  if (mutation.type === "adjust_gold" && mutation.delta < 0) {
+    return "immediate";
+  }
+  if (mutation.type === "record_local_interaction") {
+    return "immediate";
+  }
+  if (mutation.type === "adjust_inventory" && mutation.action === "remove") {
+    return "immediate";
+  }
+  return "conditional";
+}
+
+function hasMeaningfulCheckStakes(command: ResolveMechanicsResponse) {
+  return command.mutations.some((mutation) => {
+    if (mutationPhaseForCheckStakes(mutation) !== "conditional") {
+      return false;
+    }
+
+    return mutation.type !== "advance_time";
+  });
+}
+
 function deriveCheckResult(
   snapshot: CampaignSnapshot,
   command: ResolveMechanicsResponse,
@@ -155,6 +184,13 @@ function deriveCheckResult(
 ): CheckResult | undefined {
   const checkIntent = command.checkIntent;
   if (!checkIntent) {
+    return undefined;
+  }
+
+  // Checks should gate meaningful success-state mutations. If the planner only
+  // produced routine immediate actions, treat the turn as no-roll instead of
+  // inventing stakes in validation.
+  if (!hasMeaningfulCheckStakes(command)) {
     return undefined;
   }
 

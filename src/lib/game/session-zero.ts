@@ -210,6 +210,107 @@ export const resolvedLaunchEntrySchema = resolvedLaunchEntryContextSchemaBase.ex
   customRequestPrompt: z.string().trim().min(1).nullable(),
 }).superRefine(refineResolvedLaunchEntryShape);
 
+function normalizeOptionalLaunchAnchorString(value: unknown) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length ? trimmed : null;
+}
+
+function normalizeLaunchAnchorSurfaceText(value: string) {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+export function normalizeCustomResolvedLaunchEntryDraft(input: unknown): unknown {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return input;
+  }
+
+  const source = input as Record<string, unknown>;
+  let changed = false;
+  const localContactNpcId = normalizeOptionalLaunchAnchorString(source.localContactNpcId);
+  if (localContactNpcId !== source.localContactNpcId) {
+    changed = true;
+  }
+
+  const temporaryLocalActors = Array.isArray(source.temporaryLocalActors)
+    ? source.temporaryLocalActors.map((actor) => {
+      if (!actor || typeof actor !== "object" || Array.isArray(actor)) {
+        return actor;
+      }
+
+      const originalActor = actor as Record<string, unknown>;
+      const normalizedActor = { ...originalActor };
+
+      if (typeof normalizedActor.label === "string") {
+        const trimmedLabel = normalizedActor.label.trim();
+        if (trimmedLabel !== normalizedActor.label) {
+          changed = true;
+        }
+        normalizedActor.label = trimmedLabel;
+      }
+
+      if (typeof normalizedActor.summary === "string") {
+        const trimmedSummary = normalizedActor.summary.trim();
+        if (trimmedSummary !== normalizedActor.summary) {
+          changed = true;
+        }
+        normalizedActor.summary = trimmedSummary;
+      }
+
+      return normalizedActor;
+    })
+    : source.temporaryLocalActors;
+
+  const requestedTemporaryContact = normalizeOptionalLaunchAnchorString(
+    source.localContactTemporaryActorLabel,
+  );
+  if (requestedTemporaryContact !== source.localContactTemporaryActorLabel) {
+    changed = true;
+  }
+
+  const normalized: Record<string, unknown> = {
+    ...source,
+    localContactNpcId,
+    temporaryLocalActors,
+  };
+
+  if (!requestedTemporaryContact || !Array.isArray(temporaryLocalActors)) {
+    normalized.localContactTemporaryActorLabel = requestedTemporaryContact;
+    return changed ? normalized : input;
+  }
+
+  if (localContactNpcId) {
+    if (source.localContactTemporaryActorLabel !== null) {
+      changed = true;
+    }
+    normalized.localContactTemporaryActorLabel = null;
+    return changed ? normalized : input;
+  }
+
+  const matchingTemporaryActor = temporaryLocalActors.find((actor) => (
+    actor
+    && typeof actor === "object"
+    && !Array.isArray(actor)
+    && typeof (actor as Record<string, unknown>).label === "string"
+    && normalizeLaunchAnchorSurfaceText((actor as Record<string, unknown>).label as string)
+      === normalizeLaunchAnchorSurfaceText(requestedTemporaryContact)
+  ));
+
+  normalized.localContactTemporaryActorLabel = matchingTemporaryActor
+    && typeof (matchingTemporaryActor as Record<string, unknown>).label === "string"
+    ? ((matchingTemporaryActor as Record<string, unknown>).label as string).trim()
+    : null;
+
+  if (normalized.localContactTemporaryActorLabel !== source.localContactTemporaryActorLabel) {
+    changed = true;
+  }
+
+  return changed ? normalized : input;
+}
+
 type EntryPointReferenceIssue = {
   path: PropertyKey[];
   message: string;

@@ -1199,14 +1199,20 @@ export async function resolveCustomEntryPointForUser(input: {
   }
 
   const world = parseWorldTemplate(adventureModule.openWorldTemplateJson);
+  const templateRecord = toTemplateRecord(template);
+  const interpretedIntent = await dmClient.interpretCustomEntryIntent({
+    prompt: input.prompt,
+    character: templateRecord,
+  });
   let correctionNotes: string | null = null;
 
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     const resolvedDraft = await dmClient.resolveCustomEntryPoint({
       module: world,
-      character: toTemplateRecord(template),
+      character: templateRecord,
       prompt: input.prompt,
       correctionNotes,
+      interpretedIntent,
     });
     const resolvedEntryPoint = resolvedLaunchEntrySchema.parse({
       id: `custom_entry_${randomUUID()}`,
@@ -1445,22 +1451,31 @@ async function generateRequiredInitialSchedules(input: {
   const schedules: Array<{ dayNumber: number; schedule: GeneratedDailySchedule }> = [];
 
   for (const dayNumber of [1, 2]) {
-    schedules.push({
-      dayNumber,
-      schedule: await dmClient.generateDailyWorldSchedule(
-        buildDailyScheduleInputFromWorld({
-          campaignId: input.campaignId,
-          title: input.module.title,
-          premise: input.module.premise,
-          tone: input.module.tone,
-          setting: input.module.setting,
-          currentLocationId: input.entryPoint.startLocationId,
-          dayStartTime: dayStartTimeForDay(dayNumber),
-          world: input.world,
-          discoveredInformationIds,
-        }),
-      ),
-    });
+    try {
+      schedules.push({
+        dayNumber,
+        schedule: await dmClient.generateDailyWorldSchedule(
+          buildDailyScheduleInputFromWorld({
+            campaignId: input.campaignId,
+            title: input.module.title,
+            premise: input.module.premise,
+            tone: input.module.tone,
+            setting: input.module.setting,
+            currentLocationId: input.entryPoint.startLocationId,
+            dayStartTime: dayStartTimeForDay(dayNumber),
+            world: input.world,
+            discoveredInformationIds,
+          }),
+        ),
+      });
+    } catch (error) {
+      logBackendDiagnostic("campaign.create.initial_schedule_fallback", {
+        campaignId: input.campaignId,
+        dayNumber,
+        startLocationId: input.entryPoint.startLocationId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   return schedules;
@@ -1519,6 +1534,13 @@ async function createCampaignInTx(
               role: "assistant",
               kind: "narration",
               content: input.opening.narration,
+              payload: toPrismaJsonValue({
+                suggestedActions: input.opening.scene.suggestedActions,
+                fetchedFacts: [],
+                checkResult: null,
+                whatChanged: [],
+                why: [],
+              }),
             },
           },
         },
@@ -3053,10 +3075,12 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     }));
 
   const temporaryActors = campaign.temporaryActors.map(toTemporaryActorSummary);
+  const latestRetryableTurnId =
+    env.enableTurnUndo && campaign.turns[0]?.sessionId === session.id
+      ? campaign.turns[0]?.id ?? null
+      : null;
   const canRetryLatestTurn =
-    env.enableTurnUndo &&
-    Boolean(campaign.turns[0]?.id) &&
-    campaign.turns[0]?.sessionId === session.id;
+    latestRetryableTurnId != null;
 
   return {
     campaignId: campaign.id,
@@ -3090,6 +3114,7 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     activeThreads,
     recentMessages,
     canRetryLatestTurn,
+    latestRetryableTurnId,
   };
 }
 
@@ -3485,10 +3510,12 @@ export async function getTurnSnapshot(
           : null,
     }));
   const temporaryActors = temporaryActorRecords.map(toTemporaryActorSummary);
+  const latestRetryableTurnId =
+    env.enableTurnUndo && campaign.turns[0]?.sessionId === session.id
+      ? campaign.turns[0]?.id ?? null
+      : null;
   const canRetryLatestTurn =
-    env.enableTurnUndo &&
-    Boolean(campaign.turns[0]?.id) &&
-    campaign.turns[0]?.sessionId === session.id;
+    latestRetryableTurnId != null;
 
   return {
     campaignId: campaign.id,
@@ -3522,6 +3549,7 @@ export async function getTurnSnapshot(
     activeThreads,
     recentMessages,
     canRetryLatestTurn,
+    latestRetryableTurnId,
   };
 }
 
@@ -3570,6 +3598,7 @@ export function toPlayerCampaignSnapshot(snapshot: CampaignSnapshot): PlayerCamp
     activeThreads: snapshot.activeThreads,
     recentMessages: snapshot.recentMessages,
     canRetryLatestTurn: snapshot.canRetryLatestTurn,
+    latestRetryableTurnId: snapshot.latestRetryableTurnId,
   };
 }
 
@@ -3712,4 +3741,5 @@ export const repositoryTestUtils = {
   buildOpeningWorldWithStartingLocals,
   rescopeOpeningToCampaign,
   preparedLaunchMatchesSelection,
+  toPlayerCampaignSnapshot,
 };

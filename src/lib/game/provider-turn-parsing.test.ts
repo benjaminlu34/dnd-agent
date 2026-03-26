@@ -81,6 +81,14 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   const prompt = aiProviderTestUtils.buildTurnSystemPrompt("player_input");
 
   assert.match(prompt, /Obey the router_constraints block/);
+  assert.match(prompt, /always include top-level timeMode, suggestedActions, and mutations/);
+  assert.match(prompt, /timeMode must be exactly one of: combat, exploration, travel, rest, downtime/);
+  assert.match(prompt, /Use downtime for crafting, routine work, commissioning help/);
+  assert.match(prompt, /Use exploration for investigation, searching, scouting, talking within the current scene/);
+  assert.match(prompt, /Do not treat internal thoughts, mutters to yourself, or naming an item as dialogue/);
+  assert.match(prompt, /Giving a present subordinate or ally a routine instruction to fetch someone/);
+  assert.match(prompt, /Only include checkIntent when success or failure meaningfully changes which mutations can happen/);
+  assert.match(prompt, /Only set citedNpcId when the player is directly engaging that NPC on-screen this turn/);
   assert.match(prompt, /Use only bounded mutations/);
   assert.match(prompt, /The engine will reject them automatically on failure or partial success/);
   assert.match(prompt, /Mark resource costs, fees, and other upfront expenditures as phase immediate/);
@@ -89,6 +97,26 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   assert.match(prompt, /Use record_local_interaction for current-scene unnamed locals instead of adjust_relationship/);
   assert.match(prompt, /Use adjust_inventory for gaining, losing, consuming, or handing over grounded inventory items/);
   assert.match(prompt, /Use update_scene_object for simple persistent object or scene state changes/);
+});
+
+test("buildTurnRouterSystemPrompt distinguishes self-talk from on-screen social commitment", () => {
+  const prompt = aiProviderTestUtils.buildTurnRouterSystemPrompt();
+
+  assert.match(prompt, /Internal thoughts, mutters to yourself, and naming an item are not converse/);
+  assert.match(prompt, /Directing a present subordinate or ally to pass along a message or fetch someone is a local in-scene action/);
+});
+
+test("buildTurnActionCorrectionNotes adds targeted timeMode recovery guidance", () => {
+  const notes = aiProviderTestUtils.buildTurnActionCorrectionNotes({
+    likelyTruncated: false,
+    validationIssues:
+      'timeMode: Invalid option: expected one of "combat"|"exploration"|"travel"|"rest"|"downtime"',
+  });
+
+  assert.match(notes, /Validation issues: timeMode/);
+  assert.match(notes, /always include top-level timeMode as exactly one of: combat, exploration, travel, rest, downtime/);
+  assert.match(notes, /Use downtime for crafting, routine work, errands, or commissioning help/);
+  assert.match(notes, /Use exploration for investigation, searching, talking within the current scene/);
 });
 
 test("buildResolvedTurnNarrationPrompt includes prompt context and fetched facts", () => {

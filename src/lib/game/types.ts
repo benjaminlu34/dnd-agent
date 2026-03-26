@@ -902,6 +902,7 @@ export type CampaignSnapshot = {
   activeThreads: ActiveThreadSummary[];
   recentMessages: StoryMessage[];
   canRetryLatestTurn: boolean;
+  latestRetryableTurnId: string | null;
 };
 
 export type PlayerCampaignSnapshot = Omit<

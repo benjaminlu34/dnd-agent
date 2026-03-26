@@ -113,6 +113,7 @@ function createSnapshot(): CampaignSnapshot {
     recentWorldShifts: [],
     recentMessages: [],
     canRetryLatestTurn: false,
+    latestRetryableTurnId: null,
   };
 }
 
@@ -195,7 +196,13 @@ test("validateTurnCommand rolls challenge checks from checkIntent", () => {
         challengeApproach: "influence",
         citedNpcId: "npc_guard",
       },
-      mutations: [{ type: "adjust_relationship", npcId: "npc_guard", delta: 1, reason: "The guard softens." }],
+      mutations: [{
+        type: "adjust_relationship",
+        npcId: "npc_guard",
+        delta: 1,
+        reason: "The guard softens.",
+        phase: "conditional",
+      }],
     },
   });
 
@@ -203,6 +210,32 @@ test("validateTurnCommand rolls challenge checks from checkIntent", () => {
   assert.equal(validated.checkResult?.stat, "charisma");
   assert.equal(validated.checkResult?.reason, "Lean on the guard");
   assert.equal(validated.checkResult?.dc, 9);
+});
+
+test("validateTurnCommand suppresses checks that have no success-gated stakes", () => {
+  const validated = validateTurnCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "downtime",
+      suggestedActions: ["Wait for the apprentice"],
+      checkIntent: {
+        type: "challenge",
+        reason: "Send the apprentice to find the runeforger",
+        challengeApproach: "influence",
+        citedNpcId: "npc_guard",
+      },
+      mutations: [
+        {
+          type: "advance_time",
+          durationMinutes: 15,
+        },
+      ],
+    },
+  });
+
+  assert.equal(validated.type, "resolve_mechanics");
+  assert.equal(validated.checkResult, undefined);
 });
 
 test("validateTurnCommand can use fetched npc detail to derive combat check dc", () => {

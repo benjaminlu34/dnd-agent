@@ -130,6 +130,7 @@ function createSnapshot(): CampaignSnapshot {
     recentWorldShifts: [],
     recentMessages: [],
     canRetryLatestTurn: false,
+    latestRetryableTurnId: null,
   };
 }
 
@@ -300,6 +301,58 @@ test("failed checks still apply immediate costs but block conditional rewards", 
   );
   assert.equal(evaluated.nextState.globalTime, 485);
   assert.equal(evaluated.stateCommitLog[1]?.metadata?.delta, -3);
+});
+
+test("unscoped router fallback does not reject routine local interactions", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: {
+      ...createSnapshot(),
+      temporaryActors: [
+        {
+          id: "temp_apprentice",
+          label: "apprentice",
+          currentLocationId: "loc_gate",
+          promotedNpcId: null,
+          interactionCount: 0,
+          recentTopics: [],
+          lastSummary: "A young apprentice waiting for instructions.",
+          lastSeenAtTurn: 0,
+          lastSeenAtTime: 480,
+        },
+      ],
+    },
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "downtime",
+      suggestedActions: ["Wait for the apprentice"],
+      mutations: [
+        {
+          type: "record_local_interaction",
+          localEntityId: "temp_apprentice",
+          interactionSummary: "You send the apprentice to find the runeforger.",
+          topic: "runeforger",
+        },
+        {
+          type: "advance_time",
+          durationMinutes: 15,
+        },
+      ],
+      warnings: [],
+      timeElapsed: 15,
+    },
+    fetchedFacts: [],
+    routerDecision: {
+      profile: "full",
+      confidence: "low",
+      authorizedVectors: [],
+      requiredPrerequisites: [],
+      reason: "Planner output was invalid, so the turn falls back to full context and no explicit vectors.",
+    },
+  });
+
+  assert.equal(evaluated.stateCommitLog[0]?.reasonCode, "local_interaction_recorded");
+  assert.equal(evaluated.stateCommitLog[0]?.status, "applied");
+  assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "time_advanced");
 });
 
 test("partial checks reject requested mutations with check_partial_blocked", () => {
