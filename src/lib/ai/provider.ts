@@ -2670,12 +2670,16 @@ function buildTurnUserPrompt(input: {
   ].join("\n\n");
 }
 
-function isAppliedArrivalMutation(entry: StateCommitLog[number]) {
+function isAppliedArrivalMutation(entry: StateCommitLog[number], currentLocationId: string) {
   if (entry.status !== "applied") {
     return false;
   }
 
-  return entry.mutationType === "spawn_temporary_actor" || entry.mutationType === "set_scene_actor_presence";
+  if (entry.metadata?.arrivesInCurrentScene === true) {
+    return true;
+  }
+
+  return entry.mutationType === "set_scene_actor_presence" && entry.metadata?.newLocationId === currentLocationId;
 }
 
 function buildResolvedNarrationConstraints(input: ResolvedTurnNarrationInput) {
@@ -2693,7 +2697,9 @@ function buildResolvedNarrationConstraints(input: ResolvedTurnNarrationInput) {
   return {
     timeOnlyTurn,
     waitingForArrival,
-    hasArrivalCommit: input.stateCommitLog.some(isAppliedArrivalMutation),
+    hasArrivalCommit: input.stateCommitLog.some((entry) =>
+      isAppliedArrivalMutation(entry, input.promptContext.currentLocation.id),
+    ),
   };
 }
 

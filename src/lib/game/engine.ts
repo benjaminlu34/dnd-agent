@@ -943,6 +943,19 @@ type ProjectedTemporaryActor = {
   promotedNpcId: string | null;
 };
 
+function compareTemporaryActorReusePriority(
+  left: Pick<ProjectedTemporaryActor, "id" | "lastSeenAtTurn" | "lastSeenAtTime">,
+  right: Pick<ProjectedTemporaryActor, "id" | "lastSeenAtTurn" | "lastSeenAtTime">,
+) {
+  if (left.lastSeenAtTurn !== right.lastSeenAtTurn) {
+    return right.lastSeenAtTurn - left.lastSeenAtTurn;
+  }
+  if (left.lastSeenAtTime !== right.lastSeenAtTime) {
+    return right.lastSeenAtTime - left.lastSeenAtTime;
+  }
+  return left.id.localeCompare(right.id);
+}
+
 function mutationPhaseForOrdering(mutation: MechanicsMutation): "immediate" | "conditional" {
   return mutationPhaseForEvaluation(mutation);
 }
@@ -1167,7 +1180,7 @@ function evaluateResolvedCommand(input: {
     ]),
   );
   const projectedNpcLocationIds = new Map(
-    input.snapshot.presentNpcs.map((npc) => [npc.id, npc.currentLocationId]),
+    Object.entries(input.snapshot.knownNpcLocationIds),
   );
   const spawnedTemporaryActorIds = new Map<string, string>();
   const spawnedItemTemplateIds = new Map<string, string>();
@@ -1451,18 +1464,21 @@ function evaluateResolvedCommand(input: {
       const normalizedSummary = normalizeWhitespace(mutation.summary);
       const normalizedDisposition = normalizeWhitespace(mutation.apparentDisposition);
       const lastSummary = `${normalizedSummary} Apparent disposition: ${normalizedDisposition}.`;
-      const matchingActor = Array.from(projectedTemporaryActors.values()).find((actor) =>
-        actor.promotedNpcId == null
-        && (actor.currentLocationId === projectedLocationId || actor.currentLocationId === null)
-        && sceneActorIdentityClearlyMatches({
-          candidateRole: normalizedRole,
-          existingRole: actor.label,
-          candidateSummary: `${normalizedSummary} ${normalizedDisposition}`,
-          existingSummary: actor.lastSummary,
-        })
-      );
+      const matchingActor = [...projectedTemporaryActors.values()]
+        .sort(compareTemporaryActorReusePriority)
+        .find((actor) =>
+          actor.promotedNpcId == null
+          && (actor.currentLocationId === projectedLocationId || actor.currentLocationId === null)
+          && sceneActorIdentityClearlyMatches({
+            candidateRole: normalizedRole,
+            existingRole: actor.label,
+            candidateSummary: `${normalizedSummary} ${normalizedDisposition}`,
+            existingSummary: actor.lastSummary,
+          })
+        );
 
       const resolvedActorId = matchingActor?.id ?? `spawned_temp:${mutation.spawnKey}`;
+      const wasOffscene = matchingActor?.currentLocationId == null;
       if (matchingActor) {
         matchingActor.currentLocationId = projectedLocationId;
         matchingActor.lastSummary = lastSummary;
@@ -1493,12 +1509,16 @@ function evaluateResolvedCommand(input: {
         status: "applied" as const,
         reasonCode: matchingActor ? "temporary_actor_reused" : "temporary_actor_spawned",
         summary: matchingActor
-          ? `${matchingActor.label} is already part of the scene.`
+          ? wasOffscene
+            ? `${matchingActor.label} arrives in the scene.`
+            : `${matchingActor.label} is already part of the scene.`
           : `${normalizedRole} enters the scene.`,
         metadata: {
           ...mutation,
           actorRef: tempActorRef(resolvedActorId),
           reusedExisting: Boolean(matchingActor),
+          wasOffscene,
+          arrivesInCurrentScene: !matchingActor || wasOffscene,
           phase,
         } as unknown as Record<string, unknown>,
       };
@@ -1622,6 +1642,7 @@ function evaluateResolvedCommand(input: {
             metadata: {
               ...mutation,
               actorRef: tempActorRef(actor.id),
+              arrivesInCurrentScene: mutation.newLocationId === projectedLocationId,
               phase,
             } as unknown as Record<string, unknown>,
           });
@@ -1641,6 +1662,7 @@ function evaluateResolvedCommand(input: {
           metadata: {
             ...mutation,
             actorRef: tempActorRef(actor.id),
+            arrivesInCurrentScene: mutation.newLocationId === projectedLocationId,
             phase,
           } as unknown as Record<string, unknown>,
         };
@@ -1666,6 +1688,7 @@ function evaluateResolvedCommand(input: {
           metadata: {
             ...mutation,
             actorRef: npcActorRef(target.actorId),
+            arrivesInCurrentScene: mutation.newLocationId === projectedLocationId,
             phase,
           } as unknown as Record<string, unknown>,
         });
@@ -1685,6 +1708,7 @@ function evaluateResolvedCommand(input: {
         metadata: {
           ...mutation,
           actorRef: npcActorRef(target.actorId),
+          arrivesInCurrentScene: mutation.newLocationId === projectedLocationId,
           phase,
         } as unknown as Record<string, unknown>,
       };
@@ -2352,8 +2376,8 @@ async function findReusableTemporaryActor(input: {
         { currentLocationId: null },
       ],
     },
-    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
-    take: 20,
+    orderBy: [{ lastSeenAtTurn: "desc" }, { lastSeenAtTime: "desc" }, { id: "asc" }],
+    take: 50,
   });
 
   return candidates.find((actor) =>
@@ -3933,7 +3957,7 @@ function deterministicNarrationFallback(input: {
     && /\b(arrive|arrives|arrival|return|returns|come|comes)\b/i.test(input.playerAction);
   const hasArrivalCommit = input.stateCommitLog.some((entry) =>
     entry.status === "applied"
-    && (entry.mutationType === "spawn_temporary_actor" || entry.mutationType === "set_scene_actor_presence"),
+    && entry.metadata?.arrivesInCurrentScene === true,
   );
   if (waitedForArrival && !hasArrivalCommit) {
     sentences.push("What you were waiting for has not happened yet.");

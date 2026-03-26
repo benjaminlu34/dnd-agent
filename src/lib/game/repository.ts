@@ -2935,8 +2935,8 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
         take: 30,
       },
       temporaryActors: {
-        orderBy: [{ lastSeenAtTurn: "desc" }, { updatedAt: "desc" }],
-        take: 20,
+        orderBy: [{ lastSeenAtTurn: "desc" }, { lastSeenAtTime: "desc" }, { id: "asc" }],
+        take: 50,
       },
       turns: {
         where: { status: "resolved" },
@@ -3093,6 +3093,9 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
   const temporaryActors = campaign.temporaryActors
     .filter((actor) => actor.promotedNpcId == null)
     .map(toTemporaryActorSummary);
+  const knownNpcLocationIds = Object.fromEntries(
+    campaign.npcs.map((npc) => [npc.id, npc.currentLocationId]),
+  );
   const latestRetryableTurnId =
     env.enableTurnUndo && campaign.turns[0]?.sessionId === session.id
       ? campaign.turns[0]?.id ?? null
@@ -3120,6 +3123,7 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     currentLocation,
     adjacentRoutes,
     presentNpcs,
+    knownNpcLocationIds,
     knownFactions,
     factionRelations,
     localInformation,
@@ -3209,14 +3213,24 @@ export async function getTurnSnapshot(
     },
     orderBy: { name: "asc" },
   });
+  const offscreenNpcRecords = await prisma.nPC.findMany({
+    where: {
+      campaignId,
+      currentLocationId: null,
+    },
+    orderBy: { name: "asc" },
+  });
   const temporaryActorRecords = await prisma.temporaryActor.findMany({
     where: {
       campaignId,
-      currentLocationId: state.currentLocationId,
       promotedNpcId: null,
+      OR: [
+        { currentLocationId: state.currentLocationId },
+        { currentLocationId: null },
+      ],
     },
-    orderBy: [{ lastSeenAtTurn: "desc" }, { updatedAt: "desc" }],
-    take: 20,
+    orderBy: [{ lastSeenAtTurn: "desc" }, { lastSeenAtTime: "desc" }, { id: "asc" }],
+    take: 50,
   });
   const discoveredInfoRecords = await prisma.information.findMany({
     where: {
@@ -3392,6 +3406,9 @@ export async function getTurnSnapshot(
     };
   });
   const presentNpcs = presentNpcRecords.map((npc) => toNpcSummary(npc, factionRecords));
+  const knownNpcLocationIds = Object.fromEntries(
+    [...presentNpcRecords, ...offscreenNpcRecords].map((npc) => [npc.id, npc.currentLocationId]),
+  );
 
   const localInformation = relevantInformationRecords
     .filter(
@@ -3556,6 +3573,7 @@ export async function getTurnSnapshot(
     currentLocation,
     adjacentRoutes,
     presentNpcs,
+    knownNpcLocationIds,
     knownFactions,
     factionRelations: normalizedFactionRelations,
     localInformation,

@@ -914,6 +914,7 @@ export type CampaignSnapshot = {
   currentLocation: LocationSummary;
   adjacentRoutes: RouteSummary[];
   presentNpcs: NpcSummary[];
+  knownNpcLocationIds: Record<string, string | null>;
   knownFactions: FactionSummary[];
   factionRelations: FactionRelationSummary[];
   localInformation: InformationSummary[];
@@ -931,7 +932,7 @@ export type CampaignSnapshot = {
 
 export type PlayerCampaignSnapshot = Omit<
   CampaignSnapshot,
-  "sessionTurnCount" | "factionRelations" | "connectedLeads"
+  "sessionTurnCount" | "factionRelations" | "connectedLeads" | "knownNpcLocationIds"
 >;
 
 export type CampaignListItem = {

@@ -101,6 +101,9 @@ function createSnapshot(): CampaignSnapshot {
         threatLevel: 2,
       },
     ],
+    knownNpcLocationIds: {
+      npc_guard: "loc_gate",
+    },
     knownFactions: [],
     factionRelations: [],
     activeThreads: [],

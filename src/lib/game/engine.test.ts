@@ -102,6 +102,9 @@ function createSnapshot(): CampaignSnapshot {
         threatLevel: 2,
       },
     ],
+    knownNpcLocationIds: {
+      npc_guard: "loc_gate",
+    },
     knownFactions: [],
     factionRelations: [],
     activeThreads: [],
@@ -633,7 +636,104 @@ test("reused offscene temporary actors can be brought back and referenced later 
   });
 
   assert.equal(evaluated.stateCommitLog[0]?.reasonCode, "temporary_actor_reused");
+  assert.match(evaluated.stateCommitLog[0]?.summary ?? "", /arrives in the scene/i);
+  assert.equal(evaluated.stateCommitLog[0]?.metadata?.arrivesInCurrentScene, true);
   assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "local_interaction_recorded");
+});
+
+test("offscene npc refs can be returned to the scene by prefixed actorRef", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: {
+      ...createSnapshot(),
+      presentNpcs: [],
+      knownNpcLocationIds: {
+        npc_guard: null,
+      },
+    },
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "downtime",
+      suggestedActions: ["Wait for the guard"],
+      mutations: [
+        {
+          type: "set_scene_actor_presence",
+          actorRef: "npc:npc_guard",
+          newLocationId: "loc_gate",
+          reason: "The guard returns to the gate.",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 10,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+  });
+
+  assert.equal(evaluated.stateCommitLog[0]?.status, "applied");
+  assert.equal(evaluated.stateCommitLog[0]?.reasonCode, "scene_actor_presence_updated");
+  assert.equal(evaluated.stateCommitLog[0]?.metadata?.arrivesInCurrentScene, true);
+});
+
+test("temporary actor reuse prefers the most recently seen matching actor", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: {
+      ...createSnapshot(),
+      temporaryActors: [
+        {
+          id: "temp_older",
+          label: "apprentice",
+          currentLocationId: "loc_gate",
+          interactionCount: 1,
+          firstSeenAtTurn: 0,
+          lastSeenAtTurn: 2,
+          lastSeenAtTime: 500,
+          recentTopics: [],
+          lastSummary: "A young apprentice waits by the gate. Apparent disposition: eager but anxious.",
+          holdsInventory: false,
+          affectedWorldState: false,
+          isInMemoryGraph: false,
+          promotedNpcId: null,
+        },
+        {
+          id: "temp_newer",
+          label: "apprentice",
+          currentLocationId: "loc_gate",
+          interactionCount: 1,
+          firstSeenAtTurn: 0,
+          lastSeenAtTurn: 4,
+          lastSeenAtTime: 540,
+          recentTopics: [],
+          lastSummary: "A young apprentice waits by the gate. Apparent disposition: eager but anxious.",
+          holdsInventory: false,
+          affectedWorldState: false,
+          isInMemoryGraph: false,
+          promotedNpcId: null,
+        },
+      ],
+    },
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Call for the apprentice"],
+      mutations: [
+        {
+          type: "spawn_temporary_actor",
+          spawnKey: "apprentice",
+          role: "apprentice",
+          summary: "A young apprentice waits by the gate.",
+          apparentDisposition: "eager but anxious",
+          reason: "The player calls for the same helper again.",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 10,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+  });
+
+  assert.equal(evaluated.stateCommitLog[0]?.reasonCode, "temporary_actor_reused");
+  assert.equal(evaluated.stateCommitLog[0]?.metadata?.actorRef, "temp:temp_newer");
 });
 
 test("environmental item spawn handles can be referenced later in the same turn", () => {
@@ -834,6 +934,29 @@ test("wait fallback narration explicitly marks non-arrival when nothing comes ba
         reasonCode: "time_advanced",
         summary: "Time passes for 30 minutes.",
         metadata: null,
+      },
+    ],
+    checkResult: null,
+  });
+
+  assert.match(narration, /has not happened yet/i);
+});
+
+test("wait fallback still marks non-arrival when a departure happened instead", () => {
+  const narration = engineTestUtils.deterministicNarrationFallback({
+    playerAction: "Wait until the apprentice returns.",
+    stateCommitLog: [
+      {
+        kind: "mutation",
+        mutationType: "set_scene_actor_presence",
+        status: "applied",
+        reasonCode: "scene_actor_presence_updated",
+        summary: "The dockhand leaves the scene.",
+        metadata: {
+          actorRef: "temp:temp_dockhand",
+          newLocationId: null,
+          arrivesInCurrentScene: false,
+        },
       },
     ],
     checkResult: null,

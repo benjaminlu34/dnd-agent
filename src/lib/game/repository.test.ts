@@ -560,6 +560,7 @@ test("toPlayerCampaignSnapshot preserves latest retryable turn metadata", () => 
     currentLocation: {} as never,
     adjacentRoutes: [],
     presentNpcs: [],
+    knownNpcLocationIds: {},
     knownFactions: [],
     factionRelations: [],
     localInformation: [],

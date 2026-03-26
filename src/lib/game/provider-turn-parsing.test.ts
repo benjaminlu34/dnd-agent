@@ -219,6 +219,55 @@ test("buildResolvedTurnNarrationPrompt includes prompt context and fetched facts
   assert.match(prompt.user, /Pier Nine Closure/);
 });
 
+test("buildResolvedTurnNarrationPrompt does not treat departures as waited-for arrivals", () => {
+  const prompt = aiProviderTestUtils.buildResolvedTurnNarrationPrompt({
+    playerAction: "Wait until the apprentice returns.",
+    promptContext: {
+      currentLocation: {
+        id: "loc_gate",
+        name: "Ash Gate",
+        type: "district",
+        summary: "Rain-dark stone and watchfires.",
+        state: "active",
+      },
+      adjacentRoutes: [],
+      sceneActors: [],
+      recentLocalEvents: [],
+      recentTurnLedger: [],
+      discoveredInformation: [],
+      activePressures: [],
+      recentWorldShifts: [],
+      activeThreads: [],
+      inventory: [],
+      sceneAspects: {},
+      localTexture: null,
+      globalTime: 480,
+      timeOfDay: "morning",
+      dayCount: 1,
+    },
+    fetchedFacts: [],
+    stateCommitLog: [
+      {
+        kind: "mutation",
+        mutationType: "set_scene_actor_presence",
+        status: "applied",
+        reasonCode: "scene_actor_presence_updated",
+        summary: "The dockhand leaves the scene.",
+        metadata: {
+          actorRef: "temp:temp_dockhand",
+          newLocationId: null,
+          arrivesInCurrentScene: false,
+        },
+      },
+    ],
+    checkResult: null,
+    suggestedActions: [],
+  });
+
+  assert.match(prompt.user, /waitingForArrival: true/);
+  assert.match(prompt.user, /hasArrivalCommit: false/);
+});
+
 test("normalizeRouterDecision dedupes vectors and prerequisites", () => {
   const normalized = aiProviderTestUtils.normalizeRouterDecision({
     profile: "local",
