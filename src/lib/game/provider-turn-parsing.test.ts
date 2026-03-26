@@ -94,9 +94,13 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   assert.match(prompt, /Mark resource costs, fees, and other upfront expenditures as phase immediate/);
   assert.match(prompt, /Mark success-only rewards or outcomes as phase conditional/);
   assert.match(prompt, /Use commit_market_trade only for strict commodity trade backed by fetched market prices/);
+  assert.match(prompt, /Use sceneActors.actorRef values exactly when targeting on-screen actors/);
   assert.match(prompt, /Use record_local_interaction for current-scene unnamed locals instead of adjust_relationship/);
+  assert.match(prompt, /Use spawn_temporary_actor before record_local_interaction/);
+  assert.match(prompt, /Use spawn_environmental_item before adjust_inventory/);
+  assert.match(prompt, /Use set_scene_actor_presence whenever someone leaves the current scene/);
   assert.match(prompt, /Use adjust_inventory for gaining, losing, consuming, or handing over grounded inventory items/);
-  assert.match(prompt, /Use update_scene_object for simple persistent object or scene state changes/);
+  assert.match(prompt, /Use spawn_scene_aspect for smoke, damage, noise/);
 });
 
 test("buildTurnRouterSystemPrompt distinguishes self-talk from on-screen social commitment", () => {
@@ -131,14 +135,14 @@ test("buildResolvedTurnNarrationPrompt includes prompt context and fetched facts
         state: "tense",
       },
       adjacentRoutes: [],
-      presentNpcs: [],
-      recentUnnamedLocals: [
+      sceneActors: [
         {
-          id: "temp_dockhand",
-          label: "dockhand",
-          interactionCount: 1,
+          actorRef: "temp:temp_dockhand",
+          kind: "temporary_actor",
+          displayLabel: "dockhand",
+          role: "dockhand",
+          detailFetchHint: null,
           lastSummary: "He kept glancing toward the sealed pier.",
-          lastSeenAtTurn: 3,
         },
       ],
       recentLocalEvents: [],
@@ -148,7 +152,7 @@ test("buildResolvedTurnNarrationPrompt includes prompt context and fetched facts
       recentWorldShifts: [],
       activeThreads: [],
       inventory: [],
-      sceneObjectStates: {},
+      sceneAspects: {},
       localTexture: null,
       globalTime: 270,
       timeOfDay: "pre-dawn",

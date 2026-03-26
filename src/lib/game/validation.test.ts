@@ -25,7 +25,7 @@ function createSnapshot(): CampaignSnapshot {
       globalTime: 480,
       pendingTurnId: null,
       lastActionSummary: null,
-      sceneObjectStates: {},
+      sceneAspects: {},
     },
     character: {
       id: "char_1",

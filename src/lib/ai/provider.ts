@@ -2282,6 +2282,32 @@ const mechanicsMutationSchema = z.discriminatedUnion("type", [
     phase: z.enum(["immediate", "conditional"]).optional(),
   }),
   z.object({
+    type: z.literal("spawn_scene_aspect"),
+    aspectName: z.string().trim().min(1).max(80),
+    state: z.string().trim().min(1).max(160),
+    duration: z.enum(["scene", "permanent"]),
+    reason: z.string().trim().min(1).max(120),
+    phase: z.enum(["immediate", "conditional"]).optional(),
+  }),
+  z.object({
+    type: z.literal("spawn_temporary_actor"),
+    spawnKey: z.string().trim().min(1).max(60),
+    role: z.string().trim().min(1).max(80),
+    summary: z.string().trim().min(1).max(240),
+    apparentDisposition: z.string().trim().min(1).max(80),
+    reason: z.string().trim().min(1).max(120),
+    phase: z.enum(["immediate", "conditional"]).optional(),
+  }),
+  z.object({
+    type: z.literal("spawn_environmental_item"),
+    spawnKey: z.string().trim().min(1).max(60),
+    itemName: z.string().trim().min(1).max(80),
+    description: z.string().trim().min(1).max(240),
+    quantity: z.number().int().positive().max(12),
+    reason: z.string().trim().min(1).max(120),
+    phase: z.enum(["immediate", "conditional"]).optional(),
+  }),
+  z.object({
     type: z.literal("commit_market_trade"),
     action: z.enum(["buy", "sell"]),
     marketPriceId: z.string().trim().min(1),
@@ -2313,6 +2339,13 @@ const mechanicsMutationSchema = z.discriminatedUnion("type", [
     type: z.literal("set_npc_state"),
     npcId: z.string().trim().min(1),
     newState: z.enum(["active", "wounded", "incapacitated", "dead"]),
+    phase: z.enum(["immediate", "conditional"]).optional(),
+  }),
+  z.object({
+    type: z.literal("set_scene_actor_presence"),
+    actorRef: z.string().trim().min(1),
+    newLocationId: z.string().trim().min(1).nullable(),
+    reason: z.string().trim().min(1).max(120),
     phase: z.enum(["immediate", "conditional"]).optional(),
   }),
   z.object({
@@ -2508,6 +2541,12 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Mark success-only rewards or outcomes as phase conditional.",
         "Advance the scene or world only through passive observation or waiting.",
         "Do not create combat, market trade, or deliberate social escalation in observe mode.",
+        "Use sceneActors.actorRef values exactly when targeting on-screen actors.",
+        "If the player reaches for a plausible unlisted local, improvised item, or environmental condition, spawn it first before interacting with it.",
+        "Use spawn_temporary_actor before record_local_interaction when the local is not already listed in sceneActors.",
+        "Use spawn_environmental_item before adjust_inventory when the item is plausible in the environment but not already grounded in inventory.",
+        "Use spawn_scene_aspect for smoke, damage, noise, weather spillover, improvised cover, and other grounded scene conditions.",
+        "Use set_scene_actor_presence whenever someone leaves the current scene or returns during the turn.",
         "Only include checkIntent when success or failure meaningfully changes which mutations can happen. If the turn is routine and should simply create a local interaction or consume time, omit checkIntent.",
         "If a check is needed, set checkIntent and list only the success-state mutations. The engine will reject them on failure.",
         "Use advance_time for passive waiting or observation windows.",
@@ -2539,11 +2578,16 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Use adjust_gold for incidental payments, rewards, bribes, tips, fees, or other non-market gold movement.",
         "Use move_player only for actual route travel to a known adjacent location.",
         "Use record_local_interaction for current-scene unnamed locals instead of adjust_relationship.",
+        "Use sceneActors.actorRef values exactly when targeting on-screen actors.",
+        "If the player reaches for a plausible unlisted local, improvised item, or environmental condition, spawn it first before interacting with it.",
+        "Use spawn_temporary_actor before record_local_interaction when the local is not already listed in sceneActors.",
+        "Use spawn_environmental_item before adjust_inventory when the item is plausible in the environment but not already grounded in inventory.",
+        "Use spawn_scene_aspect for smoke, damage, noise, weather spillover, improvised cover, and other grounded scene conditions.",
         "Use adjust_inventory for gaining, losing, consuming, or handing over grounded inventory items.",
         "Use set_npc_state only for direct violence, subdual, or comparable physical outcomes.",
         "Use adjust_relationship for meaningful social shifts with a present NPC.",
         "Use discover_information only for specific known information ids grounded in context or fetched facts.",
-        "Use update_scene_object for simple persistent object or scene state changes.",
+        "Use set_scene_actor_presence whenever someone leaves the current scene or returns during the turn.",
         "Use restore_health for rest recovery or explicit healing outcomes the engine should apply.",
         "Use advance_time when the action necessarily consumes time. Suggested actions should stay short and concrete.",
         "Preserve the player's commitment level. Do not upgrade browsing or approach into stronger mechanics unless the wording clearly commits to them.",
@@ -2626,6 +2670,33 @@ function buildTurnUserPrompt(input: {
   ].join("\n\n");
 }
 
+function isAppliedArrivalMutation(entry: StateCommitLog[number]) {
+  if (entry.status !== "applied") {
+    return false;
+  }
+
+  return entry.mutationType === "spawn_temporary_actor" || entry.mutationType === "set_scene_actor_presence";
+}
+
+function buildResolvedNarrationConstraints(input: ResolvedTurnNarrationInput) {
+  const appliedMutations = input.stateCommitLog.filter(
+    (entry) => entry.status === "applied" && entry.kind === "mutation" && entry.mutationType,
+  );
+  const timeOnlyTurn =
+    appliedMutations.length > 0
+    && appliedMutations.every((entry) => entry.mutationType === "advance_time");
+  const waitingForArrival =
+    /\bwait\b/i.test(input.playerAction)
+    && /\b(for|until|til)\b/i.test(input.playerAction)
+    && /\b(arrive|arrives|arrival|return|returns|come|comes)\b/i.test(input.playerAction);
+
+  return {
+    timeOnlyTurn,
+    waitingForArrival,
+    hasArrivalCommit: input.stateCommitLog.some(isAppliedArrivalMutation),
+  };
+}
+
 function buildResolvedTurnNarrationPrompt(input: ResolvedTurnNarrationInput) {
   const system = [
     "You are the Dungeon Master narrator for a resolved simulated-world turn.",
@@ -2633,12 +2704,16 @@ function buildResolvedTurnNarrationPrompt(input: ResolvedTurnNarrationInput) {
     "Narrate only what is grounded in the committed state_commit_log, the player's action, the provided spatial context, and the fetched facts.",
     "Do not invent successful outcomes, prices, discoveries, NPC reactions, travel, or social shifts that are not supported by the log, context, or fetched facts.",
     "If a mutation was rejected or a check failed, make that failure legible in the narration.",
+    "If the applied log only advances time, narrate only the time passage and any grounded atmosphere shift. Do not restage the room or repeat the opening setup.",
+    "If the player waited for a person or event and the commit log does not contain the arrival or return, explicitly say it has not happened yet.",
+    "Do not imply that someone arrived, returned, or appeared unless the committed log makes that change explicit.",
     "Write in second person to the player character as 'you'.",
     "Keep the narration compact, concrete, and forward-moving.",
   ].join("\n");
 
   const user = [
     formatPromptBlock("player_action", input.playerAction),
+    formatPromptBlock("narration_constraints", buildResolvedNarrationConstraints(input)),
     formatPromptBlock("context", input.promptContext),
     formatPromptBlock("fetched_facts", input.fetchedFacts),
     formatPromptBlock("state_commit_log", input.stateCommitLog),

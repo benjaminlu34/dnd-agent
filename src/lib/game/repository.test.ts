@@ -326,6 +326,76 @@ test("buildOpeningWorldWithStartingLocals removes duplicated temporary locals an
   ]);
 });
 
+test("buildOpeningWorldWithStartingLocals strips generic role prefixes when reconciling launch locals", () => {
+  const built = repositoryTestUtils.buildOpeningWorldWithStartingLocals({
+    module: {
+      title: "Preview Market",
+      premise: "A quiet lane before the morning rush.",
+      tone: "Grounded",
+      setting: "A trade market",
+      locations: [
+        {
+          id: "preview_launch_1:location:loc_market",
+          name: "Lantern Market",
+          type: "market",
+          summary: "A busy market lane.",
+          description: "A lane lined with stalls and awnings.",
+          state: "active",
+          controllingFactionId: null,
+          tags: [],
+        },
+      ],
+      edges: [],
+      factions: [],
+      factionRelations: [],
+      npcs: [],
+      information: [],
+      informationLinks: [],
+      commodities: [],
+      marketPrices: [],
+      entryPoints: [],
+    },
+    entryPoint: {
+      id: "custom_entry_apprentice",
+      title: "Quiet Prep",
+      summary: "Open the shutters before the market wakes.",
+      startLocationId: "preview_launch_1:location:loc_market",
+      presentNpcIds: [],
+      initialInformationIds: [],
+      immediatePressure: "You only have a few quiet minutes before the lane fills.",
+      publicLead: "A local apprentice is already hovering near the stall with ink-stained hands.",
+      localContactNpcId: null,
+      localContactTemporaryActorLabel: "local apprentice",
+      temporaryLocalActors: [
+        {
+          label: "local apprentice",
+          summary: "An ink-stained apprentice hovers nearby waiting for the ledger runner.",
+        },
+      ],
+      mundaneActionPath: "Set out the ledgers and assign the first morning errands.",
+      evidenceWorldAlreadyMoving: "Sweepers and bakers are already moving through the lane.",
+      isCustom: true,
+      customRequestPrompt: "I want to start by opening a clerk's stall in the market.",
+    },
+    startingLocals: repositoryTestUtils.assignStartingLocalNpcIds("preview_launch_1", [
+      {
+        name: "Mira Dain",
+        role: "apprentice",
+        summary: "An ink-stained apprentice waits with the morning ledger under one arm.",
+        description: "She looks ready to sprint the first message across the market.",
+        factionId: null,
+        currentLocationId: "preview_launch_1:location:loc_market",
+        approval: 0,
+        isCompanion: false,
+      },
+    ]),
+  });
+
+  assert.equal(built.entryPoint.localContactNpcId, "preview_launch_1:npc:npc_local_1");
+  assert.equal(built.entryPoint.localContactTemporaryActorLabel, null);
+  assert.deepEqual(built.entryPoint.temporaryLocalActors, []);
+});
+
 test("rescopeOpeningToCampaign remaps preview ids to final campaign ids", () => {
   const opening: GeneratedCampaignOpening = {
     narration: "Morning light spills across the lane as you raise the awning.",
@@ -484,7 +554,7 @@ test("toPlayerCampaignSnapshot preserves latest retryable turn metadata", () => 
       globalTime: 480,
       pendingTurnId: null,
       lastActionSummary: null,
-      sceneObjectStates: {},
+      sceneAspects: {},
     },
     character: {} as never,
     currentLocation: {} as never,

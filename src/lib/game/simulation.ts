@@ -1527,6 +1527,9 @@ export async function applySimulationInverse(
       case "itemInstance":
         await tx.itemInstance.delete({ where: { id: inverse.id } });
         return;
+      case "itemTemplate":
+        await tx.itemTemplate.delete({ where: { id: inverse.id } });
+        return;
       case "characterCommodityStack":
         await tx.characterCommodityStack.delete({ where: { id: inverse.id } });
         return;
@@ -1613,6 +1616,12 @@ export async function applySimulationInverse(
       return;
     case "itemInstance":
       await tx.itemInstance.update({
+        where: { id: inverse.id },
+        data: { [inverse.field]: inverse.previousValue } as never,
+      });
+      return;
+    case "itemTemplate":
+      await tx.itemTemplate.update({
         where: { id: inverse.id },
         data: { [inverse.field]: inverse.previousValue } as never,
       });

@@ -4,6 +4,7 @@ import { dmClient, logBackendDiagnostic } from "@/lib/ai/provider";
 import { toCampaignCharacter, toCharacterStats } from "@/lib/game/characters";
 import { parseTurnResultPayloadJson, parseCampaignRuntimeStateJson, approvalBandForValue, toCampaignRuntimeStateJson, toFactionResourcesJson } from "@/lib/game/json-contracts";
 import { createAdHocCampaignInventoryItem } from "@/lib/game/items";
+import { sceneActorIdentityClearlyMatches } from "@/lib/game/scene-identity";
 import {
   resolvedLaunchEntrySchema,
   validateResolvedLaunchEntryAgainstWorld,
@@ -50,6 +51,7 @@ import type {
   RelationshipHistory,
   RecentLocalEventSummary,
   RouteSummary,
+  SceneActorSummary,
   PromptContextProfile,
   SpatialPromptContext,
   StoryMessage,
@@ -393,31 +395,12 @@ function temporaryActorMatchesStartingLocal(input: {
   actor: { label: string; summary: string };
   npc: Pick<GeneratedWorldModule["npcs"][number], "role" | "summary" | "description">;
 }) {
-  const labelTokens = normalizeActorSurfaceText(input.actor.label)
-    .split(" ")
-    .filter((token) => token.length >= 3);
-  if (!labelTokens.length) {
-    return false;
-  }
-  const summaryTokens = normalizeActorSurfaceText(input.actor.summary)
-    .split(" ")
-    .filter((token) => token.length >= 4);
-
-  const npcSurface = normalizeActorSurfaceText(
-    `${input.npc.role} ${input.npc.summary} ${input.npc.description}`,
-  );
-
-  if (!labelTokens.every((token) => npcSurface.includes(token))) {
-    return false;
-  }
-
-  if (!summaryTokens.length) {
-    return true;
-  }
-
-  const summaryOverlap = summaryTokens.filter((token) => npcSurface.includes(token)).length;
-  const requiredSummaryOverlap = Math.min(summaryTokens.length, Math.max(1, Math.ceil(summaryTokens.length / 3)));
-  return summaryOverlap >= requiredSummaryOverlap;
+  return sceneActorIdentityClearlyMatches({
+    candidateRole: input.actor.label,
+    existingRole: input.npc.role,
+    candidateSummary: input.actor.summary,
+    existingSummary: `${input.npc.summary} ${input.npc.description}`,
+  });
 }
 
 function reconcileEntryPointWithStartingLocals(input: {
@@ -1502,7 +1485,7 @@ async function createCampaignInTx(
     globalTime: 480,
     pendingTurnId: null,
     lastActionSummary: input.opening.activeThreat ?? input.opening.scene.summary,
-    sceneObjectStates: {},
+    sceneAspects: {},
   };
 
   const campaign = await tx.campaign.create({
@@ -2232,6 +2215,39 @@ function toTemporaryActorSummary(
     isInMemoryGraph: actor.isInMemoryGraph,
     promotedNpcId: actor.promotedNpcId,
   };
+}
+
+function toSceneActorSummaries(input: {
+  presentNpcs: NpcSummary[];
+  temporaryActors: TemporaryActorSummary[];
+  currentLocationId: string;
+}): SceneActorSummary[] {
+  return [
+    ...input.presentNpcs.map<SceneActorSummary>((npc) => ({
+      actorRef: `npc:${npc.id}`,
+      kind: "npc",
+      displayLabel: npc.name,
+      role: npc.role,
+      detailFetchHint:
+        npc.socialLayer === "promoted_local" && !npc.isNarrativelyHydrated
+          ? {
+              type: "fetch_npc_detail",
+              npcId: npc.id,
+            }
+          : null,
+      lastSummary: npc.summary,
+    })),
+    ...input.temporaryActors
+      .filter((actor) => actor.currentLocationId === input.currentLocationId && actor.promotedNpcId == null)
+      .map<SceneActorSummary>((actor) => ({
+        actorRef: `temp:${actor.id}`,
+        kind: "temporary_actor",
+        displayLabel: actor.label,
+        role: actor.label,
+        detailFetchHint: null,
+        lastSummary: actor.lastSummary,
+      })),
+  ];
 }
 
 function buildCrossLocationLeads(input: {
@@ -3074,7 +3090,9 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
           : null,
     }));
 
-  const temporaryActors = campaign.temporaryActors.map(toTemporaryActorSummary);
+  const temporaryActors = campaign.temporaryActors
+    .filter((actor) => actor.promotedNpcId == null)
+    .map(toTemporaryActorSummary);
   const latestRetryableTurnId =
     env.enableTurnUndo && campaign.turns[0]?.sessionId === session.id
       ? campaign.turns[0]?.id ?? null
@@ -3195,6 +3213,7 @@ export async function getTurnSnapshot(
     where: {
       campaignId,
       currentLocationId: state.currentLocationId,
+      promotedNpcId: null,
     },
     orderBy: [{ lastSeenAtTurn: "desc" }, { updatedAt: "desc" }],
     take: 20,
@@ -3662,26 +3681,11 @@ export async function getTurnRouterContext(snapshot: CampaignSnapshot): Promise<
       state: snapshot.currentLocation.state,
     },
     adjacentRoutes: snapshot.adjacentRoutes,
-    presentNpcs: snapshot.presentNpcs.map((npc) => ({
-      id: npc.id,
-      name: npc.name,
-      role: npc.role,
-      requiresDetailFetch: npc.socialLayer === "promoted_local" && !npc.isNarrativelyHydrated,
-    })),
-    recentUnnamedLocals: snapshot.temporaryActors
-      .filter(
-        (actor) =>
-          actor.currentLocationId === snapshot.currentLocation.id
-          && actor.promotedNpcId == null,
-      )
-      .slice(0, 5)
-      .map((actor) => ({
-        id: actor.id,
-        label: actor.label,
-        interactionCount: actor.interactionCount,
-        lastSummary: actor.lastSummary,
-        lastSeenAtTurn: actor.lastSeenAtTurn,
-      })),
+    sceneActors: toSceneActorSummaries({
+      presentNpcs: snapshot.presentNpcs,
+      temporaryActors: snapshot.temporaryActors,
+      currentLocationId: snapshot.currentLocation.id,
+    }).slice(0, 8),
     recentLocalEvents: await loadRecentLocalEvents(snapshot),
     recentTurnLedger: buildRecentTurnLedger(snapshot),
     discoveredInformation: snapshot.discoveredInformation.map((information) => ({
@@ -3714,8 +3718,7 @@ export async function getPromptContext(
   return {
     currentLocation: routerContext.currentLocation,
     adjacentRoutes: isLocal ? [] : routerContext.adjacentRoutes,
-    presentNpcs: routerContext.presentNpcs,
-    recentUnnamedLocals: routerContext.recentUnnamedLocals,
+    sceneActors: routerContext.sceneActors,
     recentLocalEvents: routerContext.recentLocalEvents,
     recentTurnLedger: routerContext.recentTurnLedger,
     discoveredInformation: isLocal ? [] : routerContext.discoveredInformation,
@@ -3723,7 +3726,7 @@ export async function getPromptContext(
     recentWorldShifts: isLocal ? [] : snapshot.recentWorldShifts,
     activeThreads: isLocal ? [] : routerContext.activeThreads,
     inventory: toPromptInventory(snapshot.character, campaignItemTemplates),
-    sceneObjectStates: structuredClone(snapshot.state.sceneObjectStates ?? {}),
+    sceneAspects: structuredClone(snapshot.state.sceneAspects ?? {}),
     localTexture: snapshot.currentLocation.localTexture,
     globalTime: snapshot.state.globalTime,
     timeOfDay: timeOfDay(snapshot.state.globalTime),

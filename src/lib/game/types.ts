@@ -20,6 +20,7 @@ export type TradeAction = "buy" | "sell";
 export type RestType = "light" | "full";
 export type ApprovalBand = "hostile" | "cold" | "neutral" | "warm" | "trusted";
 export type DurationMagnitude = "instant" | "brief" | "standard" | "extended" | "long";
+export type SceneAspectDuration = "scene" | "permanent";
 export type RelationshipMove = "worsen" | "slip" | "steady" | "warm" | "bond";
 export type DiscoveryIntent = "none" | "surface" | "focused" | "deep";
 export type ChallengeApproach = "force" | "finesse" | "endure" | "analyze" | "notice" | "influence";
@@ -633,7 +634,14 @@ export type CampaignRuntimeState = {
   globalTime: number;
   pendingTurnId: string | null;
   lastActionSummary: string | null;
-  sceneObjectStates: Record<string, string>;
+  sceneAspects: Record<
+    string,
+    {
+      label: string;
+      state: string;
+      duration: SceneAspectDuration;
+    }
+  >;
   customTitle?: string | null;
 };
 
@@ -726,7 +734,7 @@ export type CrossLocationLead = {
 export type TemporaryActorSummary = {
   id: string;
   label: string;
-  currentLocationId: string;
+  currentLocationId: string | null;
   interactionCount: number;
   firstSeenAtTurn: number;
   lastSeenAtTurn: number;
@@ -760,6 +768,22 @@ export type PromptNpcSummary = {
   name: string;
   role: string;
   requiresDetailFetch: boolean;
+};
+
+export type SceneActorRef = string;
+
+export type SceneActorSummary = {
+  actorRef: SceneActorRef;
+  kind: "npc" | "temporary_actor";
+  displayLabel: string;
+  role: string;
+  detailFetchHint:
+    | {
+        type: "fetch_npc_detail";
+        npcId: string;
+      }
+    | null;
+  lastSummary: string | null;
 };
 
 export type PromptInformationSummary = Pick<
@@ -934,8 +958,7 @@ export type PromptInventoryItem = {
 export type SpatialPromptContext = {
   currentLocation: Pick<LocationSummary, "id" | "name" | "type" | "summary" | "state">;
   adjacentRoutes: RouteSummary[];
-  presentNpcs: PromptNpcSummary[];
-  recentUnnamedLocals: RecentUnnamedLocalSummary[];
+  sceneActors: SceneActorSummary[];
   recentLocalEvents: RecentLocalEventSummary[];
   recentTurnLedger: string[];
   discoveredInformation: PromptInformationSummary[];
@@ -943,7 +966,7 @@ export type SpatialPromptContext = {
   recentWorldShifts: WorldShiftSummary[];
   activeThreads: ActiveThreadSummary[];
   inventory: PromptInventoryItem[];
-  sceneObjectStates: Record<string, string>;
+  sceneAspects: CampaignRuntimeState["sceneAspects"];
   localTexture: LocalTextureSummary | null;
   globalTime: number;
   timeOfDay: string;
@@ -954,8 +977,7 @@ export type TurnRouterContext = Pick<
   SpatialPromptContext,
   | "currentLocation"
   | "adjacentRoutes"
-  | "presentNpcs"
-  | "recentUnnamedLocals"
+  | "sceneActors"
   | "recentLocalEvents"
   | "recentTurnLedger"
   | "discoveredInformation"
@@ -1226,6 +1248,32 @@ export type MechanicsMutation =
       phase?: MutationPhase;
     }
   | {
+      type: "spawn_scene_aspect";
+      aspectName: string;
+      state: string;
+      duration: SceneAspectDuration;
+      reason: string;
+      phase?: MutationPhase;
+    }
+  | {
+      type: "spawn_temporary_actor";
+      spawnKey: string;
+      role: string;
+      summary: string;
+      apparentDisposition: string;
+      reason: string;
+      phase?: MutationPhase;
+    }
+  | {
+      type: "spawn_environmental_item";
+      spawnKey: string;
+      itemName: string;
+      description: string;
+      quantity: number;
+      reason: string;
+      phase?: MutationPhase;
+    }
+  | {
       type: "commit_market_trade";
       action: TradeAction;
       marketPriceId: string;
@@ -1257,6 +1305,13 @@ export type MechanicsMutation =
       type: "set_npc_state";
       npcId: string;
       newState: NpcState;
+      phase?: MutationPhase;
+    }
+  | {
+      type: "set_scene_actor_presence";
+      actorRef: SceneActorRef;
+      newLocationId: string | null;
+      reason: string;
       phase?: MutationPhase;
     }
   | {

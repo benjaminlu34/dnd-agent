@@ -26,7 +26,7 @@ function createSnapshot(): CampaignSnapshot {
       globalTime: 480,
       pendingTurnId: null,
       lastActionSummary: null,
-      sceneObjectStates: {},
+      sceneAspects: {},
     },
     character: {
       id: "char_1",
@@ -295,8 +295,8 @@ test("failed checks still apply immediate costs but block conditional rewards", 
     [
       ["check", null, "applied", "check_failure"],
       ["mutation", "adjust_gold", "applied", "gold_adjusted"],
-      ["mutation", "adjust_relationship", "rejected", "check_failed"],
       ["mutation", "advance_time", "applied", "time_advanced"],
+      ["mutation", "adjust_relationship", "rejected", "check_failed"],
     ],
   );
   assert.equal(evaluated.nextState.globalTime, 485);
@@ -314,8 +314,12 @@ test("unscoped router fallback does not reject routine local interactions", () =
           currentLocationId: "loc_gate",
           promotedNpcId: null,
           interactionCount: 0,
+          firstSeenAtTurn: 0,
           recentTopics: [],
           lastSummary: "A young apprentice waiting for instructions.",
+          holdsInventory: false,
+          affectedWorldState: false,
+          isInMemoryGraph: false,
           lastSeenAtTurn: 0,
           lastSeenAtTime: 480,
         },
@@ -367,9 +371,15 @@ test("partial checks reject requested mutations with check_partial_blocked", () 
     routerDecision: createRouterDecision(["economy_strict", "converse"]),
   });
 
-  assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "gold_adjusted");
-  assert.equal(evaluated.stateCommitLog[2]?.reasonCode, "check_partial_blocked");
-  assert.equal(evaluated.stateCommitLog[2]?.status, "rejected");
+  assert.deepEqual(
+    evaluated.stateCommitLog.map((entry) => [entry.kind, entry.mutationType, entry.status, entry.reasonCode]),
+    [
+      ["check", null, "applied", "check_partial"],
+      ["mutation", "adjust_gold", "applied", "gold_adjusted"],
+      ["mutation", "advance_time", "applied", "time_advanced"],
+      ["mutation", "adjust_relationship", "rejected", "check_partial_blocked"],
+    ],
+  );
   assert.equal(evaluated.nextState.globalTime, 485);
 });
 
@@ -425,11 +435,17 @@ test("successful checks allow requested mutations to resolve normally", () => {
     routerDecision: createRouterDecision(["economy_strict", "converse"]),
   });
 
-  assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "gold_adjusted");
-  assert.equal(evaluated.stateCommitLog[1]?.status, "applied");
-  assert.equal(evaluated.stateCommitLog[1]?.metadata?.delta, 50);
-  assert.equal(evaluated.stateCommitLog[2]?.reasonCode, "relationship_adjusted");
-  assert.equal(evaluated.stateCommitLog[2]?.metadata?.delta, 2);
+  assert.deepEqual(
+    evaluated.stateCommitLog.map((entry) => [entry.kind, entry.mutationType, entry.status, entry.reasonCode]),
+    [
+      ["check", null, "applied", "check_success"],
+      ["mutation", "advance_time", "applied", "time_advanced"],
+      ["mutation", "adjust_gold", "applied", "gold_adjusted"],
+      ["mutation", "adjust_relationship", "applied", "relationship_adjusted"],
+    ],
+  );
+  assert.equal(evaluated.stateCommitLog[2]?.metadata?.delta, 50);
+  assert.equal(evaluated.stateCommitLog[3]?.metadata?.delta, 2);
   assert.equal(evaluated.nextState.globalTime, 485);
 });
 
@@ -517,9 +533,10 @@ test("scene-object mutations persist into next state", () => {
     snapshot: createSnapshot(),
     command: createValidatedCommand("success", [
       {
-        type: "update_scene_object",
-        objectId: "gate_winch",
-        newState: "jammed open",
+        type: "spawn_scene_aspect",
+        aspectName: "gate winch",
+        state: "jammed open",
+        duration: "scene",
         reason: "The player jams the mechanism.",
       },
     ]),
@@ -527,8 +544,249 @@ test("scene-object mutations persist into next state", () => {
     routerDecision: createRouterDecision(["investigate"]),
   });
 
-  assert.equal(evaluated.nextState.sceneObjectStates.gate_winch, "jammed open");
-  assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "scene_object_updated");
+  assert.equal(evaluated.nextState.sceneAspects.gate_winch?.state, "jammed open");
+  assert.equal(evaluated.nextState.sceneAspects.gate_winch?.duration, "scene");
+  assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "scene_aspect_spawned");
+});
+
+test("temporary actor spawn handles can be referenced later in the same turn", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Keep talking"],
+      mutations: [
+        {
+          type: "spawn_temporary_actor",
+          spawnKey: "apprentice",
+          role: "apprentice",
+          summary: "A young apprentice hovers near the gate with ink on their cuffs.",
+          apparentDisposition: "eager but anxious",
+          reason: "The player calls for a plausible helper.",
+        },
+        {
+          type: "record_local_interaction",
+          localEntityId: "spawn:apprentice",
+          interactionSummary: "You send the apprentice to fetch the runeforger.",
+          topic: "runeforger",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 10,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+  });
+
+  assert.equal(evaluated.stateCommitLog[0]?.reasonCode, "temporary_actor_spawned");
+  assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "local_interaction_recorded");
+});
+
+test("environmental item spawn handles can be referenced later in the same turn", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Use the crate"],
+      mutations: [
+        {
+          type: "spawn_environmental_item",
+          spawnKey: "crate",
+          itemName: "Loose Crate Lid",
+          description: "A rough plank lid lying beside a split shipping crate.",
+          quantity: 1,
+          reason: "The player grabs improvised cover.",
+        },
+        {
+          type: "adjust_inventory",
+          itemId: "spawn:crate",
+          quantity: 1,
+          action: "remove",
+          reason: "You wedge it in place as cover.",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["investigate"]),
+  });
+
+  assert.equal(evaluated.stateCommitLog[0]?.reasonCode, "environmental_item_spawned");
+  assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "inventory_adjusted");
+});
+
+test("forward spawn references reject cleanly", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Wait"],
+      mutations: [
+        {
+          type: "record_local_interaction",
+          localEntityId: "spawn:apprentice",
+          interactionSummary: "You ask the apprentice to wait.",
+        },
+        {
+          type: "spawn_temporary_actor",
+          spawnKey: "apprentice",
+          role: "apprentice",
+          summary: "A young helper lingers nearby.",
+          apparentDisposition: "alert",
+          reason: "The player calls over a helper.",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+  });
+
+  assert.equal(evaluated.stateCommitLog[0]?.status, "rejected");
+  assert.equal(evaluated.stateCommitLog[0]?.reasonCode, "invalid_target");
+});
+
+test("spawn namespaces do not cross-resolve", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Keep moving"],
+      mutations: [
+        {
+          type: "spawn_temporary_actor",
+          spawnKey: "shared",
+          role: "apprentice",
+          summary: "A runner slips through the checkpoint.",
+          apparentDisposition: "out of breath",
+          reason: "A plausible helper appears.",
+        },
+        {
+          type: "adjust_inventory",
+          itemId: "spawn:shared",
+          quantity: 1,
+          action: "add",
+          reason: "Attempt to treat an actor handle as an item handle.",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse", "investigate"]),
+  });
+
+  assert.equal(evaluated.stateCommitLog[1]?.status, "rejected");
+  assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "invalid_target");
+});
+
+test("scene-duration aspects clear only on successful travel", () => {
+  const snapshot = {
+    ...createSnapshot(),
+    state: {
+      ...createSnapshot().state,
+      sceneAspects: {
+        gate_smoke: {
+          label: "gate smoke",
+          state: "hanging thick in the archway",
+          duration: "scene",
+        },
+        charter_notice: {
+          label: "charter notice",
+          state: "nailed to the post",
+          duration: "permanent",
+        },
+      },
+    },
+  } as CampaignSnapshot;
+
+  const moved = engineTestUtils.evaluateResolvedCommand({
+    snapshot,
+    command: createValidatedCommand("success", [
+      { type: "move_player", routeEdgeId: "edge_gate_market", targetLocationId: "loc_market" },
+    ]),
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["investigate"]),
+  });
+
+  assert.equal(moved.nextState.sceneAspects.gate_smoke, undefined);
+  assert.equal(moved.nextState.sceneAspects.charter_notice?.state, "nailed to the post");
+
+  const blocked = engineTestUtils.evaluateResolvedCommand({
+    snapshot: {
+      ...snapshot,
+      adjacentRoutes: [
+        {
+          ...snapshot.adjacentRoutes[0],
+          currentStatus: "blocked",
+        },
+      ],
+    },
+    command: createValidatedCommand("success", [
+      { type: "move_player", routeEdgeId: "edge_gate_market", targetLocationId: "loc_market" },
+    ]),
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["investigate"]),
+  });
+
+  assert.equal(blocked.nextState.sceneAspects.gate_smoke?.state, "hanging thick in the archway");
+});
+
+test("scene actor presence updates remove temporary actors from projected availability", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "downtime",
+      suggestedActions: ["Wait"],
+      mutations: [
+        {
+          type: "set_scene_actor_presence",
+          actorRef: "temp:temp_dockhand",
+          newLocationId: null,
+          reason: "You send the dockhand away on an errand.",
+        },
+        {
+          type: "record_local_interaction",
+          localEntityId: "temp:temp_dockhand",
+          interactionSummary: "You call the dockhand back immediately.",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 10,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+  });
+
+  assert.equal(evaluated.stateCommitLog[0]?.reasonCode, "scene_actor_presence_updated");
+  assert.equal(evaluated.stateCommitLog[1]?.status, "rejected");
+  assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "invalid_target");
+});
+
+test("wait fallback narration explicitly marks non-arrival when nothing comes back", () => {
+  const narration = engineTestUtils.deterministicNarrationFallback({
+    playerAction: "Wait until the apprentice returns.",
+    stateCommitLog: [
+      {
+        kind: "mutation",
+        mutationType: "advance_time",
+        status: "applied",
+        reasonCode: "time_advanced",
+        summary: "Time passes for 30 minutes.",
+        metadata: null,
+      },
+    ],
+    checkResult: null,
+  });
+
+  assert.match(narration, /has not happened yet/i);
 });
 
 test("blocked routes reject move_player deterministically", () => {

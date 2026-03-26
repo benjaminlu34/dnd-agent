@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   approvalBandForValue,
+  parseCampaignRuntimeStateJson,
   parseTurnResultPayloadJson,
   toTurnResultPayloadJson,
 } from "./json-contracts";
@@ -68,5 +69,25 @@ test("parseTurnResultPayloadJson migrates legacy result payloads into the canoni
     rollback: null,
     clarification: null,
     error: null,
+  });
+});
+
+test("parseCampaignRuntimeStateJson normalizes legacy scene object state into permanent scene aspects", () => {
+  const parsed = parseCampaignRuntimeStateJson({
+    currentLocationId: "loc_gate",
+    globalTime: 480,
+    pendingTurnId: null,
+    lastActionSummary: null,
+    sceneObjectStates: {
+      gate_winch: "jammed open",
+    },
+  });
+
+  assert.deepEqual(parsed.sceneAspects, {
+    gate_winch: {
+      label: "gate winch",
+      state: "jammed open",
+      duration: "permanent",
+    },
   });
 });

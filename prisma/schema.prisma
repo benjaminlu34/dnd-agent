@@ -558,7 +558,7 @@ model TemporaryActor {
   id                  String       @id @default(cuid())
   campaignId          String
   label               String
-  currentLocationId   String
+  currentLocationId   String?
   interactionCount    Int          @default(1)
   firstSeenAtTurn     Int
   lastSeenAtTurn      Int
@@ -572,7 +572,7 @@ model TemporaryActor {
   createdAt           DateTime     @default(now())
   updatedAt           DateTime     @updatedAt
   campaign            Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  currentLocation     LocationNode @relation(fields: [currentLocationId], references: [id], onDelete: Cascade)
+  currentLocation     LocationNode? @relation(fields: [currentLocationId], references: [id], onDelete: SetNull)
   promotedNpc         NPC?         @relation(fields: [promotedNpcId], references: [id], onDelete: SetNull)
 
   @@index([campaignId, currentLocationId])
