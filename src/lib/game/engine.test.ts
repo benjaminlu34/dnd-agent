@@ -583,6 +583,59 @@ test("temporary actor spawn handles can be referenced later in the same turn", (
   assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "local_interaction_recorded");
 });
 
+test("reused offscene temporary actors can be brought back and referenced later in the same turn", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: {
+      ...createSnapshot(),
+      temporaryActors: [
+        {
+          id: "temp_apprentice",
+          label: "apprentice",
+          currentLocationId: null,
+          interactionCount: 1,
+          firstSeenAtTurn: 0,
+          lastSeenAtTurn: 0,
+          lastSeenAtTime: 480,
+          recentTopics: [],
+          lastSummary: "A young apprentice hovers near the gate. Apparent disposition: eager but anxious.",
+          holdsInventory: false,
+          affectedWorldState: false,
+          isInMemoryGraph: false,
+          promotedNpcId: null,
+        },
+      ],
+    },
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Bring the apprentice back"],
+      mutations: [
+        {
+          type: "spawn_temporary_actor",
+          spawnKey: "apprentice",
+          role: "apprentice",
+          summary: "A young apprentice hovers near the gate.",
+          apparentDisposition: "eager but anxious",
+          reason: "The player calls for the same helper to return.",
+        },
+        {
+          type: "record_local_interaction",
+          localEntityId: "spawn:apprentice",
+          interactionSummary: "You send the apprentice to fetch the runeforger.",
+          topic: "runeforger",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 10,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+  });
+
+  assert.equal(evaluated.stateCommitLog[0]?.reasonCode, "temporary_actor_reused");
+  assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "local_interaction_recorded");
+});
+
 test("environmental item spawn handles can be referenced later in the same turn", () => {
   const evaluated = engineTestUtils.evaluateResolvedCommand({
     snapshot: createSnapshot(),

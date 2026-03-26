@@ -1447,29 +1447,38 @@ function evaluateResolvedCommand(input: {
         continue;
       }
 
+      const normalizedRole = normalizeWhitespace(mutation.role);
+      const normalizedSummary = normalizeWhitespace(mutation.summary);
+      const normalizedDisposition = normalizeWhitespace(mutation.apparentDisposition);
+      const lastSummary = `${normalizedSummary} Apparent disposition: ${normalizedDisposition}.`;
       const matchingActor = Array.from(projectedTemporaryActors.values()).find((actor) =>
         actor.promotedNpcId == null
-        && actor.currentLocationId === projectedLocationId
+        && (actor.currentLocationId === projectedLocationId || actor.currentLocationId === null)
         && sceneActorIdentityClearlyMatches({
-          candidateRole: mutation.role,
+          candidateRole: normalizedRole,
           existingRole: actor.label,
-          candidateSummary: `${normalizeWhitespace(mutation.summary)} ${normalizeWhitespace(mutation.apparentDisposition)}`,
+          candidateSummary: `${normalizedSummary} ${normalizedDisposition}`,
           existingSummary: actor.lastSummary,
         })
       );
 
       const resolvedActorId = matchingActor?.id ?? `spawned_temp:${mutation.spawnKey}`;
-      if (!matchingActor) {
+      if (matchingActor) {
+        matchingActor.currentLocationId = projectedLocationId;
+        matchingActor.lastSummary = lastSummary;
+        matchingActor.lastSeenAtTurn = input.snapshot.sessionTurnCount + 1;
+        matchingActor.lastSeenAtTime = input.snapshot.state.globalTime + input.command.timeElapsed;
+      } else {
         projectedTemporaryActors.set(resolvedActorId, {
           id: resolvedActorId,
-          label: normalizeWhitespace(mutation.role),
+          label: normalizedRole,
           currentLocationId: projectedLocationId,
           interactionCount: 0,
           firstSeenAtTurn: input.snapshot.sessionTurnCount + 1,
           lastSeenAtTurn: input.snapshot.sessionTurnCount + 1,
           lastSeenAtTime: input.snapshot.state.globalTime + input.command.timeElapsed,
           recentTopics: [],
-          lastSummary: `${normalizeWhitespace(mutation.summary)} Apparent disposition: ${normalizeWhitespace(mutation.apparentDisposition)}.`,
+          lastSummary,
           holdsInventory: false,
           affectedWorldState: false,
           isInMemoryGraph: false,
@@ -1485,7 +1494,7 @@ function evaluateResolvedCommand(input: {
         reasonCode: matchingActor ? "temporary_actor_reused" : "temporary_actor_spawned",
         summary: matchingActor
           ? `${matchingActor.label} is already part of the scene.`
-          : `${normalizeWhitespace(mutation.role)} enters the scene.`,
+          : `${normalizedRole} enters the scene.`,
         metadata: {
           ...mutation,
           actorRef: tempActorRef(resolvedActorId),
