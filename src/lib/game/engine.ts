@@ -2394,7 +2394,7 @@ async function applyResolvedMutations(input: {
   const spawnedItemTemplateIds = new Map<string, string>();
   let currentLocationId = input.snapshot.state.currentLocationId;
 
-  for (const { mutation } of input.appliedMutations) {
+  for (const { mutation, entry } of input.appliedMutations) {
     if (mutation.type === "move_player") {
       currentLocationId = mutation.targetLocationId;
       continue;
@@ -2644,9 +2644,11 @@ async function applyResolvedMutations(input: {
     }
 
     if (mutation.type === "set_scene_actor_presence") {
-      if (isSpawnHandle(mutation.actorRef) || mutation.actorRef.startsWith("temp:") || !mutation.actorRef.startsWith("npc:")) {
+      const resolvedActorRef =
+        typeof entry.metadata?.actorRef === "string" ? entry.metadata.actorRef : mutation.actorRef;
+      if (!resolvedActorRef.startsWith("npc:")) {
         const actorId = resolveSpawnedTemporaryActorId({
-          actorRef: mutation.actorRef,
+          actorRef: resolvedActorRef,
           spawnedTemporaryActorIds,
         });
         if (!actorId) {
@@ -2671,7 +2673,7 @@ async function applyResolvedMutations(input: {
         continue;
       }
 
-      const npcId = mutation.actorRef.slice("npc:".length);
+      const npcId = resolvedActorRef.slice("npc:".length);
       const npc = await input.tx.nPC.findUnique({
         where: { id: npcId },
         select: { id: true, currentLocationId: true },
