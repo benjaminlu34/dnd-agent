@@ -1410,7 +1410,7 @@ function evaluateResolvedCommand(input: {
         kind: "mutation" as const,
         mutationType: mutation.type,
         status: "applied" as const,
-        reasonCode: "scene_aspect_spawned",
+        reasonCode: existing ? "scene_aspect_updated" : "scene_aspect_spawned",
         summary: `${label} shifts to ${state}.`,
         metadata: {
           ...mutation,
@@ -2050,7 +2050,7 @@ function evaluateResolvedCommand(input: {
         kind: "mutation" as const,
         mutationType: mutation.type,
         status: "applied" as const,
-        reasonCode: "scene_aspect_spawned",
+        reasonCode: existing ? "scene_aspect_updated" : "scene_aspect_spawned",
         summary: `${label} changes to ${state}.`,
         metadata: {
           ...mutation,
