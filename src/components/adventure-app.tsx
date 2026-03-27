@@ -2,6 +2,14 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import {
+  BookOpen,
+  ChevronRight,
+  Compass,
+  Package,
+  Shield,
+  X,
+} from "lucide-react";
 import type { StreamEvent } from "@/lib/http/ndjson";
 import type {
   CampaignListItem,
@@ -121,6 +129,10 @@ export function AdventureApp({
   initialCampaignId?: string | null;
 }) {
   const router = useRouter();
+  const [activeSidebarTab, setActiveSidebarTab] = useState<"character" | "inventory" | "journal">(
+    "character",
+  );
+  const [locationsDrawerOpen, setLocationsDrawerOpen] = useState(false);
   const [campaigns, setCampaigns] = useState<CampaignListItem[]>([]);
   const [campaignId, setCampaignId] = useState<string | null>(initialCampaignId);
   const [snapshot, setSnapshot] = useState<PlayerCampaignSnapshot | null>(null);
@@ -450,128 +462,196 @@ export function AdventureApp({
 
   return (
     <main className="app-shell relative overflow-hidden bg-zinc-950 text-zinc-300">
-      <div className="pointer-events-none absolute inset-x-0 top-0 h-72 bg-[radial-gradient(circle_at_top,_rgba(245,158,11,0.16),_transparent_52%),linear-gradient(180deg,_rgba(24,24,27,0.1),_rgba(9,9,11,0))]" />
-      <div className="app-frame relative grid max-w-7xl gap-6 xl:grid-cols-[280px_minmax(0,1fr)_320px]">
-        <aside className="space-y-6">
-          <section className="rounded-[1.75rem] border border-zinc-800 bg-zinc-950/95 p-6 shadow-2xl shadow-black/20 backdrop-blur">
-            <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Campaigns</p>
-            <div className="mt-4 space-y-3">
-              <button
-                type="button"
-                className="button-press w-full rounded-2xl border border-zinc-700 bg-zinc-100 px-4 py-3 text-sm font-semibold text-zinc-950 transition hover:bg-white"
-                onClick={() => router.push("/")}
-              >
-                Home
-              </button>
-              <button
-                type="button"
-                className="button-press w-full rounded-2xl border border-zinc-700 bg-zinc-900 px-4 py-3 text-sm font-semibold text-zinc-100 transition hover:border-zinc-500 hover:bg-zinc-800"
-                onClick={() => router.push("/campaigns")}
-              >
-                View All Campaigns
-              </button>
-              <button
-                type="button"
-                className="button-press w-full rounded-2xl border border-zinc-700 bg-zinc-100 px-4 py-3 text-sm font-semibold text-zinc-950 transition hover:bg-white"
-                onClick={() => router.push("/campaigns/new")}
-              >
-                New Campaign
-              </button>
-              <button
-                type="button"
-                className="button-press w-full rounded-2xl border border-zinc-700 bg-zinc-900 px-4 py-3 text-sm font-semibold text-zinc-100 transition hover:border-zinc-500 hover:bg-zinc-800"
-                onClick={() => router.push("/characters")}
-              >
-                Character Library
-              </button>
-            </div>
-            {loading ? (
-              <p className="mt-4 text-sm text-zinc-400">Loading campaigns...</p>
-            ) : (
-              <div className="mt-4 space-y-3">
-                {campaigns.map((campaign) => (
-                  <button
-                    key={campaign.id}
-                    type="button"
-                    onClick={() => {
-                      setCampaignId(campaign.id);
-                      router.push(`/play/${campaign.id}`);
-                    }}
-                    className={[
-                      "w-full rounded-3xl border p-4 text-left transition",
-                      campaignId === campaign.id
-                        ? "border-amber-500/50 bg-zinc-900 text-zinc-100 shadow-lg shadow-amber-950/20"
-                        : "border-zinc-800 bg-zinc-900/80 text-zinc-200 hover:border-zinc-600 hover:bg-zinc-900",
-                    ].join(" ")}
-                  >
-                    <h2 className="font-serif text-base font-semibold text-zinc-100">{campaign.title}</h2>
-                    <p className="mt-2 text-xs leading-relaxed text-zinc-400">{campaign.currentLocationName}</p>
-                  </button>
-                ))}
-              </div>
-            )}
-          </section>
-
+      {locationsDrawerOpen ? (
+        <button
+          type="button"
+          aria-label="Close world drawer"
+          className="fixed inset-0 z-30 bg-black/50 backdrop-blur-sm xl:hidden"
+          onClick={() => setLocationsDrawerOpen(false)}
+        />
+      ) : null}
+      <div className="app-frame relative grid max-w-7xl gap-6 xl:grid-cols-[300px_minmax(0,1fr)]">
+        <aside className="xl:sticky xl:top-6 xl:self-start">
           {snapshot ? (
             <section className="overflow-hidden rounded-[1.75rem] border border-zinc-800 bg-zinc-950/95 shadow-2xl shadow-black/20 backdrop-blur">
-              <div className="divide-y divide-zinc-800">
-                <section className="p-6">
-                  <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Character</p>
-                  <h2 className="mt-3 font-serif text-2xl font-semibold text-zinc-100">
-                    {snapshot.character.name}
-                  </h2>
-                  <p className="mt-1 text-sm text-zinc-400">{snapshot.character.archetype}</p>
-                  <p className="mt-4 text-xs uppercase tracking-[0.18em] text-zinc-500">
-                    HP {snapshot.character.health} · Gold {snapshot.character.gold}
-                  </p>
-                </section>
+              <div className="border-b border-zinc-800 p-3">
+                <div className="grid grid-cols-3 gap-2 rounded-2xl bg-zinc-900/80 p-1">
+                  {[
+                    { id: "character", label: "Character", icon: Shield },
+                    { id: "inventory", label: "Inventory", icon: Package },
+                    { id: "journal", label: "Journal", icon: BookOpen },
+                  ].map((tab) => {
+                    const Icon = tab.icon;
+                    const isActive = activeSidebarTab === tab.id;
+                    return (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        className={[
+                          "button-press flex h-11 items-center justify-center gap-2 rounded-xl px-2.5 text-[0.72rem] font-semibold leading-none transition",
+                          isActive
+                            ? "bg-zinc-100 text-zinc-950"
+                            : "text-zinc-400 hover:bg-zinc-800/80 hover:text-zinc-100",
+                        ].join(" ")}
+                        onClick={() =>
+                          setActiveSidebarTab(tab.id as "character" | "inventory" | "journal")
+                        }
+                      >
+                        <Icon className="h-4 w-4" />
+                        <span className="translate-y-px">{tab.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
 
-                <section className="p-6">
-                  <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Equipment</p>
-                  <div className="mt-4 space-y-3">
-                    {equipment.length ? (
-                      equipment.map((item) => (
-                        <div key={item.id} className="rounded-2xl border border-zinc-800 bg-zinc-900/70 p-4">
-                          <h3 className="font-serif text-base font-semibold text-zinc-100">
-                            {item.template.name}
-                          </h3>
-                          {item.template.description ? (
-                            <p className="mt-2 text-sm leading-relaxed text-zinc-400">
-                              {item.template.description}
-                            </p>
-                          ) : null}
-                        </div>
-                      ))
-                    ) : (
-                      <p className="text-sm text-zinc-500">No notable equipment on hand.</p>
-                    )}
-                  </div>
-                </section>
+              <div className="max-h-[calc(100vh-10rem)] overflow-y-auto p-6">
+                {activeSidebarTab === "character" ? (
+                  <div className="space-y-5">
+                    <section>
+                      <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Character</p>
+                      <h2 className="mt-3 font-serif text-2xl font-semibold text-zinc-100">
+                        {snapshot.character.name}
+                      </h2>
+                      <p className="mt-1 text-sm text-zinc-400">{snapshot.character.archetype}</p>
+                    </section>
 
-                <section className="p-6">
-                  <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Inventory</p>
-                  <div className="mt-4 space-y-3">
-                    {inventory.length ? (
-                      inventory.map((item) => (
-                        <div key={item.id} className="rounded-2xl border border-zinc-800 bg-zinc-900/70 p-4">
-                          <h3 className="font-serif text-base font-semibold text-zinc-100">
-                            {item.template.name}
-                          </h3>
-                          {item.template.description ? (
-                            <p className="mt-2 text-sm leading-relaxed text-zinc-400">
-                              {item.template.description}
-                            </p>
-                          ) : null}
-                        </div>
-                      ))
-                    ) : (
-                      <p className="text-sm text-zinc-500">Nothing else rattling around in the pack.</p>
-                    )}
+                    <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+                      <div className="rounded-2xl border border-zinc-800 bg-zinc-900/70 p-4">
+                        <p className="text-[0.68rem] uppercase tracking-[0.18em] text-zinc-500">Health</p>
+                        <p className="mt-2 font-serif text-2xl text-zinc-100">{snapshot.character.health}</p>
+                      </div>
+                      <div className="rounded-2xl border border-zinc-800 bg-zinc-900/70 p-4">
+                        <p className="text-[0.68rem] uppercase tracking-[0.18em] text-zinc-500">Gold</p>
+                        <p className="mt-2 font-serif text-2xl text-zinc-100">{snapshot.character.gold}</p>
+                      </div>
+                    </section>
+
+                    <section>
+                      <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Equipment</p>
+                      <div className="mt-4 space-y-3">
+                        {equipment.length ? (
+                          equipment.map((item) => (
+                            <div key={item.id} className="rounded-2xl border border-zinc-800 bg-zinc-900/70 p-4">
+                              <h3 className="font-serif text-base font-semibold text-zinc-100">
+                                {item.template.name}
+                              </h3>
+                              {item.template.description ? (
+                                <p className="mt-2 text-sm leading-relaxed text-zinc-400">
+                                  {item.template.description}
+                                </p>
+                              ) : null}
+                            </div>
+                          ))
+                        ) : (
+                          <p className="text-sm text-zinc-500">No notable equipment on hand.</p>
+                        )}
+                      </div>
+                    </section>
                   </div>
-                </section>
+                ) : null}
+
+                {activeSidebarTab === "inventory" ? (
+                  <div className="space-y-5">
+                    <section className="rounded-2xl border border-zinc-800 bg-zinc-900/70 p-4">
+                      <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Pack Summary</p>
+                      <p className="mt-2 text-sm leading-relaxed text-zinc-300">
+                        {inventory.length
+                          ? `${inventory.length} carried item${inventory.length === 1 ? "" : "s"} ready to use or trade.`
+                          : "Traveling light at the moment."}
+                      </p>
+                    </section>
+
+                    <section>
+                      <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Inventory</p>
+                      <div className="mt-4 space-y-3">
+                        {inventory.length ? (
+                          inventory.map((item) => (
+                            <div key={item.id} className="rounded-2xl border border-zinc-800 bg-zinc-900/70 p-4">
+                              <div className="flex items-start justify-between gap-3">
+                                <h3 className="font-serif text-base font-semibold text-zinc-100">
+                                  {item.template.name}
+                                </h3>
+                                {typeof item.quantity === "number" ? (
+                                  <span className="rounded-full border border-zinc-700 px-2 py-1 text-[0.68rem] uppercase tracking-[0.16em] text-zinc-400">
+                                    x{item.quantity}
+                                  </span>
+                                ) : null}
+                              </div>
+                              {item.template.description ? (
+                                <p className="mt-2 text-sm leading-relaxed text-zinc-400">
+                                  {item.template.description}
+                                </p>
+                              ) : null}
+                            </div>
+                          ))
+                        ) : (
+                          <p className="text-sm text-zinc-500">Nothing else rattling around in the pack.</p>
+                        )}
+                      </div>
+                    </section>
+                  </div>
+                ) : null}
+
+                {activeSidebarTab === "journal" ? (
+                  <div className="space-y-5">
+                    <section>
+                      <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Active Threads</p>
+                      <div className="mt-4 space-y-3">
+                        {snapshot.activeThreads.length ? (
+                          snapshot.activeThreads.map((thread) => (
+                            <div key={thread.memoryId} className="rounded-2xl border border-zinc-800 bg-zinc-900/70 p-4">
+                              <p className="text-sm leading-relaxed text-zinc-200">{thread.summary}</p>
+                            </div>
+                          ))
+                        ) : (
+                          <p className="text-sm text-zinc-500">No long-arc threads have surfaced yet.</p>
+                        )}
+                      </div>
+                    </section>
+
+                    <section>
+                      <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Pressures</p>
+                      <div className="mt-4 space-y-3">
+                        {snapshot.activePressures.length ? (
+                          snapshot.activePressures.map((pressure) => (
+                            <div
+                              key={`${pressure.entityType}-${pressure.entityId}`}
+                              className="rounded-2xl border border-zinc-800 bg-zinc-900/70 p-4"
+                            >
+                              <h3 className="font-serif text-base font-semibold text-zinc-100">{pressure.label}</h3>
+                              <p className="mt-2 text-sm leading-relaxed text-zinc-400">{pressure.summary}</p>
+                            </div>
+                          ))
+                        ) : (
+                          <p className="text-sm text-zinc-500">No urgent pressures are crowding the scene.</p>
+                        )}
+                      </div>
+                    </section>
+
+                    <section>
+                      <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Recent World Shifts</p>
+                      <div className="mt-4 space-y-3">
+                        {snapshot.recentWorldShifts.length ? (
+                          snapshot.recentWorldShifts.map((shift) => (
+                            <div key={shift.turnId} className="rounded-2xl border border-zinc-800 bg-zinc-900/70 p-4">
+                              <p className="text-sm leading-relaxed text-zinc-300">{shift.summary}</p>
+                            </div>
+                          ))
+                        ) : (
+                          <p className="text-sm text-zinc-500">The wider world has been relatively quiet.</p>
+                        )}
+                      </div>
+                    </section>
+                  </div>
+                ) : null}
               </div>
             </section>
-          ) : null}
+          ) : (
+            <section className="rounded-[1.75rem] border border-zinc-800 bg-zinc-950/95 p-6 shadow-2xl shadow-black/20 backdrop-blur">
+              <p className="text-sm text-zinc-400">Choose a campaign to start playing.</p>
+            </section>
+          )}
         </aside>
 
         <section className="rounded-[2rem] border border-zinc-800 bg-zinc-900/95 p-6 shadow-2xl shadow-black/25 backdrop-blur md:p-8">
@@ -579,7 +659,49 @@ export function AdventureApp({
             <p className="text-sm text-zinc-400">Loading campaign state...</p>
           ) : snapshot ? (
             <>
-              <div className="mx-auto max-w-3xl">
+              <div className="mx-auto max-w-4xl">
+                <div className="sticky top-0 z-20 -mx-2 mb-6 border-b border-zinc-800/80 bg-zinc-900/95 px-2 pb-5 pt-1 backdrop-blur">
+                  <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                    <nav className="flex flex-wrap items-center text-sm text-zinc-400">
+                      <button
+                        type="button"
+                        className="transition hover:text-zinc-100"
+                        onClick={() => router.push("/campaigns")}
+                      >
+                        Campaigns
+                      </button>
+                      <ChevronRight className="mx-2 h-4 w-4" />
+                      <button
+                        type="button"
+                        className="transition hover:text-zinc-100"
+                        onClick={() => router.push("/")}
+                      >
+                        Home
+                      </button>
+                      <ChevronRight className="mx-2 h-4 w-4" />
+                      <span className="font-medium text-zinc-100">{snapshot.title}</span>
+                    </nav>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        className="button-press rounded-2xl border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-100 transition hover:border-zinc-500 hover:bg-zinc-800"
+                        onClick={() => router.push("/campaigns/new")}
+                      >
+                        New Campaign
+                      </button>
+                      <button
+                        type="button"
+                        className="button-press rounded-2xl border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-100 transition hover:border-zinc-500 hover:bg-zinc-800"
+                        onClick={() => setLocationsDrawerOpen(true)}
+                      >
+                        <Compass className="mr-2 inline h-4 w-4" />
+                        World
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
                 <header className="border-b border-zinc-800 pb-8">
                   <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Current Chapter</p>
                   <h1 className="mt-3 font-serif text-4xl font-semibold tracking-tight text-zinc-100 md:text-5xl">
@@ -671,7 +793,7 @@ export function AdventureApp({
               </div>
 
               <div className="sticky bottom-4 z-10 mt-10">
-                <div className="mx-auto max-w-3xl rounded-[1.75rem] border border-zinc-800 bg-zinc-950/95 p-5 shadow-2xl shadow-black/30 backdrop-blur">
+                <div className="mx-auto max-w-4xl rounded-[1.75rem] border border-zinc-800 bg-zinc-950/95 p-5 shadow-2xl shadow-black/30 backdrop-blur">
                   <div className="border-b border-zinc-800 pb-4">
                     <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Your Turn</p>
                     <h2 className="mt-2 font-serif text-2xl font-semibold text-zinc-100">
@@ -800,99 +922,166 @@ export function AdventureApp({
             </div>
           )}
         </section>
-
-        <aside className="space-y-6">
-          {snapshot ? (
-            <>
-              <section className="rounded-[1.75rem] border border-zinc-800 bg-zinc-950/95 p-6 shadow-2xl shadow-black/20 backdrop-blur">
-                <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Routes</p>
-                <div className="mt-4 space-y-3">
-                  {snapshot.adjacentRoutes.map((route) => {
-                    const routeIsOpen = route.currentStatus === "open";
-                    return (
-                      <div key={route.id} className="rounded-3xl border border-zinc-800 bg-zinc-900/70 p-4">
-                        <h3 className="font-serif text-lg font-semibold text-zinc-100">
-                          {route.targetLocationName}
-                        </h3>
-                        <p className="mt-2 text-sm leading-relaxed text-zinc-400">
-                          {route.travelTimeMinutes} min · danger {route.dangerLevel} · {route.currentStatus}
-                        </p>
-                        {route.description ? (
-                          <p className="mt-2 text-sm leading-relaxed text-zinc-500">{route.description}</p>
-                        ) : null}
-                        <button
-                          type="button"
-                          className="button-press mt-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm font-semibold text-amber-50 transition hover:border-amber-400/60 hover:bg-amber-400/15 disabled:cursor-not-allowed disabled:opacity-60"
-                          onClick={() =>
-                            void submitTurnWithIntent(
-                              `I set out for ${route.targetLocationName}.`,
-                              undefined,
-                              {
-                                type: "travel_route",
-                                routeEdgeId: route.id,
-                                targetLocationId: route.targetLocationId,
-                              },
-                            )}
-                          disabled={submitting || !routeIsOpen}
-                        >
-                          {routeIsOpen
-                            ? "Set Out"
-                            : route.currentStatus === "blocked"
-                              ? "Blocked"
-                              : "Unavailable"}
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
-              </section>
-
-              <section className="rounded-[1.75rem] border border-zinc-800 bg-zinc-950/95 p-6 shadow-2xl shadow-black/20 backdrop-blur">
-                <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Present NPCs</p>
-                <div className="mt-4 space-y-3">
-                  {snapshot.presentNpcs.map((npc) => (
-                    <div key={npc.id} className="rounded-3xl border border-zinc-800 bg-zinc-900/70 p-4">
-                      <h3 className="font-serif text-lg font-semibold text-zinc-100">{npc.name}</h3>
-                      <p className="mt-1 text-xs uppercase tracking-[0.16em] text-zinc-500">{npc.role}</p>
-                      <p className="mt-2 text-sm leading-relaxed text-zinc-400">{npc.summary}</p>
-                    </div>
-                  ))}
-                </div>
-              </section>
-
-              <section className="rounded-[1.75rem] border border-zinc-800 bg-zinc-950/95 p-6 shadow-2xl shadow-black/20 backdrop-blur">
-                <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Known Factions</p>
-                <div className="mt-4 space-y-3">
-                  {snapshot.knownFactions.map((faction) => (
-                    <div key={faction.id} className="rounded-3xl border border-zinc-800 bg-zinc-900/70 p-4">
-                      <h3 className="font-serif text-lg font-semibold text-zinc-100">{faction.name}</h3>
-                      <p className="mt-2 text-sm leading-relaxed text-zinc-400">{faction.summary}</p>
-                    </div>
-                  ))}
-                </div>
-              </section>
-
-              <section className="rounded-[1.75rem] border border-zinc-800 bg-zinc-950/95 p-6 shadow-2xl shadow-black/20 backdrop-blur">
-                <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">
-                  Discovered Information
-                </p>
-                <div className="mt-4 space-y-3">
-                  {snapshot.discoveredInformation.map((information) => (
-                    <div key={information.id} className="rounded-3xl border border-zinc-800 bg-zinc-900/70 p-4">
-                      <h3 className="font-serif text-lg font-semibold text-zinc-100">
-                        {information.title}
-                      </h3>
-                      <p className="mt-2 text-sm leading-relaxed text-zinc-400">
-                        {information.summary}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              </section>
-            </>
-          ) : null}
-        </aside>
       </div>
+
+      <aside
+        className={[
+          "fixed right-0 top-0 z-40 h-full w-full max-w-md border-l border-zinc-800 bg-zinc-950/98 p-6 shadow-2xl shadow-black/40 backdrop-blur transition-transform duration-300",
+          locationsDrawerOpen ? "translate-x-0" : "translate-x-full",
+        ].join(" ")}
+      >
+        <div className="flex h-full flex-col">
+          <div className="flex items-start justify-between gap-4 border-b border-zinc-800 pb-4">
+            <div>
+              <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">World Drawer</p>
+              <h2 className="mt-2 font-serif text-2xl font-semibold text-zinc-100">Routes, locals, and leads</h2>
+            </div>
+            <button
+              type="button"
+              className="button-press rounded-2xl border border-zinc-700 bg-zinc-900 p-2 text-zinc-100 transition hover:border-zinc-500 hover:bg-zinc-800"
+              onClick={() => setLocationsDrawerOpen(false)}
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          <div className="mt-6 flex-1 space-y-6 overflow-y-auto pr-1">
+            <section className="rounded-[1.5rem] border border-zinc-800 bg-zinc-900/70 p-5">
+              <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Campaign Switcher</p>
+              {loading ? (
+                <p className="mt-4 text-sm text-zinc-400">Loading campaigns...</p>
+              ) : (
+                <div className="mt-4 space-y-3">
+                  {campaigns.map((campaign) => (
+                    <button
+                      key={campaign.id}
+                      type="button"
+                      onClick={() => {
+                        setCampaignId(campaign.id);
+                        setLocationsDrawerOpen(false);
+                        router.push(`/play/${campaign.id}`);
+                      }}
+                      className={[
+                        "w-full rounded-3xl border p-4 text-left transition",
+                        campaignId === campaign.id
+                          ? "border-amber-500/50 bg-zinc-950 text-zinc-100 shadow-lg shadow-amber-950/20"
+                          : "border-zinc-800 bg-zinc-900/80 text-zinc-200 hover:border-zinc-600 hover:bg-zinc-900",
+                      ].join(" ")}
+                    >
+                      <h3 className="font-serif text-base font-semibold text-zinc-100">{campaign.title}</h3>
+                      <p className="mt-2 text-xs leading-relaxed text-zinc-400">{campaign.currentLocationName}</p>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            {snapshot ? (
+              <>
+                <section className="rounded-[1.5rem] border border-zinc-800 bg-zinc-900/70 p-5">
+                  <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Routes</p>
+                  <div className="mt-4 space-y-3">
+                    {snapshot.adjacentRoutes.map((route) => {
+                      const routeIsOpen = route.currentStatus === "open";
+                      return (
+                        <div key={route.id} className="rounded-3xl border border-zinc-800 bg-zinc-950/70 p-4">
+                          <h3 className="font-serif text-lg font-semibold text-zinc-100">
+                            {route.targetLocationName}
+                          </h3>
+                          <p className="mt-2 text-sm leading-relaxed text-zinc-400">
+                            {route.travelTimeMinutes} min · danger {route.dangerLevel} · {route.currentStatus}
+                          </p>
+                          {route.description ? (
+                            <p className="mt-2 text-sm leading-relaxed text-zinc-500">{route.description}</p>
+                          ) : null}
+                          <button
+                            type="button"
+                            className="button-press mt-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm font-semibold text-amber-50 transition hover:border-amber-400/60 hover:bg-amber-400/15 disabled:cursor-not-allowed disabled:opacity-60"
+                            onClick={() => {
+                              setLocationsDrawerOpen(false);
+                              void submitTurnWithIntent(
+                                `I set out for ${route.targetLocationName}.`,
+                                undefined,
+                                {
+                                  type: "travel_route",
+                                  routeEdgeId: route.id,
+                                  targetLocationId: route.targetLocationId,
+                                },
+                              );
+                            }}
+                            disabled={submitting || !routeIsOpen}
+                          >
+                            {routeIsOpen
+                              ? "Set Out"
+                              : route.currentStatus === "blocked"
+                                ? "Blocked"
+                                : "Unavailable"}
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </section>
+
+                <section className="rounded-[1.5rem] border border-zinc-800 bg-zinc-900/70 p-5">
+                  <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Present NPCs</p>
+                  <div className="mt-4 space-y-3">
+                    {snapshot.presentNpcs.length ? (
+                      snapshot.presentNpcs.map((npc) => (
+                        <div key={npc.id} className="rounded-3xl border border-zinc-800 bg-zinc-950/70 p-4">
+                          <h3 className="font-serif text-lg font-semibold text-zinc-100">{npc.name}</h3>
+                          <p className="mt-1 text-xs uppercase tracking-[0.16em] text-zinc-500">{npc.role}</p>
+                          <p className="mt-2 text-sm leading-relaxed text-zinc-400">{npc.summary}</p>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-sm text-zinc-500">No one notable is on the scene right now.</p>
+                    )}
+                  </div>
+                </section>
+
+                <section className="rounded-[1.5rem] border border-zinc-800 bg-zinc-900/70 p-5">
+                  <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Known Factions</p>
+                  <div className="mt-4 space-y-3">
+                    {snapshot.knownFactions.length ? (
+                      snapshot.knownFactions.map((faction) => (
+                        <div key={faction.id} className="rounded-3xl border border-zinc-800 bg-zinc-950/70 p-4">
+                          <h3 className="font-serif text-lg font-semibold text-zinc-100">{faction.name}</h3>
+                          <p className="mt-2 text-sm leading-relaxed text-zinc-400">{faction.summary}</p>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-sm text-zinc-500">No factions have been surfaced to the player yet.</p>
+                    )}
+                  </div>
+                </section>
+
+                <section className="rounded-[1.5rem] border border-zinc-800 bg-zinc-900/70 p-5">
+                  <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">
+                    Discovered Information
+                  </p>
+                  <div className="mt-4 space-y-3">
+                    {snapshot.discoveredInformation.length ? (
+                      snapshot.discoveredInformation.map((information) => (
+                        <div key={information.id} className="rounded-3xl border border-zinc-800 bg-zinc-950/70 p-4">
+                          <h3 className="font-serif text-lg font-semibold text-zinc-100">
+                            {information.title}
+                          </h3>
+                          <p className="mt-2 text-sm leading-relaxed text-zinc-400">
+                            {information.summary}
+                          </p>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-sm text-zinc-500">No notable leads have been written into the journal yet.</p>
+                    )}
+                  </div>
+                </section>
+              </>
+            ) : null}
+          </div>
+        </div>
+      </aside>
     </main>
   );
 }

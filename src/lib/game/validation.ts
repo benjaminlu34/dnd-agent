@@ -148,6 +148,24 @@ function findPresentNpc(snapshot: CampaignSnapshot, npcId: string | undefined) {
   return snapshot.presentNpcs.find((npc) => npc.id === npcId) ?? null;
 }
 
+function isValidLocalInteractionTarget(snapshot: CampaignSnapshot, localEntityId: string) {
+  const normalized = localEntityId.trim();
+  if (!normalized) {
+    return false;
+  }
+  if (normalized.startsWith("spawn:") || normalized.startsWith("temp:")) {
+    return true;
+  }
+  if (normalized.startsWith("npc:")) {
+    return false;
+  }
+  if (Object.hasOwn(snapshot.knownNpcLocationIds, normalized)) {
+    return false;
+  }
+
+  return snapshot.temporaryActors.some((actor) => actor.id === normalized);
+}
+
 function mutationPhaseForCheckStakes(mutation: MechanicsMutation): "immediate" | "conditional" {
   if (mutation.phase) {
     return mutation.phase;
@@ -267,11 +285,27 @@ export function validateTurnCommand(input: {
     warnings.push("Mechanics response returned no suggested actions; engine provided none.");
   }
 
+  const mutations = command.mutations.filter((mutation) => {
+    if (mutation.type !== "record_local_interaction") {
+      return true;
+    }
+
+    if (isValidLocalInteractionTarget(snapshot, mutation.localEntityId)) {
+      return true;
+    }
+
+    warnings.push(
+      "Mechanics response targeted record_local_interaction at an invalid local actor ref; mutation was dropped.",
+    );
+    return false;
+  });
+
   return {
     ...command,
+    mutations,
     suggestedActions,
     warnings: Array.from(new Set(warnings)),
-    timeElapsed: deriveTimeElapsed(command, snapshot),
-    checkResult: deriveCheckResult(snapshot, command, fetchedFacts),
+    timeElapsed: deriveTimeElapsed({ ...command, mutations }, snapshot),
+    checkResult: deriveCheckResult(snapshot, { ...command, mutations }, fetchedFacts),
   };
 }

@@ -295,6 +295,77 @@ test("validateTurnCommand warns when no suggested actions are provided", () => {
   ]);
 });
 
+test("validateTurnCommand drops record_local_interaction targeting a named npc ref", () => {
+  const validated = validateTurnCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Buy breakfast"],
+      mutations: [
+        {
+          type: "record_local_interaction",
+          localEntityId: "npc:npc_guard",
+          interactionSummary: "You buy breakfast from the guard.",
+        },
+        {
+          type: "advance_time",
+          durationMinutes: 10,
+        },
+      ],
+    },
+  });
+
+  assert.equal(validated.type, "resolve_mechanics");
+  assert.equal(validated.mutations.length, 1);
+  assert.equal(validated.mutations[0]?.type, "advance_time");
+  assert.match(
+    validated.warnings.join("\n"),
+    /record_local_interaction at an invalid local actor ref; mutation was dropped/i,
+  );
+});
+
+test("validateTurnCommand preserves record_local_interaction targeting a raw temporary actor id", () => {
+  const validated = validateTurnCommand({
+    snapshot: {
+      ...createSnapshot(),
+      temporaryActors: [
+        {
+          id: "temp_apprentice",
+          label: "apprentice",
+          currentLocationId: "loc_gate",
+          interactionCount: 0,
+          firstSeenAtTurn: 0,
+          lastSeenAtTurn: 0,
+          lastSeenAtTime: 480,
+          recentTopics: [],
+          lastSummary: "A young apprentice waiting for instructions.",
+          holdsInventory: false,
+          affectedWorldState: false,
+          isInMemoryGraph: false,
+          promotedNpcId: null,
+        },
+      ],
+    },
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "downtime",
+      suggestedActions: ["Send the apprentice"],
+      mutations: [
+        {
+          type: "record_local_interaction",
+          localEntityId: "temp_apprentice",
+          interactionSummary: "You send the apprentice to find the runeforger.",
+        },
+      ],
+    },
+  });
+
+  assert.equal(validated.type, "resolve_mechanics");
+  assert.equal(validated.mutations.length, 1);
+  assert.equal(validated.mutations[0]?.type, "record_local_interaction");
+});
+
 test("validateTurnCommand preserves explicit command warnings", () => {
   const validated = validateTurnCommand({
     snapshot: createSnapshot(),

@@ -2391,7 +2391,7 @@ const classifyTurnIntentTool = createStructuredTool(
 );
 
 const resolvedTurnNarrationSchema = z.object({
-  narration: z.string().trim().min(1).max(800),
+  narration: z.string().trim().min(1).max(1500),
 });
 
 const resolvedTurnNarrationTool = createStructuredTool(
@@ -2542,10 +2542,12 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Advance the scene or world only through passive observation or waiting.",
         "Do not create combat, market trade, or deliberate social escalation in observe mode.",
         "Use sceneActors.actorRef values exactly when targeting on-screen actors.",
+        "Never use record_local_interaction with npc: refs or named sceneActors. It is only for unnamed temporary locals referenced as temp:..., spawn:..., or raw temporary-actor ids.",
         "If the player reaches for a plausible unlisted local, improvised item, or environmental condition, spawn it first before interacting with it.",
         "Use spawn_temporary_actor before record_local_interaction when the local is not already listed in sceneActors.",
         "Use spawn_environmental_item before adjust_inventory when the item is plausible in the environment but not already grounded in inventory.",
         "Use spawn_scene_aspect for smoke, damage, noise, weather spillover, improvised cover, and other grounded scene conditions.",
+        "Self-directed downtime work may use adjust_inventory, spawn_environmental_item, and spawn_scene_aspect for grounded byproducts, consumed materials, and scene conditions.",
         "Use set_scene_actor_presence whenever someone leaves the current scene or returns during the turn.",
         "Only include checkIntent when success or failure meaningfully changes which mutations can happen. If the turn is routine and should simply create a local interaction or consume time, omit checkIntent.",
         "If a check is needed, set checkIntent and list only the success-state mutations. The engine will reject them on failure.",
@@ -2579,15 +2581,19 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Use move_player only for actual route travel to a known adjacent location.",
         "Use record_local_interaction for current-scene unnamed locals instead of adjust_relationship.",
         "Use sceneActors.actorRef values exactly when targeting on-screen actors.",
+        "Never use record_local_interaction with npc: refs or named sceneActors. It is only for unnamed temporary locals referenced as temp:..., spawn:..., or raw temporary-actor ids.",
+        "When speaking to a named on-screen NPC, cite them in checkIntent only when needed, use adjust_relationship only for meaningful social shifts, and otherwise rely on time passage without inventing a local-interaction mutation.",
         "If the player reaches for a plausible unlisted local, improvised item, or environmental condition, spawn it first before interacting with it.",
         "Use spawn_temporary_actor before record_local_interaction when the local is not already listed in sceneActors.",
         "Use spawn_environmental_item before adjust_inventory when the item is plausible in the environment but not already grounded in inventory.",
         "Use spawn_scene_aspect for smoke, damage, noise, weather spillover, improvised cover, and other grounded scene conditions.",
+        "Self-directed downtime work may use adjust_inventory, spawn_environmental_item, and spawn_scene_aspect for grounded byproducts, consumed materials, and scene conditions.",
         "Use adjust_inventory for gaining, losing, consuming, or handing over grounded inventory items.",
         "Use set_npc_state only for direct violence, subdual, or comparable physical outcomes.",
         "Use adjust_relationship for meaningful social shifts with a present NPC.",
         "Use discover_information only for specific known information ids grounded in context or fetched facts.",
         "Use set_scene_actor_presence whenever someone leaves the current scene or returns during the turn.",
+        "If a helper, subordinate, or named scene actor leaves on an errand or comes back later in the turn, represent that mechanically with set_scene_actor_presence.",
         "Use restore_health for rest recovery or explicit healing outcomes the engine should apply.",
         "Use advance_time when the action necessarily consumes time. Suggested actions should stay short and concrete.",
         "Preserve the player's commitment level. Do not upgrade browsing or approach into stronger mechanics unless the wording clearly commits to them.",
@@ -2686,9 +2692,14 @@ function buildResolvedNarrationConstraints(input: ResolvedTurnNarrationInput) {
   const appliedMutations = input.stateCommitLog.filter(
     (entry) => entry.status === "applied" && entry.kind === "mutation" && entry.mutationType,
   );
+  const rejectedMutations = input.stateCommitLog.filter(
+    (entry) => entry.status === "rejected" && entry.kind === "mutation" && entry.mutationType,
+  );
   const timeOnlyTurn =
     appliedMutations.length > 0
     && appliedMutations.every((entry) => entry.mutationType === "advance_time");
+  const appliedNonTimeMutations = appliedMutations.filter((entry) => entry.mutationType !== "advance_time");
+  const rejectedNonTimeMutations = rejectedMutations.filter((entry) => entry.mutationType !== "advance_time");
   const waitingForArrival =
     /\bwait\b/i.test(input.playerAction)
     && /\b(for|until|til)\b/i.test(input.playerAction)
@@ -2697,10 +2708,33 @@ function buildResolvedNarrationConstraints(input: ResolvedTurnNarrationInput) {
   return {
     timeOnlyTurn,
     waitingForArrival,
+    rejectedOutcomeOnly:
+      rejectedNonTimeMutations.length > 0 && appliedNonTimeMutations.length === 0,
+    rejectedInteractionOnly:
+      rejectedNonTimeMutations.length > 0
+      && appliedNonTimeMutations.length === 0
+      && rejectedNonTimeMutations.every(
+        (entry) =>
+          entry.mutationType === "record_local_interaction"
+          || entry.mutationType === "set_scene_actor_presence",
+      ),
+    rejectedMutationTypes: rejectedNonTimeMutations.map((entry) => entry.mutationType),
     hasArrivalCommit: input.stateCommitLog.some((entry) =>
       isAppliedArrivalMutation(entry, input.promptContext.currentLocation.id),
     ),
   };
+}
+
+function narrationViolatesResolvedConstraints(
+  input: ResolvedTurnNarrationInput,
+  narration: string,
+) {
+  const constraints = buildResolvedNarrationConstraints(input);
+  if (constraints.rejectedInteractionOnly && /["“”'‘’]/.test(narration)) {
+    return "Rejected interaction-only turns must not invent quoted dialogue.";
+  }
+
+  return null;
 }
 
 function buildResolvedTurnNarrationPrompt(input: ResolvedTurnNarrationInput) {
@@ -2713,6 +2747,10 @@ function buildResolvedTurnNarrationPrompt(input: ResolvedTurnNarrationInput) {
     "If the applied log only advances time, narrate only the time passage and any grounded atmosphere shift. Do not restage the room or repeat the opening setup.",
     "If the player waited for a person or event and the commit log does not contain the arrival or return, explicitly say it has not happened yet.",
     "Do not imply that someone arrived, returned, or appeared unless the committed log makes that change explicit.",
+    "If rejectedOutcomeOnly is true, do not narrate rejected outcomes as if they happened.",
+    "If rejectedInteractionOnly is true, you may acknowledge that the attempt stalls or goes unanswered, but do not invent direct replies, quoted dialogue, completed errands, or offscreen returns.",
+    "If rejectedMutationTypes only cover item or scene changes, do not invent completed crafting outputs, item transfers, or scene transformations that the log rejected.",
+    "Do not write quoted dialogue unless it is grounded by a committed interaction, a committed check result, fetched facts, or explicit player speech that is visibly answered in the committed log.",
     "Write in second person to the player character as 'you'.",
     "Keep the narration compact, concrete, and forward-moving.",
   ].join("\n");
@@ -5574,7 +5612,18 @@ class DungeonMasterClient {
           continue;
         }
 
-        return parsed.data.narration.trim();
+        const narration = parsed.data.narration.trim();
+        const violation = narrationViolatesResolvedConstraints(input, narration);
+        if (violation) {
+          correctionNotes = [
+            "Your previous reply violated the narration grounding rules.",
+            violation,
+            "Return a complete replacement payload grounded only in committed outcomes.",
+          ].join("\n");
+          continue;
+        }
+
+        return narration;
       }
 
       throw new Error("Resolved-turn narration did not return a valid payload after retries.");
@@ -5600,6 +5649,7 @@ export const aiProviderTestUtils = {
   buildTurnRouterSystemPrompt,
   buildTurnActionCorrectionNotes,
   buildTurnSystemPrompt,
+  buildResolvedNarrationConstraints,
   buildResolvedTurnNarrationPrompt,
   buildRouterConstraintsBlock,
   buildCustomEntryIntentCorrectionNotes,
@@ -5607,6 +5657,7 @@ export const aiProviderTestUtils = {
   findCustomEntryIntentConflicts,
   isObservePermittedFinalTool,
   isObserveMechanicsPayloadSafe,
+  narrationViolatesResolvedConstraints,
   normalizeSocialCastInput,
   normalizeScheduleEntityId,
   normalizeSchedulePayloadIds,

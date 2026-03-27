@@ -472,6 +472,51 @@ test("record_local_interaction applies on failed checks and updates temp-local s
   assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "local_interaction_recorded");
 });
 
+test("record_local_interaction is authorized on economy_light turns", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: {
+      ...createSnapshot(),
+      temporaryActors: [
+        {
+          id: "temp_baker_boy",
+          label: "baker's boy",
+          currentLocationId: "loc_gate",
+          interactionCount: 0,
+          firstSeenAtTurn: 0,
+          lastSeenAtTurn: 0,
+          lastSeenAtTime: 480,
+          recentTopics: [],
+          lastSummary: "A baker's boy hurries past with a basket of fresh bread.",
+          holdsInventory: false,
+          affectedWorldState: false,
+          isInMemoryGraph: false,
+          promotedNpcId: null,
+        },
+      ],
+    },
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Buy breakfast"],
+      mutations: [
+        {
+          type: "record_local_interaction",
+          localEntityId: "temp:temp_baker_boy",
+          interactionSummary: "You stop the baker's boy and buy a quick breakfast.",
+          topic: "breakfast",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 10,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["economy_light"]),
+  });
+
+  assert.equal(evaluated.stateCommitLog[0]?.reasonCode, "local_interaction_recorded");
+  assert.equal(evaluated.stateCommitLog[0]?.status, "applied");
+});
+
 test("inventory removal applies as an immediate cost while add stays blocked on failed checks", () => {
   const snapshot = {
     ...createSnapshot(),
@@ -550,6 +595,80 @@ test("scene-object mutations persist into next state", () => {
   assert.equal(evaluated.nextState.sceneAspects.gate_winch?.state, "jammed open");
   assert.equal(evaluated.nextState.sceneAspects.gate_winch?.duration, "scene");
   assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "scene_aspect_spawned");
+});
+
+test("grounded downtime mutations apply even when the router authorizes no explicit vectors", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: {
+      ...createSnapshot(),
+      character: {
+        ...createSnapshot().character,
+        inventory: [
+          {
+            id: "iteminst_scrap",
+            characterInstanceId: "inst_1",
+            templateId: "item_scrap_iron",
+            template: {
+              id: "item_scrap_iron",
+              campaignId: "camp_1",
+              name: "Scrap Iron",
+              description: "Bent offcuts from an earlier job.",
+              value: 0,
+              weight: 1,
+              rarity: "common",
+              tags: [],
+            },
+            isIdentified: true,
+            charges: null,
+            properties: null,
+          },
+        ],
+      },
+    },
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "downtime",
+      suggestedActions: ["Keep hammering"],
+      mutations: [
+        {
+          type: "adjust_inventory",
+          itemId: "item_scrap_iron",
+          quantity: 1,
+          action: "remove",
+          reason: "You work the scrap into usable stock.",
+        },
+        {
+          type: "spawn_environmental_item",
+          spawnKey: "horseshoes",
+          itemName: "Horseshoe Set",
+          description: "Freshly worked shoes cooling beside the anvil.",
+          quantity: 1,
+          reason: "Routine smithing produces a finished order.",
+        },
+        {
+          type: "spawn_scene_aspect",
+          aspectName: "forging activity",
+          state: "The anvil rings and the forge throws a steady spray of sparks.",
+          duration: "scene",
+          reason: "Routine work fills the smithy with heat and noise.",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 120,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision([]),
+  });
+
+  assert.deepEqual(
+    evaluated.stateCommitLog.map((entry) => [entry.mutationType, entry.status, entry.reasonCode]),
+    [
+      ["adjust_inventory", "applied", "inventory_adjusted"],
+      ["spawn_environmental_item", "applied", "environmental_item_spawned"],
+      ["spawn_scene_aspect", "applied", "scene_aspect_spawned"],
+    ],
+  );
+  assert.equal(evaluated.nextState.sceneAspects.forging_activity?.duration, "scene");
 });
 
 test("temporary actor spawn handles can be referenced later in the same turn", () => {

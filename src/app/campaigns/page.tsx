@@ -1,9 +1,11 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
 export default function CampaignsPage() {
+  const router = useRouter();
   const [campaigns, setCampaigns] = useState<Array<{ id: string; title: string; description?: string }>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -129,9 +131,12 @@ export default function CampaignsPage() {
         ) : (
           <div className="space-y-4 w-full max-w-2xl">
             {campaigns.map((campaign) => (
-              <Link key={campaign.id} href={`/play/${campaign.id}`} className="block rounded-xl border border-zinc-800 bg-zinc-950/50 p-4 hover:bg-zinc-900 transition-colors relative">
+              <div key={campaign.id} className="block rounded-xl border border-zinc-800 bg-zinc-950/50 p-4 hover:bg-zinc-900 transition-colors relative">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                  <div className="min-w-0 flex-1">
+                  <div
+                    className="min-w-0 flex-1 cursor-pointer"
+                    onClick={() => router.push(`/play/${campaign.id}`)}
+                  >
                     {editingCampaign?.id === campaign.id ? (
                       <div>
                         <label htmlFor={`campaign-name-${campaign.id}`} className="mb-2 block text-[10px] font-medium uppercase tracking-widest text-zinc-500">
@@ -225,7 +230,7 @@ export default function CampaignsPage() {
                     ) : null}
                   </div>
                 </div>
-              </Link>
+              </div>
             ))}
           </div>
         )}

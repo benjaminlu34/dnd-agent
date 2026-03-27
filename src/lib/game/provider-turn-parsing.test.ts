@@ -96,10 +96,14 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   assert.match(prompt, /Use commit_market_trade only for strict commodity trade backed by fetched market prices/);
   assert.match(prompt, /Use sceneActors.actorRef values exactly when targeting on-screen actors/);
   assert.match(prompt, /Use record_local_interaction for current-scene unnamed locals instead of adjust_relationship/);
+  assert.match(prompt, /Never use record_local_interaction with npc: refs or named sceneActors/);
+  assert.match(prompt, /When speaking to a named on-screen NPC/);
   assert.match(prompt, /Use spawn_temporary_actor before record_local_interaction/);
   assert.match(prompt, /Use spawn_environmental_item before adjust_inventory/);
   assert.match(prompt, /Use set_scene_actor_presence whenever someone leaves the current scene/);
+  assert.match(prompt, /comes back later in the turn, represent that mechanically with set_scene_actor_presence/);
   assert.match(prompt, /Use adjust_inventory for gaining, losing, consuming, or handing over grounded inventory items/);
+  assert.match(prompt, /Self-directed downtime work may use adjust_inventory, spawn_environmental_item, and spawn_scene_aspect/);
   assert.match(prompt, /Use spawn_scene_aspect for smoke, damage, noise/);
 });
 
@@ -266,6 +270,126 @@ test("buildResolvedTurnNarrationPrompt does not treat departures as waited-for a
 
   assert.match(prompt.user, /waitingForArrival: true/);
   assert.match(prompt.user, /hasArrivalCommit: false/);
+});
+
+test("buildResolvedTurnNarrationPrompt surfaces rejected-only interaction constraints", () => {
+  const prompt = aiProviderTestUtils.buildResolvedTurnNarrationPrompt({
+    playerAction: "I call over Mira Brightstone and ask for a loaf.",
+    promptContext: {
+      currentLocation: {
+        id: "loc_market",
+        name: "Lantern Market",
+        type: "district",
+        summary: "Rain-dark awnings and crowded stalls.",
+        state: "busy",
+      },
+      adjacentRoutes: [],
+      sceneActors: [
+        {
+          actorRef: "npc:npc_mira",
+          kind: "npc",
+          displayLabel: "Mira Brightstone",
+          role: "baker",
+          detailFetchHint: null,
+          lastSummary: "She keeps bread warm under layered cloth.",
+        },
+      ],
+      recentLocalEvents: [],
+      recentTurnLedger: [],
+      discoveredInformation: [],
+      activePressures: [],
+      recentWorldShifts: [],
+      activeThreads: [],
+      inventory: [],
+      sceneAspects: {},
+      localTexture: null,
+      globalTime: 540,
+      timeOfDay: "morning",
+      dayCount: 1,
+    },
+    fetchedFacts: [],
+    stateCommitLog: [
+      {
+        kind: "mutation",
+        mutationType: "advance_time",
+        status: "applied",
+        reasonCode: "time_advanced",
+        summary: "Time passes for 5 minutes.",
+        metadata: {},
+      },
+      {
+        kind: "mutation",
+        mutationType: "record_local_interaction",
+        status: "rejected",
+        reasonCode: "invalid_target",
+        summary: "That unnamed local is not available here.",
+        metadata: {
+          localEntityId: "npc:npc_mira",
+        },
+      },
+    ],
+    checkResult: null,
+    suggestedActions: [],
+  });
+
+  assert.match(prompt.user, /rejectedOutcomeOnly: true/);
+  assert.match(prompt.user, /rejectedInteractionOnly: true/);
+  assert.match(prompt.user, /rejectedMutationTypes:\s+  - record_local_interaction/);
+});
+
+test("narrationViolatesResolvedConstraints rejects invented quoted replies on rejected-only interaction turns", () => {
+  const violation = aiProviderTestUtils.narrationViolatesResolvedConstraints(
+    {
+      playerAction: "I ask Mira Brightstone for a loaf.",
+      promptContext: {
+        currentLocation: {
+          id: "loc_market",
+          name: "Lantern Market",
+          type: "district",
+          summary: "Rain-dark awnings and crowded stalls.",
+          state: "busy",
+        },
+        adjacentRoutes: [],
+        sceneActors: [],
+        recentLocalEvents: [],
+        recentTurnLedger: [],
+        discoveredInformation: [],
+        activePressures: [],
+        recentWorldShifts: [],
+        activeThreads: [],
+        inventory: [],
+        sceneAspects: {},
+        localTexture: null,
+        globalTime: 540,
+        timeOfDay: "morning",
+        dayCount: 1,
+      },
+      fetchedFacts: [],
+      stateCommitLog: [
+        {
+          kind: "mutation",
+          mutationType: "advance_time",
+          status: "applied",
+          reasonCode: "time_advanced",
+          summary: "Time passes for 5 minutes.",
+          metadata: {},
+        },
+        {
+          kind: "mutation",
+          mutationType: "record_local_interaction",
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "That unnamed local is not available here.",
+          metadata: {},
+        },
+      ],
+      checkResult: null,
+      suggestedActions: [],
+    },
+    'Mira glances over and says, "Take the heel and be quick about it."',
+  );
+
+  assert.match(violation ?? "", /must not invent quoted dialogue/i);
 });
 
 test("normalizeRouterDecision dedupes vectors and prerequisites", () => {

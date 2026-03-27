@@ -1088,6 +1088,13 @@ function hasAnyAuthorizedVector(decision: RouterDecision) {
   return decision.authorizedVectors.length > 0;
 }
 
+function allowsGroundedDowntimeMutation(
+  decision: RouterDecision,
+  timeMode: ResolveMechanicsResponse["timeMode"],
+) {
+  return hasAnyAuthorizedVector(decision) || timeMode === "downtime";
+}
+
 function isTraversableRoute(route: CampaignSnapshot["adjacentRoutes"][number]) {
   return route.currentStatus === "open";
 }
@@ -1375,7 +1382,7 @@ function evaluateResolvedCommand(input: {
     }
 
     if (mutation.type === "spawn_scene_aspect") {
-      if (!hasAnyAuthorizedVector(input.routerDecision)) {
+      if (!allowsGroundedDowntimeMutation(input.routerDecision, input.command.timeMode)) {
         stateCommitLog.push({
           kind: "mutation",
           mutationType: mutation.type,
@@ -1528,7 +1535,11 @@ function evaluateResolvedCommand(input: {
     }
 
     if (mutation.type === "record_local_interaction") {
-      if (!hasVector(input.routerDecision, "converse")) {
+      if (
+        !hasVector(input.routerDecision, "converse")
+        && !hasVector(input.routerDecision, "economy_light")
+        && !hasVector(input.routerDecision, "investigate")
+      ) {
         stateCommitLog.push({
           kind: "mutation",
           mutationType: mutation.type,
@@ -1816,7 +1827,7 @@ function evaluateResolvedCommand(input: {
     }
 
     if (mutation.type === "spawn_environmental_item") {
-      if (!hasAnyAuthorizedVector(input.routerDecision)) {
+      if (!allowsGroundedDowntimeMutation(input.routerDecision, input.command.timeMode)) {
         stateCommitLog.push({
           kind: "mutation",
           mutationType: mutation.type,
@@ -1864,7 +1875,7 @@ function evaluateResolvedCommand(input: {
     }
 
     if (mutation.type === "adjust_inventory") {
-      if (!hasAnyAuthorizedVector(input.routerDecision)) {
+      if (!allowsGroundedDowntimeMutation(input.routerDecision, input.command.timeMode)) {
         stateCommitLog.push({
           kind: "mutation",
           mutationType: mutation.type,
