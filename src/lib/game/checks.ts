@@ -16,16 +16,15 @@ function outcomeForTotal(total: number): CheckOutcome {
   return "failure";
 }
 
-export function rollCheck(input: {
+export function buildCheckResult(input: {
   stat: Stat;
   mode: CheckMode;
   reason: string;
-  character: CampaignCharacter;
+  modifier: number;
+  rolls: [number, number];
   dc?: number;
 }): CheckResult {
-  const first = roll2d6();
-  const second = roll2d6();
-
+  const [first, second] = input.rolls;
   let chosen = first;
 
   if (input.mode === "advantage") {
@@ -34,8 +33,7 @@ export function rollCheck(input: {
     chosen = Math.min(first, second);
   }
 
-  const modifier = input.character.stats[input.stat];
-  const total = chosen + modifier;
+  const total = chosen + input.modifier;
   const dc = input.dc;
   const outcome =
     typeof dc === "number"
@@ -50,8 +48,8 @@ export function rollCheck(input: {
     stat: input.stat,
     mode: input.mode,
     reason: input.reason,
-    rolls: [first, second],
-    modifier,
+    rolls: input.rolls,
+    modifier: input.modifier,
     total,
     dc,
     outcome,
@@ -62,4 +60,23 @@ export function rollCheck(input: {
           ? ["You get what you want, but not cleanly."]
           : ["Momentum shifts in your favor."],
   };
+}
+
+export function rollCheck(input: {
+  stat: Stat;
+  mode: CheckMode;
+  reason: string;
+  character: CampaignCharacter;
+  dc?: number;
+}): CheckResult {
+  const first = roll2d6();
+  const second = roll2d6();
+  return buildCheckResult({
+    stat: input.stat,
+    mode: input.mode,
+    reason: input.reason,
+    modifier: input.character.stats[input.stat],
+    rolls: [first, second],
+    dc: input.dc,
+  });
 }

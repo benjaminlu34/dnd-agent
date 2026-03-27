@@ -276,6 +276,124 @@ test("toRouterSceneAspectSummaries emits compact duration-aware aspect records",
   ]);
 });
 
+test("prunePromptContextForRouter ranks resolved refs and trims unrelated heavy surfaces", () => {
+  const pruned = repositoryTestUtils.prunePromptContextForRouter({
+    profile: "local",
+    routerDecision: {
+      profile: "local",
+      confidence: "high",
+      authorizedVectors: ["economy_light"],
+      requiredPrerequisites: [],
+      reason: "Simple named-NPC purchase.",
+      clarification: {
+        needed: false,
+        blocker: null,
+        question: null,
+        options: [],
+      },
+      attention: {
+        primaryIntent: "Buy bread from the baker.",
+        resolvedReferents: [
+          {
+            phrase: "Mira Brightstone",
+            targetRef: "npc:npc_mira",
+            targetKind: "scene_actor",
+            confidence: "high",
+          },
+        ],
+        unresolvedReferents: [],
+        mustCheck: ["sceneActors", "gold"],
+      },
+    },
+    promptContext: {
+      currentLocation: {
+        id: "loc_market",
+        name: "Lantern Market",
+        type: "district",
+        summary: "Rain-dark awnings and crowded stalls.",
+        state: "busy",
+      },
+      adjacentRoutes: [
+        {
+          id: "edge_market_dock",
+          targetLocationId: "loc_dock",
+          targetLocationName: "Dock Ward",
+          travelTimeMinutes: 10,
+          dangerLevel: 1,
+          currentStatus: "open",
+          description: null,
+        },
+      ],
+      sceneActors: [
+        {
+          actorRef: "temp:temp_runner",
+          kind: "temporary_actor",
+          displayLabel: "runner",
+          role: "runner",
+          detailFetchHint: null,
+          lastSummary: "A courier darts through the lane.",
+        },
+        {
+          actorRef: "npc:npc_mira",
+          kind: "npc",
+          displayLabel: "Mira Brightstone",
+          role: "baker",
+          detailFetchHint: null,
+          lastSummary: "She keeps bread warm under cloth.",
+        },
+        {
+          actorRef: "temp:temp_guard",
+          kind: "temporary_actor",
+          displayLabel: "guard",
+          role: "guard",
+          detailFetchHint: null,
+          lastSummary: "A watchman scans the crowd.",
+        },
+      ],
+      recentLocalEvents: [],
+      recentTurnLedger: ["[You] I set out the stall."],
+      discoveredInformation: [],
+      activePressures: [],
+      recentWorldShifts: [],
+      activeThreads: [],
+      inventory: [
+        {
+          kind: "item",
+          id: "item_rope",
+          name: "Rope",
+          description: "A coil of rope.",
+          quantity: 2,
+        },
+        {
+          kind: "item",
+          id: "item_lantern",
+          name: "Lantern",
+          description: "A hooded lantern.",
+          quantity: 0,
+        },
+      ],
+      sceneAspects: {
+        crowd_noise: {
+          label: "crowd noise",
+          state: "The market is already loud.",
+          duration: "scene",
+        },
+      },
+      localTexture: null,
+      globalTime: 540,
+      timeOfDay: "morning",
+      dayCount: 1,
+    },
+  });
+
+  assert.equal(pruned.sceneActors[0]?.actorRef, "npc:npc_mira");
+  assert.deepEqual(pruned.adjacentRoutes, []);
+  assert.deepEqual(
+    pruned.inventory.map((entry) => [entry.id, entry.quantity]),
+    [["item_rope", 2]],
+  );
+});
+
 test("normalizeLaunchEntrySelection returns provided custom entry unchanged", () => {
   const customEntryPoint: ResolvedLaunchEntry = {
     id: "custom_entry_1",

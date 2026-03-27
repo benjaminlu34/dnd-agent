@@ -1,5 +1,6 @@
 import type {
   CheckResult,
+  PendingCheck,
   PlayerCampaignSnapshot,
   TurnDigest,
   TurnResultPayload,
@@ -7,6 +8,11 @@ import type {
 
 export type StreamEvent =
   | { type: "narration"; chunk: string }
+  | {
+      type: "check_required";
+      turnId: string;
+      check: PendingCheck;
+    }
   | {
       type: "check_result";
       result: CheckResult;

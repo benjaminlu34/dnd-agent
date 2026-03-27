@@ -3,7 +3,12 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { dmClient, logBackendDiagnostic } from "@/lib/ai/provider";
 import { renderWhatChanged, renderWhy } from "@/lib/game/causality";
-import { parseTurnResultPayloadJson, toCampaignRuntimeStateJson, toTurnResultPayloadJson } from "@/lib/game/json-contracts";
+import {
+  parseCampaignRuntimeStateJson,
+  parseTurnResultPayloadJson,
+  toCampaignRuntimeStateJson,
+  toTurnResultPayloadJson,
+} from "@/lib/game/json-contracts";
 import {
   InvalidExpectedStateVersionError,
   StateConflictError,
@@ -11,12 +16,12 @@ import {
   TurnLockedError,
 } from "@/lib/game/errors";
 import {
-  fetchFactionIntel,
-  fetchInformationConnections,
-  fetchInformationDetail,
-  fetchMarketPrices,
-  fetchNpcDetail,
-  fetchRelationshipHistory,
+  fetchFactionIntelBulk,
+  fetchInformationConnectionsBulk,
+  fetchInformationDetailsBulk,
+  fetchMarketPricesBulk,
+  fetchNpcDetailsBulk,
+  fetchRelationshipHistoriesBulk,
   getMissedTurnDigests,
   getPromptContext,
   getTurnRouterContext,
@@ -40,7 +45,9 @@ import type {
   MechanicsMutation,
   NpcDetail,
   NpcSummary,
+  PendingCheck,
   PromotedNpcHydrationDraft,
+  ResolvePendingCheckRequest,
   RequestClarificationToolCall,
   RelationshipHistory,
   ResolveMechanicsResponse,
@@ -50,7 +57,6 @@ import type {
   StateCommitLog,
   StateCommitLogEntry,
   TurnCausalityCode,
-  TurnFetchToolCall,
   TurnFetchToolResult,
   TurnMode,
   TurnResolution,
@@ -60,6 +66,7 @@ import type {
   ValidatedTurnCommand,
 } from "@/lib/game/types";
 import { validateTurnCommand, TIME_MODE_BOUNDS } from "@/lib/game/validation";
+import { buildCheckResult } from "@/lib/game/checks";
 import { normalizeItemName } from "@/lib/game/item-utils";
 import { sceneActorIdentityClearlyMatches } from "@/lib/game/scene-identity";
 import { env } from "@/lib/env";
@@ -67,6 +74,7 @@ import { env } from "@/lib/env";
 type TurnStream = {
   narration?: (chunk: string) => void;
   warning?: (message: string) => void;
+  checkRequired?: (payload: { turnId: string; check: PendingCheck }) => void;
   checkResult?: (result: CheckResult) => void;
 };
 
@@ -76,6 +84,19 @@ const INCIDENTAL_GOLD_MAX = 50;
 
 const activeTurnControllers = new Map<string, AbortController>();
 const activeCommitTurnKeys = new Set<string>();
+
+type PendingCheckToolBundle = {
+  type: "pending_check";
+  command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall> & {
+    pendingCheck: PendingCheck;
+    checkResult?: undefined;
+  };
+  fetchedFacts: TurnFetchToolResult[];
+  routerDecision: RouterDecision;
+  playerAction: string;
+  turnMode: TurnMode;
+  groundedItemIds: string[];
+};
 
 function activeTurnKey(campaignId: string, requestId: string) {
   return `${campaignId}:${requestId}`;
@@ -312,6 +333,37 @@ function buildClarificationToolCall(input: {
   };
 }
 
+function isPendingCheckToolBundle(value: unknown): value is PendingCheckToolBundle {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const bundle = value as Partial<PendingCheckToolBundle>;
+  return bundle.type === "pending_check"
+    && Boolean(bundle.command)
+    && Array.isArray(bundle.fetchedFacts)
+    && Boolean(bundle.routerDecision)
+    && typeof bundle.playerAction === "string"
+    && typeof bundle.turnMode === "string"
+    && Array.isArray(bundle.groundedItemIds);
+}
+
+function normalizeSubmittedRolls(mode: PendingCheck["mode"], rolls: [number, number]): [number, number] {
+  const first = Number(rolls[0]);
+  const second = Number(rolls[1]);
+  const valid = (value: number) => Number.isInteger(value) && value >= 2 && value <= 12;
+
+  if (!valid(first) || !valid(second)) {
+    throw new Error("Submitted rolls must be integer 2d6 totals between 2 and 12.");
+  }
+
+  if (mode === "normal") {
+    return [first, first];
+  }
+
+  return [first, second];
+}
+
 async function persistClarificationRequest(input: {
   turnId: string;
   stateVersion: number;
@@ -339,6 +391,61 @@ async function persistClarificationRequest(input: {
         error: null,
       })),
     },
+  });
+}
+
+async function persistPendingCheckRequest(input: {
+  campaignId: string;
+  turnId: string;
+  requestId: string;
+  stateVersion: number;
+  previousState: CampaignRuntimeState;
+  bundle: PendingCheckToolBundle;
+}) {
+  await prisma.$transaction(async (tx) => {
+    const campaignUpdate = await tx.campaign.updateMany({
+      where: {
+        id: input.campaignId,
+        stateVersion: input.stateVersion,
+        turnLockRequestId: input.requestId,
+      },
+      data: {
+        stateJson: toCampaignRuntimeStateJson({
+          ...input.previousState,
+          pendingTurnId: input.turnId,
+        }),
+        turnLockRequestId: null,
+        turnLockSessionId: null,
+        turnLockExpiresAt: null,
+      },
+    });
+
+    if (campaignUpdate.count === 0) {
+      throw new StateConflictError("Campaign state changed before the pending roll could be stored.", input.stateVersion);
+    }
+
+    await tx.turn.update({
+      where: { id: input.turnId },
+      data: {
+        status: "pending_check",
+        toolCallJson: toPrismaJsonValue(input.bundle),
+        resultJson: toPrismaJsonValue(toTurnResultPayloadJson({
+          stateVersionAfter: input.stateVersion,
+          changeCodes: [],
+          reasonCodes: [],
+          whatChanged: [],
+          why: [],
+          warnings: input.bundle.command.warnings,
+          stateCommitLog: [],
+          narrationBounds: input.bundle.command.narrationBounds ?? null,
+          pendingCheck: input.bundle.command.pendingCheck,
+          checkResult: null,
+          rollback: null,
+          clarification: null,
+          error: null,
+        })),
+      },
+    });
   });
 }
 
@@ -3908,12 +4015,91 @@ async function commitResolvedTurn(input: {
   };
 }
 
-async function executeFetchTool(
-  snapshot: CampaignSnapshot,
-  call: TurnFetchToolCall,
-): Promise<TurnFetchToolResult> {
-  if (call.type === "fetch_npc_detail") {
-    const result = await fetchNpcDetail(snapshot.campaignId, call.npcId);
+async function executeRequiredPrerequisites(input: {
+  snapshot: CampaignSnapshot;
+  prerequisites: RouterDecision["requiredPrerequisites"];
+}) {
+  if (!input.prerequisites.length) {
+    return [];
+  }
+
+  const fetchedFacts: Array<TurnFetchToolResult | null> = Array.from({
+    length: input.prerequisites.length,
+  }).fill(null);
+  const npcDetailRequests: Array<{ index: number; npcId: string }> = [];
+  const marketPriceRequests: Array<{ index: number; locationId: string }> = [];
+  const factionIntelRequests: Array<{ index: number; factionId: string }> = [];
+  const informationDetailRequests: Array<{ index: number; informationId: string }> = [];
+  const informationConnectionRequests: Array<{ index: number; key: string; informationIds: string[] }> = [];
+  const relationshipHistoryRequests: Array<{ index: number; npcId: string }> = [];
+
+  for (const [index, prerequisite] of input.prerequisites.entries()) {
+    if (prerequisite.type === "npc_detail") {
+      npcDetailRequests.push({ index, npcId: prerequisite.npcId });
+      continue;
+    }
+    if (prerequisite.type === "market_prices") {
+      marketPriceRequests.push({ index, locationId: prerequisite.locationId });
+      continue;
+    }
+    if (prerequisite.type === "faction_intel") {
+      factionIntelRequests.push({ index, factionId: prerequisite.factionId });
+      continue;
+    }
+    if (prerequisite.type === "information_detail") {
+      informationDetailRequests.push({ index, informationId: prerequisite.informationId });
+      continue;
+    }
+    if (prerequisite.type === "information_connections") {
+      informationConnectionRequests.push({
+        index,
+        key: prerequisite.informationIds.join("\u0000"),
+        informationIds: prerequisite.informationIds,
+      });
+      continue;
+    }
+    relationshipHistoryRequests.push({ index, npcId: prerequisite.npcId });
+  }
+
+  const [
+    npcDetailsById,
+    marketPricesByLocationId,
+    factionIntelById,
+    informationDetailsById,
+    informationConnectionsByKey,
+    relationshipHistoriesByNpcId,
+  ] = await Promise.all([
+    fetchNpcDetailsBulk(
+      input.snapshot.campaignId,
+      npcDetailRequests.map((entry) => entry.npcId),
+    ),
+    fetchMarketPricesBulk(
+      input.snapshot.campaignId,
+      marketPriceRequests.map((entry) => entry.locationId),
+    ),
+    fetchFactionIntelBulk(
+      input.snapshot.campaignId,
+      factionIntelRequests.map((entry) => entry.factionId),
+    ),
+    fetchInformationDetailsBulk(
+      input.snapshot.campaignId,
+      informationDetailRequests.map((entry) => entry.informationId),
+    ),
+    fetchInformationConnectionsBulk({
+      campaignId: input.snapshot.campaignId,
+      groups: informationConnectionRequests.map((entry) => ({
+        key: entry.key,
+        informationIds: entry.informationIds,
+      })),
+    }),
+    fetchRelationshipHistoriesBulk(
+      input.snapshot.campaignId,
+      relationshipHistoryRequests.map((entry) => entry.npcId),
+    ),
+  ]);
+
+  for (const request of npcDetailRequests) {
+    const result = npcDetailsById.get(request.npcId);
     if (!result) {
       throw new Error("NPC detail not found.");
     }
@@ -3921,90 +4107,81 @@ async function executeFetchTool(
     if (result.socialLayer === "promoted_local" && !result.isNarrativelyHydrated) {
       try {
         const hydration = await buildPromotedNpcHydrationPayload({
-          campaignId: snapshot.campaignId,
+          campaignId: input.snapshot.campaignId,
           baseResult: result,
         });
 
         if (hydration) {
-          return {
-            type: call.type,
+          fetchedFacts[request.index] = {
+            type: "fetch_npc_detail",
             result: hydration.hydratedResult,
             hydrationDraft: hydration.hydrationDraft,
           };
+          continue;
         }
       } catch (error) {
         logBackendDiagnostic("turn.fetch.promoted_local_hydration_failed", {
-          campaignId: snapshot.campaignId,
+          campaignId: input.snapshot.campaignId,
           npcId: result.id,
           error: error instanceof Error ? error.message : String(error),
         });
       }
     }
 
-    return { type: call.type, result };
-  }
-
-  if (call.type === "fetch_market_prices") {
-    return {
-      type: call.type,
-      result: await fetchMarketPrices(snapshot.campaignId, call.locationId),
+    fetchedFacts[request.index] = {
+      type: "fetch_npc_detail",
+      result,
     };
   }
 
-  if (call.type === "fetch_faction_intel") {
-    const result = await fetchFactionIntel(snapshot.campaignId, call.factionId);
+  for (const request of marketPriceRequests) {
+    fetchedFacts[request.index] = {
+      type: "fetch_market_prices",
+      result: marketPricesByLocationId.get(request.locationId) ?? [],
+    };
+  }
+
+  for (const request of factionIntelRequests) {
+    const result = factionIntelById.get(request.factionId);
     if (!result) {
       throw new Error("Faction intel not found.");
     }
-    return { type: call.type, result };
-  }
-
-  if (call.type === "fetch_information_detail") {
-    const result = await fetchInformationDetail(snapshot.campaignId, call.informationId);
-    if (!result) {
-      throw new Error("Information detail not found.");
-    }
-    return { type: call.type, result };
-  }
-
-  if (call.type === "fetch_information_connections") {
-    return {
-      type: call.type,
-      result: await fetchInformationConnections(snapshot.campaignId, call.informationIds),
+    fetchedFacts[request.index] = {
+      type: "fetch_faction_intel",
+      result,
     };
   }
 
-  const result = await fetchRelationshipHistory(snapshot.campaignId, call.npcId);
-  if (!result) {
-    throw new Error("Relationship history not found.");
-  }
-  return { type: call.type, result };
-}
-
-async function executeRequiredPrerequisites(input: {
-  snapshot: CampaignSnapshot;
-  prerequisites: RouterDecision["requiredPrerequisites"];
-}) {
-  const fetchedFacts: TurnFetchToolResult[] = [];
-
-  for (const prerequisite of input.prerequisites) {
-    const call: TurnFetchToolCall =
-      prerequisite.type === "market_prices"
-        ? { type: "fetch_market_prices", locationId: prerequisite.locationId }
-        : prerequisite.type === "npc_detail"
-          ? { type: "fetch_npc_detail", npcId: prerequisite.npcId }
-          : prerequisite.type === "faction_intel"
-            ? { type: "fetch_faction_intel", factionId: prerequisite.factionId }
-            : prerequisite.type === "information_detail"
-              ? { type: "fetch_information_detail", informationId: prerequisite.informationId }
-              : prerequisite.type === "information_connections"
-                ? { type: "fetch_information_connections", informationIds: prerequisite.informationIds }
-                : { type: "fetch_relationship_history", npcId: prerequisite.npcId };
-
-    fetchedFacts.push(await executeFetchTool(input.snapshot, call));
+  for (const request of informationDetailRequests) {
+    const result = informationDetailsById.get(request.informationId);
+    if (!result) {
+      throw new Error("Information detail not found.");
+    }
+    fetchedFacts[request.index] = {
+      type: "fetch_information_detail",
+      result,
+    };
   }
 
-  return fetchedFacts;
+  for (const request of informationConnectionRequests) {
+    fetchedFacts[request.index] = {
+      type: "fetch_information_connections",
+      result: informationConnectionsByKey.get(request.key) ?? [],
+    };
+  }
+
+  for (const request of relationshipHistoryRequests) {
+    const result = relationshipHistoriesByNpcId.get(request.npcId);
+    if (!result) {
+      throw new Error("Relationship history not found.");
+    }
+    fetchedFacts[request.index] = {
+      type: "fetch_relationship_history",
+      result,
+    };
+  }
+
+  return fetchedFacts.filter((entry): entry is TurnFetchToolResult => entry != null);
 }
 
 function deterministicNarrationFallback(input: {
@@ -4230,6 +4407,15 @@ async function replayExistingTurn(input: {
 }) {
   const result = parseTurnResultPayloadJson(input.turn.resultJson);
 
+  if (input.turn.status === "pending_check" && result?.pendingCheck) {
+    return {
+      type: "check_required" as const,
+      turnId: input.turn.id,
+      check: result.pendingCheck,
+      warnings: result.warnings,
+    };
+  }
+
   if (input.turn.status === "clarification_requested" && result?.clarification) {
     return {
       type: "clarification" as const,
@@ -4349,7 +4535,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       throw new Error("requestId was reused with a different action payload.");
     }
 
-    if (["resolved", "clarification_requested", "conflicted"].includes(existingTurn.status)) {
+    if (["resolved", "clarification_requested", "pending_check", "conflicted"].includes(existingTurn.status)) {
       const replay = await replayExistingTurn({
         turn: existingTurn,
         campaignId: input.campaignId,
@@ -4386,6 +4572,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
     select: {
       id: true,
       stateVersion: true,
+      stateJson: true,
     },
   });
 
@@ -4423,6 +4610,22 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       `expectedStateVersion ${input.expectedStateVersion} is ahead of the campaign state ${campaign.stateVersion}.`,
       campaign.stateVersion,
     );
+  }
+
+  const pendingTurnId = parseCampaignRuntimeStateJson(campaign.stateJson).pendingTurnId;
+  if (pendingTurnId) {
+    const pendingTurn = await prisma.turn.findUnique({
+      where: { id: pendingTurnId },
+    });
+    if (pendingTurn?.status === "pending_check") {
+      const replay = await replayExistingTurn({
+        turn: pendingTurn,
+        campaignId: input.campaignId,
+      });
+      if (replay) {
+        return replay;
+      }
+    }
   }
 
   const lockClaim = await prisma.campaign.updateMany({
@@ -4601,6 +4804,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
     const promptContext = await getPromptContext(
       snapshot,
       promptContextProfileForRouter(routerDecision),
+      routerDecision,
     );
     const narrationOverride =
       intent?.type === "travel_route"
@@ -4725,6 +4929,52 @@ export async function triageTurn(input: TurnSubmissionRequest & {
         question: validated.question,
         options: validated.options,
         warnings: [],
+      };
+    }
+
+    if (validated.pendingCheck) {
+      const pendingBundle: PendingCheckToolBundle = {
+        type: "pending_check",
+        command: {
+          ...validated,
+          pendingCheck: validated.pendingCheck,
+          checkResult: undefined,
+        },
+        fetchedFacts: resolution.fetchedFacts,
+        routerDecision,
+        playerAction,
+        turnMode,
+        groundedItemIds: promptContext.inventory
+          .filter((entry) => entry.kind === "item")
+          .map((entry) => entry.id),
+      };
+      logBackendDiagnostic("turn.check_requested", {
+        campaignId: input.campaignId,
+        sessionId: input.sessionId,
+        requestId: input.requestId,
+        turnId: turn.id,
+        stat: validated.pendingCheck.stat,
+        mode: validated.pendingCheck.mode,
+        dc: validated.pendingCheck.dc ?? null,
+      });
+      await persistPendingCheckRequest({
+        campaignId: input.campaignId,
+        turnId: turn.id,
+        requestId: input.requestId,
+        stateVersion: snapshot.stateVersion,
+        previousState: snapshot.state,
+        bundle: pendingBundle,
+      });
+      input.stream?.checkRequired?.({
+        turnId: turn.id,
+        check: validated.pendingCheck,
+      });
+
+      return {
+        type: "check_required" as const,
+        turnId: turn.id,
+        check: validated.pendingCheck,
+        warnings: validated.warnings,
       };
     }
 
@@ -5135,8 +5385,177 @@ export async function cancelPendingTurn() {
   throw new Error("Use cancelTurnRequest with campaignId, sessionId, and requestId.");
 }
 
-export async function resolvePendingCheck() {
-  throw new Error("Separate pending checks are not used in the spatial turn loop.");
+export async function resolvePendingCheck(input: ResolvePendingCheckRequest & {
+  stream?: TurnStream;
+}) {
+  const pendingTurn = await prisma.turn.findUnique({
+    where: { id: input.pendingTurnId },
+  });
+
+  if (!pendingTurn || pendingTurn.campaignId !== input.campaignId || pendingTurn.sessionId !== input.sessionId) {
+    throw new Error("Pending check turn not found.");
+  }
+
+  if (pendingTurn.status !== "pending_check") {
+    const replay = await replayExistingTurn({
+      turn: pendingTurn,
+      campaignId: input.campaignId,
+    });
+    if (replay) {
+      return replay;
+    }
+    throw new Error("That turn is no longer waiting on a roll.");
+  }
+
+  if (!isPendingCheckToolBundle(pendingTurn.toolCallJson)) {
+    throw new Error("Pending check turn is missing its stored resolution plan.");
+  }
+
+  const campaign = await prisma.campaign.findUnique({
+    where: { id: input.campaignId },
+    select: {
+      stateVersion: true,
+      stateJson: true,
+    },
+  });
+
+  if (!campaign) {
+    throw new Error("Campaign not found.");
+  }
+
+  const campaignState = parseCampaignRuntimeStateJson(campaign.stateJson);
+  if (campaignState.pendingTurnId !== pendingTurn.id) {
+    const replay = await replayExistingTurn({
+      turn: pendingTurn,
+      campaignId: input.campaignId,
+    });
+    if (replay) {
+      return replay;
+    }
+    throw new Error("That pending roll is no longer active.");
+  }
+
+  const lockClaim = await prisma.campaign.updateMany({
+    where: {
+      id: input.campaignId,
+      stateVersion: campaign.stateVersion,
+      OR: [
+        { turnLockRequestId: null },
+        { turnLockRequestId: input.requestId },
+        { turnLockExpiresAt: { lt: new Date() } },
+      ],
+    },
+    data: {
+      turnLockRequestId: input.requestId,
+      turnLockSessionId: input.sessionId,
+      turnLockExpiresAt: new Date(Date.now() + TURN_LOCK_TTL_MS),
+    },
+  });
+
+  if (lockClaim.count === 0) {
+    throw new TurnLockedError("Another turn already owns the campaign lock.");
+  }
+
+  try {
+    const snapshot = await getTurnSnapshot(input.campaignId, input.sessionId);
+    if (!snapshot) {
+      throw new Error("Campaign session not found.");
+    }
+    if (snapshot.state.pendingTurnId !== pendingTurn.id) {
+      throw new Error("The pending roll is no longer active.");
+    }
+
+    const bundle = pendingTurn.toolCallJson;
+    const normalizedRolls = normalizeSubmittedRolls(bundle.command.pendingCheck.mode, input.rolls);
+    const checkResult = buildCheckResult({
+      ...bundle.command.pendingCheck,
+      rolls: normalizedRolls,
+    });
+    input.stream?.checkResult?.(checkResult);
+
+    const committedCommand = {
+      ...bundle.command,
+      pendingCheck: undefined,
+      checkResult,
+    };
+
+    for (const warning of committedCommand.warnings) {
+      input.stream?.warning?.(warning);
+    }
+
+    const committed = await commitResolvedTurn({
+      snapshot,
+      sessionId: input.sessionId,
+      turnId: pendingTurn.id,
+      requestId: input.requestId,
+      expectedStateVersion: snapshot.stateVersion,
+      playerAction: bundle.playerAction,
+      turnMode: bundle.turnMode,
+      command: committedCommand,
+      fetchedFacts: bundle.fetchedFacts,
+      routerDecision: bundle.routerDecision,
+      groundedItemIds: bundle.groundedItemIds,
+    });
+
+    const promptContext = await getPromptContext(
+      snapshot,
+      promptContextProfileForRouter(bundle.routerDecision),
+      bundle.routerDecision,
+    );
+
+    let narration: string;
+    try {
+      narration = await dmClient.narrateResolvedTurn({
+        playerAction: bundle.playerAction,
+        promptContext,
+        fetchedFacts: bundle.fetchedFacts,
+        stateCommitLog: committed.resultPayload.stateCommitLog ?? [],
+        checkResult: committed.resultPayload.checkResult ?? null,
+        suggestedActions: dedupeStrings(committedCommand.suggestedActions),
+      });
+    } catch (error) {
+      narration = deterministicNarrationFallback({
+        playerAction: bundle.playerAction,
+        stateCommitLog: committed.resultPayload.stateCommitLog ?? [],
+        checkResult: committed.resultPayload.checkResult ?? null,
+      });
+      logBackendDiagnostic("turn.narration.fallback", {
+        campaignId: input.campaignId,
+        requestId: input.requestId,
+        turnId: pendingTurn.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    await persistResolvedTurnNarration({
+      sessionId: input.sessionId,
+      turnId: pendingTurn.id,
+      narration,
+      suggestedActions: dedupeStrings(committedCommand.suggestedActions),
+      fetchedFacts: bundle.fetchedFacts,
+      checkResult: committed.resultPayload.checkResult ?? null,
+      whatChanged: committed.resultPayload.whatChanged,
+      why: committed.resultPayload.why,
+      memoryEntryId: committed.memoryEntryId,
+    });
+    input.stream?.narration?.(narration);
+
+    return {
+      type: "resolved" as const,
+      turnId: pendingTurn.id,
+      narration,
+      suggestedActions: dedupeStrings(committedCommand.suggestedActions),
+      warnings: committedCommand.warnings,
+      checkResult: committedCommand.checkResult,
+      result: committed.resultPayload,
+    };
+  } catch (error) {
+    await cleanupTurnLock({
+      campaignId: input.campaignId,
+      requestId: input.requestId,
+    }).catch(() => undefined);
+    throw error;
+  }
 }
 
 export async function revisePendingCheck() {

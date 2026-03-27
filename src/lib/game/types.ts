@@ -885,6 +885,7 @@ export type TurnResultPayload = {
   warnings: string[];
   stateCommitLog?: StateCommitLog;
   narrationBounds?: TurnNarrationBounds | null;
+  pendingCheck?: PendingCheck | null;
   checkResult?: CheckResult | null;
   rollback?: TurnRollbackData | null;
   clarification?: {
@@ -1109,6 +1110,14 @@ export type CheckResult = {
   consequences?: string[];
 };
 
+export type PendingCheck = {
+  stat: Stat;
+  mode: CheckMode;
+  reason: string;
+  modifier: number;
+  dc?: number;
+};
+
 export type MarketPriceDetail = {
   marketPriceId: string;
   commodityId: string;
@@ -1198,6 +1207,14 @@ export type RetryRequiredResponse = {
   turnId: string;
   previousStatus: string;
   result: TurnResultPayload;
+};
+
+export type ResolvePendingCheckRequest = {
+  campaignId: string;
+  sessionId: string;
+  requestId: string;
+  pendingTurnId: string;
+  rolls: [number, number];
 };
 
 export type TurnLockCancelRequest = {
@@ -1441,6 +1458,7 @@ export type ValidatedTurnCommand =
       warnings: string[];
       timeElapsed: number;
       narrationBounds?: TurnNarrationBounds | null;
+      pendingCheck?: PendingCheck;
       checkResult?: CheckResult;
     });
 

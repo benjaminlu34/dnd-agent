@@ -80,6 +80,7 @@ export async function POST(request: Request) {
           stream: {
             narration: (chunk) => send({ type: "narration", chunk }),
             warning: (message) => send({ type: "warning", message }),
+            checkRequired: (payload) => send({ type: "check_required", ...payload }),
             checkResult: (result) => send({ type: "check_result", result }),
           },
         });
@@ -112,6 +113,18 @@ export async function POST(request: Request) {
             type: "clarification",
             question: result.question,
             options: result.options,
+          });
+          return;
+        }
+
+        if (result.type === "check_required") {
+          for (const warning of result.warnings) {
+            send({ type: "warning", message: warning });
+          }
+          send({
+            type: "check_required",
+            turnId: result.turnId,
+            check: result.check,
           });
           return;
         }

@@ -170,6 +170,16 @@ const turnResultPayloadSchema: z.ZodType<TurnResultPayload> = z.object({
   warnings: z.array(z.string()),
   stateCommitLog: z.array(stateCommitLogEntrySchema).optional().default([]),
   narrationBounds: turnNarrationBoundsSchema.optional().nullable(),
+  pendingCheck: z
+    .object({
+      stat: z.enum(["strength", "dexterity", "constitution", "intelligence", "wisdom", "charisma"]),
+      mode: z.enum(["normal", "advantage", "disadvantage"]),
+      reason: z.string(),
+      modifier: z.number().int(),
+      dc: z.number().int().optional(),
+    })
+    .optional()
+    .nullable(),
   checkResult: z
     .object({
       stat: z.enum(["strength", "dexterity", "constitution", "intelligence", "wisdom", "charisma"]),
@@ -337,6 +347,7 @@ export function parseTurnResultPayloadJson(value: unknown): TurnResultPayload | 
     why: [],
     warnings: legacy.data.warnings,
     stateCommitLog: [],
+    pendingCheck: null,
     checkResult: legacy.data.checkResult ?? null,
     rollback: legacy.data.rollback ?? null,
     clarification: null,

@@ -186,7 +186,7 @@ test("validateTurnCommand derives rest duration from restore_health mutations", 
   assert.equal(validated.timeElapsed, 480);
 });
 
-test("validateTurnCommand rolls challenge checks from checkIntent", () => {
+test("validateTurnCommand derives pending challenge checks from checkIntent", () => {
   const validated = validateTurnCommand({
     snapshot: createSnapshot(),
     command: {
@@ -210,9 +210,10 @@ test("validateTurnCommand rolls challenge checks from checkIntent", () => {
   });
 
   assert.equal(validated.type, "resolve_mechanics");
-  assert.equal(validated.checkResult?.stat, "charisma");
-  assert.equal(validated.checkResult?.reason, "Lean on the guard");
-  assert.equal(validated.checkResult?.dc, 9);
+  assert.equal(validated.pendingCheck?.stat, "charisma");
+  assert.equal(validated.pendingCheck?.reason, "Lean on the guard");
+  assert.equal(validated.pendingCheck?.dc, 9);
+  assert.equal(validated.checkResult, undefined);
 });
 
 test("validateTurnCommand suppresses checks that have no success-gated stakes", () => {
@@ -238,10 +239,11 @@ test("validateTurnCommand suppresses checks that have no success-gated stakes", 
   });
 
   assert.equal(validated.type, "resolve_mechanics");
+  assert.equal(validated.pendingCheck, undefined);
   assert.equal(validated.checkResult, undefined);
 });
 
-test("validateTurnCommand can use fetched npc detail to derive combat check dc", () => {
+test("validateTurnCommand can use fetched npc detail to derive pending combat check dc", () => {
   const fetchedFacts: TurnFetchToolResult[] = [
     {
       type: "fetch_npc_detail",
@@ -272,8 +274,9 @@ test("validateTurnCommand can use fetched npc detail to derive combat check dc",
   });
 
   assert.equal(validated.type, "resolve_mechanics");
-  assert.equal(validated.checkResult?.stat, "strength");
-  assert.equal(validated.checkResult?.dc, 9);
+  assert.equal(validated.pendingCheck?.stat, "strength");
+  assert.equal(validated.pendingCheck?.dc, 9);
+  assert.equal(validated.checkResult, undefined);
 });
 
 test("validateTurnCommand warns when no suggested actions are provided", () => {

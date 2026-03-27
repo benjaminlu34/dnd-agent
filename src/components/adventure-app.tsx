@@ -14,7 +14,9 @@ import type { StreamEvent } from "@/lib/http/ndjson";
 import type {
   CampaignListItem,
   CheckResult,
+  PendingCheck,
   PlayerCampaignSnapshot,
+  ResolvePendingCheckRequest,
   StoryMessage,
   TurnSubmissionRequest,
   TurnDigest,
@@ -76,6 +78,10 @@ function extractSuggestedActions(snapshot: PlayerCampaignSnapshot | null) {
     .find((entry) => entry.role === "assistant" && entry.kind === "narration");
   const value = latestNarration?.payload?.suggestedActions;
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function roll2d6Total() {
+  return Math.ceil(Math.random() * 6) + Math.ceil(Math.random() * 6);
 }
 
 const EQUIPMENT_KEYWORDS = [
@@ -143,6 +149,10 @@ export function AdventureApp({
   const [clarification, setClarification] = useState<{
     question: string;
     options: string[];
+  } | null>(null);
+  const [pendingCheck, setPendingCheck] = useState<{
+    turnId: string;
+    check: PendingCheck;
   } | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [retryingTurn, setRetryingTurn] = useState(false);
@@ -222,6 +232,7 @@ export function AdventureApp({
         setSnapshot(data.snapshot);
         setSuggestedActions(extractSuggestedActions(data.snapshot));
         setMissedTurnDigests([]);
+        setPendingCheck(null);
       } catch (error) {
         if (active) {
           setTurnError(error instanceof Error ? error.message : "Failed to load campaign.");
@@ -282,6 +293,7 @@ export function AdventureApp({
     setMissedTurnDigests([]);
     setStreamedNarration("");
     setLatestCheck(null);
+    setPendingCheck(null);
     if (!preserveAction) {
       setAction("");
     }
@@ -296,6 +308,7 @@ export function AdventureApp({
     setTurnError(null);
     setWarnings([]);
     setClarification(null);
+    setPendingCheck(null);
     setLatestCheck(null);
     setStreamedNarration("");
 
@@ -324,18 +337,120 @@ export function AdventureApp({
     return submitTurnWithIntent(nextAction, mode);
   }
 
+  async function submitPendingCheck(rolls?: [number, number]) {
+    if (!campaignId || !sessionId || !pendingCheck || submitting) {
+      return;
+    }
+
+    setSubmitting(true);
+    setTurnError(null);
+    setWarnings([]);
+    setLatestCheck(null);
+    setStreamedNarration("");
+
+    try {
+      const generatedRolls: [number, number] =
+        rolls
+        ?? (
+          pendingCheck.check.mode === "normal"
+            ? [roll2d6Total(), roll2d6Total()]
+            : [roll2d6Total(), roll2d6Total()]
+        );
+      const body: ResolvePendingCheckRequest = {
+        campaignId,
+        sessionId,
+        requestId: crypto.randomUUID(),
+        pendingTurnId: pendingCheck.turnId,
+        rolls: pendingCheck.check.mode === "normal"
+          ? [generatedRolls[0], generatedRolls[0]]
+          : generatedRolls,
+      };
+
+      const response = await fetch("/api/turns/check", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (!response.ok) {
+        throw new Error("Check resolution failed.");
+      }
+
+      const nextWarnings: string[] = [];
+      let nextSnapshot: PlayerCampaignSnapshot | null = null;
+      let nextActions: string[] = [];
+      let nextMissedTurnDigests: TurnDigest[] = [];
+      let streamErrorMessage: string | null = null;
+
+      await consumeNdjson(response, (event) => {
+        if (event.type === "warning") {
+          nextWarnings.push(event.message);
+        } else if (event.type === "narration") {
+          setStreamedNarration((current) => `${current}${event.chunk}`);
+        } else if (event.type === "state") {
+          nextSnapshot = event.snapshot;
+        } else if (event.type === "actions") {
+          nextActions = event.actions;
+        } else if (event.type === "error") {
+          streamErrorMessage = event.message;
+          setTurnError(event.message);
+        } else if (event.type === "check_result") {
+          setLatestCheck(event.result);
+        } else if (event.type === "check_required") {
+          setPendingCheck({
+            turnId: event.turnId,
+            check: event.check,
+          });
+        } else if (event.type === "state_conflict") {
+          streamErrorMessage = "state_conflict";
+          if (event.latestSnapshot) {
+            nextSnapshot = event.latestSnapshot;
+            nextMissedTurnDigests = event.missedTurnDigests;
+            nextActions = extractSuggestedActions(event.latestSnapshot);
+          }
+          setTurnError("The world advanced before this roll could commit. Review the missed outcome and choose a new action.");
+        } else if (event.type === "retry_required") {
+          streamErrorMessage = "retry_required";
+          setTurnError(
+            event.result.error?.message
+            ?? "That request already ended in a retryable failure state. Submit the action again to create a fresh attempt.",
+          );
+        }
+      });
+
+      if (nextSnapshot) {
+        setSnapshot(nextSnapshot);
+        setMissedTurnDigests(nextMissedTurnDigests);
+        setSuggestedActions(nextActions.length ? nextActions : extractSuggestedActions(nextSnapshot));
+        setPendingCheck(null);
+        setAction("");
+        setStreamedNarration("");
+      } else if (!streamErrorMessage) {
+        setWarnings(nextWarnings);
+      }
+      setWarnings(nextWarnings);
+    } catch (error) {
+      setTurnError(error instanceof Error ? error.message : "Check resolution failed.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   async function submitTurnWithIntent(
     nextAction: string,
     mode?: TurnSubmissionRequest["mode"],
     intent?: TurnSubmissionRequest["intent"],
   ) {
-    if (!campaignId || !sessionId || !nextAction.trim() || submitting) {
+    if (!campaignId || !sessionId || !nextAction.trim() || submitting || pendingCheck) {
       return;
     }
 
     setSubmitting(true);
     setTurnError(null);
     setClarification(null);
+    setPendingCheck(null);
     setWarnings([]);
     setLatestCheck(null);
     setStreamedNarration("");
@@ -379,6 +494,11 @@ export function AdventureApp({
           setClarification({
             question: event.question,
             options: event.options,
+          });
+        } else if (event.type === "check_required") {
+          setPendingCheck({
+            turnId: event.turnId,
+            check: event.check,
           });
         } else if (event.type === "state") {
           nextSnapshot = event.snapshot;
@@ -654,14 +774,24 @@ export function AdventureApp({
           )}
         </aside>
 
-        <section className="rounded-[2rem] border border-zinc-800 bg-zinc-900/95 p-6 shadow-2xl shadow-black/25 backdrop-blur md:p-8">
+        <section className="relative rounded-[2rem] border border-zinc-800 bg-zinc-900/95 p-6 shadow-2xl shadow-black/25 backdrop-blur md:p-8">
           {loadingSnapshot ? (
             <p className="text-sm text-zinc-400">Loading campaign state...</p>
           ) : snapshot ? (
             <>
+              <div className="pointer-events-none sticky top-4 z-30 mb-2 hidden justify-end lg:flex">
+                <button
+                  type="button"
+                  className="button-press pointer-events-auto rounded-2xl border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-100 transition hover:border-zinc-500 hover:bg-zinc-800"
+                  onClick={() => setLocationsDrawerOpen(true)}
+                >
+                  <Compass className="mr-2 inline h-4 w-4" />
+                  World
+                </button>
+              </div>
               <div className="mx-auto max-w-4xl">
                 <div className="sticky top-0 z-20 -mx-2 mb-6 border-b border-zinc-800/80 bg-zinc-900/95 px-2 pb-5 pt-1 backdrop-blur">
-                  <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                  <div className="mx-auto flex max-w-4xl flex-col gap-4">
                     <nav className="flex flex-wrap items-center text-sm text-zinc-400">
                       <button
                         type="button"
@@ -692,7 +822,7 @@ export function AdventureApp({
                       </button>
                       <button
                         type="button"
-                        className="button-press rounded-2xl border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-100 transition hover:border-zinc-500 hover:bg-zinc-800"
+                        className="button-press rounded-2xl border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-100 transition hover:border-zinc-500 hover:bg-zinc-800 lg:hidden"
                         onClick={() => setLocationsDrawerOpen(true)}
                       >
                         <Compass className="mr-2 inline h-4 w-4" />
@@ -829,15 +959,15 @@ export function AdventureApp({
                       type="button"
                       className="button-press rounded-2xl bg-zinc-100 px-5 py-3 text-sm font-semibold text-zinc-950 transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
                       onClick={() => void submitTurn(action)}
-                      disabled={!action.trim() || submitting || retryingTurn}
+                      disabled={!action.trim() || submitting || retryingTurn || Boolean(pendingCheck)}
                     >
-                      {submitting ? "Resolving..." : "Submit turn"}
+                      {submitting ? "Resolving..." : pendingCheck ? "Resolve pending roll first" : "Submit turn"}
                     </button>
                     <button
                       type="button"
                       className="button-press rounded-2xl border border-zinc-700 bg-zinc-900 px-5 py-3 text-sm font-semibold text-zinc-100 transition hover:border-zinc-500 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-60"
                       onClick={() => void submitTurn("Observe", "observe")}
-                      disabled={submitting || retryingTurn || !snapshot || Boolean(action.trim())}
+                      disabled={submitting || retryingTurn || !snapshot || Boolean(action.trim()) || Boolean(pendingCheck)}
                     >
                       Observe
                     </button>
@@ -870,6 +1000,28 @@ export function AdventureApp({
                             {option}
                           </button>
                         ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {pendingCheck ? (
+                    <div className="mt-5 rounded-3xl border border-amber-500/30 bg-amber-500/10 p-4">
+                      <p className="text-[0.68rem] uppercase tracking-[0.22em] text-amber-200/70">Roll Required</p>
+                      <p className="mt-2 text-sm leading-relaxed text-zinc-100">
+                        Roll {pendingCheck.check.mode === "normal" ? "2d6" : "two 2d6 totals"}
+                        {" "}for {pendingCheck.check.stat.toUpperCase()}.
+                        {typeof pendingCheck.check.dc === "number" ? ` DC ${pendingCheck.check.dc}.` : null}
+                      </p>
+                      <p className="mt-2 text-sm leading-relaxed text-zinc-300">{pendingCheck.check.reason}</p>
+                      <div className="mt-4 flex flex-wrap gap-3">
+                        <button
+                          type="button"
+                          className="button-press rounded-2xl bg-amber-200 px-4 py-2 text-sm font-semibold text-zinc-950 transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
+                          onClick={() => void submitPendingCheck()}
+                          disabled={submitting}
+                        >
+                          {submitting ? "Rolling..." : pendingCheck.check.mode === "normal" ? "Roll 2d6" : "Roll Both"}
+                        </button>
                       </div>
                     </div>
                   ) : null}

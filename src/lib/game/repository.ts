@@ -53,6 +53,7 @@ import type {
   RouteSummary,
   SceneActorSummary,
   PromptContextProfile,
+  RouterDecision,
   SpatialPromptContext,
   StoryMessage,
   TemporaryActorSummary,
@@ -1006,6 +1007,118 @@ function toRouterSceneAspectSummaries(state: CampaignRuntimeState) {
       duration: aspect.duration,
     }))
     .sort((left, right) => left.key.localeCompare(right.key));
+}
+
+function rankedEntries<T>(
+  entries: T[],
+  score: (entry: T) => number,
+) {
+  return entries
+    .map((entry, index) => ({ entry, index, score: score(entry) }))
+    .sort((left, right) => {
+      if (left.score !== right.score) {
+        return right.score - left.score;
+      }
+      return left.index - right.index;
+    })
+    .map((entry) => entry.entry);
+}
+
+function prunePromptContextForRouter(input: {
+  promptContext: SpatialPromptContext;
+  profile: PromptContextProfile;
+  routerDecision?: RouterDecision;
+}): SpatialPromptContext {
+  const mustCheck = new Set(input.routerDecision?.attention.mustCheck ?? []);
+  const resolvedActorRefs = new Set(
+    (input.routerDecision?.attention.resolvedReferents ?? [])
+      .filter((entry) => entry.targetKind === "scene_actor")
+      .map((entry) => entry.targetRef),
+  );
+  const resolvedInventoryRefs = new Set(
+    (input.routerDecision?.attention.resolvedReferents ?? [])
+      .filter((entry) => entry.targetKind === "inventory_item")
+      .map((entry) => entry.targetRef),
+  );
+  const resolvedRouteRefs = new Set(
+    (input.routerDecision?.attention.resolvedReferents ?? [])
+      .filter((entry) => entry.targetKind === "route")
+      .map((entry) => entry.targetRef),
+  );
+  const resolvedInformationRefs = new Set(
+    (input.routerDecision?.attention.resolvedReferents ?? [])
+      .filter((entry) => entry.targetKind === "information")
+      .map((entry) => entry.targetRef),
+  );
+  const unresolvedKinds = new Set(
+    (input.routerDecision?.attention.unresolvedReferents ?? []).map((entry) => entry.intendedKind),
+  );
+
+  const sceneActors = rankedEntries(input.promptContext.sceneActors, (actor) =>
+    resolvedActorRefs.has(actor.actorRef) ? 100 : 0,
+  ).slice(0, mustCheck.has("sceneActors")
+    ? input.profile === "local" ? 6 : 8
+    : input.profile === "local" ? 2 : 3);
+
+  const adjacentRoutes =
+    mustCheck.has("routes") || resolvedRouteRefs.size > 0
+      ? rankedEntries(input.promptContext.adjacentRoutes, (route) =>
+          resolvedRouteRefs.has(route.id) ? 100 : 0,
+        ).slice(0, input.profile === "local" ? 4 : 8)
+      : [];
+
+  const inventory = rankedEntries(
+    input.promptContext.inventory.filter((entry) => (entry.quantity ?? 0) > 0),
+    (entry) => {
+      let value = 0;
+      if (resolvedInventoryRefs.has(entry.id)) {
+        value += 100;
+      }
+      value += Math.min(entry.quantity ?? 0, 20);
+      return value;
+    },
+  ).slice(0, mustCheck.has("inventory")
+    ? input.profile === "local" ? 8 : 12
+    : input.profile === "local" ? 4 : 6);
+
+  const rankedSceneAspectEntries = rankedEntries(
+    Object.entries(input.promptContext.sceneAspects),
+    () => {
+      if (unresolvedKinds.has("scene_aspect")) {
+        return 10;
+      }
+      return 0;
+    },
+  );
+  const sceneAspectLimit = mustCheck.has("sceneAspects") || unresolvedKinds.has("scene_aspect")
+    ? input.profile === "local" ? 6 : 8
+    : input.profile === "local" ? 0 : 2;
+  const sceneAspects = Object.fromEntries(
+    rankedSceneAspectEntries.slice(0, sceneAspectLimit),
+  );
+
+  return {
+    ...input.promptContext,
+    adjacentRoutes,
+    sceneActors,
+    recentLocalEvents: input.promptContext.recentLocalEvents.slice(0, input.profile === "local" ? 2 : 3),
+    recentTurnLedger: mustCheck.has("recentTurnLedger")
+      ? input.promptContext.recentTurnLedger.slice(0, input.profile === "local" ? 4 : 6)
+      : input.profile === "local"
+        ? []
+        : input.promptContext.recentTurnLedger.slice(0, 2),
+    discoveredInformation: input.profile === "local"
+      ? []
+      : rankedEntries(
+          input.promptContext.discoveredInformation,
+          (entry) => (resolvedInformationRefs.has(entry.id) ? 100 : 0),
+        ).slice(0, 4),
+    activePressures: input.profile === "local" ? [] : input.promptContext.activePressures.slice(0, 3),
+    recentWorldShifts: input.profile === "local" ? [] : input.promptContext.recentWorldShifts.slice(0, 2),
+    activeThreads: input.profile === "local" ? [] : input.promptContext.activeThreads.slice(0, 3),
+    inventory,
+    sceneAspects,
+  };
 }
 
 export async function ensureLocalUser() {
@@ -2403,291 +2516,555 @@ async function fetchEntityLinkedMemories(input: {
   return sortMemoriesByPriority(memories, input.prioritizedKinds).slice(0, input.take);
 }
 
-export async function fetchNpcDetail(campaignId: string, npcId: string): Promise<NpcDetail | null> {
-  const npc = await prisma.nPC.findFirst({
-    where: { id: npcId, campaignId },
-  });
-  const factions = await prisma.faction.findMany({
-    where: { campaignId },
-  });
-  const memories = await fetchEntityLinkedMemories({
-    campaignId,
-    entityType: "npc",
-    entityId: npcId,
-    take: 8,
-    prioritizedKinds: ["relationship_shift", "promise", "conflict"],
-  });
-  const temporaryActor = await prisma.temporaryActor.findFirst({
-    where: {
-      campaignId,
-      promotedNpcId: npcId,
-    },
-  });
-
-  if (!npc) {
-    return null;
+async function fetchNpcLinkedMemoriesById(input: {
+  campaignId: string;
+  npcIds: string[];
+  take: number;
+  prioritizedKinds?: MemoryKind[];
+}) {
+  const npcIds = Array.from(new Set(input.npcIds));
+  if (!npcIds.length) {
+    return new Map<string, MemoryRecord[]>();
   }
 
-  const locations = await prisma.locationNode.findMany({
-    where: { campaignId },
-  });
-  const npcs = await prisma.nPC.findMany({
-    where: { campaignId },
-  });
-  const npcKnowledge = await prisma.npcKnowledge.findMany({
+  const memories = await prisma.memoryEntry.findMany({
     where: {
-      campaignId,
-      npcId,
+      campaignId: input.campaignId,
+      entityLinks: {
+        some: {
+          entityType: "npc",
+          entityId: {
+            in: npcIds,
+          },
+        },
+      },
     },
     include: {
-      information: true,
+      entityLinks: true,
     },
-    orderBy: { informationId: "asc" },
-    take: 12,
+    orderBy: { createdAt: "desc" },
   });
-  const factionKnowledge = npc.factionId
-    ? await prisma.factionKnowledge.findMany({
-        where: {
-          campaignId,
-          factionId: npc.factionId,
-        },
-        include: {
-          information: true,
-        },
-        orderBy: { informationId: "asc" },
-        take: 12,
-      })
-    : [];
-  const locationKnowledge = npc.currentLocationId
-    ? await prisma.locationKnowledge.findMany({
-        where: {
-          campaignId,
-          locationId: npc.currentLocationId,
-        },
-        include: {
-          information: true,
-        },
-        orderBy: { informationId: "asc" },
-        take: 12,
-      })
-    : [];
 
-  const visibleKnowledgeById = new Map<string, InformationSummary>();
-  for (const entry of npcKnowledge) {
-    if (entry.shareability === "private" && !entry.information.isDiscovered) {
-      continue;
-    }
-    visibleKnowledgeById.set(
-      entry.informationId,
-      toInformationSummary(entry.information, locations, factions, npcs),
+  const byNpcId = new Map<string, typeof memories>();
+  for (const npcId of npcIds) {
+    const linked = memories.filter((memory) =>
+      memory.entityLinks.some((link) => link.entityType === "npc" && link.entityId === npcId),
+    );
+    byNpcId.set(
+      npcId,
+      sortMemoriesByPriority(linked, input.prioritizedKinds).slice(0, input.take),
     );
   }
+
+  return new Map(
+    Array.from(byNpcId.entries()).map(([npcId, linked]) => [
+      npcId,
+      linked.map((memory) => toMemoryRecord(memory)),
+    ]),
+  );
+}
+
+export async function fetchNpcDetailsBulk(
+  campaignId: string,
+  npcIds: string[],
+) {
+  const uniqueNpcIds = Array.from(new Set(npcIds));
+  if (!uniqueNpcIds.length) {
+    return new Map<string, NpcDetail>();
+  }
+
+  const npcRecords = await prisma.nPC.findMany({
+    where: {
+      campaignId,
+      id: {
+        in: uniqueNpcIds,
+      },
+    },
+    orderBy: { name: "asc" },
+  });
+  if (!npcRecords.length) {
+    return new Map<string, NpcDetail>();
+  }
+
+  const [factions, locations, npcs, temporaryActors, memoriesByNpcId, npcKnowledge, factionKnowledge, locationKnowledge] =
+    await Promise.all([
+      prisma.faction.findMany({
+        where: { campaignId },
+      }),
+      prisma.locationNode.findMany({
+        where: { campaignId },
+      }),
+      prisma.nPC.findMany({
+        where: { campaignId },
+      }),
+      prisma.temporaryActor.findMany({
+        where: {
+          campaignId,
+          promotedNpcId: {
+            in: uniqueNpcIds,
+          },
+        },
+      }),
+      fetchNpcLinkedMemoriesById({
+        campaignId,
+        npcIds: uniqueNpcIds,
+        take: 8,
+        prioritizedKinds: ["relationship_shift", "promise", "conflict"],
+      }),
+      prisma.npcKnowledge.findMany({
+        where: {
+          campaignId,
+          npcId: {
+            in: uniqueNpcIds,
+          },
+        },
+        include: {
+          information: true,
+        },
+        orderBy: { informationId: "asc" },
+      }),
+      prisma.factionKnowledge.findMany({
+        where: {
+          campaignId,
+          factionId: {
+            in: Array.from(new Set(npcRecords.flatMap((npc) => (npc.factionId ? [npc.factionId] : [])))),
+          },
+        },
+        include: {
+          information: true,
+        },
+        orderBy: { informationId: "asc" },
+      }),
+      prisma.locationKnowledge.findMany({
+        where: {
+          campaignId,
+          locationId: {
+            in: Array.from(new Set(npcRecords.flatMap((npc) => (npc.currentLocationId ? [npc.currentLocationId] : [])))),
+          },
+        },
+        include: {
+          information: true,
+        },
+        orderBy: { informationId: "asc" },
+      }),
+    ]);
+
+  const temporaryActorByNpcId = new Map(
+    temporaryActors
+      .filter((actor): actor is typeof actor & { promotedNpcId: string } => actor.promotedNpcId != null)
+      .map((actor) => [actor.promotedNpcId, actor.id]),
+  );
+  const npcKnowledgeByNpcId = new Map<string, typeof npcKnowledge>();
+  const factionKnowledgeByFactionId = new Map<string, typeof factionKnowledge>();
+  const locationKnowledgeByLocationId = new Map<string, typeof locationKnowledge>();
+
+  for (const entry of npcKnowledge) {
+    const list = npcKnowledgeByNpcId.get(entry.npcId) ?? [];
+    list.push(entry);
+    npcKnowledgeByNpcId.set(entry.npcId, list);
+  }
   for (const entry of factionKnowledge) {
-    if (entry.information.accessibility === "secret" && !entry.information.isDiscovered) {
-      continue;
-    }
-    if (!visibleKnowledgeById.has(entry.informationId)) {
-      visibleKnowledgeById.set(
-        entry.informationId,
-        toInformationSummary(entry.information, locations, factions, npcs),
-      );
-    }
+    const list = factionKnowledgeByFactionId.get(entry.factionId) ?? [];
+    list.push(entry);
+    factionKnowledgeByFactionId.set(entry.factionId, list);
   }
   for (const entry of locationKnowledge) {
-    if (entry.information.accessibility === "secret" && !entry.information.isDiscovered) {
+    const list = locationKnowledgeByLocationId.get(entry.locationId) ?? [];
+    list.push(entry);
+    locationKnowledgeByLocationId.set(entry.locationId, list);
+  }
+
+  return new Map(
+    npcRecords.map((npc) => {
+      const visibleKnowledgeById = new Map<string, InformationSummary>();
+      for (const entry of npcKnowledgeByNpcId.get(npc.id) ?? []) {
+        if (entry.shareability === "private" && !entry.information.isDiscovered) {
+          continue;
+        }
+        visibleKnowledgeById.set(
+          entry.informationId,
+          toInformationSummary(entry.information, locations, factions, npcs),
+        );
+      }
+      if (npc.factionId) {
+        for (const entry of factionKnowledgeByFactionId.get(npc.factionId) ?? []) {
+          if (entry.information.accessibility === "secret" && !entry.information.isDiscovered) {
+            continue;
+          }
+          if (!visibleKnowledgeById.has(entry.informationId)) {
+            visibleKnowledgeById.set(
+              entry.informationId,
+              toInformationSummary(entry.information, locations, factions, npcs),
+            );
+          }
+        }
+      }
+      if (npc.currentLocationId) {
+        for (const entry of locationKnowledgeByLocationId.get(npc.currentLocationId) ?? []) {
+          if (entry.information.accessibility === "secret" && !entry.information.isDiscovered) {
+            continue;
+          }
+          if (!visibleKnowledgeById.has(entry.informationId)) {
+            visibleKnowledgeById.set(
+              entry.informationId,
+              toInformationSummary(entry.information, locations, factions, npcs),
+            );
+          }
+        }
+      }
+
+      return [npc.id, {
+        ...toNpcSummary(npc, factions),
+        knownInformation: Array.from(visibleKnowledgeById.values()).slice(0, 12),
+        relationshipHistory: memoriesByNpcId.get(npc.id) ?? [],
+        temporaryActorId: temporaryActorByNpcId.get(npc.id) ?? null,
+      } satisfies NpcDetail];
+    }),
+  );
+}
+
+export async function fetchMarketPricesBulk(
+  campaignId: string,
+  locationIds: string[],
+) {
+  const uniqueLocationIds = Array.from(new Set(locationIds));
+  if (!uniqueLocationIds.length) {
+    return new Map<string, MarketPriceDetail[]>();
+  }
+
+  const [locations, prices] = await Promise.all([
+    prisma.locationNode.findMany({
+      where: {
+        campaignId,
+        id: {
+          in: uniqueLocationIds,
+        },
+      },
+      select: { id: true, name: true },
+    }),
+    prisma.marketPrice.findMany({
+      where: {
+        campaignId,
+        locationId: {
+          in: uniqueLocationIds,
+        },
+      },
+      include: {
+        commodity: true,
+        vendorNpc: true,
+      },
+      orderBy: [{ locationId: "asc" }, { commodity: { name: "asc" } }, { createdAt: "asc" }],
+    }),
+  ]);
+
+  const locationById = new Map(locations.map((location) => [location.id, location]));
+  const pricesByLocationId = new Map<string, MarketPriceDetail[]>();
+  for (const price of prices) {
+    const location = locationById.get(price.locationId);
+    if (!location) {
       continue;
     }
-    if (!visibleKnowledgeById.has(entry.informationId)) {
-      visibleKnowledgeById.set(
-        entry.informationId,
-        toInformationSummary(entry.information, locations, factions, npcs),
-      );
+    const list = pricesByLocationId.get(price.locationId) ?? [];
+    list.push({
+      marketPriceId: price.id,
+      commodityId: price.commodityId,
+      commodityName: price.commodity.name,
+      baseValue: price.commodity.baseValue,
+      modifier: price.modifier,
+      price: Math.max(1, Math.round(price.commodity.baseValue * price.modifier)),
+      stock: price.stock,
+      legalStatus: price.legalStatus,
+      vendorNpcId: price.vendorNpcId,
+      vendorNpcName: price.vendorNpc?.name ?? null,
+      locationId: location.id,
+      locationName: location.name,
+      restockTime: price.restockTime ?? null,
+    });
+    pricesByLocationId.set(price.locationId, list);
+  }
+
+  for (const locationId of uniqueLocationIds) {
+    if (!pricesByLocationId.has(locationId)) {
+      pricesByLocationId.set(locationId, []);
     }
   }
 
-  return {
-    ...toNpcSummary(npc, factions),
-    knownInformation: Array.from(visibleKnowledgeById.values()).slice(0, 12),
-    relationshipHistory: memories.map((memory) => toMemoryRecord(memory)),
-    temporaryActorId: temporaryActor?.id ?? null,
-  };
+  return pricesByLocationId;
+}
+
+export async function fetchFactionIntelBulk(
+  campaignId: string,
+  factionIds: string[],
+) {
+  const uniqueFactionIds = Array.from(new Set(factionIds));
+  if (!uniqueFactionIds.length) {
+    return new Map<string, FactionIntel>();
+  }
+
+  const factions = await prisma.faction.findMany({
+    where: {
+      campaignId,
+      id: {
+        in: uniqueFactionIds,
+      },
+    },
+  });
+  if (!factions.length) {
+    return new Map<string, FactionIntel>();
+  }
+
+  const relations = await prisma.factionRelation.findMany({
+    where: {
+      campaignId,
+      OR: [
+        { factionAId: { in: uniqueFactionIds } },
+        { factionBId: { in: uniqueFactionIds } },
+      ],
+    },
+    orderBy: { createdAt: "asc" },
+  });
+  const relatedFactionIds = Array.from(new Set([
+    ...factions.map((faction) => faction.id),
+    ...relations.flatMap((relation) => [relation.factionAId, relation.factionBId]),
+  ]));
+  const [relationFactions, moves, locations] = await Promise.all([
+    prisma.faction.findMany({
+      where: {
+        campaignId,
+        id: {
+          in: relatedFactionIds,
+        },
+      },
+    }),
+    prisma.factionMove.findMany({
+      where: {
+        campaignId,
+        factionId: {
+          in: uniqueFactionIds,
+        },
+      },
+      orderBy: { scheduledAtTime: "asc" },
+      take: uniqueFactionIds.length * 8,
+    }),
+    prisma.locationNode.findMany({
+      where: {
+        campaignId,
+        controllingFactionId: {
+          in: uniqueFactionIds,
+        },
+      },
+      select: { id: true, controllingFactionId: true },
+    }),
+  ]);
+
+  return new Map(
+    factions.map((faction) => [
+      faction.id,
+      {
+        ...toFactionSummary(faction),
+        relations: relations
+          .filter((relation) => relation.factionAId === faction.id || relation.factionBId === faction.id)
+          .map((relation) => toFactionRelationSummary(relation, relationFactions)),
+        visibleMoves: moves
+          .filter((move) => move.factionId === faction.id)
+          .slice(0, 8)
+          .map<FactionMoveSummary>((move) => ({
+            id: move.id,
+            description: move.description,
+            scheduledAtTime: move.scheduledAtTime,
+            isExecuted: move.isExecuted,
+            isCancelled: move.isCancelled,
+            cancellationReason: move.cancellationReason,
+          })),
+        controlledLocationIds: locations
+          .filter((location) => location.controllingFactionId === faction.id)
+          .map((location) => location.id),
+      } satisfies FactionIntel,
+    ]),
+  );
+}
+
+export async function fetchInformationDetailsBulk(
+  campaignId: string,
+  informationIds: string[],
+) {
+  const uniqueInformationIds = Array.from(new Set(informationIds));
+  if (!uniqueInformationIds.length) {
+    return new Map<string, InformationDetail>();
+  }
+
+  const information = await prisma.information.findMany({
+    where: {
+      campaignId,
+      id: {
+        in: uniqueInformationIds,
+      },
+      isDiscovered: true,
+    },
+    orderBy: { title: "asc" },
+  });
+  if (!information.length) {
+    return new Map<string, InformationDetail>();
+  }
+
+  const [locations, factions, npcs] = await Promise.all([
+    prisma.locationNode.findMany({
+      where: {
+        campaignId,
+        id: {
+          in: Array.from(new Set(information.flatMap((entry) => (entry.locationId ? [entry.locationId] : [])))),
+        },
+      },
+    }),
+    prisma.faction.findMany({
+      where: {
+        campaignId,
+        id: {
+          in: Array.from(new Set(information.flatMap((entry) => (entry.factionId ? [entry.factionId] : [])))),
+        },
+      },
+    }),
+    prisma.nPC.findMany({
+      where: {
+        campaignId,
+        id: {
+          in: Array.from(new Set(information.flatMap((entry) => (entry.sourceNpcId ? [entry.sourceNpcId] : [])))),
+        },
+      },
+    }),
+  ]);
+
+  return new Map(
+    information.map((entry) => [
+      entry.id,
+      {
+        ...toInformationSummary(entry, locations, factions, npcs),
+        content: entry.content,
+      } satisfies InformationDetail,
+    ]),
+  );
+}
+
+export async function fetchInformationConnectionsBulk(input: {
+  campaignId: string;
+  groups: Array<{ key: string; informationIds: string[] }>;
+}) {
+  if (!input.groups.length) {
+    return new Map<string, CrossLocationLead[]>();
+  }
+
+  const [information, informationLinks, locations, factions, npcs] = await Promise.all([
+    prisma.information.findMany({
+      where: { campaignId: input.campaignId },
+      orderBy: { title: "asc" },
+    }),
+    prisma.informationLink.findMany({
+      where: { campaignId: input.campaignId },
+      orderBy: { createdAt: "asc" },
+    }),
+    prisma.locationNode.findMany({
+      where: { campaignId: input.campaignId },
+    }),
+    prisma.faction.findMany({
+      where: { campaignId: input.campaignId },
+    }),
+    prisma.nPC.findMany({
+      where: { campaignId: input.campaignId },
+    }),
+  ]);
+
+  return new Map(
+    input.groups.map((group) => [
+      group.key,
+      buildCrossLocationLeads({
+        discoveredInformationIds: group.informationIds,
+        information,
+        informationLinks,
+        locations,
+        factions,
+        npcs,
+      }),
+    ]),
+  );
+}
+
+export async function fetchRelationshipHistoriesBulk(
+  campaignId: string,
+  npcIds: string[],
+) {
+  const uniqueNpcIds = Array.from(new Set(npcIds));
+  if (!uniqueNpcIds.length) {
+    return new Map<string, RelationshipHistory>();
+  }
+
+  const [npcs, memoriesByNpcId] = await Promise.all([
+    prisma.nPC.findMany({
+      where: {
+        campaignId,
+        id: {
+          in: uniqueNpcIds,
+        },
+      },
+      select: { id: true, name: true },
+    }),
+    fetchNpcLinkedMemoriesById({
+      campaignId,
+      npcIds: uniqueNpcIds,
+      take: 8,
+      prioritizedKinds: ["relationship_shift", "promise", "conflict"],
+    }),
+  ]);
+
+  return new Map(
+    npcs.map((npc) => [
+      npc.id,
+      {
+        npcId: npc.id,
+        npcName: npc.name,
+        memories: memoriesByNpcId.get(npc.id) ?? [],
+      } satisfies RelationshipHistory,
+    ]),
+  );
+}
+
+export async function fetchNpcDetail(campaignId: string, npcId: string): Promise<NpcDetail | null> {
+  return (await fetchNpcDetailsBulk(campaignId, [npcId])).get(npcId) ?? null;
 }
 
 export async function fetchMarketPrices(
   campaignId: string,
   locationId: string,
 ): Promise<MarketPriceDetail[]> {
-  const location = await prisma.locationNode.findFirst({
-    where: { id: locationId, campaignId },
-    select: { id: true, name: true },
-  });
-  const prices = await prisma.marketPrice.findMany({
-    where: { campaignId, locationId },
-    include: {
-      commodity: true,
-      vendorNpc: true,
-    },
-    orderBy: [{ commodity: { name: "asc" } }, { createdAt: "asc" }],
-  });
-
-  if (!location) {
-    return [];
-  }
-
-  return prices.map((price) => ({
-    marketPriceId: price.id,
-    commodityId: price.commodityId,
-    commodityName: price.commodity.name,
-    baseValue: price.commodity.baseValue,
-    modifier: price.modifier,
-    price: Math.max(1, Math.round(price.commodity.baseValue * price.modifier)),
-    stock: price.stock,
-    legalStatus: price.legalStatus,
-    vendorNpcId: price.vendorNpcId,
-    vendorNpcName: price.vendorNpc?.name ?? null,
-    locationId: location.id,
-    locationName: location.name,
-    restockTime: price.restockTime ?? null,
-  }));
+  return (await fetchMarketPricesBulk(campaignId, [locationId])).get(locationId) ?? [];
 }
 
 export async function fetchFactionIntel(campaignId: string, factionId: string): Promise<FactionIntel | null> {
-  const faction = await prisma.faction.findFirst({
-    where: { id: factionId, campaignId },
-  });
-  const factions = await prisma.faction.findMany({
-    where: { campaignId },
-  });
-  const relations = await prisma.factionRelation.findMany({
-    where: {
-      campaignId,
-      OR: [{ factionAId: factionId }, { factionBId: factionId }],
-    },
-    orderBy: { createdAt: "asc" },
-  });
-  const moves = await prisma.factionMove.findMany({
-    where: {
-      campaignId,
-      factionId,
-    },
-    orderBy: { scheduledAtTime: "asc" },
-    take: 8,
-  });
-  const locations = await prisma.locationNode.findMany({
-    where: {
-      campaignId,
-      controllingFactionId: factionId,
-    },
-    select: { id: true },
-  });
-
-  if (!faction) {
-    return null;
-  }
-
-  return {
-    ...toFactionSummary(faction),
-    relations: relations.map((relation) => toFactionRelationSummary(relation, factions)),
-    visibleMoves: moves.map<FactionMoveSummary>((move) => ({
-      id: move.id,
-      description: move.description,
-      scheduledAtTime: move.scheduledAtTime,
-      isExecuted: move.isExecuted,
-      isCancelled: move.isCancelled,
-      cancellationReason: move.cancellationReason,
-    })),
-    controlledLocationIds: locations.map((location) => location.id),
-  };
+  return (await fetchFactionIntelBulk(campaignId, [factionId])).get(factionId) ?? null;
 }
 
 export async function fetchInformationDetail(
   campaignId: string,
   informationId: string,
 ): Promise<InformationDetail | null> {
-  const information = await prisma.information.findFirst({
-    where: { id: informationId, campaignId, isDiscovered: true },
-  });
-  const locations = await prisma.locationNode.findMany({
-    where: { campaignId },
-  });
-  const factions = await prisma.faction.findMany({
-    where: { campaignId },
-  });
-  const npcs = await prisma.nPC.findMany({
-    where: { campaignId },
-  });
-
-  if (!information) {
-    return null;
-  }
-
-  return {
-    ...toInformationSummary(information, locations, factions, npcs),
-    content: information.content,
-  };
+  return (await fetchInformationDetailsBulk(campaignId, [informationId])).get(informationId) ?? null;
 }
 
 export async function fetchInformationConnections(
   campaignId: string,
   informationIds: string[],
 ): Promise<CrossLocationLead[]> {
-  const information = await prisma.information.findMany({
-    where: {
-      campaignId,
-    },
-    orderBy: { title: "asc" },
-  });
-  const informationLinks = await prisma.informationLink.findMany({
-    where: {
-      campaignId,
-    },
-    orderBy: { createdAt: "asc" },
-  });
-  const locations = await prisma.locationNode.findMany({
-    where: { campaignId },
-  });
-  const factions = await prisma.faction.findMany({
-    where: { campaignId },
-  });
-  const npcs = await prisma.nPC.findMany({
-    where: { campaignId },
-  });
-
-  return buildCrossLocationLeads({
-    discoveredInformationIds: informationIds,
-    information,
-    informationLinks,
-    locations,
-    factions,
-    npcs,
-  });
+  const key = informationIds.join("\u0000");
+  return (await fetchInformationConnectionsBulk({
+    campaignId,
+    groups: [{ key, informationIds }],
+  })).get(key) ?? [];
 }
 
 export async function fetchRelationshipHistory(
   campaignId: string,
   npcId: string,
 ): Promise<RelationshipHistory | null> {
-  const npc = await prisma.nPC.findFirst({
-    where: { id: npcId, campaignId },
-    select: { id: true, name: true },
-  });
-  const memories = await fetchEntityLinkedMemories({
-    campaignId,
-    entityType: "npc",
-    entityId: npcId,
-    take: 8,
-    prioritizedKinds: ["relationship_shift", "promise", "conflict"],
-  });
-
-  if (!npc) {
-    return null;
-  }
-
-  return {
-    npcId: npc.id,
-    npcName: npc.name,
-    memories: memories.map((memory) => toMemoryRecord(memory)),
-  };
+  return (await fetchRelationshipHistoriesBulk(campaignId, [npcId])).get(npcId) ?? null;
 }
 
 function toTurnDigest(
@@ -3761,6 +4138,7 @@ export async function getTurnRouterContext(snapshot: CampaignSnapshot): Promise<
 export async function getPromptContext(
   snapshot: CampaignSnapshot,
   profile: PromptContextProfile = "full",
+  routerDecision?: RouterDecision,
 ): Promise<SpatialPromptContext> {
   const routerContext = await getTurnRouterContext(snapshot);
   const campaignItemTemplates = await prisma.itemTemplate.findMany({
@@ -3774,7 +4152,7 @@ export async function getPromptContext(
   });
   const isLocal = profile === "local";
 
-  return {
+  const promptContext = {
     currentLocation: routerContext.currentLocation,
     adjacentRoutes: isLocal ? [] : routerContext.adjacentRoutes,
     sceneActors: routerContext.sceneActors,
@@ -3791,9 +4169,16 @@ export async function getPromptContext(
     timeOfDay: timeOfDay(snapshot.state.globalTime),
     dayCount: Math.floor(snapshot.state.globalTime / 1440) + 1,
   };
+
+  return prunePromptContextForRouter({
+    promptContext,
+    profile,
+    routerDecision,
+  });
 }
 
 export const repositoryTestUtils = {
+  prunePromptContextForRouter,
   toRouterInventorySummary,
   toRouterSceneAspectSummaries,
   createFallbackResolvedLaunchEntry,

@@ -1,9 +1,8 @@
-import { rollCheck } from "@/lib/game/checks";
 import type {
   CampaignSnapshot,
   ChallengeApproach,
-  CheckResult,
   MechanicsMutation,
+  PendingCheck,
   ResolveMechanicsResponse,
   TimeMode,
   TurnActionToolCall,
@@ -203,11 +202,11 @@ function hasMeaningfulCheckStakes(command: ResolveMechanicsResponse) {
   });
 }
 
-function deriveCheckResult(
+function derivePendingCheck(
   snapshot: CampaignSnapshot,
   command: ResolveMechanicsResponse,
   fetchedFacts: TurnFetchToolResult[],
-): CheckResult | undefined {
+): PendingCheck | undefined {
   const checkIntent = command.checkIntent;
   if (!checkIntent) {
     return undefined;
@@ -227,13 +226,13 @@ function deriveCheckResult(
     const stat = checkIntent.approach === "assassinate" ? "dexterity" : "strength";
     const dc = 7 + Math.max(1, target?.threatLevel ?? 2);
 
-    return rollCheck({
+    return {
       stat,
       mode: checkIntent.mode ?? "normal",
       reason: checkIntent.reason,
-      character: snapshot.character,
+      modifier: snapshot.character.stats[stat],
       dc,
-    });
+    };
   }
 
   const citedNpc =
@@ -248,13 +247,14 @@ function deriveCheckResult(
           ? 8
           : 7;
 
-  return rollCheck({
-    stat: statForChallengeApproach(checkIntent.challengeApproach),
+  const stat = statForChallengeApproach(checkIntent.challengeApproach);
+  return {
+    stat,
     mode: checkIntent.mode ?? "normal",
     reason: checkIntent.reason,
-    character: snapshot.character,
+    modifier: snapshot.character.stats[stat],
     dc,
-  });
+  };
 }
 
 export function validateTurnCommand(input: {
@@ -306,6 +306,7 @@ export function validateTurnCommand(input: {
     suggestedActions,
     warnings: Array.from(new Set(warnings)),
     timeElapsed: deriveTimeElapsed({ ...command, mutations }, snapshot),
-    checkResult: deriveCheckResult(snapshot, { ...command, mutations }, fetchedFacts),
+    pendingCheck: derivePendingCheck(snapshot, { ...command, mutations }, fetchedFacts),
+    checkResult: undefined,
   };
 }
