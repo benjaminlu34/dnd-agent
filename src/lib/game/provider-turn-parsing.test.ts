@@ -112,6 +112,9 @@ test("buildTurnRouterSystemPrompt distinguishes self-talk from on-screen social 
 
   assert.match(prompt, /Internal thoughts, mutters to yourself, and naming an item are not converse/);
   assert.match(prompt, /Directing a present subordinate or ally to pass along a message or fetch someone is a local in-scene action/);
+  assert.match(prompt, /Use clarification only for hard blockers/);
+  assert.match(prompt, /Do not invent new ids or spawn handles/);
+  assert.match(prompt, /unresolvedReferents/);
 });
 
 test("buildTurnActionCorrectionNotes adds targeted timeMode recovery guidance", () => {
@@ -221,6 +224,94 @@ test("buildResolvedTurnNarrationPrompt includes prompt context and fetched facts
   assert.match(prompt.user, /Blackwater Docks/);
   assert.match(prompt.user, /fetched_facts/);
   assert.match(prompt.user, /Pier Nine Closure/);
+});
+
+test("buildTurnUserPrompt includes attention packet before the main action block", () => {
+  const prompt = aiProviderTestUtils.buildTurnUserPrompt({
+    playerAction: "Ask Mira Brightstone for bread.",
+    promptContext: {
+      currentLocation: {
+        id: "loc_market",
+        name: "Lantern Market",
+        type: "district",
+        summary: "Rain-dark awnings and crowded stalls.",
+        state: "busy",
+      },
+      adjacentRoutes: [],
+      sceneActors: [],
+      recentLocalEvents: [],
+      recentTurnLedger: [],
+      discoveredInformation: [],
+      activePressures: [],
+      recentWorldShifts: [],
+      activeThreads: [],
+      inventory: [],
+      sceneAspects: {},
+      localTexture: null,
+      globalTime: 540,
+      timeOfDay: "morning",
+      dayCount: 1,
+    },
+    fetchedFacts: [],
+    character: {
+      id: "char_1",
+      instanceId: "inst_1",
+      templateId: "char_1",
+      name: "Rowan",
+      archetype: "Scout",
+      strength: 1,
+      dexterity: 2,
+      constitution: 1,
+      intelligence: 0,
+      wisdom: 2,
+      charisma: 1,
+      maxHealth: 12,
+      backstory: null,
+      starterItems: [],
+      stats: {
+        strength: 1,
+        dexterity: 2,
+        constitution: 1,
+        intelligence: 0,
+        wisdom: 2,
+        charisma: 1,
+      },
+      health: 12,
+      gold: 3,
+      inventory: [],
+      commodityStacks: [],
+    },
+    routerDecision: {
+      profile: "local",
+      confidence: "high",
+      authorizedVectors: ["economy_light"],
+      requiredPrerequisites: [],
+      reason: "A simple named-NPC purchase request.",
+      clarification: {
+        needed: false,
+        blocker: null,
+        question: null,
+        options: [],
+      },
+      attention: {
+        primaryIntent: "Buy bread from the named baker in scene.",
+        resolvedReferents: [
+          {
+            phrase: "Mira Brightstone",
+            targetRef: "npc:npc_mira",
+            targetKind: "scene_actor",
+            confidence: "high",
+          },
+        ],
+        unresolvedReferents: [],
+        mustCheck: ["sceneActors", "gold"],
+      },
+    },
+  });
+
+  assert.ok(prompt.indexOf("<attention_packet>") < prompt.indexOf("<action>"));
+  assert.match(prompt, /targetRef: npc:npc_mira/);
+  assert.match(prompt, /mustCheck:/);
 });
 
 test("buildResolvedTurnNarrationPrompt does not treat departures as waited-for arrivals", () => {
@@ -403,6 +494,18 @@ test("normalizeRouterDecision dedupes vectors and prerequisites", () => {
       { type: "relationship_history", npcId: "npc_guard" },
     ],
     reason: "  same-scene negotiation  ",
+    clarification: {
+      needed: false,
+      blocker: null,
+      question: null,
+      options: [],
+    },
+    attention: {
+      primaryIntent: "Talk through the checkpoint.",
+      resolvedReferents: [],
+      unresolvedReferents: [],
+      mustCheck: ["sceneActors", "sceneActors", "recentTurnLedger"],
+    },
   });
 
   assert.deepEqual(normalized.authorizedVectors, ["converse", "economy_light"]);
@@ -411,6 +514,52 @@ test("normalizeRouterDecision dedupes vectors and prerequisites", () => {
     { type: "relationship_history", npcId: "npc_guard" },
   ]);
   assert.equal(normalized.reason, "same-scene negotiation");
+  assert.deepEqual(normalized.attention.mustCheck, ["sceneActors", "recentTurnLedger"]);
+});
+
+test("normalizeRouterDecision fills missing clarification and strips invalid resolved spawn refs", () => {
+  const normalized = aiProviderTestUtils.normalizeRouterDecision({
+    profile: "full",
+    confidence: "low",
+    authorizedVectors: [],
+    requiredPrerequisites: [],
+    reason: "Need a conservative read.",
+    attention: {
+      primaryIntent: "Figure out what the player means.",
+      resolvedReferents: [
+        {
+          phrase: "the helper",
+          targetRef: "spawn:helper",
+          targetKind: "scene_actor",
+          confidence: "medium",
+        },
+        {
+          phrase: "Mira",
+          targetRef: "npc:npc_mira",
+          targetKind: "scene_actor",
+          confidence: "high",
+        },
+      ],
+      unresolvedReferents: [],
+      mustCheck: ["gold", "gold", "inventory"],
+    },
+  } as never);
+
+  assert.deepEqual(normalized.clarification, {
+    needed: false,
+    blocker: null,
+    question: null,
+    options: [],
+  });
+  assert.deepEqual(normalized.attention.resolvedReferents, [
+    {
+      phrase: "Mira",
+      targetRef: "npc:npc_mira",
+      targetKind: "scene_actor",
+      confidence: "high",
+    },
+  ]);
+  assert.deepEqual(normalized.attention.mustCheck, ["gold", "inventory"]);
 });
 
 test("selectPromptContextProfile falls back to full when router confidence is low", () => {
@@ -421,6 +570,18 @@ test("selectPromptContextProfile falls back to full when router confidence is lo
       authorizedVectors: ["converse"],
       requiredPrerequisites: [],
       reason: "uncertain",
+      clarification: {
+        needed: false,
+        blocker: null,
+        question: null,
+        options: [],
+      },
+      attention: {
+        primaryIntent: "Uncertain local action.",
+        resolvedReferents: [],
+        unresolvedReferents: [],
+        mustCheck: [],
+      },
     }),
     "full",
   );

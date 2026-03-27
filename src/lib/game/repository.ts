@@ -970,6 +970,44 @@ function toPromptInventory(
   ];
 }
 
+function toRouterInventorySummary(character: CharacterInstance) {
+  const itemsById = new Map<string, { templateId: string; name: string; quantity: number }>();
+
+  for (const item of character.inventory) {
+    if (isArchivedInventoryProperties(item.properties as Record<string, unknown> | null)) {
+      continue;
+    }
+    const existing = itemsById.get(item.templateId);
+    if (existing) {
+      existing.quantity += 1;
+      continue;
+    }
+    itemsById.set(item.templateId, {
+      templateId: item.templateId,
+      name: item.template.name,
+      quantity: 1,
+    });
+  }
+
+  return Array.from(itemsById.values()).sort((left, right) => {
+    if (left.quantity !== right.quantity) {
+      return right.quantity - left.quantity;
+    }
+    return left.name.localeCompare(right.name);
+  });
+}
+
+function toRouterSceneAspectSummaries(state: CampaignRuntimeState) {
+  return Object.entries(state.sceneAspects ?? {})
+    .map(([key, aspect]) => ({
+      key,
+      label: aspect.label,
+      state: aspect.state,
+      duration: aspect.duration,
+    }))
+    .sort((left, right) => left.key.localeCompare(right.key));
+}
+
 export async function ensureLocalUser() {
   const email = "solo@adventure.local";
   const existingUser = await prisma.user.findUnique({
@@ -3714,6 +3752,9 @@ export async function getTurnRouterContext(snapshot: CampaignSnapshot): Promise<
     })),
     activePressures: snapshot.activePressures,
     activeThreads: snapshot.activeThreads,
+    inventory: toRouterInventorySummary(snapshot.character),
+    sceneAspects: toRouterSceneAspectSummaries(snapshot.state),
+    gold: snapshot.character.gold,
   };
 }
 
@@ -3753,6 +3794,8 @@ export async function getPromptContext(
 }
 
 export const repositoryTestUtils = {
+  toRouterInventorySummary,
+  toRouterSceneAspectSummaries,
   createFallbackResolvedLaunchEntry,
   normalizeLaunchEntrySelection,
   resolveStockLaunchEntry,

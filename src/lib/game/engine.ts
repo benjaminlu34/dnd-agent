@@ -244,6 +244,18 @@ function routerDecisionForTurnMode(input: {
       authorizedVectors: [],
       requiredPrerequisites: [],
       reason: "Router classification skipped for explicitly committed travel.",
+      clarification: {
+        needed: false,
+        blocker: null,
+        question: null,
+        options: [],
+      },
+      attention: {
+        primaryIntent: "Resolve the player action conservatively from grounded context.",
+        resolvedReferents: [],
+        unresolvedReferents: [],
+        mustCheck: [],
+      },
     };
   }
 
@@ -254,6 +266,18 @@ function routerDecisionForTurnMode(input: {
       authorizedVectors: ["investigate"],
       requiredPrerequisites: [],
       reason: "Router classification skipped for observe mode.",
+      clarification: {
+        needed: false,
+        blocker: null,
+        question: null,
+        options: [],
+      },
+      attention: {
+        primaryIntent: "Resolve the player action conservatively from grounded context.",
+        resolvedReferents: [],
+        unresolvedReferents: [],
+        mustCheck: [],
+      },
     };
   }
 
@@ -273,6 +297,47 @@ async function cleanupTurnLock(input: {
       turnLockRequestId: null,
       turnLockSessionId: null,
       turnLockExpiresAt: null,
+    },
+  });
+}
+
+function buildClarificationToolCall(input: {
+  question: string;
+  options: string[];
+}): RequestClarificationToolCall {
+  return {
+    type: "request_clarification",
+    question: input.question.trim(),
+    options: dedupeStrings(input.options).slice(0, 4),
+  };
+}
+
+async function persistClarificationRequest(input: {
+  turnId: string;
+  stateVersion: number;
+  command: RequestClarificationToolCall;
+}) {
+  await prisma.turn.update({
+    where: { id: input.turnId },
+    data: {
+      status: "clarification_requested",
+      toolCallJson: toPrismaJsonValue(input.command),
+      resultJson: toPrismaJsonValue(toTurnResultPayloadJson({
+        stateVersionAfter: input.stateVersion,
+        changeCodes: [],
+        reasonCodes: [],
+        whatChanged: [],
+        why: [],
+        warnings: [],
+        narrationBounds: null,
+        checkResult: null,
+        rollback: null,
+        clarification: {
+          question: input.command.question,
+          options: input.command.options,
+        },
+        error: null,
+      })),
     },
   });
 }
@@ -4498,7 +4563,41 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       authorizedVectors: routerDecision.authorizedVectors,
       requiredPrerequisites: routerDecision.requiredPrerequisites,
       reason: routerDecision.reason,
+      clarificationNeeded: routerDecision.clarification.needed,
+      attentionMustCheck: routerDecision.attention.mustCheck,
+      attentionResolvedReferentCount: routerDecision.attention.resolvedReferents.length,
     });
+    if (turnMode === "player_input" && intent?.type !== "travel_route" && routerDecision.clarification.needed) {
+      const clarificationCommand = buildClarificationToolCall({
+        question: routerDecision.clarification.question ?? "Can you clarify what you mean?",
+        options: routerDecision.clarification.options,
+      });
+      logBackendDiagnostic("turn.clarification_requested", {
+        campaignId: input.campaignId,
+        sessionId: input.sessionId,
+        requestId: input.requestId,
+        turnId: turn.id,
+        source: "router",
+        blocker: routerDecision.clarification.blocker,
+      });
+      await persistClarificationRequest({
+        turnId: turn.id,
+        stateVersion: snapshot.stateVersion,
+        command: clarificationCommand,
+      });
+      await cleanupTurnLock({
+        campaignId: input.campaignId,
+        requestId: input.requestId,
+      });
+
+      return {
+        type: "clarification" as const,
+        turnId: turn.id,
+        question: clarificationCommand.question,
+        options: clarificationCommand.options,
+        warnings: [],
+      };
+    }
     const promptContext = await getPromptContext(
       snapshot,
       promptContextProfileForRouter(routerDecision),
@@ -4608,29 +4707,12 @@ export async function triageTurn(input: TurnSubmissionRequest & {
         sessionId: input.sessionId,
         requestId: input.requestId,
         turnId: turn.id,
+        source: "model",
       });
-      await prisma.turn.update({
-        where: { id: turn.id },
-        data: {
-          status: "clarification_requested",
-          toolCallJson: toPrismaJsonValue(validated),
-          resultJson: toPrismaJsonValue(toTurnResultPayloadJson({
-            stateVersionAfter: snapshot.stateVersion,
-            changeCodes: [],
-            reasonCodes: [],
-            whatChanged: [],
-            why: [],
-            warnings: [],
-            narrationBounds: null,
-            checkResult: null,
-            rollback: null,
-            clarification: {
-              question: validated.question,
-              options: validated.options,
-            },
-            error: null,
-          })),
-        },
+      await persistClarificationRequest({
+        turnId: turn.id,
+        stateVersion: snapshot.stateVersion,
+        command: validated,
       });
       await cleanupTurnLock({
         campaignId: input.campaignId,

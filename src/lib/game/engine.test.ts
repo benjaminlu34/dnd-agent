@@ -146,6 +146,18 @@ function createRouterDecision(
     authorizedVectors,
     requiredPrerequisites: [],
     reason: "test",
+    clarification: {
+      needed: false,
+      blocker: null,
+      question: null,
+      options: [],
+    },
+    attention: {
+      primaryIntent: "Test routing.",
+      resolvedReferents: [],
+      unresolvedReferents: [],
+      mustCheck: [],
+    },
   };
 }
 
@@ -247,6 +259,18 @@ test("router-selected local profile only applies at high confidence", () => {
       authorizedVectors: [],
       requiredPrerequisites: [],
       reason: "same-scene action",
+      clarification: {
+        needed: false,
+        blocker: null,
+        question: null,
+        options: [],
+      },
+      attention: {
+        primaryIntent: "Same-scene action.",
+        resolvedReferents: [],
+        unresolvedReferents: [],
+        mustCheck: [],
+      },
     }),
     "local",
   );
@@ -258,6 +282,18 @@ test("router-selected local profile only applies at high confidence", () => {
       authorizedVectors: ["converse"],
       requiredPrerequisites: [],
       reason: "uncertain broader context dependency",
+      clarification: {
+        needed: false,
+        blocker: null,
+        question: null,
+        options: [],
+      },
+      attention: {
+        primaryIntent: "Uncertain broader context dependency.",
+        resolvedReferents: [],
+        unresolvedReferents: [],
+        mustCheck: [],
+      },
     }),
     "full",
   );
@@ -354,6 +390,18 @@ test("unscoped router fallback does not reject routine local interactions", () =
       authorizedVectors: [],
       requiredPrerequisites: [],
       reason: "Planner output was invalid, so the turn falls back to full context and no explicit vectors.",
+      clarification: {
+        needed: false,
+        blocker: null,
+        question: null,
+        options: [],
+      },
+      attention: {
+        primaryIntent: "Fallback routine interaction.",
+        resolvedReferents: [],
+        unresolvedReferents: [],
+        mustCheck: [],
+      },
     },
   });
 

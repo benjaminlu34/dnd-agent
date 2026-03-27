@@ -2228,6 +2228,51 @@ const requiredPrerequisiteSchema = z.discriminatedUnion("type", [
   }),
 ]);
 
+const routerClarificationSchema = z.object({
+  needed: z.boolean().default(false),
+  blocker: z
+    .enum(["missing_target", "missing_item", "missing_destination", "unclear_intent"])
+    .nullable()
+    .default(null),
+  question: z.string().trim().min(1).max(180).nullable().default(null),
+  options: z.array(z.string().trim().min(1).max(80)).max(4).default([]),
+}).optional().default({
+  needed: false,
+  blocker: null,
+  question: null,
+  options: [],
+});
+
+const routerResolvedReferentSchema = z.object({
+  phrase: z.string().trim().min(1).max(80),
+  targetRef: z.string().trim().min(1).max(120).refine(
+    (value) => !value.startsWith("spawn:"),
+    "resolved referents must not use spawn handles",
+  ),
+  targetKind: z.enum(["scene_actor", "inventory_item", "route", "information", "location"]),
+  confidence: z.enum(["high", "medium"]),
+});
+
+const routerUnresolvedReferentSchema = z.object({
+  phrase: z.string().trim().min(1).max(80),
+  intendedKind: z.enum(["temporary_actor", "environmental_item", "scene_aspect"]),
+  confidence: z.enum(["high", "medium"]),
+});
+
+const routerAttentionSchema = z.object({
+  primaryIntent: z.string().trim().min(1).max(160),
+  resolvedReferents: z.array(routerResolvedReferentSchema).max(6).default([]),
+  unresolvedReferents: z.array(routerUnresolvedReferentSchema).max(6).default([]),
+  mustCheck: z.array(
+    z.enum(["sceneActors", "sceneAspects", "inventory", "routes", "gold", "fetchedFacts", "recentTurnLedger"]),
+  ).max(7).default([]),
+}).optional().default({
+  primaryIntent: "Resolve the player action conservatively from grounded context.",
+  resolvedReferents: [],
+  unresolvedReferents: [],
+  mustCheck: [],
+});
+
 const routerDecisionSchema = z.object({
   profile: z.enum(["local", "full"]),
   confidence: z.enum(["high", "low"]),
@@ -2237,6 +2282,8 @@ const routerDecisionSchema = z.object({
     .default([]),
   requiredPrerequisites: z.array(requiredPrerequisiteSchema).max(3).default([]),
   reason: z.string().trim().min(1).max(240),
+  clarification: routerClarificationSchema,
+  attention: routerAttentionSchema,
 });
 
 const checkIntentSchema = z.discriminatedUnion("type", [
@@ -2414,12 +2461,54 @@ function normalizeRouterDecision(value: RouterDecision): RouterDecision {
     seenPrerequisites.add(key);
     return true;
   });
+  const clarification = value.clarification?.needed
+    ? {
+        needed: true,
+        blocker: value.clarification.blocker ?? "unclear_intent",
+        question: value.clarification.question?.trim() || null,
+        options: Array.from(new Set((value.clarification.options ?? []).map((entry) => entry.trim()).filter(Boolean))).slice(0, 4),
+      }
+    : {
+        needed: false,
+        blocker: null,
+        question: null,
+        options: [],
+      };
+  if (!clarification.question || clarification.options.length === 0) {
+    clarification.needed = false;
+    clarification.blocker = null;
+    clarification.question = null;
+    clarification.options = [];
+  }
+  const resolvedReferents = (value.attention?.resolvedReferents ?? [])
+    .filter((entry) => !entry.targetRef.startsWith("spawn:"))
+    .map((entry) => ({
+      phrase: entry.phrase.trim(),
+      targetRef: entry.targetRef.trim(),
+      targetKind: entry.targetKind,
+      confidence: entry.confidence,
+    }));
+  const unresolvedReferents = (value.attention?.unresolvedReferents ?? []).map((entry) => ({
+    phrase: entry.phrase.trim(),
+    intendedKind: entry.intendedKind,
+    confidence: entry.confidence,
+  }));
+  const mustCheck = Array.from(new Set(value.attention?.mustCheck ?? []));
   return {
     profile: value.profile,
     confidence: value.confidence,
     authorizedVectors: dedupedVectors,
     requiredPrerequisites,
     reason: value.reason.trim(),
+    clarification,
+    attention: {
+      primaryIntent:
+        value.attention?.primaryIntent?.trim()
+        || "Resolve the player action conservatively from grounded context.",
+      resolvedReferents,
+      unresolvedReferents,
+      mustCheck,
+    },
   };
 }
 
@@ -2430,6 +2519,18 @@ function fallbackRouterDecision(reason: string): RouterDecision {
     authorizedVectors: [],
     requiredPrerequisites: [],
     reason,
+    clarification: {
+      needed: false,
+      blocker: null,
+      question: null,
+      options: [],
+    },
+    attention: {
+      primaryIntent: "Resolve the player action conservatively from grounded context.",
+      resolvedReferents: [],
+      unresolvedReferents: [],
+      mustCheck: [],
+    },
   };
 }
 
@@ -2450,6 +2551,15 @@ function buildRouterConstraintsBlock(decision: RouterDecision) {
     authorizedVectors: decision.authorizedVectors,
     requiredPrerequisites: decision.requiredPrerequisites,
     reason: decision.reason,
+  };
+}
+
+function buildAttentionPacketBlock(decision: RouterDecision) {
+  return {
+    primaryIntent: decision.attention.primaryIntent,
+    resolvedReferents: decision.attention.resolvedReferents,
+    unresolvedReferents: decision.attention.unresolvedReferents,
+    mustCheck: decision.attention.mustCheck,
   };
 }
 
@@ -2549,6 +2659,12 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Use spawn_scene_aspect for smoke, damage, noise, weather spillover, improvised cover, and other grounded scene conditions.",
         "Self-directed downtime work may use adjust_inventory, spawn_environmental_item, and spawn_scene_aspect for grounded byproducts, consumed materials, and scene conditions.",
         "Use set_scene_actor_presence whenever someone leaves the current scene or returns during the turn.",
+        "Review the attention_packet before planning mutations.",
+        "If attention_packet.resolvedReferents supplies a grounded ref, use that exact ref instead of inventing or guessing ids.",
+        "If attention_packet.mustCheck lists inventory, do not remove or consume an item unless it is grounded in context.inventory or fetched_facts.",
+        "If attention_packet.mustCheck lists sceneActors, do not target a named actor through record_local_interaction.",
+        "If attention_packet.mustCheck lists sceneAspects or routes, verify those surfaces before depending on them in mutations.",
+        "If attention_packet.unresolvedReferents names a plausible ungrounded noun, spawn it before interacting with it when needed.",
         "Only include checkIntent when success or failure meaningfully changes which mutations can happen. If the turn is routine and should simply create a local interaction or consume time, omit checkIntent.",
         "If a check is needed, set checkIntent and list only the success-state mutations. The engine will reject them on failure.",
         "Use advance_time for passive waiting or observation windows.",
@@ -2594,6 +2710,12 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Use discover_information only for specific known information ids grounded in context or fetched facts.",
         "Use set_scene_actor_presence whenever someone leaves the current scene or returns during the turn.",
         "If a helper, subordinate, or named scene actor leaves on an errand or comes back later in the turn, represent that mechanically with set_scene_actor_presence.",
+        "Review the attention_packet before planning mutations.",
+        "If attention_packet.resolvedReferents supplies a grounded ref, use that exact ref instead of inventing or guessing ids.",
+        "If attention_packet.mustCheck lists inventory, do not remove or consume an item unless it is grounded in context.inventory or fetched_facts.",
+        "If attention_packet.mustCheck lists sceneActors, do not target a named actor through record_local_interaction.",
+        "If attention_packet.mustCheck lists sceneAspects or routes, verify those surfaces before depending on them in mutations.",
+        "If attention_packet.unresolvedReferents names a plausible ungrounded noun, spawn it before interacting with it when needed.",
         "Use restore_health for rest recovery or explicit healing outcomes the engine should apply.",
         "Use advance_time when the action necessarily consumes time. Suggested actions should stay short and concrete.",
         "Preserve the player's commitment level. Do not upgrade browsing or approach into stronger mechanics unless the wording clearly commits to them.",
@@ -2651,6 +2773,11 @@ function buildTurnRouterSystemPrompt(correctionNotes?: string | null) {
     "requiredPrerequisites must list every authoritative fetch the mechanics pass will need before it can safely resolve the turn.",
     "Use market_prices before strict commodity trade, npc_detail before detailed interaction with a present NPC that needs it, and relationship_history only when prior rapport materially matters.",
     "Confidence governs profile only. authorizedVectors and requiredPrerequisites should still reflect the best conservative reading even when confidence is low.",
+    "Use clarification only for hard blockers where a best-effort interpretation would be materially unreliable.",
+    "Do not generate gameplay policy, strategy notes, or prohibitions for the mechanics model.",
+    "Map player nouns to existing grounded refs when possible.",
+    "Do not invent new ids or spawn handles.",
+    "If no grounded ref exists but the noun is plausible, emit it in unresolvedReferents instead of resolvedReferents.",
   ].join("\n");
 
   return correctionNotes ? `${base}\n${correctionNotes}` : base;
@@ -2664,6 +2791,7 @@ function buildTurnUserPrompt(input: {
   routerDecision: RouterDecision;
 }) {
   return [
+    formatPromptBlock("attention_packet", buildAttentionPacketBlock(input.routerDecision)),
     formatPromptBlock("action", input.playerAction),
     formatPromptBlock("router_constraints", buildRouterConstraintsBlock(input.routerDecision)),
     formatPromptBlock("context", input.promptContext),
@@ -5409,7 +5537,7 @@ class DungeonMasterClient {
           response?.likelyTruncated
             ? "The previous payload was cut off. Return a much shorter complete replacement payload."
             : `Return a complete replacement payload that matches the router schema exactly. Validation issues: ${issues}`,
-          "Return only the tool payload with profile, confidence, authorizedVectors, requiredPrerequisites, and reason.",
+          "Return only the tool payload with profile, confidence, authorizedVectors, requiredPrerequisites, reason, clarification, and attention.",
         ].join("\n");
       }
 
@@ -5649,9 +5777,11 @@ export const aiProviderTestUtils = {
   buildTurnRouterSystemPrompt,
   buildTurnActionCorrectionNotes,
   buildTurnSystemPrompt,
+  buildTurnUserPrompt,
   buildResolvedNarrationConstraints,
   buildResolvedTurnNarrationPrompt,
   buildRouterConstraintsBlock,
+  buildAttentionPacketBlock,
   buildCustomEntryIntentCorrectionNotes,
   extractToolInput,
   findCustomEntryIntentConflicts,

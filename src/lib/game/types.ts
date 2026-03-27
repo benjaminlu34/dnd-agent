@@ -974,6 +974,19 @@ export type SpatialPromptContext = {
   dayCount: number;
 };
 
+export type RouterInventorySummary = {
+  templateId: string;
+  name: string;
+  quantity: number;
+};
+
+export type RouterSceneAspectSummary = {
+  key: string;
+  label: string;
+  state: string;
+  duration: CampaignRuntimeState["sceneAspects"][string]["duration"];
+};
+
 export type TurnRouterContext = Pick<
   SpatialPromptContext,
   | "currentLocation"
@@ -984,7 +997,11 @@ export type TurnRouterContext = Pick<
   | "discoveredInformation"
   | "activePressures"
   | "activeThreads"
->;
+> & {
+  inventory: RouterInventorySummary[];
+  sceneAspects: RouterSceneAspectSummary[];
+  gold: number;
+};
 
 export type RouterAuthorizedVector =
   | "economy_light"
@@ -1019,12 +1036,65 @@ export type RequiredPrerequisite =
       npcId: string;
     };
 
+export type RouterClarificationBlocker =
+  | "missing_target"
+  | "missing_item"
+  | "missing_destination"
+  | "unclear_intent";
+
+export type RouterClarification = {
+  needed: boolean;
+  blocker: RouterClarificationBlocker | null;
+  question: string | null;
+  options: string[];
+};
+
+export type RouterResolvedReferentTargetKind =
+  | "scene_actor"
+  | "inventory_item"
+  | "route"
+  | "information"
+  | "location";
+
+export type RouterReferentConfidence = "high" | "medium";
+
+export type RouterResolvedReferent = {
+  phrase: string;
+  targetRef: string;
+  targetKind: RouterResolvedReferentTargetKind;
+  confidence: RouterReferentConfidence;
+};
+
+export type RouterUnresolvedReferent = {
+  phrase: string;
+  intendedKind: "temporary_actor" | "environmental_item" | "scene_aspect";
+  confidence: RouterReferentConfidence;
+};
+
+export type RouterAttentionMustCheck =
+  | "sceneActors"
+  | "sceneAspects"
+  | "inventory"
+  | "routes"
+  | "gold"
+  | "fetchedFacts"
+  | "recentTurnLedger";
+
+export type RouterAttention = {
+  primaryIntent: string;
+  resolvedReferents: RouterResolvedReferent[];
+  unresolvedReferents: RouterUnresolvedReferent[];
+  mustCheck: RouterAttentionMustCheck[];
+};
+
 export type RouterDecision = {
   profile: PromptContextProfile;
   confidence: "high" | "low";
   authorizedVectors: RouterAuthorizedVector[];
   requiredPrerequisites: RequiredPrerequisite[];
   reason: string;
+  clarification: RouterClarification;
+  attention: RouterAttention;
 };
 
 export type CheckResult = {

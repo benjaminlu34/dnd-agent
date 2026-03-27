@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { repositoryTestUtils } from "./repository";
 import type {
+  CampaignRuntimeState,
+  CharacterInstance,
   GeneratedCampaignOpening,
   GeneratedWorldModule,
   OpenWorldGenerationArtifacts,
@@ -161,6 +163,117 @@ test("resolveStockLaunchEntry prefers artifact-backed entry context and marks it
   assert.equal(resolved.isCustom, false);
   assert.equal(resolved.customRequestPrompt, null);
   assert.equal(resolved.localContactNpcId, "npc_guide");
+});
+
+test("toRouterInventorySummary aggregates quantity and omits removed inventory entries", () => {
+  const inventory = repositoryTestUtils.toRouterInventorySummary({
+    id: "inst_1",
+    templateId: "char_1",
+    health: 12,
+    gold: 3,
+    commodityStacks: [],
+    inventory: [
+      {
+        id: "iteminst_1",
+        characterInstanceId: "inst_1",
+        templateId: "item_rope",
+        template: {
+          id: "item_rope",
+          campaignId: "camp_1",
+          name: "Rope",
+          description: "A coil of hemp rope.",
+          value: 1,
+          weight: 1,
+          rarity: "common",
+          tags: [],
+        },
+        isIdentified: true,
+        charges: null,
+        properties: null,
+      },
+      {
+        id: "iteminst_2",
+        characterInstanceId: "inst_1",
+        templateId: "item_rope",
+        template: {
+          id: "item_rope",
+          campaignId: "camp_1",
+          name: "Rope",
+          description: "A coil of hemp rope.",
+          value: 1,
+          weight: 1,
+          rarity: "common",
+          tags: [],
+        },
+        isIdentified: true,
+        charges: null,
+        properties: null,
+      },
+      {
+        id: "iteminst_3",
+        characterInstanceId: "inst_1",
+        templateId: "item_hook",
+        template: {
+          id: "item_hook",
+          campaignId: "camp_1",
+          name: "Grappling Hook",
+          description: "A four-pronged iron hook.",
+          value: 2,
+          weight: 1,
+          rarity: "common",
+          tags: [],
+        },
+        isIdentified: true,
+        charges: null,
+        properties: { removedFromInventory: true },
+      },
+    ],
+  } satisfies CharacterInstance);
+
+  assert.deepEqual(inventory, [
+    {
+      templateId: "item_rope",
+      name: "Rope",
+      quantity: 2,
+    },
+  ]);
+});
+
+test("toRouterSceneAspectSummaries emits compact duration-aware aspect records", () => {
+  const aspects = repositoryTestUtils.toRouterSceneAspectSummaries({
+    currentLocationId: "loc_gate",
+    globalTime: 480,
+    pendingTurnId: null,
+    lastActionSummary: null,
+    customTitle: null,
+    sceneAspects: {
+      forge_smoke: {
+        label: "forge smoke",
+        state: "hanging in the rafters",
+        duration: "scene",
+      },
+      guild_notice: {
+        label: "guild notice",
+        state: "nailed by the door",
+        duration: "permanent",
+      },
+    },
+  } satisfies CampaignRuntimeState);
+
+  assert.deepEqual(aspects, [
+    {
+      key: "forge_smoke",
+      label: "forge smoke",
+      state: "hanging in the rafters",
+      duration: "scene",
+    },
+    {
+      key: "guild_notice",
+      label: "guild notice",
+      state: "nailed by the door",
+      duration: "permanent",
+    },
+  ]);
 });
 
 test("normalizeLaunchEntrySelection returns provided custom entry unchanged", () => {
