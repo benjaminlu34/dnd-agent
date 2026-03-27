@@ -61,6 +61,7 @@ export type TurnCodeEntityType =
 export type TurnCausalityCodeName =
   | "TIME_ADVANCED"
   | "LOCATION_CHANGED"
+  | "SCENE_FOCUS_CHANGED"
   | "NPC_APPROVAL_CHANGED"
   | "INFORMATION_DISCOVERED"
   | "INFORMATION_ADDED"
@@ -634,6 +635,10 @@ export type CampaignRuntimeState = {
   globalTime: number;
   pendingTurnId: string | null;
   lastActionSummary: string | null;
+  sceneFocus: {
+    key: string;
+    label: string;
+  } | null;
   sceneAspects: Record<
     string,
     {
@@ -959,6 +964,7 @@ export type PromptInventoryItem = {
 
 export type SpatialPromptContext = {
   currentLocation: Pick<LocationSummary, "id" | "name" | "type" | "summary" | "state">;
+  sceneFocus: CampaignRuntimeState["sceneFocus"];
   adjacentRoutes: RouteSummary[];
   sceneActors: SceneActorSummary[];
   recentLocalEvents: RecentLocalEventSummary[];
@@ -991,6 +997,7 @@ export type RouterSceneAspectSummary = {
 export type TurnRouterContext = Pick<
   SpatialPromptContext,
   | "currentLocation"
+  | "sceneFocus"
   | "adjacentRoutes"
   | "sceneActors"
   | "recentLocalEvents"
@@ -1393,6 +1400,13 @@ export type MechanicsMutation =
       type: "set_npc_state";
       npcId: string;
       newState: NpcState;
+      phase?: MutationPhase;
+    }
+  | {
+      type: "set_player_scene_focus";
+      focusKey: string;
+      label: string;
+      reason: string;
       phase?: MutationPhase;
     }
   | {

@@ -1636,6 +1636,7 @@ async function createCampaignInTx(
     globalTime: 480,
     pendingTurnId: null,
     lastActionSummary: input.opening.activeThreat ?? input.opening.scene.summary,
+    sceneFocus: null,
     sceneAspects: {},
   };
 
@@ -4113,6 +4114,7 @@ export async function getTurnRouterContext(snapshot: CampaignSnapshot): Promise<
       summary: snapshot.currentLocation.summary,
       state: snapshot.currentLocation.state,
     },
+    sceneFocus: snapshot.state.sceneFocus ?? null,
     adjacentRoutes: snapshot.adjacentRoutes,
     sceneActors: toSceneActorSummaries({
       presentNpcs: snapshot.presentNpcs,
@@ -4154,6 +4156,7 @@ export async function getPromptContext(
 
   const promptContext = {
     currentLocation: routerContext.currentLocation,
+    sceneFocus: snapshot.state.sceneFocus ?? null,
     adjacentRoutes: isLocal ? [] : routerContext.adjacentRoutes,
     sceneActors: routerContext.sceneActors,
     recentLocalEvents: routerContext.recentLocalEvents,

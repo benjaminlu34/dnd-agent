@@ -25,6 +25,7 @@ function createSnapshot(): CampaignSnapshot {
       globalTime: 480,
       pendingTurnId: null,
       lastActionSummary: null,
+      sceneFocus: null,
       sceneAspects: {},
     },
     character: {
@@ -389,4 +390,72 @@ test("validateTurnCommand preserves explicit command warnings", () => {
 
   assert.equal(validated.type, "resolve_mechanics");
   assert.deepEqual(validated.warnings, ["The north road is blocked."]);
+});
+
+test("validateTurnCommand warns when record_local_interaction reads like a solo errand", () => {
+  const validated = validateTurnCommand({
+    snapshot: {
+      ...createSnapshot(),
+      temporaryActors: [
+        {
+          id: "temp_apprentice",
+          label: "apprentice",
+          currentLocationId: "loc_gate",
+          interactionCount: 0,
+          firstSeenAtTurn: 0,
+          lastSeenAtTurn: 0,
+          lastSeenAtTime: 480,
+          recentTopics: [],
+          lastSummary: "A young apprentice waiting for instructions.",
+          holdsInventory: false,
+          affectedWorldState: false,
+          isInMemoryGraph: false,
+          promotedNpcId: null,
+        },
+      ],
+    },
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Head back inside"],
+      mutations: [
+        {
+          type: "record_local_interaction",
+          localEntityId: "temp_apprentice",
+          interactionSummary: "You head back to the forge and check your bench.",
+        },
+      ],
+    },
+    playerAction: "I head back to the forge and check my bench for the coin purse.",
+  });
+
+  assert.match(
+    validated.warnings.join("\n"),
+    /record_local_interaction for a self-directed errand/i,
+  );
+});
+
+test("validateTurnCommand warns when actor presence is used as player movement proxy", () => {
+  const validated = validateTurnCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Head back inside"],
+      mutations: [
+        {
+          type: "set_scene_actor_presence",
+          actorRef: "npc:npc_guard",
+          newLocationId: "loc_gate",
+          reason: "Return to the gate.",
+        },
+      ],
+    },
+    playerAction: "I head back to the forge to get my coin purse.",
+  });
+
+  assert.match(
+    validated.warnings.join("\n"),
+    /set_scene_actor_presence as a proxy for player movement/i,
+  );
 });

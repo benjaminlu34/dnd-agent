@@ -92,4 +92,5 @@ test("parseCampaignRuntimeStateJson normalizes legacy scene object state into pe
       duration: "permanent",
     },
   });
+  assert.equal(parsed.sceneFocus, null);
 });

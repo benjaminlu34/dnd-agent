@@ -26,6 +26,7 @@ function createSnapshot(): CampaignSnapshot {
       globalTime: 480,
       pendingTurnId: null,
       lastActionSummary: null,
+      sceneFocus: null,
       sceneAspects: {},
     },
     character: {
@@ -1130,6 +1131,153 @@ test("wait fallback still marks non-arrival when a departure happened instead", 
   });
 
   assert.match(narration, /has not happened yet/i);
+});
+
+test("set_player_scene_focus updates intra-location focus and clears on macro travel", () => {
+  const focused = engineTestUtils.evaluateResolvedCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Check the workbench"],
+      mutations: [
+        {
+          type: "set_player_scene_focus",
+          focusKey: "forge_workbench",
+          label: "The Forge Workbench",
+          reason: "You head back to your bench.",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision([]),
+    playerAction: "I head back to the forge workbench.",
+  });
+
+  assert.deepEqual(focused.nextState.sceneFocus, {
+    key: "forge_workbench",
+    label: "The Forge Workbench",
+  });
+  assert.equal(focused.stateCommitLog[0]?.reasonCode, "scene_focus_updated");
+
+  const moved = engineTestUtils.evaluateResolvedCommand({
+    snapshot: {
+      ...createSnapshot(),
+      state: {
+        ...createSnapshot().state,
+        sceneFocus: {
+          key: "forge_workbench",
+          label: "The Forge Workbench",
+        },
+      },
+    },
+    command: createValidatedCommand("success", [
+      { type: "move_player", routeEdgeId: "edge_gate_market", targetLocationId: "loc_market" },
+    ]),
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["investigate"]),
+  });
+
+  assert.equal(moved.nextState.sceneFocus, null);
+});
+
+test("engine rejects record_local_interaction used for a solo errand with invalid_semantics", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: {
+      ...createSnapshot(),
+      temporaryActors: [
+        {
+          id: "temp_apprentice",
+          label: "apprentice",
+          currentLocationId: "loc_gate",
+          interactionCount: 0,
+          firstSeenAtTurn: 0,
+          lastSeenAtTurn: 0,
+          lastSeenAtTime: 480,
+          recentTopics: [],
+          lastSummary: "A young apprentice waiting for instructions.",
+          holdsInventory: false,
+          affectedWorldState: false,
+          isInMemoryGraph: false,
+          promotedNpcId: null,
+        },
+      ],
+    },
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Check the bench"],
+      mutations: [
+        {
+          type: "record_local_interaction",
+          localEntityId: "temp_apprentice",
+          interactionSummary: "You head back to the forge and check your bench.",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+    playerAction: "I head back to the forge and check my bench for the coin purse.",
+  });
+
+  assert.equal(evaluated.stateCommitLog[0]?.reasonCode, "invalid_semantics");
+});
+
+test("engine rejects set_scene_actor_presence used as player movement proxy with invalid_semantics", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Head back inside"],
+      mutations: [
+        {
+          type: "set_scene_actor_presence",
+          actorRef: "npc:npc_guard",
+          newLocationId: "loc_gate",
+          reason: "Return to the forge.",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+    playerAction: "I head back to the forge to get my coin purse.",
+  });
+
+  assert.equal(evaluated.stateCommitLog[0]?.reasonCode, "invalid_semantics");
+});
+
+test("noop scene actor presence entries do not carry arrival metadata", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Keep watch"],
+      mutations: [
+        {
+          type: "set_scene_actor_presence",
+          actorRef: "npc:npc_guard",
+          newLocationId: "loc_gate",
+          reason: "The guard remains posted.",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+    playerAction: "I wait by the gate.",
+  });
+
+  assert.equal(evaluated.stateCommitLog[0]?.status, "noop");
+  assert.equal(evaluated.stateCommitLog[0]?.metadata?.arrivesInCurrentScene, undefined);
 });
 
 test("blocked routes reject move_player deterministically", () => {

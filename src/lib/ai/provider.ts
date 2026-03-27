@@ -2389,6 +2389,13 @@ const mechanicsMutationSchema = z.discriminatedUnion("type", [
     phase: z.enum(["immediate", "conditional"]).optional(),
   }),
   z.object({
+    type: z.literal("set_player_scene_focus"),
+    focusKey: z.string().trim().min(1).max(80),
+    label: z.string().trim().min(1).max(120),
+    reason: z.string().trim().min(1).max(120),
+    phase: z.enum(["immediate", "conditional"]).optional(),
+  }),
+  z.object({
     type: z.literal("set_scene_actor_presence"),
     actorRef: z.string().trim().min(1),
     newLocationId: z.string().trim().min(1).nullable(),
@@ -2512,7 +2519,121 @@ function normalizeRouterDecision(value: RouterDecision): RouterDecision {
   };
 }
 
-function fallbackRouterDecision(reason: string): RouterDecision {
+function inferFallbackPrimaryIntent(playerAction: string) {
+  const normalized = playerAction.trim();
+  if (!normalized) {
+    return "Resolve the player action conservatively from grounded context.";
+  }
+  return `Resolve this player intent conservatively: ${normalized.slice(0, 140)}`;
+}
+
+function compactPromptText(value: string | null | undefined, maxLength = 120) {
+  if (!value) {
+    return "";
+  }
+  return value.replace(/\s+/g, " ").trim().slice(0, maxLength);
+}
+
+function formatRouterSceneActorLine(actor: TurnRouterContext["sceneActors"][number]) {
+  const label = compactPromptText(actor.displayLabel, 80) || "Unknown actor";
+  const role = compactPromptText(actor.role, 60);
+  const summary = compactPromptText(actor.lastSummary, 90);
+  const detailHint = actor.detailFetchHint?.type === "fetch_npc_detail" ? " detail-fetch" : "";
+  return `${label}${role ? ` (${role})` : ""} [${actor.actorRef}, ${actor.kind}${detailHint}]${summary ? ` - ${summary}` : ""}`;
+}
+
+function formatRouterRouteLine(route: TurnRouterContext["adjacentRoutes"][number]) {
+  return `${compactPromptText(route.targetLocationName, 80)} (${route.travelTimeMinutes}m, ${route.currentStatus}, danger ${route.dangerLevel}) [${route.id}]`;
+}
+
+function formatRouterInventoryLine(item: TurnRouterContext["inventory"][number]) {
+  return `${compactPromptText(item.name, 80)} (qty ${item.quantity}) [${item.templateId}]`;
+}
+
+function formatRouterSceneAspectLine(aspect: TurnRouterContext["sceneAspects"][number]) {
+  const label = compactPromptText(aspect.label, 80) || aspect.key;
+  const state = compactPromptText(aspect.state, 100);
+  return `${label}${state ? `: ${state}` : ""} (${aspect.duration}) [${aspect.key}]`;
+}
+
+function formatRouterContextForModel(context: TurnRouterContext) {
+  const sceneFocusLabel = context.sceneFocus?.label?.trim() || null;
+  return {
+    locationOrientation: sceneFocusLabel
+      ? `You are in ${context.currentLocation.name}. Your current focus/position is: ${sceneFocusLabel}.`
+      : `You are in ${context.currentLocation.name}.`,
+    currentLocation: `${context.currentLocation.name} (${context.currentLocation.type}, state: ${context.currentLocation.state})`,
+    gold: context.gold,
+    sceneActors: context.sceneActors.slice(0, 8).map(formatRouterSceneActorLine),
+    inventory: context.inventory.slice(0, 8).map(formatRouterInventoryLine),
+    sceneAspects: context.sceneAspects.slice(0, 8).map(formatRouterSceneAspectLine),
+    routes: context.adjacentRoutes.slice(0, 6).map(formatRouterRouteLine),
+    recentLocalEvents: context.recentLocalEvents
+      .slice(0, 2)
+      .map((event) => compactPromptText(event.description, 110)),
+    recentTurnLedger: context.recentTurnLedger
+      .slice(-2)
+      .map((entry) => compactPromptText(entry, 110)),
+    discoveredInformation: context.discoveredInformation
+      .slice(0, 3)
+      .map((information) => `${compactPromptText(information.title, 80)} [${information.id}]`),
+    activePressures: context.activePressures
+      .slice(0, 2)
+      .map((pressure) => `${compactPromptText(pressure.label, 80)} - ${compactPromptText(pressure.summary, 90)}`),
+    activeThreads: context.activeThreads
+      .slice(0, 2)
+      .map((thread) => compactPromptText(thread.summary, 100)),
+  };
+}
+
+function actionLikelyRequestsMacroTravel(playerAction: string, context?: TurnRouterContext) {
+  const normalized = playerAction.toLowerCase().replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return false;
+  }
+
+  const strongTravelIntent =
+    /\b(travel|journey|depart|set out|leave|ride|sail|take the road|take ship|make for|set off)\b/.test(normalized);
+  const routeWording = /\b(road|route|path|trail|passage|wagon|caravan|ship|boat|ferry)\b/.test(normalized);
+  const mentionsCurrentLocation =
+    Boolean(context?.currentLocation.name)
+    && normalized.includes(context.currentLocation.name.toLowerCase());
+  const mentionsAdjacentLocation = (context?.adjacentRoutes ?? []).some((route) =>
+    normalized.includes(route.targetLocationName.toLowerCase()),
+  );
+
+  if (mentionsAdjacentLocation && (strongTravelIntent || routeWording || /\b(go|head|toward|towards|to)\b/.test(normalized))) {
+    return true;
+  }
+
+  if (mentionsCurrentLocation && /\b(leave|depart from|out of)\b/.test(normalized)) {
+    return true;
+  }
+
+  return false;
+}
+
+function inferFallbackMustCheck(
+  playerAction: string,
+  context?: TurnRouterContext,
+): RouterDecision["attention"]["mustCheck"] {
+  const mustCheck: RouterDecision["attention"]["mustCheck"] = [
+    "sceneActors",
+    "inventory",
+    "sceneAspects",
+    "recentTurnLedger",
+  ];
+  if (actionLikelyRequestsMacroTravel(playerAction, context)) {
+    mustCheck.push("routes");
+  }
+  return mustCheck;
+}
+
+function fallbackRouterDecision(
+  reason: string,
+  playerAction = "",
+  context?: TurnRouterContext,
+): RouterDecision {
   return {
     profile: "full",
     confidence: "low",
@@ -2526,10 +2647,10 @@ function fallbackRouterDecision(reason: string): RouterDecision {
       options: [],
     },
     attention: {
-      primaryIntent: "Resolve the player action conservatively from grounded context.",
+      primaryIntent: inferFallbackPrimaryIntent(playerAction),
       resolvedReferents: [],
       unresolvedReferents: [],
-      mustCheck: [],
+      mustCheck: inferFallbackMustCheck(playerAction, context),
     },
   };
 }
@@ -2658,7 +2779,10 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Use spawn_environmental_item before adjust_inventory when the item is plausible in the environment but not already grounded in inventory.",
         "Use spawn_scene_aspect for smoke, damage, noise, weather spillover, improvised cover, and other grounded scene conditions.",
         "Self-directed downtime work may use adjust_inventory, spawn_environmental_item, and spawn_scene_aspect for grounded byproducts, consumed materials, and scene conditions.",
+        "Use set_player_scene_focus for self-directed movement within the current location, like stepping back into the forge, crossing to the workbench, or moving from the street to the stall front.",
         "Use set_scene_actor_presence whenever someone leaves the current scene or returns during the turn.",
+        "Use set_scene_actor_presence only for an actor's own departure or return. Never use it to simulate the player arriving somewhere.",
+        "Use record_local_interaction only when the player explicitly engages another person. Do not use it for solo errands, checking your own gear, retrieving your own belongings, or internal repositioning.",
         "Review the attention_packet before planning mutations.",
         "If attention_packet.resolvedReferents supplies a grounded ref, use that exact ref instead of inventing or guessing ids.",
         "If attention_packet.mustCheck lists inventory, do not remove or consume an item unless it is grounded in context.inventory or fetched_facts.",
@@ -2708,8 +2832,11 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Use set_npc_state only for direct violence, subdual, or comparable physical outcomes.",
         "Use adjust_relationship for meaningful social shifts with a present NPC.",
         "Use discover_information only for specific known information ids grounded in context or fetched facts.",
+        "Use set_player_scene_focus for self-directed movement within the current location, like heading back to the forge, moving to the workbench, or stepping from the street to a nearby shopfront.",
         "Use set_scene_actor_presence whenever someone leaves the current scene or returns during the turn.",
         "If a helper, subordinate, or named scene actor leaves on an errand or comes back later in the turn, represent that mechanically with set_scene_actor_presence.",
+        "Use set_scene_actor_presence only for an actor's own departure or return. Never use it to simulate the player arriving somewhere.",
+        "Use record_local_interaction only when the player explicitly engages another person. Do not use it for solo errands, checking your own gear, retrieving your own belongings, or internal repositioning.",
         "Review the attention_packet before planning mutations.",
         "If attention_packet.resolvedReferents supplies a grounded ref, use that exact ref instead of inventing or guessing ids.",
         "If attention_packet.mustCheck lists inventory, do not remove or consume an item unless it is grounded in context.inventory or fetched_facts.",
@@ -2777,10 +2904,38 @@ function buildTurnRouterSystemPrompt(correctionNotes?: string | null) {
     "Do not generate gameplay policy, strategy notes, or prohibitions for the mechanics model.",
     "Map player nouns to existing grounded refs when possible.",
     "Do not invent new ids or spawn handles.",
+    "routes strictly means macro-travel leaving the current location node for another adjacent location.",
+    "Movement within the same city, district, building, shop, or worksite is intra-location focus, not routes.",
+    "Phrases like back to the forge, into the market, over to the bench, or to the tavern inside the same place should not add routes to mustCheck.",
     "If no grounded ref exists but the noun is plausible, emit it in unresolvedReferents instead of resolvedReferents.",
   ].join("\n");
 
   return correctionNotes ? `${base}\n${correctionNotes}` : base;
+}
+
+function formatSpatialPromptContext(context: SpatialPromptContext) {
+  const sceneFocusLabel = context.sceneFocus?.label?.trim() || null;
+  return {
+    locationOrientation: sceneFocusLabel
+      ? `You are in ${context.currentLocation.name}. Your current focus/position is: ${sceneFocusLabel}.`
+      : `You are in ${context.currentLocation.name}.`,
+    currentLocation: context.currentLocation,
+    sceneFocus: context.sceneFocus,
+    adjacentRoutes: context.adjacentRoutes,
+    sceneActors: context.sceneActors,
+    recentLocalEvents: context.recentLocalEvents,
+    recentTurnLedger: context.recentTurnLedger,
+    discoveredInformation: context.discoveredInformation,
+    activePressures: context.activePressures,
+    recentWorldShifts: context.recentWorldShifts,
+    activeThreads: context.activeThreads,
+    inventory: context.inventory,
+    sceneAspects: context.sceneAspects,
+    localTexture: context.localTexture,
+    globalTime: context.globalTime,
+    timeOfDay: context.timeOfDay,
+    dayCount: context.dayCount,
+  };
 }
 
 function buildTurnUserPrompt(input: {
@@ -2794,7 +2949,7 @@ function buildTurnUserPrompt(input: {
     formatPromptBlock("attention_packet", buildAttentionPacketBlock(input.routerDecision)),
     formatPromptBlock("action", input.playerAction),
     formatPromptBlock("router_constraints", buildRouterConstraintsBlock(input.routerDecision)),
-    formatPromptBlock("context", input.promptContext),
+    formatPromptBlock("context", formatSpatialPromptContext(input.promptContext)),
     formatPromptBlock("character", {
       name: input.character.name,
       archetype: input.character.archetype,
@@ -2816,11 +2971,72 @@ function isAppliedArrivalMutation(entry: StateCommitLog[number], currentLocation
   return entry.mutationType === "set_scene_actor_presence" && entry.metadata?.newLocationId === currentLocationId;
 }
 
+function sanitizeNarrationMetadata(entry: StateCommitLog[number]) {
+  if (!entry.metadata) {
+    return null;
+  }
+
+  if (entry.status === "rejected" || entry.status === "noop") {
+    return null;
+  }
+
+  const metadata = entry.metadata;
+  const sanitized: Record<string, unknown> = {};
+
+  if (typeof metadata.actorRef === "string") {
+    sanitized.actorRef = metadata.actorRef;
+  }
+  if (typeof metadata.newLocationId === "string" || metadata.newLocationId === null) {
+    sanitized.newLocationId = metadata.newLocationId;
+  }
+  if (typeof metadata.arrivesInCurrentScene === "boolean") {
+    sanitized.arrivesInCurrentScene = metadata.arrivesInCurrentScene;
+  }
+  if (typeof metadata.aspectKey === "string") {
+    sanitized.aspectKey = metadata.aspectKey;
+  }
+  if (typeof metadata.objectId === "string") {
+    sanitized.objectId = metadata.objectId;
+  }
+  if (typeof metadata.state === "string") {
+    sanitized.state = metadata.state;
+  }
+  if (typeof metadata.itemId === "string") {
+    sanitized.itemId = metadata.itemId;
+  }
+  if (typeof metadata.informationId === "string") {
+    sanitized.informationId = metadata.informationId;
+  }
+  if (typeof metadata.npcId === "string") {
+    sanitized.npcId = metadata.npcId;
+  }
+  if (typeof metadata.focusKey === "string") {
+    sanitized.focusKey = metadata.focusKey;
+  }
+  if (typeof metadata.label === "string") {
+    sanitized.label = metadata.label;
+  }
+
+  return Object.keys(sanitized).length ? sanitized : null;
+}
+
+function buildSanitizedNarrationCommitLog(stateCommitLog: StateCommitLog) {
+  return stateCommitLog.map((entry) => ({
+    kind: entry.kind,
+    mutationType: entry.mutationType ?? null,
+    status: entry.status,
+    reasonCode: entry.reasonCode,
+    summary: entry.summary,
+    metadata: sanitizeNarrationMetadata(entry),
+  }));
+}
+
 function buildResolvedNarrationConstraints(input: ResolvedTurnNarrationInput) {
-  const appliedMutations = input.stateCommitLog.filter(
+  const sanitizedCommitLog = buildSanitizedNarrationCommitLog(input.stateCommitLog);
+  const appliedMutations = sanitizedCommitLog.filter(
     (entry) => entry.status === "applied" && entry.kind === "mutation" && entry.mutationType,
   );
-  const rejectedMutations = input.stateCommitLog.filter(
+  const rejectedMutations = sanitizedCommitLog.filter(
     (entry) => entry.status === "rejected" && entry.kind === "mutation" && entry.mutationType,
   );
   const timeOnlyTurn =
@@ -2847,7 +3063,7 @@ function buildResolvedNarrationConstraints(input: ResolvedTurnNarrationInput) {
           || entry.mutationType === "set_scene_actor_presence",
       ),
     rejectedMutationTypes: rejectedNonTimeMutations.map((entry) => entry.mutationType),
-    hasArrivalCommit: input.stateCommitLog.some((entry) =>
+    hasArrivalCommit: sanitizedCommitLog.some((entry) =>
       isAppliedArrivalMutation(entry, input.promptContext.currentLocation.id),
     ),
   };
@@ -2866,6 +3082,7 @@ function narrationViolatesResolvedConstraints(
 }
 
 function buildResolvedTurnNarrationPrompt(input: ResolvedTurnNarrationInput) {
+  const sanitizedCommitLog = buildSanitizedNarrationCommitLog(input.stateCommitLog);
   const system = [
     "You are the Dungeon Master narrator for a resolved simulated-world turn.",
     "Return exactly one structured payload using the provided tool.",
@@ -2886,9 +3103,9 @@ function buildResolvedTurnNarrationPrompt(input: ResolvedTurnNarrationInput) {
   const user = [
     formatPromptBlock("player_action", input.playerAction),
     formatPromptBlock("narration_constraints", buildResolvedNarrationConstraints(input)),
-    formatPromptBlock("context", input.promptContext),
+    formatPromptBlock("context", formatSpatialPromptContext(input.promptContext)),
     formatPromptBlock("fetched_facts", input.fetchedFacts),
-    formatPromptBlock("state_commit_log", input.stateCommitLog),
+    formatPromptBlock("state_commit_log", sanitizedCommitLog),
     formatPromptBlock("check_result", input.checkResult ?? null),
     formatPromptBlock("suggested_actions", input.suggestedActions),
   ].join("\n\n");
@@ -5483,6 +5700,8 @@ class DungeonMasterClient {
     if (!plannerModel) {
       return fallbackRouterDecision(
         "Planner model is unavailable, so the turn falls back to full context and no explicit vectors.",
+        input.playerAction,
+        input.context,
       );
     }
 
@@ -5490,7 +5709,7 @@ class DungeonMasterClient {
       const user = [
         formatPromptBlock("action", input.playerAction),
         formatPromptBlock("turn_mode", input.turnMode),
-        formatPromptBlock("router_context", input.context),
+        formatPromptBlock("router_context", formatRouterContextForModel(input.context)),
       ].join("\n\n");
 
       let correctionNotes: string | null = null;
@@ -5543,6 +5762,8 @@ class DungeonMasterClient {
 
       return fallbackRouterDecision(
         "Planner output was invalid, so the turn falls back to full context and no explicit vectors.",
+        input.playerAction,
+        input.context,
       );
     } catch (error) {
       logNarrationDebug("turn_router.error", {
@@ -5550,6 +5771,8 @@ class DungeonMasterClient {
       });
       return fallbackRouterDecision(
         "Planner classification failed, so the turn falls back to full context and no explicit vectors.",
+        input.playerAction,
+        input.context,
       );
     }
   }
@@ -5792,6 +6015,8 @@ export const aiProviderTestUtils = {
   normalizeScheduleEntityId,
   normalizeSchedulePayloadIds,
   normalizeRouterDecision,
+  formatRouterContextForModel,
+  fallbackRouterDecision,
   parseFinalActionToolCall,
   selectPromptContextProfile,
 };

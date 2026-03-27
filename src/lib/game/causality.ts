@@ -8,6 +8,7 @@ function entityLabel(input: TurnCausalityCode) {
 
 const changeRenderers: Record<string, (code: TurnCausalityCode) => string> = {
   LOCATION_CHANGED: (code) => `You moved to ${entityLabel(code)}.`,
+  SCENE_FOCUS_CHANGED: (code) => `You repositioned to ${entityLabel(code)}.`,
   TIME_ADVANCED: (code) => `${code.minutes ?? 0} minutes passed.`,
   NPC_APPROVAL_CHANGED: (code) =>
     `${entityLabel(code)}'s attitude shifted by ${code.delta ?? 0}.`,

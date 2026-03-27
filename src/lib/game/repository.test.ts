@@ -245,6 +245,7 @@ test("toRouterSceneAspectSummaries emits compact duration-aware aspect records",
     globalTime: 480,
     pendingTurnId: null,
     lastActionSummary: null,
+    sceneFocus: null,
     customTitle: null,
     sceneAspects: {
       forge_smoke: {
@@ -372,6 +373,7 @@ test("prunePromptContextForRouter ranks resolved refs and trims unrelated heavy 
           quantity: 0,
         },
       ],
+      sceneFocus: null,
       sceneAspects: {
         crowd_noise: {
           label: "crowd noise",
@@ -785,6 +787,7 @@ test("toPlayerCampaignSnapshot preserves latest retryable turn metadata", () => 
       globalTime: 480,
       pendingTurnId: null,
       lastActionSummary: null,
+      sceneFocus: null,
       sceneAspects: {},
     },
     character: {} as never,

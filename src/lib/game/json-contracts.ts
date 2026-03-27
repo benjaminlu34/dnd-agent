@@ -23,6 +23,10 @@ const rawCampaignRuntimeStateSchema = z.object({
   globalTime: z.number().int().min(0),
   pendingTurnId: z.string().trim().min(1).nullable(),
   lastActionSummary: z.string().trim().min(1).nullable(),
+  sceneFocus: z.object({
+    key: z.string().trim().min(1),
+    label: z.string().trim().min(1),
+  }).nullish().default(null),
   sceneAspects: z.record(z.string(), sceneAspectSchema).optional().default({}),
   sceneObjectStates: z.record(z.string(), z.string()).optional().default({}),
   customTitle: z.string().trim().min(1).nullable().optional(),
@@ -47,6 +51,7 @@ const campaignRuntimeStateSchema: z.ZodType<CampaignRuntimeState> = rawCampaignR
     globalTime: value.globalTime,
     pendingTurnId: value.pendingTurnId,
     lastActionSummary: value.lastActionSummary,
+    sceneFocus: value.sceneFocus ?? null,
     sceneAspects: normalizedAspects,
     customTitle: value.customTitle ?? null,
   } satisfies CampaignRuntimeState;
@@ -62,6 +67,7 @@ const factionResourcesSchema = z.object({
 const turnCausalityCodeNameValues = [
   "TIME_ADVANCED",
   "LOCATION_CHANGED",
+  "SCENE_FOCUS_CHANGED",
   "NPC_APPROVAL_CHANGED",
   "INFORMATION_DISCOVERED",
   "INFORMATION_ADDED",
@@ -149,6 +155,7 @@ const stateCommitLogEntrySchema: z.ZodType<StateCommitLogEntry> = z.object({
       "adjust_relationship",
       "discover_information",
       "set_npc_state",
+      "set_player_scene_focus",
       "set_scene_actor_presence",
       "update_scene_object",
       "restore_health",

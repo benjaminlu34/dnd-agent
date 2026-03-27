@@ -65,7 +65,12 @@ import type {
   TurnSubmissionRequest,
   ValidatedTurnCommand,
 } from "@/lib/game/types";
-import { validateTurnCommand, TIME_MODE_BOUNDS } from "@/lib/game/validation";
+import {
+  isLikelyProxyPlayerMovementAction,
+  isLikelySoloErrandAction,
+  validateTurnCommand,
+  TIME_MODE_BOUNDS,
+} from "@/lib/game/validation";
 import { buildCheckResult } from "@/lib/game/checks";
 import { normalizeItemName } from "@/lib/game/item-utils";
 import { sceneActorIdentityClearlyMatches } from "@/lib/game/scene-identity";
@@ -1307,6 +1312,7 @@ function mutationPhaseForEvaluation(mutation: MechanicsMutation): "immediate" | 
     mutation.type === "spawn_scene_aspect"
     || mutation.type === "spawn_temporary_actor"
     || mutation.type === "spawn_environmental_item"
+    || mutation.type === "set_player_scene_focus"
     || mutation.type === "set_scene_actor_presence"
   ) {
     return "immediate";
@@ -1331,6 +1337,7 @@ function evaluateResolvedCommand(input: {
   fetchedFacts: TurnFetchToolResult[];
   routerDecision: RouterDecision;
   groundedItemIds?: string[];
+  playerAction?: string;
 }) {
   const stateCommitLog: StateCommitLog = [];
   const appliedMutations: AppliedMutationRecord[] = [];
@@ -1366,6 +1373,7 @@ function evaluateResolvedCommand(input: {
   const discoveredInformationIds = new Set<string>();
   let projectedGold = input.snapshot.character.gold;
   let projectedLocationId = input.snapshot.state.currentLocationId;
+  let projectedSceneFocus = input.snapshot.state.sceneFocus ?? null;
   let projectedHealth = input.snapshot.character.health;
   const projectedSceneAspects = structuredClone(input.snapshot.state.sceneAspects ?? {});
   const groundedItemIds = new Set(
@@ -1465,6 +1473,7 @@ function evaluateResolvedCommand(input: {
         continue;
       }
       projectedLocationId = mutation.targetLocationId;
+      projectedSceneFocus = null;
       hasAppliedMove = true;
       for (const [aspectKey, aspect] of Object.entries(projectedSceneAspects)) {
         if (aspect.duration === "scene") {
@@ -1479,6 +1488,53 @@ function evaluateResolvedCommand(input: {
         reasonCode: "moved_player",
         summary: `You travel to ${route.targetLocationName}.`,
         metadata: { ...appliedMutation } as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({ mutation: appliedMutation, entry });
+      continue;
+    }
+
+    if (mutation.type === "set_player_scene_focus") {
+      const focusKey = normalizeWhitespace(mutation.focusKey);
+      const label = normalizeWhitespace(mutation.label);
+      if (!focusKey || !label) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "That scene focus is not grounded enough to apply.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (projectedSceneFocus?.key === focusKey && projectedSceneFocus.label === label) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "noop",
+          reasonCode: "already_applied",
+          summary: `You are already focused on ${label}.`,
+          metadata: {
+            focusKey,
+            label,
+          } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      projectedSceneFocus = { key: focusKey, label };
+      const appliedMutation = { ...mutation, focusKey, label, phase } as MechanicsMutation;
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "scene_focus_updated",
+        summary: `You reposition to ${label}.`,
+        metadata: {
+          focusKey,
+          label,
+          phase,
+        } as unknown as Record<string, unknown>,
       };
       stateCommitLog.push(entry);
       appliedMutations.push({ mutation: appliedMutation, entry });
@@ -1707,6 +1763,17 @@ function evaluateResolvedCommand(input: {
     }
 
     if (mutation.type === "record_local_interaction") {
+      if (isLikelySoloErrandAction(input.playerAction)) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_semantics",
+          summary: "That action reads as a self-directed errand rather than an interaction with another person.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
       if (
         !hasVector(input.routerDecision, "converse")
         && !hasVector(input.routerDecision, "economy_light")
@@ -1765,6 +1832,17 @@ function evaluateResolvedCommand(input: {
     }
 
     if (mutation.type === "set_scene_actor_presence") {
+      if (isLikelyProxyPlayerMovementAction(input.playerAction)) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_semantics",
+          summary: "That presence change reads like player movement, not an actor independently leaving or returning.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
       if (
         !hasVector(input.routerDecision, "converse")
         && !hasVector(input.routerDecision, "investigate")
@@ -1819,13 +1897,12 @@ function evaluateResolvedCommand(input: {
             status: "noop",
             reasonCode: "already_applied",
             summary:
-              mutation.newLocationId == null
-                ? `${actor.label} is already away from the scene.`
-                : `${actor.label} is already there.`,
+            mutation.newLocationId == null
+              ? `${actor.label} is already away from the scene.`
+              : `${actor.label} is already there.`,
             metadata: {
               ...mutation,
               actorRef: tempActorRef(actor.id),
-              arrivesInCurrentScene: mutation.newLocationId === projectedLocationId,
               phase,
             } as unknown as Record<string, unknown>,
           });
@@ -1868,13 +1945,12 @@ function evaluateResolvedCommand(input: {
             mutation.newLocationId == null
               ? `${npcLabel} is already away from the scene.`
               : `${npcLabel} is already there.`,
-          metadata: {
-            ...mutation,
-            actorRef: npcActorRef(target.actorId),
-            arrivesInCurrentScene: mutation.newLocationId === projectedLocationId,
-            phase,
-          } as unknown as Record<string, unknown>,
-        });
+            metadata: {
+              ...mutation,
+              actorRef: npcActorRef(target.actorId),
+              phase,
+            } as unknown as Record<string, unknown>,
+          });
         continue;
       }
 
@@ -2427,6 +2503,7 @@ function evaluateResolvedCommand(input: {
         input.command.memorySummary
         ?? stateCommitLog.find((entry) => entry.status !== "noop")?.summary
         ?? "The situation changes.",
+      sceneFocus: projectedSceneFocus,
       sceneAspects: projectedSceneAspects,
     } satisfies CampaignRuntimeState,
   };
@@ -2616,7 +2693,11 @@ async function applyResolvedMutations(input: {
       continue;
     }
 
-    if (mutation.type === "spawn_scene_aspect" || mutation.type === "update_scene_object") {
+    if (
+      mutation.type === "spawn_scene_aspect"
+      || mutation.type === "update_scene_object"
+      || mutation.type === "set_player_scene_focus"
+    ) {
       continue;
     }
 
@@ -3494,6 +3575,9 @@ function collectMemoryEntityLinks(input: {
             : null,
       );
     }
+    if (entry.mutationType === "set_player_scene_focus") {
+      pushKey("scene_object", typeof entry.metadata.focusKey === "string" ? entry.metadata.focusKey : null);
+    }
     if (entry.mutationType === "record_local_interaction") {
       pushKey("npc", typeof entry.metadata.promotedNpcId === "string" ? entry.metadata.promotedNpcId : null);
     }
@@ -3560,6 +3644,28 @@ function buildTurnCausality(input: {
       code: "PLAYER_TRAVEL",
       entityType: "location",
       targetId: input.nextState.currentLocationId,
+      metadata: null,
+    });
+  }
+  if (
+    input.nextState.currentLocationId === input.snapshot.state.currentLocationId
+    && (
+      input.nextState.sceneFocus?.key !== input.snapshot.state.sceneFocus?.key
+      || input.nextState.sceneFocus?.label !== input.snapshot.state.sceneFocus?.label
+    )
+  ) {
+    changeCodes.push({
+      code: "SCENE_FOCUS_CHANGED",
+      entityType: "scene_object",
+      targetId: input.nextState.sceneFocus?.key ?? null,
+      metadata: {
+        label: input.nextState.sceneFocus?.label ?? null,
+      },
+    });
+    reasonCodes.push({
+      code: "PLAYER_SCENE_INTERACTION",
+      entityType: "scene_object",
+      targetId: input.nextState.sceneFocus?.key ?? null,
       metadata: null,
     });
   }
@@ -3790,6 +3896,7 @@ async function commitResolvedTurn(input: {
       fetchedFacts,
       routerDecision,
       groundedItemIds: input.groundedItemIds,
+      playerAction,
     });
 
     const actionEffects = await applyResolvedMutations({

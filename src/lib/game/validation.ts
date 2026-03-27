@@ -165,6 +165,47 @@ function isValidLocalInteractionTarget(snapshot: CampaignSnapshot, localEntityId
   return snapshot.temporaryActors.some((actor) => actor.id === normalized);
 }
 
+function normalizePlayerActionText(playerAction: string | undefined) {
+  return (playerAction ?? "").trim().toLowerCase();
+}
+
+export function isLikelySoloErrandAction(playerAction: string | undefined) {
+  const normalized = normalizePlayerActionText(playerAction);
+  if (!normalized) {
+    return false;
+  }
+
+  const soloErrandSignals = [
+    /\b(head|go|return|step|move|walk|make my way)\b/,
+    /\b(check|inspect|retrieve|get|grab|look through|search through|sort through)\b/,
+    /\b(my|mine|coin purse|pack|bag|bench|belongings|gear|tools)\b/,
+  ];
+  const explicitInterpersonalSignals = [
+    /\b(ask|tell|speak|talk|greet|hail|call over|hear .* out|buy .* from|sell .* to|trade with)\b/,
+  ];
+
+  return soloErrandSignals.every((pattern) => pattern.test(normalized))
+    && !explicitInterpersonalSignals.some((pattern) => pattern.test(normalized));
+}
+
+export function isLikelyProxyPlayerMovementAction(playerAction: string | undefined) {
+  const normalized = normalizePlayerActionText(playerAction);
+  if (!normalized) {
+    return false;
+  }
+
+  const playerMovementSignals = [
+    /\b(i|me|my)\b/,
+    /\b(head|go|return|step|move|walk|make my way|back to)\b/,
+  ];
+  const actorDirectionSignals = [
+    /\b(send|dismiss|order|tell|ask|beckon|wave|call)\b/,
+  ];
+
+  return playerMovementSignals.every((pattern) => pattern.test(normalized))
+    && !actorDirectionSignals.some((pattern) => pattern.test(normalized));
+}
+
 function mutationPhaseForCheckStakes(mutation: MechanicsMutation): "immediate" | "conditional" {
   if (mutation.phase) {
     return mutation.phase;
@@ -182,6 +223,7 @@ function mutationPhaseForCheckStakes(mutation: MechanicsMutation): "immediate" |
     mutation.type === "spawn_scene_aspect"
     || mutation.type === "spawn_temporary_actor"
     || mutation.type === "spawn_environmental_item"
+    || mutation.type === "set_player_scene_focus"
     || mutation.type === "set_scene_actor_presence"
   ) {
     return "immediate";
@@ -263,7 +305,7 @@ export function validateTurnCommand(input: {
   fetchedFacts?: TurnFetchToolResult[];
   playerAction?: string;
 }): ValidatedTurnCommand {
-  const { snapshot, command, fetchedFacts = [] } = input;
+  const { snapshot, command, fetchedFacts = [], playerAction } = input;
 
   if (command.type === "request_clarification") {
     return {
@@ -287,10 +329,20 @@ export function validateTurnCommand(input: {
 
   const mutations = command.mutations.filter((mutation) => {
     if (mutation.type !== "record_local_interaction") {
+      if (mutation.type === "set_scene_actor_presence" && isLikelyProxyPlayerMovementAction(playerAction)) {
+        warnings.push(
+          "Mechanics response appears to use set_scene_actor_presence as a proxy for player movement; engine will reject it semantically.",
+        );
+      }
       return true;
     }
 
     if (isValidLocalInteractionTarget(snapshot, mutation.localEntityId)) {
+      if (isLikelySoloErrandAction(playerAction)) {
+        warnings.push(
+          "Mechanics response appears to use record_local_interaction for a self-directed errand; engine will reject it semantically.",
+        );
+      }
       return true;
     }
 

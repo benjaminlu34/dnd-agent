@@ -102,6 +102,9 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   assert.match(prompt, /Use spawn_environmental_item before adjust_inventory/);
   assert.match(prompt, /Use set_scene_actor_presence whenever someone leaves the current scene/);
   assert.match(prompt, /comes back later in the turn, represent that mechanically with set_scene_actor_presence/);
+  assert.match(prompt, /Use set_player_scene_focus for self-directed movement within the current location/);
+  assert.match(prompt, /Never use it to simulate the player arriving somewhere/);
+  assert.match(prompt, /Do not use it for solo errands, checking your own gear, retrieving your own belongings/);
   assert.match(prompt, /Use adjust_inventory for gaining, losing, consuming, or handing over grounded inventory items/);
   assert.match(prompt, /Self-directed downtime work may use adjust_inventory, spawn_environmental_item, and spawn_scene_aspect/);
   assert.match(prompt, /Use spawn_scene_aspect for smoke, damage, noise/);
@@ -114,6 +117,8 @@ test("buildTurnRouterSystemPrompt distinguishes self-talk from on-screen social 
   assert.match(prompt, /Directing a present subordinate or ally to pass along a message or fetch someone is a local in-scene action/);
   assert.match(prompt, /Use clarification only for hard blockers/);
   assert.match(prompt, /Do not invent new ids or spawn handles/);
+  assert.match(prompt, /routes strictly means macro-travel leaving the current location node/);
+  assert.match(prompt, /back to the forge, into the market, over to the bench/);
   assert.match(prompt, /unresolvedReferents/);
 });
 
@@ -159,6 +164,7 @@ test("buildResolvedTurnNarrationPrompt includes prompt context and fetched facts
       recentWorldShifts: [],
       activeThreads: [],
       inventory: [],
+      sceneFocus: null,
       sceneAspects: {},
       localTexture: null,
       globalTime: 270,
@@ -246,6 +252,10 @@ test("buildTurnUserPrompt includes attention packet before the main action block
       recentWorldShifts: [],
       activeThreads: [],
       inventory: [],
+      sceneFocus: {
+        key: "forge",
+        label: "The Forge",
+      },
       sceneAspects: {},
       localTexture: null,
       globalTime: 540,
@@ -312,6 +322,7 @@ test("buildTurnUserPrompt includes attention packet before the main action block
   assert.ok(prompt.indexOf("<attention_packet>") < prompt.indexOf("<action>"));
   assert.match(prompt, /targetRef: npc:npc_mira/);
   assert.match(prompt, /mustCheck:/);
+  assert.match(prompt, /You are in Lantern Market\. Your current focus\/position is: The Forge\./);
 });
 
 test("buildResolvedTurnNarrationPrompt does not treat departures as waited-for arrivals", () => {
@@ -334,6 +345,7 @@ test("buildResolvedTurnNarrationPrompt does not treat departures as waited-for a
       recentWorldShifts: [],
       activeThreads: [],
       inventory: [],
+      sceneFocus: null,
       sceneAspects: {},
       localTexture: null,
       globalTime: 480,
@@ -392,6 +404,7 @@ test("buildResolvedTurnNarrationPrompt surfaces rejected-only interaction constr
       recentWorldShifts: [],
       activeThreads: [],
       inventory: [],
+      sceneFocus: null,
       sceneAspects: {},
       localTexture: null,
       globalTime: 540,
@@ -426,6 +439,7 @@ test("buildResolvedTurnNarrationPrompt surfaces rejected-only interaction constr
   assert.match(prompt.user, /rejectedOutcomeOnly: true/);
   assert.match(prompt.user, /rejectedInteractionOnly: true/);
   assert.match(prompt.user, /rejectedMutationTypes:\s+  - record_local_interaction/);
+  assert.doesNotMatch(prompt.user, /localEntityId: npc:npc_mira/);
 });
 
 test("narrationViolatesResolvedConstraints rejects invented quoted replies on rejected-only interaction turns", () => {
@@ -449,6 +463,7 @@ test("narrationViolatesResolvedConstraints rejects invented quoted replies on re
         recentWorldShifts: [],
         activeThreads: [],
         inventory: [],
+        sceneFocus: null,
         sceneAspects: {},
         localTexture: null,
         globalTime: 540,
@@ -481,6 +496,90 @@ test("narrationViolatesResolvedConstraints rejects invented quoted replies on re
   );
 
   assert.match(violation ?? "", /must not invent quoted dialogue/i);
+});
+
+test("buildResolvedTurnNarrationPrompt strips planner-intent metadata for the coin-purse regression turn", () => {
+  const prompt = aiProviderTestUtils.buildResolvedTurnNarrationPrompt({
+    playerAction: "I realize I did not bring my coin purse. I head back to the forge to get it and check on the horseshoe order.",
+    promptContext: {
+      currentLocation: {
+        id: "loc_waterdeep",
+        name: "Waterdeep",
+        type: "city",
+        summary: "A busy district with street traffic and workshops.",
+        state: "active",
+      },
+      adjacentRoutes: [],
+      sceneActors: [
+        {
+          actorRef: "npc:npc_bram",
+          kind: "npc",
+          displayLabel: "Bram Stoutshield",
+          role: "forge assistant",
+          detailFetchHint: null,
+          lastSummary: "He usually keeps near the forge when business is brisk.",
+        },
+      ],
+      recentLocalEvents: [],
+      recentTurnLedger: [],
+      discoveredInformation: [],
+      activePressures: [],
+      recentWorldShifts: [],
+      activeThreads: [],
+      inventory: [],
+      sceneFocus: null,
+      sceneAspects: {},
+      localTexture: null,
+      globalTime: 620,
+      timeOfDay: "late morning",
+      dayCount: 1,
+    },
+    fetchedFacts: [],
+    stateCommitLog: [
+      {
+        kind: "mutation",
+        mutationType: "advance_time",
+        status: "applied",
+        reasonCode: "time_advanced",
+        summary: "Time passes for 10 minutes.",
+        metadata: {
+          durationMinutes: 10,
+        },
+      },
+      {
+        kind: "mutation",
+        mutationType: "set_scene_actor_presence",
+        status: "noop",
+        reasonCode: "already_applied",
+        summary: "Bram Stoutshield is already there.",
+        metadata: {
+          actorRef: "npc:npc_bram",
+          newLocationId: "loc_waterdeep",
+          arrivesInCurrentScene: true,
+          reason: "Returns to the forge to retrieve coin purse and check the order.",
+        },
+      },
+      {
+        kind: "mutation",
+        mutationType: "record_local_interaction",
+        status: "rejected",
+        reasonCode: "invalid_target",
+        summary: "That unnamed local is not available here.",
+        metadata: {
+          localEntityId: "temp:forge_assistant",
+          interactionSummary: "Returns to the forge to retrieve coin purse and check on the horseshoe order.",
+        },
+      },
+    ],
+    checkResult: null,
+    suggestedActions: [],
+  });
+
+  assert.match(prompt.user, /rejectedOutcomeOnly: true/);
+  assert.match(prompt.user, /rejectedInteractionOnly: true/);
+  assert.doesNotMatch(prompt.user, /Returns to the forge to retrieve coin purse/);
+  assert.doesNotMatch(prompt.user, /arrivesInCurrentScene: true/);
+  assert.doesNotMatch(prompt.user, /localEntityId: temp:forge_assistant/);
 });
 
 test("normalizeRouterDecision dedupes vectors and prerequisites", () => {
@@ -560,6 +659,198 @@ test("normalizeRouterDecision fills missing clarification and strips invalid res
     },
   ]);
   assert.deepEqual(normalized.attention.mustCheck, ["gold", "inventory"]);
+});
+
+test("fallbackRouterDecision keeps a conservative non-empty attention packet", () => {
+  const fallback = aiProviderTestUtils.fallbackRouterDecision(
+    "Planner classification failed, so the turn falls back to full context and no explicit vectors.",
+    "I head back to the forge to get my coin purse.",
+    {
+      currentLocation: {
+        id: "loc_waterdeep",
+        name: "Waterdeep",
+        type: "city",
+        summary: "A broad city node.",
+        state: "active",
+      },
+      sceneFocus: null,
+      adjacentRoutes: [
+        {
+          id: "route_neverwinter",
+          targetLocationId: "loc_neverwinter",
+          targetLocationName: "Neverwinter",
+          travelTimeMinutes: 720,
+          dangerLevel: 2,
+          currentStatus: "open",
+          description: "A long northern road.",
+        },
+      ],
+      sceneActors: [],
+      recentLocalEvents: [],
+      recentTurnLedger: [],
+      discoveredInformation: [],
+      activePressures: [],
+      activeThreads: [],
+      inventory: [],
+      sceneAspects: [],
+      gold: 3,
+    },
+  );
+
+  assert.match(fallback.attention.primaryIntent, /head back to the forge/i);
+  assert.deepEqual(fallback.attention.mustCheck, [
+    "sceneActors",
+    "inventory",
+    "sceneAspects",
+    "recentTurnLedger",
+  ]);
+});
+
+test("fallbackRouterDecision includes routes only for clear macro-travel intent", () => {
+  const fallback = aiProviderTestUtils.fallbackRouterDecision(
+    "Planner classification failed, so the turn falls back to full context and no explicit vectors.",
+    "I travel to Neverwinter before dusk.",
+    {
+      currentLocation: {
+        id: "loc_waterdeep",
+        name: "Waterdeep",
+        type: "city",
+        summary: "A broad city node.",
+        state: "active",
+      },
+      sceneFocus: null,
+      adjacentRoutes: [
+        {
+          id: "route_neverwinter",
+          targetLocationId: "loc_neverwinter",
+          targetLocationName: "Neverwinter",
+          travelTimeMinutes: 720,
+          dangerLevel: 2,
+          currentStatus: "open",
+          description: "A long northern road.",
+        },
+      ],
+      sceneActors: [],
+      recentLocalEvents: [],
+      recentTurnLedger: [],
+      discoveredInformation: [],
+      activePressures: [],
+      activeThreads: [],
+      inventory: [],
+      sceneAspects: [],
+      gold: 3,
+    },
+  );
+
+  assert.deepEqual(fallback.attention.mustCheck, [
+    "sceneActors",
+    "inventory",
+    "sceneAspects",
+    "recentTurnLedger",
+    "routes",
+  ]);
+});
+
+test("formatRouterContextForModel compacts router payload to skinny referent lists", () => {
+  const rendered = aiProviderTestUtils.formatRouterContextForModel({
+    currentLocation: {
+      id: "loc_waterdeep",
+      name: "Waterdeep",
+      type: "city",
+      summary: "A city of wards, guilds, and harbor trade.",
+      state: "active",
+    },
+    sceneFocus: {
+      key: "forge",
+      label: "The Forge",
+    },
+    adjacentRoutes: [
+      {
+        id: "route_neverwinter",
+        targetLocationId: "loc_neverwinter",
+        targetLocationName: "Neverwinter",
+        travelTimeMinutes: 720,
+        dangerLevel: 2,
+        currentStatus: "open",
+        description: "A long northern road lined with caravanserais and patrol beacons.",
+      },
+    ],
+    sceneActors: [
+      {
+        actorRef: "npc:npc_captain_thorne",
+        kind: "npc",
+        displayLabel: "Captain Thorne",
+        role: "watch captain",
+        detailFetchHint: {
+          type: "fetch_npc_detail",
+          npcId: "npc_captain_thorne",
+        },
+        lastSummary:
+          "A veteran officer with a long backstory paragraph that should not dominate the router payload or encourage bloated prompts.",
+      },
+    ],
+    recentLocalEvents: [
+      {
+        id: "event_1",
+        description: "The street crowd thickened after dawn as carts and apprentices started competing for room near the ward gate.",
+        locationId: "loc_waterdeep",
+        triggerTime: 480,
+        minutesAgo: 5,
+      },
+    ],
+    recentTurnLedger: [
+      "You finished a complicated exchange with the guild factor and then spent several minutes checking invoices around the stall fronts.",
+    ],
+    discoveredInformation: [
+      {
+        id: "info_1",
+        title: "Guild Friction",
+        summary: "A dispute is slowing charcoal deliveries.",
+        truthfulness: "verified",
+      },
+    ],
+    activePressures: [
+      {
+        entityType: "npc",
+        entityId: "npc_captain_thorne",
+        label: "Watch scrutiny",
+        summary: "The city watch is paying closer attention to the ward after a smuggling rumor spread.",
+      },
+    ],
+    activeThreads: [
+      {
+        memoryId: "mem_1",
+        memoryKind: "promise",
+        summary: "You promised to finish the horseshoe order before the afternoon merchant arrives.",
+        isLongArcCandidate: false,
+        primaryEntityType: "npc",
+        primaryEntityId: "npc_merchant",
+      },
+    ],
+    inventory: [
+      {
+        templateId: "item_coin_purse",
+        name: "coin purse",
+        quantity: 1,
+      },
+    ],
+    sceneAspects: [
+      {
+        key: "forge_heat",
+        label: "Forge Heat",
+        state: "The forge is roaring hot and ready for another long work session.",
+        duration: "scene",
+      },
+    ],
+    gold: 3,
+  });
+
+  assert.equal(rendered.locationOrientation, "You are in Waterdeep. Your current focus/position is: The Forge.");
+  assert.deepEqual(rendered.inventory, ["coin purse (qty 1) [item_coin_purse]"]);
+  assert.deepEqual(rendered.routes, ["Neverwinter (720m, open, danger 2) [route_neverwinter]"]);
+  assert.match(rendered.sceneActors[0] ?? "", /Captain Thorne \(watch captain\) \[npc:npc_captain_thorne, npc detail-fetch\]/);
+  assert.doesNotMatch(rendered.sceneActors[0] ?? "", /encourage bloated prompts/);
+  assert.doesNotMatch(rendered.routes[0] ?? "", /caravanserais/);
 });
 
 test("selectPromptContextProfile falls back to full when router confidence is low", () => {
