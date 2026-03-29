@@ -52,6 +52,22 @@ const summaryStopWords = new Set([
   "your",
 ]);
 
+const focusStopWords = new Set([
+  "the",
+  "and",
+  "for",
+  "with",
+  "into",
+  "from",
+  "your",
+  "inside",
+  "front",
+  "back",
+  "room",
+  "area",
+  "entrance",
+]);
+
 function canonicalRoleTokens(value: string) {
   const tokens = normalizeSceneIdentityText(value)
     .split(" ")
@@ -84,6 +100,12 @@ function overlapRatio(left: string[], right: string[]) {
   }
 
   return overlap / Math.min(left.length, right.length);
+}
+
+function focusTokens(value: string) {
+  return normalizeSceneIdentityText(value)
+    .split(" ")
+    .filter((token) => token.length >= 3 && !focusStopWords.has(token));
 }
 
 export function canonicalSceneRoleSignature(value: string) {
@@ -122,4 +144,74 @@ export function sceneActorIdentityClearlyMatches(input: {
   }
 
   return roleOverlap >= 0.5 && summaryOverlap >= 0.34;
+}
+
+export function sceneFocusTokens(sceneFocus: { key: string; label: string } | null | undefined) {
+  if (!sceneFocus) {
+    return [];
+  }
+
+  return Array.from(
+    new Set(focusTokens(`${sceneFocus.key} ${sceneFocus.label}`)),
+  );
+}
+
+export function sceneActorMatchesFocus(input: {
+  actor: {
+    displayLabel: string;
+    role: string;
+    lastSummary?: string | null;
+    focusKey?: string | null;
+  };
+  sceneFocus: { key: string; label: string } | null | undefined;
+}) {
+  if (!input.sceneFocus) {
+    return true;
+  }
+  if (input.actor.focusKey && input.actor.focusKey !== input.sceneFocus.key) {
+    return false;
+  }
+  if (input.actor.focusKey === input.sceneFocus.key) {
+    return true;
+  }
+
+  const tokens = sceneFocusTokens(input.sceneFocus);
+  if (!tokens.length) {
+    return false;
+  }
+
+  const haystack = normalizeSceneIdentityText(
+    `${input.actor.displayLabel} ${input.actor.role} ${input.actor.lastSummary ?? ""}`,
+  );
+  return tokens.some((token) => haystack.includes(token));
+}
+
+export function sceneAspectMatchesFocus(input: {
+  aspect: {
+    label: string;
+    state: string;
+    focusKey?: string | null;
+  };
+  sceneFocus: { key: string; label: string } | null | undefined;
+}) {
+  if (!input.sceneFocus) {
+    return true;
+  }
+  if (input.aspect.focusKey == null) {
+    return true;
+  }
+  if (input.aspect.focusKey && input.aspect.focusKey !== input.sceneFocus.key) {
+    return false;
+  }
+  if (input.aspect.focusKey === input.sceneFocus.key) {
+    return true;
+  }
+
+  const tokens = sceneFocusTokens(input.sceneFocus);
+  if (!tokens.length) {
+    return false;
+  }
+
+  const haystack = normalizeSceneIdentityText(`${input.aspect.label} ${input.aspect.state}`);
+  return tokens.some((token) => haystack.includes(token));
 }

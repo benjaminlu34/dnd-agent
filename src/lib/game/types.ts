@@ -1082,6 +1082,11 @@ export type RouterUnresolvedReferent = {
   confidence: RouterReferentConfidence;
 };
 
+export type RouterImpliedDestinationFocus = {
+  key: string;
+  label: string;
+};
+
 export type RouterAttentionMustCheck =
   | "sceneActors"
   | "sceneAspects"
@@ -1095,6 +1100,7 @@ export type RouterAttention = {
   primaryIntent: string;
   resolvedReferents: RouterResolvedReferent[];
   unresolvedReferents: RouterUnresolvedReferent[];
+  impliedDestinationFocus: RouterImpliedDestinationFocus | null;
   mustCheck: RouterAttentionMustCheck[];
 };
 

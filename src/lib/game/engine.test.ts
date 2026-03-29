@@ -157,6 +157,7 @@ function createRouterDecision(
       primaryIntent: "Test routing.",
       resolvedReferents: [],
       unresolvedReferents: [],
+      impliedDestinationFocus: null,
       mustCheck: [],
     },
   };
@@ -252,7 +253,7 @@ test("request hash changes when observe mode changes the submission identity", (
   assert.notEqual(playerInputHash, observeHash);
 });
 
-test("router-selected local profile only applies at high confidence", () => {
+test("router-selected local profile stays local for micro-scene routing even at low confidence", () => {
   assert.equal(
     engineTestUtils.promptContextProfileForRouter({
       profile: "local",
@@ -270,6 +271,7 @@ test("router-selected local profile only applies at high confidence", () => {
         primaryIntent: "Same-scene action.",
         resolvedReferents: [],
         unresolvedReferents: [],
+        impliedDestinationFocus: null,
         mustCheck: [],
       },
     }),
@@ -293,10 +295,11 @@ test("router-selected local profile only applies at high confidence", () => {
         primaryIntent: "Uncertain broader context dependency.",
         resolvedReferents: [],
         unresolvedReferents: [],
+        impliedDestinationFocus: null,
         mustCheck: [],
       },
     }),
-    "full",
+    "local",
   );
 });
 
@@ -401,6 +404,7 @@ test("unscoped router fallback does not reject routine local interactions", () =
         primaryIntent: "Fallback routine interaction.",
         resolvedReferents: [],
         unresolvedReferents: [],
+        impliedDestinationFocus: null,
         mustCheck: [],
       },
     },
@@ -473,6 +477,107 @@ test("already discovered information becomes noop already_applied", () => {
       ["mutation", "discover_information", "noop", "already_applied"],
     ],
   );
+});
+
+test("grounded knowledge discoveries still apply when backed by fetched facts", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Review the clue"],
+      mutations: [
+        { type: "discover_information", informationId: "info_smuggler_ledger" },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [
+      {
+        type: "fetch_information_detail",
+        result: {
+          id: "info_smuggler_ledger",
+          title: "Smuggler Ledger",
+          summary: "A ledger ties tonight's cargo to the harbor syndicate.",
+          content: "The ledger ties tonight's cargo to the harbor syndicate.",
+          truthfulness: "verified",
+          accessibility: "guarded",
+          locationId: "loc_gate",
+          locationName: "Ash Gate",
+          factionId: null,
+          factionName: null,
+          sourceNpcId: null,
+          sourceNpcName: null,
+          isDiscovered: false,
+          expiresAtTime: null,
+        },
+      },
+    ],
+    routerDecision: createRouterDecision(["investigate"]),
+    playerAction: "I connect the ledger entry to what I already know.",
+  });
+
+  assert.deepEqual(
+    evaluated.stateCommitLog.map((entry) => [entry.kind, entry.mutationType, entry.status, entry.reasonCode]),
+    [
+      ["mutation", "discover_information", "applied", "information_discovered"],
+    ],
+  );
+});
+
+test("local sensory investigation rejects discover_information and points toward manifestation semantics", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: {
+      ...createSnapshot(),
+      localInformation: [
+        {
+          id: "info_rustle",
+          title: "The Rustle",
+          summary: "Something moved in the alley.",
+          accessibility: "public",
+          truthfulness: "uncertain",
+          locationId: "loc_gate",
+          locationName: "Ash Gate",
+          factionId: null,
+          factionName: null,
+          sourceNpcId: null,
+          sourceNpcName: null,
+          isDiscovered: false,
+          expiresAtTime: null,
+        },
+      ],
+    },
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Check the alley"],
+      mutations: [
+        { type: "discover_information", informationId: "info_rustle" },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: {
+      ...createRouterDecision(["investigate"]),
+      attention: {
+        primaryIntent: "Investigate the nearby noise.",
+        resolvedReferents: [],
+        unresolvedReferents: [],
+        impliedDestinationFocus: null,
+        mustCheck: ["sceneAspects"],
+      },
+    },
+    playerAction: "I investigate the noise in the alley.",
+  });
+
+  assert.deepEqual(
+    evaluated.stateCommitLog.map((entry) => [entry.mutationType, entry.status, entry.reasonCode]),
+    [
+      ["discover_information", "rejected", "invalid_semantics"],
+    ],
+  );
+  assert.match(evaluated.stateCommitLog[0]?.summary ?? "", /manifest/i);
 });
 
 test("successful checks allow requested mutations to resolve normally", () => {
@@ -1217,6 +1322,137 @@ test("spawn_scene_aspect inherits the current scene focus for later context filt
   });
 
   assert.equal(evaluated.nextState.sceneAspects.fresh_straw?.focusKey, "stable_entrance");
+});
+
+test("same-turn focus changes reject interactions with stale prior-focus actors", () => {
+  const baseSnapshot = createSnapshot();
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: {
+      ...baseSnapshot,
+      state: {
+        ...baseSnapshot.state,
+        sceneFocus: {
+          key: "gate_arch",
+          label: "Gate Arch",
+        },
+      },
+    },
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Check the back room"],
+      mutations: [
+        {
+          type: "set_player_scene_focus",
+          focusKey: "back_room",
+          label: "Back Room",
+          reason: "You step into the back room.",
+        },
+        {
+          type: "record_local_interaction",
+          localEntityId: "temp:temp_dockhand",
+          interactionSummary: "You ask the dockhand what he saw.",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse", "investigate"]),
+    playerAction: "I go to the back room and ask the dockhand what he saw.",
+  });
+
+  assert.deepEqual(
+    evaluated.stateCommitLog.map((entry) => [entry.mutationType, entry.status, entry.reasonCode]),
+    [
+      ["set_player_scene_focus", "applied", "scene_focus_updated"],
+      ["record_local_interaction", "rejected", "invalid_semantics"],
+    ],
+  );
+});
+
+test("same-turn focus changes can interact with actors manifested into the new focus", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["See who's back there"],
+      mutations: [
+        {
+          type: "set_player_scene_focus",
+          focusKey: "back_room",
+          label: "Back Room",
+          reason: "You step into the back room.",
+        },
+        {
+          type: "spawn_temporary_actor",
+          spawnKey: "customer",
+          role: "customer",
+          summary: "A curious customer is already peering over the shelves.",
+          apparentDisposition: "interested",
+          reason: "A plausible local notices you.",
+        },
+        {
+          type: "record_local_interaction",
+          localEntityId: "spawn:customer",
+          interactionSummary: "You answer the customer's first question.",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+    playerAction: "I head to the back room and answer the interested customer there.",
+  });
+
+  assert.deepEqual(
+    evaluated.stateCommitLog.map((entry) => [entry.mutationType, entry.status, entry.reasonCode]),
+    [
+      ["set_player_scene_focus", "applied", "scene_focus_updated"],
+      ["spawn_temporary_actor", "applied", "temporary_actor_spawned"],
+      ["record_local_interaction", "applied", "local_interaction_recorded"],
+    ],
+  );
+});
+
+test("same-turn focus changes reject named-actor targeting from the prior focus", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Find someone nearby"],
+      mutations: [
+        {
+          type: "set_player_scene_focus",
+          focusKey: "back_room",
+          label: "Back Room",
+          reason: "You step into the back room.",
+        },
+        {
+          type: "adjust_relationship",
+          npcId: "npc_guard",
+          delta: 1,
+          reason: "You smooth things over with the guard.",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+    playerAction: "I go into the back room and keep talking to the guard.",
+  });
+
+  assert.deepEqual(
+    evaluated.stateCommitLog.map((entry) => [entry.mutationType, entry.status, entry.reasonCode]),
+    [
+      ["set_player_scene_focus", "applied", "scene_focus_updated"],
+      ["adjust_relationship", "rejected", "invalid_semantics"],
+    ],
+  );
 });
 
 test("engine rejects record_local_interaction used for a solo errand with invalid_semantics", () => {

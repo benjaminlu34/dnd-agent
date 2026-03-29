@@ -3,6 +3,7 @@ import test from "node:test";
 import type {
   CampaignSnapshot,
   ResolveMechanicsResponse,
+  RouterDecision,
   TurnFetchToolResult,
 } from "./types";
 import { validateTurnCommand } from "./validation";
@@ -118,6 +119,35 @@ function createSnapshot(): CampaignSnapshot {
     recentMessages: [],
     canRetryLatestTurn: false,
     latestRetryableTurnId: null,
+  };
+}
+
+function createRouterDecision(
+  overrides: Partial<RouterDecision> = {},
+): RouterDecision {
+  const attentionOverrides = overrides.attention ?? {};
+  const { attention: _ignoredAttention, ...routerOverrides } = overrides;
+  return {
+    profile: "local",
+    confidence: "high",
+    authorizedVectors: ["investigate"],
+    requiredPrerequisites: [],
+    reason: "test",
+    clarification: {
+      needed: false,
+      blocker: null,
+      question: null,
+      options: [],
+    },
+    ...routerOverrides,
+    attention: {
+      primaryIntent: "Test routing.",
+      resolvedReferents: [],
+      unresolvedReferents: [],
+      impliedDestinationFocus: null,
+      mustCheck: [],
+      ...attentionOverrides,
+    },
   };
 }
 
@@ -465,5 +495,41 @@ test("validateTurnCommand warns when actor presence is used as player movement p
   assert.match(
     validated.warnings.join("\n"),
     /set_scene_actor_presence as a proxy for player movement/i,
+  );
+});
+
+test("validateTurnCommand warns when discover_information is used for local sensory investigation", () => {
+  const validated = validateTurnCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Check the alley"],
+      mutations: [
+        {
+          type: "discover_information",
+          informationId: "info_rustle",
+        },
+      ],
+    },
+    playerAction: "I investigate the noise in the alley.",
+    routerDecision: createRouterDecision({
+      attention: {
+        primaryIntent: "Investigate the nearby noise.",
+        resolvedReferents: [],
+        unresolvedReferents: [],
+        impliedDestinationFocus: null,
+        mustCheck: ["sceneAspects"],
+      },
+    }),
+  });
+
+  assert.equal(validated.type, "resolve_mechanics");
+  if (validated.type !== "resolve_mechanics") {
+    return;
+  }
+  assert.match(
+    validated.warnings.join("\n"),
+    /router indicates local manifestation semantics/i,
   );
 });

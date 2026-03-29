@@ -2260,10 +2260,19 @@ const routerUnresolvedReferentSchema = z.object({
   confidence: z.enum(["high", "medium"]),
 });
 
+const routerImpliedDestinationFocusSchema = z.object({
+  key: z.string().trim().min(1).max(80),
+  label: z.string().trim().min(1).max(120),
+});
+
 const routerAttentionSchema = z.object({
   primaryIntent: z.string().trim().min(1).max(160),
   resolvedReferents: z.array(routerResolvedReferentSchema).max(6).default([]),
   unresolvedReferents: z.array(routerUnresolvedReferentSchema).max(6).default([]),
+  impliedDestinationFocus: z.preprocess(
+    (value) => (value === null ? undefined : value),
+    routerImpliedDestinationFocusSchema.nullable().optional().default(null),
+  ),
   mustCheck: z.array(
     z.enum(["sceneActors", "sceneAspects", "inventory", "routes", "gold", "fetchedFacts", "recentTurnLedger"]),
   ).max(7).default([]),
@@ -2271,6 +2280,7 @@ const routerAttentionSchema = z.object({
   primaryIntent: "Resolve the player action conservatively from grounded context.",
   resolvedReferents: [],
   unresolvedReferents: [],
+  impliedDestinationFocus: null,
   mustCheck: [],
 });
 
@@ -2504,6 +2514,12 @@ function normalizeRouterDecision(value: RouterDecision): RouterDecision {
     intendedKind: entry.intendedKind,
     confidence: entry.confidence,
   }));
+  const impliedDestinationFocus = value.attention?.impliedDestinationFocus
+    ? {
+        key: value.attention.impliedDestinationFocus.key.trim(),
+        label: value.attention.impliedDestinationFocus.label.trim(),
+      }
+    : null;
   const mustCheck = Array.from(new Set(value.attention?.mustCheck ?? []));
   return {
     profile: value.profile,
@@ -2518,6 +2534,10 @@ function normalizeRouterDecision(value: RouterDecision): RouterDecision {
         || "Resolve the player action conservatively from grounded context.",
       resolvedReferents,
       unresolvedReferents,
+      impliedDestinationFocus:
+        impliedDestinationFocus?.key && impliedDestinationFocus.label
+          ? impliedDestinationFocus
+          : null,
       mustCheck,
     },
   };
@@ -2590,47 +2610,16 @@ function formatRouterContextForModel(context: TurnRouterContext) {
   };
 }
 
-function actionLikelyRequestsMacroTravel(playerAction: string, context?: TurnRouterContext) {
-  const normalized = playerAction.toLowerCase().replace(/\s+/g, " ").trim();
-  if (!normalized) {
-    return false;
-  }
-
-  const strongTravelIntent =
-    /\b(travel|journey|depart|set out|leave|ride|sail|take the road|take ship|make for|set off)\b/.test(normalized);
-  const routeWording = /\b(road|route|path|trail|passage|wagon|caravan|ship|boat|ferry)\b/.test(normalized);
-  const currentLocationName = context?.currentLocation.name?.toLowerCase() ?? null;
-  const mentionsCurrentLocation = currentLocationName != null
-    && normalized.includes(currentLocationName);
-  const mentionsAdjacentLocation = (context?.adjacentRoutes ?? []).some((route) =>
-    normalized.includes(route.targetLocationName.toLowerCase()),
-  );
-
-  if (mentionsAdjacentLocation && (strongTravelIntent || routeWording || /\b(go|head|toward|towards|to)\b/.test(normalized))) {
-    return true;
-  }
-
-  if (mentionsCurrentLocation && /\b(leave|depart from|out of)\b/.test(normalized)) {
-    return true;
-  }
-
-  return false;
-}
-
 function inferFallbackMustCheck(
-  playerAction: string,
-  context?: TurnRouterContext,
+  _playerAction: string,
+  _context?: TurnRouterContext,
 ): RouterDecision["attention"]["mustCheck"] {
-  const mustCheck: RouterDecision["attention"]["mustCheck"] = [
+  return [
     "sceneActors",
     "inventory",
     "sceneAspects",
     "recentTurnLedger",
   ];
-  if (actionLikelyRequestsMacroTravel(playerAction, context)) {
-    mustCheck.push("routes");
-  }
-  return mustCheck;
 }
 
 function fallbackRouterDecision(
@@ -2654,6 +2643,7 @@ function fallbackRouterDecision(
       primaryIntent: inferFallbackPrimaryIntent(playerAction),
       resolvedReferents: [],
       unresolvedReferents: [],
+      impliedDestinationFocus: null,
       mustCheck: inferFallbackMustCheck(playerAction, context),
     },
   };
@@ -2666,7 +2656,7 @@ function zodIssuesToText(issues: z.ZodIssue[]) {
 }
 
 function selectPromptContextProfile(decision: RouterDecision): PromptContextProfile {
-  return decision.confidence === "high" ? decision.profile : "full";
+  return decision.profile === "local" ? "local" : decision.confidence === "high" ? decision.profile : "full";
 }
 
 function buildRouterConstraintsBlock(decision: RouterDecision) {
@@ -2684,6 +2674,7 @@ function buildAttentionPacketBlock(decision: RouterDecision) {
     primaryIntent: decision.attention.primaryIntent,
     resolvedReferents: decision.attention.resolvedReferents,
     unresolvedReferents: decision.attention.unresolvedReferents,
+    impliedDestinationFocus: decision.attention.impliedDestinationFocus,
     mustCheck: decision.attention.mustCheck,
   };
 }
@@ -2771,6 +2762,13 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Do not treat internal thoughts, mutters to yourself, or naming an item as dialogue with another character unless the words are explicitly addressed to them.",
         "Giving a present subordinate or ally a routine instruction to fetch someone, pass along a message, or help with ordinary work is usually a grounded local interaction, not a social challenge.",
         "The router has already chosen scope and prerequisite fetches. Do not ask for more fetches.",
+        "Before choosing mutations, classify the action into exactly one semantic lane: FLAVOR, MANIFEST, or KNOWLEDGE.",
+        "FLAVOR covers trivial atmospheric actions like checking pockets, sitting down, lighting a pipe, routine self-checks, and passive atmosphere. FLAVOR resolves through advance_time only. Do not use checkIntent, spawn mutations, or discover_information in FLAVOR.",
+        "MANIFEST covers plausible immediate local developments implied by the player, including searching a room, hearing a sound, addressing a plausible generic role, or shifting within the same scene. Prefer set_player_scene_focus, spawn_scene_aspect, and spawn_temporary_actor. Same-turn chaining is encouraged: spawn first, then reference it with spawn:<key>.",
+        "KNOWLEDGE covers recalling or surfacing already-grounded facts. KNOWLEDGE resolves through discover_information only when the informationId is already grounded.",
+        "discover_information is for grounded knowledge only. Never use it for look around, search, listen, investigate the room, or other immediate sensory scene investigation.",
+        "If the player implies a plausible local detail that is not yet grounded, prefer bounded manifestation over rejection.",
+        "If the action is purely atmospheric, stay in FLAVOR and do not escalate it into mechanics.",
         "Use only bounded mutations. The engine will validate, filter, and commit them.",
         "Mark resource costs, fees, and other upfront expenditures as phase immediate.",
         "Mark success-only rewards or outcomes as phase conditional.",
@@ -2782,11 +2780,19 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Use spawn_temporary_actor before record_local_interaction when the local is not already listed in sceneActors.",
         "Use spawn_environmental_item before adjust_inventory when the item is plausible in the environment but not already grounded in inventory.",
         "Use spawn_scene_aspect for smoke, damage, noise, weather spillover, improvised cover, and other grounded scene conditions.",
+        "In MANIFEST, do not instantiate value: no free wealth, trade goods, valuables, or mechanically advantageous loot.",
+        "In MANIFEST, do not instantiate authority: spawned actors must be ordinary generic locals, never rulers, generals, guildmasters, or specific named plot contacts.",
+        "In MANIFEST, do not instantiate confirmed plot outcomes: ambiguous threats or signs must appear as ambiguous scene aspects, not confirmed enemies, traps, or secrets.",
+        "Default manifestation pattern: sensory uncertainty becomes an ambiguous spawn_scene_aspect such as Rustling Bushes, Unsettled Desk, Fresh Tracks, or Movement in the Alley.",
+        "Default manifestation pattern: plausible generic nearby people become spawn_temporary_actor such as stablehand, customer, porter, or watch patrol.",
+        "Default manifestation pattern: intra-location repositioning becomes set_player_scene_focus.",
         "Self-directed downtime work may use adjust_inventory, spawn_environmental_item, and spawn_scene_aspect for grounded byproducts, consumed materials, and scene conditions.",
         "Use set_player_scene_focus for self-directed movement within the current location, like stepping back into the forge, crossing to the workbench, or moving from the street to the stall front.",
         "When using set_player_scene_focus, the label must describe a spatial sub-location or zone, like The Back Room, The Workbench, Alleyway, or Stall Front, never a portable object like Coin Purse or Sword.",
         "Use set_scene_actor_presence whenever someone leaves the current scene or returns during the turn.",
         "Use set_scene_actor_presence only for an actor's own departure or return. Never use it to simulate the player arriving somewhere.",
+        "Same-turn spatial isolation rule: if your mutation array includes set_player_scene_focus, the prior focus cast is left behind immediately unless you explicitly move an actor with set_scene_actor_presence or spawn a new one.",
+        "After set_player_scene_focus, any later interaction in the same turn must target an actor already valid in the new focus or a newly spawned actor referenced via spawn:<key>.",
         "Use record_local_interaction only when the player explicitly engages another person. Do not use it for solo errands, checking your own gear, retrieving your own belongings, or internal repositioning.",
         "Review the attention_packet before planning mutations.",
         "If attention_packet.resolvedReferents supplies a grounded ref, use that exact ref instead of inventing or guessing ids.",
@@ -2817,6 +2823,13 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Giving a present subordinate or ally a routine instruction to fetch someone, pass along a message, or help with ordinary work is usually a grounded local interaction, not a social challenge.",
         "The router has already chosen scope and prerequisite fetches. Do not ask for more fetches.",
         "Obey the router_constraints block. If a vector is not authorized, do not rely on it.",
+        "Before choosing mutations, classify the action into exactly one semantic lane: FLAVOR, MANIFEST, or KNOWLEDGE.",
+        "FLAVOR covers trivial atmospheric actions like checking pockets, sitting down, lighting a pipe, routine self-checks, and passive atmosphere. FLAVOR resolves through advance_time only. Do not use checkIntent, spawn mutations, or discover_information in FLAVOR.",
+        "MANIFEST covers plausible immediate local developments implied by the player, including searching a room, hearing a sound, addressing a plausible generic role, or shifting within the same scene. Prefer set_player_scene_focus, spawn_scene_aspect, and spawn_temporary_actor. Same-turn chaining is encouraged: spawn first, then reference it with spawn:<key>.",
+        "KNOWLEDGE covers recalling known lore, surfacing a specific fetched record, or connecting already-grounded clues. KNOWLEDGE resolves through discover_information only when the informationId is already grounded.",
+        "discover_information is for grounded knowledge only. Never use it for look around, search, listen, investigate the room, or other immediate sensory scene investigation.",
+        "If the player implies a plausible local detail that is not yet grounded, prefer bounded manifestation over rejection.",
+        "If the action is purely atmospheric, stay in FLAVOR and do not escalate it into mechanics.",
         "Use only bounded mutations. The engine will validate, filter, and commit them deterministically.",
         "Only include checkIntent when success or failure meaningfully changes which mutations can happen. If the turn is routine and should simply create a local interaction, spend time, or ask a subordinate to fetch someone, omit checkIntent.",
         "If a check is needed, set checkIntent and list only the success-state mutations. The engine will reject them automatically on failure or partial success.",
@@ -2834,6 +2847,12 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Use spawn_temporary_actor before record_local_interaction when the local is not already listed in sceneActors.",
         "Use spawn_environmental_item before adjust_inventory when the item is plausible in the environment but not already grounded in inventory.",
         "Use spawn_scene_aspect for smoke, damage, noise, weather spillover, improvised cover, and other grounded scene conditions.",
+        "In MANIFEST, do not instantiate value: no free wealth, trade goods, valuables, or mechanically advantageous loot.",
+        "In MANIFEST, do not instantiate authority: spawned actors must be ordinary generic locals, never rulers, generals, guildmasters, or specific named plot contacts.",
+        "In MANIFEST, do not instantiate confirmed plot outcomes: ambiguous threats or signs must appear as ambiguous scene aspects, not confirmed enemies, traps, or secrets.",
+        "Default manifestation pattern: sensory uncertainty becomes an ambiguous spawn_scene_aspect such as Rustling Bushes, Unsettled Desk, Fresh Tracks, or Movement in the Alley.",
+        "Default manifestation pattern: plausible generic nearby people become spawn_temporary_actor such as stablehand, customer, porter, or watch patrol.",
+        "Default manifestation pattern: intra-location repositioning becomes set_player_scene_focus.",
         "Self-directed downtime work may use adjust_inventory, spawn_environmental_item, and spawn_scene_aspect for grounded byproducts, consumed materials, and scene conditions.",
         "Use adjust_inventory for gaining, losing, consuming, or handing over grounded inventory items.",
         "Use set_npc_state only for direct violence, subdual, or comparable physical outcomes.",
@@ -2844,6 +2863,8 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Use set_scene_actor_presence whenever someone leaves the current scene or returns during the turn.",
         "If a helper, subordinate, or named scene actor leaves on an errand or comes back later in the turn, represent that mechanically with set_scene_actor_presence.",
         "Use set_scene_actor_presence only for an actor's own departure or return. Never use it to simulate the player arriving somewhere.",
+        "Same-turn spatial isolation rule: if your mutation array includes set_player_scene_focus, the prior focus cast is left behind immediately unless you explicitly move an actor with set_scene_actor_presence or spawn a new one.",
+        "After set_player_scene_focus, any later interaction in the same turn must target an actor already valid in the new focus or a newly spawned actor referenced via spawn:<key>.",
         "Use record_local_interaction only when the player explicitly engages another person. Do not use it for solo errands, checking your own gear, retrieving your own belongings, or internal repositioning.",
         "Review the attention_packet before planning mutations.",
         "If attention_packet.resolvedReferents supplies a grounded ref, use that exact ref instead of inventing or guessing ids.",
@@ -2955,6 +2976,8 @@ function buildTurnRouterSystemPrompt(correctionNotes?: string | null) {
     "routes strictly means macro-travel leaving the current location node for another adjacent location.",
     "Movement within the same city, district, building, shop, or worksite is intra-location focus, not routes.",
     "Phrases like back to the forge, into the market, over to the bench, or to the tavern inside the same place should not add routes to mustCheck.",
+    "When the player strongly implies movement into a clear sub-location within the current macro-location, emit attention.impliedDestinationFocus with a concise key and label such as back_room/The Back Room, yard/Yard, stable_entrance/Stable Entrance, workbench/Workbench, stall_front/Stall Front, or alleyway/Alleyway.",
+    "Do not emit impliedDestinationFocus for macro travel between location nodes or vague attention shifts with no clear sub-location.",
     "If no grounded ref exists but the noun is plausible, emit it in unresolvedReferents instead of resolvedReferents.",
   ].join("\n");
 
@@ -3123,6 +3146,9 @@ function buildResolvedNarrationConstraints(input: ResolvedTurnNarrationInput) {
     rejectedMutationTypes: rejectedNonTimeMutations.map((entry) => entry.mutationType),
     hasRejectedInvalidTargetAttempt,
     hasRejectedSemanticAttempt,
+    hasAppliedManifestedAspect: appliedNonTimeMutations.some((entry) => entry.mutationType === "spawn_scene_aspect"),
+    hasAppliedManifestedActor: appliedNonTimeMutations.some((entry) => entry.mutationType === "spawn_temporary_actor"),
+    hasRejectedKnowledgeAttempt: rejectedNonTimeMutations.some((entry) => entry.mutationType === "discover_information"),
     hasArrivalCommit: sanitizedCommitLog.some((entry) =>
       isAppliedArrivalMutation(entry, input.promptContext.currentLocation.id),
     ),
@@ -3150,12 +3176,15 @@ function buildResolvedTurnNarrationPrompt(input: ResolvedTurnNarrationInput) {
     "Do not invent successful outcomes, prices, discoveries, NPC reactions, travel, or social shifts that are not supported by the log, context, or fetched facts.",
     "If a mutation was rejected or a check failed, make that failure legible in the narration.",
     "If the applied log only advances time, narrate only the time passage and any grounded atmosphere shift. Do not restage the room or repeat the opening setup.",
+    "If a spawned scene aspect is ambiguous, narrate only the sensory detail or visible condition, not the hidden cause.",
+    "If a temporary actor was spawned, narrate them as stepping into view, coming into focus, or being noticed.",
     "If the player waited for a person or event and the commit log does not contain the arrival or return, explicitly say it has not happened yet.",
     "Do not imply that someone arrived, returned, or appeared unless the committed log makes that change explicit.",
     "If rejectedOutcomeOnly is true, do not narrate rejected outcomes as if they happened.",
     "If rejectedInteractionOnly is true, you may acknowledge that the attempt stalls or goes unanswered, but do not invent direct replies, quoted dialogue, completed errands, or offscreen returns.",
     "If state_commit_log includes a rejected record_local_interaction or set_scene_actor_presence with reasonCode invalid_target, narrate that the player looked for or attempted that contact but could not find or reach them. Do not narrate a successful encounter.",
     "If state_commit_log includes a rejected record_local_interaction or set_scene_actor_presence with reasonCode invalid_semantics, narrate the player as unable to complete that intent through another person or presence change, without inventing that it happened anyway.",
+    "If a discover_information mutation was rejected, do not convert that into an authoritative negative fact like nothing is there unless the applied state log independently proves it.",
     "If rejectedMutationTypes only cover item or scene changes, do not invent completed crafting outputs, item transfers, or scene transformations that the log rejected.",
     "Do not write quoted dialogue unless it is grounded by a committed interaction, a committed check result, fetched facts, or explicit player speech that is visibly answered in the committed log.",
     "Write in second person to the player character as 'you'.",

@@ -4,7 +4,11 @@ import { dmClient, logBackendDiagnostic } from "@/lib/ai/provider";
 import { toCampaignCharacter, toCharacterStats } from "@/lib/game/characters";
 import { parseTurnResultPayloadJson, parseCampaignRuntimeStateJson, approvalBandForValue, toCampaignRuntimeStateJson, toFactionResourcesJson } from "@/lib/game/json-contracts";
 import { createAdHocCampaignInventoryItem } from "@/lib/game/items";
-import { sceneActorIdentityClearlyMatches } from "@/lib/game/scene-identity";
+import {
+  sceneActorIdentityClearlyMatches,
+  sceneActorMatchesFocus,
+  sceneAspectMatchesFocus,
+} from "@/lib/game/scene-identity";
 import {
   resolvedLaunchEntrySchema,
   validateResolvedLaunchEntryAgainstWorld,
@@ -1010,60 +1014,6 @@ function toRouterSceneAspectSummaries(state: CampaignRuntimeState) {
     .sort((left, right) => left.key.localeCompare(right.key));
 }
 
-const sceneFocusStopWords = new Set([
-  "the",
-  "and",
-  "for",
-  "with",
-  "into",
-  "from",
-  "your",
-  "inside",
-  "front",
-  "back",
-  "room",
-  "area",
-  "entrance",
-]);
-
-function sceneFocusTokens(sceneFocus: CampaignRuntimeState["sceneFocus"]) {
-  if (!sceneFocus) {
-    return [];
-  }
-
-  const combined = `${sceneFocus.key} ${sceneFocus.label}`.toLowerCase();
-  return Array.from(
-    new Set(
-      combined
-        .split(/[^a-z0-9]+/i)
-        .map((token) => token.trim())
-        .filter((token) => token.length >= 3 && !sceneFocusStopWords.has(token)),
-    ),
-  );
-}
-
-function sceneActorMatchesFocus(
-  actor: SceneActorSummary,
-  sceneFocus: CampaignRuntimeState["sceneFocus"],
-) {
-  if (!sceneFocus) {
-    return true;
-  }
-  if (actor.focusKey && actor.focusKey !== sceneFocus.key) {
-    return false;
-  }
-  if (actor.focusKey === sceneFocus.key) {
-    return true;
-  }
-
-  const tokens = sceneFocusTokens(sceneFocus);
-  if (!tokens.length) {
-    return false;
-  }
-  const haystack = `${actor.displayLabel} ${actor.role} ${actor.lastSummary ?? ""}`.toLowerCase();
-  return tokens.some((token) => haystack.includes(token));
-}
-
 function filterSceneActorsForFocus(
   sceneActors: SceneActorSummary[],
   sceneFocus: CampaignRuntimeState["sceneFocus"],
@@ -1071,7 +1021,7 @@ function filterSceneActorsForFocus(
   if (!sceneFocus) {
     return sceneActors;
   }
-  return sceneActors.filter((actor) => sceneActorMatchesFocus(actor, sceneFocus));
+  return sceneActors.filter((actor) => sceneActorMatchesFocus({ actor, sceneFocus }));
 }
 
 function filterSceneAspectsForFocus(
@@ -1084,9 +1034,16 @@ function filterSceneAspectsForFocus(
 
   return Object.fromEntries(
     Object.entries(sceneAspects ?? {}).filter(([, aspect]) =>
-      aspect.focusKey == null || aspect.focusKey === sceneFocus.key,
+      sceneAspectMatchesFocus({ aspect, sceneFocus }),
     ),
   );
+}
+
+function effectivePromptSceneFocus(input: {
+  sceneFocus: CampaignRuntimeState["sceneFocus"];
+  routerDecision?: RouterDecision;
+}) {
+  return input.routerDecision?.attention.impliedDestinationFocus ?? input.sceneFocus ?? null;
 }
 
 function rankedEntries<T>(
@@ -4234,6 +4191,18 @@ export async function getPromptContext(
   routerDecision?: RouterDecision,
 ): Promise<SpatialPromptContext> {
   const routerContext = await getTurnRouterContext(snapshot);
+  const promptSceneFocus = effectivePromptSceneFocus({
+    sceneFocus: snapshot.state.sceneFocus ?? null,
+    routerDecision,
+  });
+  const focusedSceneActors = filterSceneActorsForFocus(
+    toSceneActorSummaries({
+      presentNpcs: snapshot.presentNpcs,
+      temporaryActors: snapshot.temporaryActors,
+      currentLocationId: snapshot.currentLocation.id,
+    }),
+    promptSceneFocus,
+  );
   const campaignItemTemplates = await prisma.itemTemplate.findMany({
     where: { campaignId: snapshot.campaignId },
     orderBy: { name: "asc" },
@@ -4249,7 +4218,7 @@ export async function getPromptContext(
     currentLocation: routerContext.currentLocation,
     sceneFocus: snapshot.state.sceneFocus ?? null,
     adjacentRoutes: isLocal ? [] : routerContext.adjacentRoutes,
-    sceneActors: routerContext.sceneActors,
+    sceneActors: focusedSceneActors,
     recentLocalEvents: routerContext.recentLocalEvents,
     recentTurnLedger: routerContext.recentTurnLedger,
     discoveredInformation: isLocal ? [] : routerContext.discoveredInformation,
@@ -4259,7 +4228,7 @@ export async function getPromptContext(
     inventory: toPromptInventory(snapshot.character, campaignItemTemplates),
     sceneAspects: filterSceneAspectsForFocus(
       structuredClone(snapshot.state.sceneAspects ?? {}),
-      snapshot.state.sceneFocus ?? null,
+      promptSceneFocus,
     ),
     localTexture: snapshot.currentLocation.localTexture,
     globalTime: snapshot.state.globalTime,
@@ -4278,6 +4247,7 @@ export const repositoryTestUtils = {
   prunePromptContextForRouter,
   toRouterInventorySummary,
   toRouterSceneAspectSummaries,
+  effectivePromptSceneFocus,
   filterSceneActorsForFocus,
   filterSceneAspectsForFocus,
   buildRecentTurnLedger,

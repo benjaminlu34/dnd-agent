@@ -68,12 +68,13 @@ import type {
 import {
   isLikelyProxyPlayerMovementAction,
   isLikelySoloErrandAction,
+  routerSuggestsManifestationOverKnowledge,
   validateTurnCommand,
   TIME_MODE_BOUNDS,
 } from "@/lib/game/validation";
 import { buildCheckResult } from "@/lib/game/checks";
 import { normalizeItemName } from "@/lib/game/item-utils";
-import { sceneActorIdentityClearlyMatches } from "@/lib/game/scene-identity";
+import { sceneActorIdentityClearlyMatches, sceneActorMatchesFocus } from "@/lib/game/scene-identity";
 import { env } from "@/lib/env";
 
 type TurnStream = {
@@ -256,7 +257,7 @@ function applyCommittedTimeWindow(input: {
 }
 
 function promptContextProfileForRouter(decision: RouterDecision) {
-  return decision.confidence === "high" ? decision.profile : "full";
+  return decision.profile === "local" ? "local" : decision.confidence === "high" ? decision.profile : "full";
 }
 
 function routerDecisionForTurnMode(input: {
@@ -280,6 +281,7 @@ function routerDecisionForTurnMode(input: {
         primaryIntent: "Resolve the player action conservatively from grounded context.",
         resolvedReferents: [],
         unresolvedReferents: [],
+        impliedDestinationFocus: null,
         mustCheck: [],
       },
     };
@@ -302,6 +304,7 @@ function routerDecisionForTurnMode(input: {
         primaryIntent: "Resolve the player action conservatively from grounded context.",
         resolvedReferents: [],
         unresolvedReferents: [],
+        impliedDestinationFocus: null,
         mustCheck: [],
       },
     };
@@ -1232,6 +1235,84 @@ function knownInformationIds(snapshot: CampaignSnapshot, fetchedFacts: TurnFetch
   return ids;
 }
 
+function groundedInformationIdsForDiscovery(input: {
+  snapshot: CampaignSnapshot;
+  fetchedFacts: TurnFetchToolResult[];
+  routerDecision: RouterDecision;
+}) {
+  const ids = knownInformationIds(input.snapshot, input.fetchedFacts);
+  for (const referent of input.routerDecision.attention.resolvedReferents) {
+    if (referent.targetKind === "information") {
+      ids.add(referent.targetRef);
+    }
+  }
+  return ids;
+}
+
+function actorSummaryForFocusEvaluation(input: {
+  snapshot: CampaignSnapshot;
+  projectedTemporaryActors: Map<string, ProjectedTemporaryActor>;
+  actorRef: string;
+}) {
+  if (input.actorRef.startsWith("temp:")) {
+    const actor = input.projectedTemporaryActors.get(input.actorRef.slice("temp:".length));
+    if (!actor) {
+      return null;
+    }
+    return {
+      displayLabel: actor.label,
+      role: actor.label,
+      focusKey: null,
+      lastSummary: actor.lastSummary,
+    };
+  }
+
+  if (input.actorRef.startsWith("npc:")) {
+    const npc = input.snapshot.presentNpcs.find((entry) => entry.id === input.actorRef.slice("npc:".length));
+    if (!npc) {
+      return null;
+    }
+    return {
+      displayLabel: npc.name,
+      role: npc.role,
+      focusKey: null,
+      lastSummary: npc.summary,
+    };
+  }
+
+  return null;
+}
+
+function targetWasLeftBehindByFocusShift(input: {
+  snapshot: CampaignSnapshot;
+  projectedTemporaryActors: Map<string, ProjectedTemporaryActor>;
+  projectedSceneFocus: CampaignRuntimeState["sceneFocus"];
+  focusChangedThisTurn: boolean;
+  currentFocusActorRefs: Set<string>;
+  actorRef: string;
+}) {
+  if (!input.focusChangedThisTurn || !input.projectedSceneFocus) {
+    return false;
+  }
+  if (input.currentFocusActorRefs.has(input.actorRef)) {
+    return false;
+  }
+
+  const actor = actorSummaryForFocusEvaluation({
+    snapshot: input.snapshot,
+    projectedTemporaryActors: input.projectedTemporaryActors,
+    actorRef: input.actorRef,
+  });
+  if (!actor) {
+    return false;
+  }
+
+  return !sceneActorMatchesFocus({
+    actor,
+    sceneFocus: input.projectedSceneFocus,
+  });
+}
+
 function knownNpc(snapshot: CampaignSnapshot, fetchedFacts: TurnFetchToolResult[], npcId: string) {
   const presentNpc = snapshot.presentNpcs.find((npc) => npc.id === npcId);
   if (presentNpc) {
@@ -1374,14 +1455,20 @@ function evaluateResolvedCommand(input: {
   let projectedGold = input.snapshot.character.gold;
   let projectedLocationId = input.snapshot.state.currentLocationId;
   let projectedSceneFocus = input.snapshot.state.sceneFocus ?? null;
+  let focusChangedThisTurn = false;
   let projectedHealth = input.snapshot.character.health;
   const projectedSceneAspects = structuredClone(input.snapshot.state.sceneAspects ?? {});
   const groundedItemIds = new Set(
     input.groundedItemIds
     ?? input.snapshot.character.inventory.map((item) => item.templateId),
   );
+  const currentFocusActorRefs = new Set<string>();
   let hasAppliedMove = false;
-  const knownInformation = knownInformationIds(input.snapshot, input.fetchedFacts);
+  const groundedInformation = groundedInformationIdsForDiscovery({
+    snapshot: input.snapshot,
+    fetchedFacts: input.fetchedFacts,
+    routerDecision: input.routerDecision,
+  });
   const checkOutcome = input.command.checkResult?.outcome;
 
   if (input.command.checkResult) {
@@ -1523,6 +1610,8 @@ function evaluateResolvedCommand(input: {
         continue;
       }
       projectedSceneFocus = { key: focusKey, label };
+      focusChangedThisTurn = true;
+      currentFocusActorRefs.clear();
       const appliedMutation = { ...mutation, focusKey, label, phase } as MechanicsMutation;
       const entry = {
         kind: "mutation" as const,
@@ -1742,6 +1831,7 @@ function evaluateResolvedCommand(input: {
       }
 
       spawnedTemporaryActorIds.set(mutation.spawnKey, resolvedActorId);
+      currentFocusActorRefs.add(tempActorRef(resolvedActorId));
       const entry = {
         kind: "mutation" as const,
         mutationType: mutation.type,
@@ -1805,6 +1895,24 @@ function evaluateResolvedCommand(input: {
           status: "rejected",
           reasonCode: "invalid_target",
           summary: "That unnamed local is not available here.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (targetWasLeftBehindByFocusShift({
+        snapshot: input.snapshot,
+        projectedTemporaryActors,
+        projectedSceneFocus,
+        focusChangedThisTurn,
+        currentFocusActorRefs,
+        actorRef: tempActorRef(actor.id),
+      })) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_semantics",
+          summary: "That local was left behind when you changed focus; manifest or move someone into the new focus first.",
           metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
         });
         continue;
@@ -1914,6 +2022,11 @@ function evaluateResolvedCommand(input: {
         }
 
         actor.currentLocationId = mutation.newLocationId;
+        if (mutation.newLocationId === projectedLocationId) {
+          currentFocusActorRefs.add(tempActorRef(actor.id));
+        } else {
+          currentFocusActorRefs.delete(tempActorRef(actor.id));
+        }
         const entry = {
           kind: "mutation" as const,
           mutationType: mutation.type,
@@ -1959,6 +2072,11 @@ function evaluateResolvedCommand(input: {
       }
 
       projectedNpcLocationIds.set(target.actorId, mutation.newLocationId);
+      if (mutation.newLocationId === projectedLocationId) {
+        currentFocusActorRefs.add(npcActorRef(target.actorId));
+      } else {
+        currentFocusActorRefs.delete(npcActorRef(target.actorId));
+      }
       const entry = {
         kind: "mutation" as const,
         mutationType: mutation.type,
@@ -2274,6 +2392,30 @@ function evaluateResolvedCommand(input: {
         });
         continue;
       }
+      if (targetWasLeftBehindByFocusShift({
+        snapshot: input.snapshot,
+        projectedTemporaryActors,
+        projectedSceneFocus,
+        focusChangedThisTurn,
+        currentFocusActorRefs,
+        actorRef: npcActorRef(mutation.npcId),
+      })) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_semantics",
+          summary: "That person was left behind when you changed focus; move them or re-encounter them in the new focus first.",
+          metadata: {
+            ...mutation,
+            delta: appliedDelta,
+            requestedDelta: mutation.delta,
+            appliedDelta,
+            phase,
+          } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
       projectedRelationshipDelta.set(
         mutation.npcId,
         (projectedRelationshipDelta.get(mutation.npcId) ?? 0) + appliedDelta,
@@ -2365,6 +2507,17 @@ function evaluateResolvedCommand(input: {
         });
         continue;
       }
+      if (routerSuggestsManifestationOverKnowledge(input.routerDecision)) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_semantics",
+          summary: "The router marked this as a local manifestation turn, so use a manifested scene detail or nearby presence instead of discover_information.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
       if (input.snapshot.discoveredInformation.some((information) => information.id === mutation.informationId)) {
         stateCommitLog.push({
           kind: "mutation",
@@ -2376,13 +2529,13 @@ function evaluateResolvedCommand(input: {
         });
         continue;
       }
-      if (!knownInformation.has(mutation.informationId)) {
+      if (!groundedInformation.has(mutation.informationId)) {
         stateCommitLog.push({
           kind: "mutation",
           mutationType: mutation.type,
           status: "rejected",
           reasonCode: "invalid_target",
-          summary: "That information is not grounded in the current turn context.",
+          summary: "discover_information requires an information id already grounded in fetched facts or resolved clues.",
           metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
         });
         continue;
@@ -2420,6 +2573,24 @@ function evaluateResolvedCommand(input: {
           status: "rejected",
           reasonCode: "unauthorized_vector",
           summary: "Violent state changes are not authorized for this turn.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (targetWasLeftBehindByFocusShift({
+        snapshot: input.snapshot,
+        projectedTemporaryActors,
+        projectedSceneFocus,
+        focusChangedThisTurn,
+        currentFocusActorRefs,
+        actorRef: npcActorRef(mutation.npcId),
+      })) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_semantics",
+          summary: "That target was left behind when you changed focus; you cannot affect them here without bringing them into the new focus.",
           metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
         });
         continue;
@@ -5015,6 +5186,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       command: resolution.command,
       fetchedFacts: resolution.fetchedFacts,
       playerAction,
+      routerDecision,
     });
 
     if (validated.type === "request_clarification") {

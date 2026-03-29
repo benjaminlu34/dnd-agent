@@ -412,6 +412,7 @@ test("prunePromptContextForRouter ranks resolved refs and trims unrelated heavy 
           },
         ],
         unresolvedReferents: [],
+        impliedDestinationFocus: null,
         mustCheck: ["sceneActors", "gold"],
       },
     },
@@ -503,6 +504,43 @@ test("prunePromptContextForRouter ranks resolved refs and trims unrelated heavy 
     pruned.inventory.map((entry) => [entry.id, entry.quantity]),
     [["item_rope", 2]],
   );
+});
+
+test("effectivePromptSceneFocus prefers the router-implied destination focus for planner context shaping", () => {
+  const effective = repositoryTestUtils.effectivePromptSceneFocus({
+    sceneFocus: {
+      key: "stall_front",
+      label: "Stall Front",
+    },
+    routerDecision: {
+      profile: "local",
+      confidence: "high",
+      authorizedVectors: ["investigate"],
+      requiredPrerequisites: [],
+      reason: "The player is moving into the back room.",
+      clarification: {
+        needed: false,
+        blocker: null,
+        question: null,
+        options: [],
+      },
+      attention: {
+        primaryIntent: "Move into the back room.",
+        resolvedReferents: [],
+        unresolvedReferents: [],
+        impliedDestinationFocus: {
+          key: "back_room",
+          label: "Back Room",
+        },
+        mustCheck: ["sceneActors", "sceneAspects"],
+      },
+    },
+  });
+
+  assert.deepEqual(effective, {
+    key: "back_room",
+    label: "Back Room",
+  });
 });
 
 test("normalizeLaunchEntrySelection returns provided custom entry unchanged", () => {

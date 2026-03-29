@@ -114,6 +114,17 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   const prompt = aiProviderTestUtils.buildTurnSystemPrompt("player_input");
 
   assert.match(prompt, /Obey the router_constraints block/);
+  assert.match(prompt, /classify the action into exactly one semantic lane: FLAVOR, MANIFEST, or KNOWLEDGE/);
+  assert.match(prompt, /FLAVOR resolves through advance_time only/);
+  assert.match(prompt, /MANIFEST covers plausible immediate local developments implied by the player/);
+  assert.match(prompt, /Same-turn chaining is encouraged: spawn first, then reference it with spawn:<key>/);
+  assert.match(prompt, /discover_information is for grounded knowledge only\. Never use it for look around, search, listen, investigate the room/);
+  assert.match(prompt, /If the player implies a plausible local detail that is not yet grounded, prefer bounded manifestation over rejection/);
+  assert.match(prompt, /In MANIFEST, do not instantiate value/);
+  assert.match(prompt, /spawned actors must be ordinary generic locals/);
+  assert.match(prompt, /ambiguous threats or signs must appear as ambiguous scene aspects/);
+  assert.match(prompt, /Same-turn spatial isolation rule/);
+  assert.match(prompt, /must target an actor already valid in the new focus or a newly spawned actor referenced via spawn:<key>/);
   assert.match(prompt, /always include top-level timeMode, suggestedActions, and mutations/);
   assert.match(prompt, /timeMode must be exactly one of: combat, exploration, travel, rest, downtime/);
   assert.match(prompt, /Use downtime for crafting, routine work, commissioning help/);
@@ -156,6 +167,8 @@ test("buildTurnRouterSystemPrompt distinguishes self-talk from on-screen social 
   assert.match(prompt, /Do not invent new ids or spawn handles/);
   assert.match(prompt, /routes strictly means macro-travel leaving the current location node/);
   assert.match(prompt, /back to the forge, into the market, over to the bench/);
+  assert.match(prompt, /emit attention\.impliedDestinationFocus/);
+  assert.match(prompt, /Do not emit impliedDestinationFocus for macro travel between location nodes/);
   assert.match(prompt, /unresolvedReferents/);
 });
 
@@ -299,6 +312,9 @@ test("buildResolvedTurnNarrationPrompt includes prompt context and fetched facts
   assert.match(prompt.user, /Blackwater Docks/);
   assert.match(prompt.user, /fetched_facts/);
   assert.match(prompt.user, /Pier Nine Closure/);
+  assert.match(prompt.system, /If a spawned scene aspect is ambiguous, narrate only the sensory detail/);
+  assert.match(prompt.system, /If a temporary actor was spawned, narrate them as stepping into view/);
+  assert.match(prompt.system, /If a discover_information mutation was rejected, do not convert that into an authoritative negative fact/);
 });
 
 test("buildResolvedTurnNarrationPrompt teaches failed invalid-target attempts as failed searches", () => {
@@ -446,6 +462,7 @@ test("buildTurnUserPrompt includes attention packet before the main action block
           },
         ],
         unresolvedReferents: [],
+        impliedDestinationFocus: null,
         mustCheck: ["sceneActors", "gold"],
       },
     },
@@ -735,6 +752,7 @@ test("normalizeRouterDecision dedupes vectors and prerequisites", () => {
       primaryIntent: "Talk through the checkpoint.",
       resolvedReferents: [],
       unresolvedReferents: [],
+      impliedDestinationFocus: null,
       mustCheck: ["sceneActors", "sceneActors", "recentTurnLedger"],
     },
   });
@@ -745,6 +763,7 @@ test("normalizeRouterDecision dedupes vectors and prerequisites", () => {
     { type: "relationship_history", npcId: "npc_guard" },
   ]);
   assert.equal(normalized.reason, "same-scene negotiation");
+  assert.equal(normalized.attention.impliedDestinationFocus, null);
   assert.deepEqual(normalized.attention.mustCheck, ["sceneActors", "recentTurnLedger"]);
 });
 
@@ -772,6 +791,7 @@ test("normalizeRouterDecision fills missing clarification and strips invalid res
         },
       ],
       unresolvedReferents: [],
+      impliedDestinationFocus: null,
       mustCheck: ["gold", "gold", "inventory"],
     },
   } as never);
@@ -790,6 +810,7 @@ test("normalizeRouterDecision fills missing clarification and strips invalid res
       confidence: "high",
     },
   ]);
+  assert.equal(normalized.attention.impliedDestinationFocus, null);
   assert.deepEqual(normalized.attention.mustCheck, ["gold", "inventory"]);
 });
 
@@ -830,6 +851,8 @@ test("fallbackRouterDecision keeps a conservative non-empty attention packet", (
   );
 
   assert.match(fallback.attention.primaryIntent, /head back to the forge/i);
+  assert.equal(fallback.profile, "full");
+  assert.equal(fallback.attention.impliedDestinationFocus, null);
   assert.deepEqual(fallback.attention.mustCheck, [
     "sceneActors",
     "inventory",
@@ -879,7 +902,6 @@ test("fallbackRouterDecision includes routes only for clear macro-travel intent"
     "inventory",
     "sceneAspects",
     "recentTurnLedger",
-    "routes",
   ]);
 });
 
@@ -985,7 +1007,7 @@ test("formatRouterContextForModel compacts router payload to skinny referent lis
   assert.doesNotMatch(rendered.routes[0] ?? "", /caravanserais/);
 });
 
-test("selectPromptContextProfile falls back to full when router confidence is low", () => {
+test("selectPromptContextProfile keeps local micro-scene context even when router confidence is low", () => {
   assert.equal(
     aiProviderTestUtils.selectPromptContextProfile({
       profile: "local",
@@ -1003,10 +1025,11 @@ test("selectPromptContextProfile falls back to full when router confidence is lo
         primaryIntent: "Uncertain local action.",
         resolvedReferents: [],
         unresolvedReferents: [],
+        impliedDestinationFocus: null,
         mustCheck: [],
       },
     }),
-    "full",
+    "local",
   );
 });
 

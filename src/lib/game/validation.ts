@@ -4,6 +4,7 @@ import type {
   MechanicsMutation,
   PendingCheck,
   ResolveMechanicsResponse,
+  RouterDecision,
   TimeMode,
   TurnActionToolCall,
   TurnFetchToolResult,
@@ -206,6 +207,30 @@ export function isLikelyProxyPlayerMovementAction(playerAction: string | undefin
     && !actorDirectionSignals.some((pattern) => pattern.test(normalized));
 }
 
+export function routerSuggestsManifestationOverKnowledge(routerDecision: RouterDecision | undefined) {
+  if (!routerDecision) {
+    return false;
+  }
+
+  if (routerDecision.profile !== "local") {
+    return false;
+  }
+
+  if (!routerDecision.authorizedVectors.includes("investigate")) {
+    return false;
+  }
+
+  if (routerDecision.attention.resolvedReferents.some((entry) => entry.targetKind === "information")) {
+    return false;
+  }
+
+  return (
+    routerDecision.attention.impliedDestinationFocus != null
+    || routerDecision.attention.mustCheck.includes("sceneActors")
+    || routerDecision.attention.mustCheck.includes("sceneAspects")
+  );
+}
+
 function mutationPhaseForCheckStakes(mutation: MechanicsMutation): "immediate" | "conditional" {
   if (mutation.phase) {
     return mutation.phase;
@@ -304,8 +329,9 @@ export function validateTurnCommand(input: {
   command: TurnActionToolCall;
   fetchedFacts?: TurnFetchToolResult[];
   playerAction?: string;
+  routerDecision?: RouterDecision;
 }): ValidatedTurnCommand {
-  const { snapshot, command, fetchedFacts = [], playerAction } = input;
+  const { snapshot, command, fetchedFacts = [], playerAction, routerDecision } = input;
 
   if (command.type === "request_clarification") {
     return {
@@ -329,6 +355,11 @@ export function validateTurnCommand(input: {
 
   const mutations = command.mutations.filter((mutation) => {
     if (mutation.type !== "record_local_interaction") {
+      if (mutation.type === "discover_information" && routerSuggestsManifestationOverKnowledge(routerDecision)) {
+        warnings.push(
+          "Mechanics response appears to use discover_information where the router indicates local manifestation semantics; prefer manifested scene details or actors instead.",
+        );
+      }
       if (mutation.type === "set_scene_actor_presence" && isLikelyProxyPlayerMovementAction(playerAction)) {
         warnings.push(
           "Mechanics response appears to use set_scene_actor_presence as a proxy for player movement; engine will reject it semantically.",
