@@ -17,6 +17,7 @@ export type PromptContextProfile = "local" | "full";
 export type NpcState = "active" | "wounded" | "incapacitated" | "dead";
 export type CombatApproach = "attack" | "subdue" | "assassinate";
 export type TradeAction = "buy" | "sell";
+export type NpcTransferMode = "willing" | "stealth" | "force";
 export type RestType = "light" | "full";
 export type ApprovalBand = "hostile" | "cold" | "neutral" | "warm" | "trusted";
 export type DurationMagnitude = "instant" | "brief" | "standard" | "extended" | "long";
@@ -49,6 +50,7 @@ export type TurnCodeEntityType =
   | "location"
   | "route"
   | "scene_object"
+  | "world_object"
   | "npc"
   | "faction"
   | "information"
@@ -156,9 +158,19 @@ export type ItemTemplate = {
   tags: string[];
 };
 
+export type AssetHolderRef =
+  | { kind: "player" }
+  | { kind: "npc"; npcId: string }
+  | { kind: "world_object"; objectId: string }
+  | { kind: "scene"; locationId: string; focusKey?: string | null };
+
 export type ItemInstance = {
   id: string;
-  characterInstanceId: string;
+  characterInstanceId: string | null;
+  npcId?: string | null;
+  worldObjectId?: string | null;
+  sceneLocationId?: string | null;
+  sceneFocusKey?: string | null;
   templateId: string;
   template: ItemTemplate;
   isIdentified: boolean;
@@ -176,10 +188,31 @@ export type CommoditySummary = {
 
 export type CharacterCommodityStack = {
   id: string;
-  characterInstanceId: string;
+  characterInstanceId: string | null;
+  npcId?: string | null;
+  worldObjectId?: string | null;
+  sceneLocationId?: string | null;
+  sceneFocusKey?: string | null;
   commodityId: string;
   quantity: number;
   commodity: CommoditySummary;
+};
+
+export type WorldObjectSummary = {
+  id: string;
+  name: string;
+  characterInstanceId?: string | null;
+  npcId?: string | null;
+  parentWorldObjectId?: string | null;
+  sceneLocationId?: string | null;
+  sceneFocusKey?: string | null;
+  storedGold: number;
+  storageCapacity?: number | null;
+  securityIsLocked: boolean;
+  securityKeyItemTemplateId?: string | null;
+  concealmentIsHidden: boolean;
+  vehicleIsHitched: boolean;
+  properties: Record<string, unknown> | null;
 };
 
 export type CharacterInstance = {
@@ -635,6 +668,10 @@ export type CampaignRuntimeState = {
   globalTime: number;
   pendingTurnId: string | null;
   lastActionSummary: string | null;
+  characterState: {
+    conditions: string[];
+    activeCompanions: string[];
+  };
   sceneFocus: {
     key: string;
     label: string;
@@ -767,6 +804,12 @@ export type RecentUnnamedLocalSummary = {
   interactionCount: number;
   lastSummary: string | null;
   lastSeenAtTurn: number;
+};
+
+export type PromptWorldObject = {
+  id: string;
+  name: string;
+  summary: string;
 };
 
 export type PromptNpcSummary = {
@@ -919,6 +962,9 @@ export type CampaignSnapshot = {
   setting: string;
   state: CampaignRuntimeState;
   character: CampaignCharacter;
+  assetItems: ItemInstance[];
+  assetCommodityStacks: CharacterCommodityStack[];
+  worldObjects: WorldObjectSummary[];
   currentLocation: LocationSummary;
   adjacentRoutes: RouteSummary[];
   presentNpcs: NpcSummary[];
@@ -940,7 +986,13 @@ export type CampaignSnapshot = {
 
 export type PlayerCampaignSnapshot = Omit<
   CampaignSnapshot,
-  "sessionTurnCount" | "factionRelations" | "connectedLeads" | "knownNpcLocationIds"
+  | "sessionTurnCount"
+  | "factionRelations"
+  | "connectedLeads"
+  | "knownNpcLocationIds"
+  | "assetItems"
+  | "assetCommodityStacks"
+  | "worldObjects"
 >;
 
 export type CampaignListItem = {
@@ -962,6 +1014,8 @@ export type PromptInventoryItem = {
   name: string;
   description: string | null;
   quantity?: number;
+  instanceIds?: string[];
+  stateTags?: string[];
 };
 
 export type SpatialPromptContext = {
@@ -976,6 +1030,7 @@ export type SpatialPromptContext = {
   recentWorldShifts: WorldShiftSummary[];
   activeThreads: ActiveThreadSummary[];
   inventory: PromptInventoryItem[];
+  worldObjects: PromptWorldObject[];
   sceneAspects: CampaignRuntimeState["sceneAspects"];
   localTexture: LocalTextureSummary | null;
   globalTime: number;
@@ -987,6 +1042,14 @@ export type RouterInventorySummary = {
   templateId: string;
   name: string;
   quantity: number;
+  instanceIds?: string[];
+  stateTags?: string[];
+};
+
+export type RouterWorldObjectSummary = {
+  id: string;
+  name: string;
+  summary: string;
 };
 
 export type RouterSceneAspectSummary = {
@@ -1010,6 +1073,7 @@ export type TurnRouterContext = Pick<
   | "activeThreads"
 > & {
   inventory: RouterInventorySummary[];
+  worldObjects: RouterWorldObjectSummary[];
   sceneAspects: RouterSceneAspectSummary[];
   gold: number;
 };
@@ -1063,6 +1127,7 @@ export type RouterClarification = {
 export type RouterResolvedReferentTargetKind =
   | "scene_actor"
   | "inventory_item"
+  | "world_object"
   | "route"
   | "information"
   | "location";
@@ -1090,6 +1155,7 @@ export type RouterImpliedDestinationFocus = {
 export type RouterAttentionMustCheck =
   | "sceneActors"
   | "sceneAspects"
+  | "worldObjects"
   | "inventory"
   | "routes"
   | "gold"
@@ -1369,6 +1435,19 @@ export type MechanicsMutation =
       phase?: MutationPhase;
     }
   | {
+      type: "spawn_world_object";
+      spawnKey: string;
+      name: string;
+      holder: AssetHolderRef;
+      storageCapacity?: number;
+      securityIsLocked?: boolean;
+      securityKeyItemTemplateId?: string;
+      concealmentIsHidden?: boolean;
+      vehicleIsHitched?: boolean;
+      reason: string;
+      phase?: MutationPhase;
+    }
+  | {
       type: "spawn_environmental_item";
       spawnKey: string;
       itemName: string;
@@ -1383,6 +1462,25 @@ export type MechanicsMutation =
       marketPriceId: string;
       commodityId: string;
       quantity: number;
+      phase?: MutationPhase;
+    }
+  | {
+      type: "transfer_assets";
+      source: AssetHolderRef;
+      destination: AssetHolderRef;
+      goldAmount?: number;
+      itemInstanceIds?: string[];
+      worldObjectIds?: string[];
+      templateTransfers?: Array<{
+        templateId: string;
+        quantity: number;
+      }>;
+      commodityTransfers?: Array<{
+        commodityId: string;
+        quantity: number;
+      }>;
+      npcTransferMode?: NpcTransferMode;
+      reason: string;
       phase?: MutationPhase;
     }
   | {
@@ -1426,9 +1524,41 @@ export type MechanicsMutation =
       phase?: MutationPhase;
     }
   | {
+      type: "update_world_object_state";
+      objectId: string;
+      isLocked?: boolean;
+      isHidden?: boolean;
+      isHitched?: boolean;
+      reason: string;
+      phase?: MutationPhase;
+    }
+  | {
+      type: "update_item_state";
+      instanceId: string;
+      isEquipped?: boolean;
+      chargesDelta?: number;
+      propertiesPatch?: Record<string, string>;
+      reason: string;
+      phase?: MutationPhase;
+    }
+  | {
+      type: "update_character_state";
+      conditionsAdded?: string[];
+      conditionsRemoved?: string[];
+      reason: string;
+      phase?: MutationPhase;
+    }
+  | {
       type: "update_scene_object";
       objectId: string;
       newState: string;
+      reason: string;
+      phase?: MutationPhase;
+    }
+  | {
+      type: "set_follow_state";
+      actorRef: SceneActorRef;
+      isFollowing: boolean;
       reason: string;
       phase?: MutationPhase;
     }
@@ -1605,4 +1735,5 @@ export type TurnRollbackData = {
   createdScheduleJobIds: string[];
   createdTemporaryActorIds: string[];
   createdCommodityStackIds: string[];
+  createdWorldObjectIds: string[];
 };

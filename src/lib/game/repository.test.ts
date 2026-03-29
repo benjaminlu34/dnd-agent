@@ -235,6 +235,8 @@ test("toRouterInventorySummary aggregates quantity and omits removed inventory e
       templateId: "item_rope",
       name: "Rope",
       quantity: 2,
+      instanceIds: ["iteminst_1", "iteminst_2"],
+      stateTags: [],
     },
   ]);
 });
@@ -258,6 +260,10 @@ test("toRouterSceneAspectSummaries emits compact duration-aware aspect records",
         state: "nailed by the door",
         duration: "permanent",
       },
+    },
+    characterState: {
+      conditions: [],
+      activeCompanions: [],
     },
   } satisfies CampaignRuntimeState);
 
@@ -483,6 +489,7 @@ test("prunePromptContextForRouter ranks resolved refs and trims unrelated heavy 
           quantity: 0,
         },
       ],
+      worldObjects: [],
       sceneFocus: null,
       sceneAspects: {
         crowd_noise: {
@@ -936,8 +943,15 @@ test("toPlayerCampaignSnapshot preserves latest retryable turn metadata", () => 
       lastActionSummary: null,
       sceneFocus: null,
       sceneAspects: {},
+      characterState: {
+        conditions: [],
+        activeCompanions: [],
+      },
     },
     character: {} as never,
+    assetItems: [],
+    assetCommodityStacks: [],
+    worldObjects: [],
     currentLocation: {} as never,
     adjacentRoutes: [],
     presentNpcs: [],

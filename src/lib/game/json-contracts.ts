@@ -24,6 +24,10 @@ const rawCampaignRuntimeStateSchema = z.object({
   globalTime: z.number().int().min(0),
   pendingTurnId: z.string().trim().min(1).nullable(),
   lastActionSummary: z.string().trim().min(1).nullable(),
+  characterState: z.object({
+    conditions: z.array(z.string().trim().min(1)).default([]),
+    activeCompanions: z.array(z.string().trim().min(1)).default([]),
+  }).nullish().default({ conditions: [], activeCompanions: [] }),
   sceneFocus: z.object({
     key: z.string().trim().min(1),
     label: z.string().trim().min(1),
@@ -53,6 +57,7 @@ const campaignRuntimeStateSchema: z.ZodType<CampaignRuntimeState> = rawCampaignR
     globalTime: value.globalTime,
     pendingTurnId: value.pendingTurnId,
     lastActionSummary: value.lastActionSummary,
+    characterState: value.characterState ?? { conditions: [], activeCompanions: [] },
     sceneFocus: value.sceneFocus ?? null,
     sceneAspects: normalizedAspects,
     customTitle: value.customTitle ?? null,
@@ -118,6 +123,7 @@ const turnCausalityCodeSchema: z.ZodType<TurnCausalityCode> = z.object({
     "location",
     "route",
     "scene_object",
+    "world_object",
     "npc",
     "faction",
     "information",
@@ -151,15 +157,21 @@ const stateCommitLogEntrySchema: z.ZodType<StateCommitLogEntry> = z.object({
       "record_local_interaction",
       "spawn_scene_aspect",
       "spawn_temporary_actor",
+      "spawn_world_object",
       "spawn_environmental_item",
       "commit_market_trade",
+      "transfer_assets",
       "adjust_inventory",
       "adjust_relationship",
       "discover_information",
       "set_npc_state",
       "set_player_scene_focus",
       "set_scene_actor_presence",
+      "update_world_object_state",
+      "update_item_state",
+      "update_character_state",
       "update_scene_object",
+      "set_follow_state",
       "restore_health",
     ])
     .optional()
@@ -233,6 +245,7 @@ const turnResultPayloadSchema: z.ZodType<TurnResultPayload> = z.object({
       createdScheduleJobIds: z.array(z.string()).default([]),
       createdTemporaryActorIds: z.array(z.string()),
       createdCommodityStackIds: z.array(z.string()),
+      createdWorldObjectIds: z.array(z.string()).default([]),
     })
     .optional()
     .nullable(),

@@ -2250,7 +2250,7 @@ const routerResolvedReferentSchema = z.object({
     (value) => !value.startsWith("spawn:"),
     "resolved referents must not use spawn handles",
   ),
-  targetKind: z.enum(["scene_actor", "inventory_item", "route", "information", "location"]),
+  targetKind: z.enum(["scene_actor", "inventory_item", "world_object", "route", "information", "location"]),
   confidence: z.enum(["high", "medium"]),
 });
 
@@ -2274,7 +2274,7 @@ const routerAttentionSchema = z.object({
     routerImpliedDestinationFocusSchema.nullable().optional().default(null),
   ),
   mustCheck: z.array(
-    z.enum(["sceneActors", "sceneAspects", "inventory", "routes", "gold", "fetchedFacts", "recentTurnLedger"]),
+    z.enum(["sceneActors", "sceneAspects", "worldObjects", "inventory", "routes", "gold", "fetchedFacts", "recentTurnLedger"]),
   ).max(7).default([]),
 }).optional().default({
   primaryIntent: "Resolve the player action conservatively from grounded context.",
@@ -2311,6 +2311,25 @@ const checkIntentSchema = z.discriminatedUnion("type", [
     targetNpcId: z.string().trim().min(1),
     approach: z.enum(["attack", "subdue", "assassinate"]),
     mode: z.enum(["normal", "advantage", "disadvantage"]).optional(),
+  }),
+]);
+
+const assetHolderSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("player"),
+  }),
+  z.object({
+    kind: z.literal("npc"),
+    npcId: z.string().trim().min(1),
+  }),
+  z.object({
+    kind: z.literal("world_object"),
+    objectId: z.string().trim().min(1),
+  }),
+  z.object({
+    kind: z.literal("scene"),
+    locationId: z.string().trim().min(1),
+    focusKey: z.string().trim().min(1).nullable().optional(),
   }),
 ]);
 
@@ -2357,6 +2376,19 @@ const mechanicsMutationSchema = z.discriminatedUnion("type", [
     phase: z.enum(["immediate", "conditional"]).optional(),
   }),
   z.object({
+    type: z.literal("spawn_world_object"),
+    spawnKey: z.string().trim().min(1).max(60),
+    name: z.string().trim().min(1).max(120),
+    holder: assetHolderSchema,
+    storageCapacity: z.number().int().positive().max(999).optional(),
+    securityIsLocked: z.boolean().optional(),
+    securityKeyItemTemplateId: z.string().trim().min(1).optional(),
+    concealmentIsHidden: z.boolean().optional(),
+    vehicleIsHitched: z.boolean().optional(),
+    reason: z.string().trim().min(1).max(120),
+    phase: z.enum(["immediate", "conditional"]).optional(),
+  }),
+  z.object({
     type: z.literal("spawn_environmental_item"),
     spawnKey: z.string().trim().min(1).max(60),
     itemName: z.string().trim().min(1).max(80),
@@ -2371,6 +2403,29 @@ const mechanicsMutationSchema = z.discriminatedUnion("type", [
     marketPriceId: z.string().trim().min(1),
     commodityId: z.string().trim().min(1),
     quantity: z.number().int().positive(),
+    phase: z.enum(["immediate", "conditional"]).optional(),
+  }),
+  z.object({
+    type: z.literal("transfer_assets"),
+    source: assetHolderSchema,
+    destination: assetHolderSchema,
+    goldAmount: z.number().int().positive().optional(),
+    itemInstanceIds: z.array(z.string().trim().min(1)).max(12).optional(),
+    worldObjectIds: z.array(z.string().trim().min(1)).max(8).optional(),
+    templateTransfers: z.array(
+      z.object({
+        templateId: z.string().trim().min(1),
+        quantity: z.number().int().positive(),
+      }),
+    ).max(8).optional(),
+    commodityTransfers: z.array(
+      z.object({
+        commodityId: z.string().trim().min(1),
+        quantity: z.number().int().positive(),
+      }),
+    ).max(8).optional(),
+    npcTransferMode: z.enum(["willing", "stealth", "force"]).optional(),
+    reason: z.string().trim().min(1).max(120),
     phase: z.enum(["immediate", "conditional"]).optional(),
   }),
   z.object({
@@ -2414,9 +2469,41 @@ const mechanicsMutationSchema = z.discriminatedUnion("type", [
     phase: z.enum(["immediate", "conditional"]).optional(),
   }),
   z.object({
+    type: z.literal("update_world_object_state"),
+    objectId: z.string().trim().min(1),
+    isLocked: z.boolean().optional(),
+    isHidden: z.boolean().optional(),
+    isHitched: z.boolean().optional(),
+    reason: z.string().trim().min(1).max(120),
+    phase: z.enum(["immediate", "conditional"]).optional(),
+  }),
+  z.object({
+    type: z.literal("update_item_state"),
+    instanceId: z.string().trim().min(1),
+    isEquipped: z.boolean().optional(),
+    chargesDelta: z.number().int().optional(),
+    propertiesPatch: z.record(z.string(), z.string()).optional(),
+    reason: z.string().trim().min(1).max(120),
+    phase: z.enum(["immediate", "conditional"]).optional(),
+  }),
+  z.object({
+    type: z.literal("update_character_state"),
+    conditionsAdded: z.array(z.string().trim().min(1).max(80)).max(8).optional(),
+    conditionsRemoved: z.array(z.string().trim().min(1).max(80)).max(8).optional(),
+    reason: z.string().trim().min(1).max(120),
+    phase: z.enum(["immediate", "conditional"]).optional(),
+  }),
+  z.object({
     type: z.literal("update_scene_object"),
     objectId: z.string().trim().min(1),
     newState: z.string().trim().min(1).max(120),
+    reason: z.string().trim().min(1).max(120),
+    phase: z.enum(["immediate", "conditional"]).optional(),
+  }),
+  z.object({
+    type: z.literal("set_follow_state"),
+    actorRef: z.string().trim().min(1),
+    isFollowing: z.boolean(),
     reason: z.string().trim().min(1).max(120),
     phase: z.enum(["immediate", "conditional"]).optional(),
   }),
@@ -2571,7 +2658,13 @@ function formatRouterRouteLine(route: TurnRouterContext["adjacentRoutes"][number
 }
 
 function formatRouterInventoryLine(item: TurnRouterContext["inventory"][number]) {
-  return `${compactPromptText(item.name, 80)} (qty ${item.quantity}) [${item.templateId}]`;
+  const ids = item.instanceIds?.length ? ` ids ${item.instanceIds.slice(0, 3).join(",")}` : "";
+  const tags = item.stateTags?.length ? ` ${item.stateTags.join("/")}` : "";
+  return `${compactPromptText(item.name, 80)} (qty ${item.quantity}${tags ? `, ${tags}` : ""}) [${item.templateId}${ids}]`;
+}
+
+function formatRouterWorldObjectLine(object: TurnRouterContext["worldObjects"][number]) {
+  return `${compactPromptText(object.name, 80)} [${object.id}] - ${compactPromptText(object.summary, 120)}`;
 }
 
 function formatRouterSceneAspectLine(aspect: TurnRouterContext["sceneAspects"][number]) {
@@ -2590,6 +2683,7 @@ function formatRouterContextForModel(context: TurnRouterContext) {
     gold: context.gold,
     sceneActors: context.sceneActors.slice(0, 8).map(formatRouterSceneActorLine),
     inventory: context.inventory.slice(0, 8).map(formatRouterInventoryLine),
+    worldObjects: context.worldObjects.slice(0, 8).map(formatRouterWorldObjectLine),
     sceneAspects: context.sceneAspects.slice(0, 8).map(formatRouterSceneAspectLine),
     routes: context.adjacentRoutes.slice(0, 6).map(formatRouterRouteLine),
     recentLocalEvents: context.recentLocalEvents
@@ -2778,6 +2872,7 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Never use record_local_interaction with npc: refs or named sceneActors. It is only for unnamed temporary locals referenced as temp:..., spawn:..., or raw temporary-actor ids.",
         "If the player reaches for a plausible unlisted local, improvised item, or environmental condition, spawn it first before interacting with it.",
         "Use spawn_temporary_actor before record_local_interaction when the local is not already listed in sceneActors.",
+        "Use spawn_world_object for durable props like lockboxes, carts, hidden nooks, and other persistent storage or fixtures.",
         "Use spawn_environmental_item before adjust_inventory when the item is plausible in the environment but not already grounded in inventory.",
         "Use spawn_scene_aspect for smoke, damage, noise, weather spillover, improvised cover, and other grounded scene conditions.",
         "In MANIFEST, do not instantiate value: no free wealth, trade goods, valuables, or mechanically advantageous loot.",
@@ -2787,6 +2882,11 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Default manifestation pattern: plausible generic nearby people become spawn_temporary_actor such as stablehand, customer, porter, or watch patrol.",
         "Default manifestation pattern: intra-location repositioning becomes set_player_scene_focus.",
         "Self-directed downtime work may use adjust_inventory, spawn_environmental_item, and spawn_scene_aspect for grounded byproducts, consumed materials, and scene conditions.",
+        "Use transfer_assets for non-market stashing, dropping, storing, retrieving, or handing over items, commodities, or gold between the player, world objects, scenes, and willing NPCs.",
+        "Use update_world_object_state to lock, hide, or hitch a durable world object.",
+        "Use update_item_state for equipping, changing charges, or toggling durable item state like lit/unlit.",
+        "Use update_character_state for track-only conditions like disguised, poisoned, or exhausted.",
+        "Use set_follow_state when someone starts or stops following the player through location and focus changes.",
         "Use set_player_scene_focus for self-directed movement within the current location, like stepping back into the forge, crossing to the workbench, or moving from the street to the stall front.",
         "When using set_player_scene_focus, the label must describe a spatial sub-location or zone, like The Back Room, The Workbench, Alleyway, or Stall Front, never a portable object like Coin Purse or Sword.",
         "Use set_scene_actor_presence whenever someone leaves the current scene or returns during the turn.",
@@ -2845,6 +2945,7 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "When speaking to a named on-screen NPC, cite them in checkIntent only when needed, use adjust_relationship only for meaningful social shifts, and otherwise rely on time passage without inventing a local-interaction mutation.",
         "If the player reaches for a plausible unlisted local, improvised item, or environmental condition, spawn it first before interacting with it.",
         "Use spawn_temporary_actor before record_local_interaction when the local is not already listed in sceneActors.",
+        "Use spawn_world_object for durable props like lockboxes, carts, hidden nooks, and other persistent storage or fixtures.",
         "Use spawn_environmental_item before adjust_inventory when the item is plausible in the environment but not already grounded in inventory.",
         "Use spawn_scene_aspect for smoke, damage, noise, weather spillover, improvised cover, and other grounded scene conditions.",
         "In MANIFEST, do not instantiate value: no free wealth, trade goods, valuables, or mechanically advantageous loot.",
@@ -2854,6 +2955,12 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Default manifestation pattern: plausible generic nearby people become spawn_temporary_actor such as stablehand, customer, porter, or watch patrol.",
         "Default manifestation pattern: intra-location repositioning becomes set_player_scene_focus.",
         "Self-directed downtime work may use adjust_inventory, spawn_environmental_item, and spawn_scene_aspect for grounded byproducts, consumed materials, and scene conditions.",
+        "Use transfer_assets only for non-market custody changes. Do not use it for buying or selling from fetched market prices.",
+        "Use transfer_assets under economy_light for stash/drop/store/retrieve, under converse for willing NPC exchange, under investigate for stealthy NPC-source transfers, and under violence for forceful NPC-source transfers.",
+        "Use update_world_object_state to lock, hide, or hitch a durable world object.",
+        "Use update_item_state for equipping, changing charges, or toggling durable item state like lit/unlit.",
+        "Use update_character_state for track-only conditions like disguised, poisoned, or exhausted.",
+        "Use set_follow_state when someone starts or stops following the player through location and focus changes.",
         "Use adjust_inventory for gaining, losing, consuming, or handing over grounded inventory items.",
         "Use set_npc_state only for direct violence, subdual, or comparable physical outcomes.",
         "Use adjust_relationship for meaningful social shifts with a present NPC.",
@@ -3001,6 +3108,7 @@ function formatSpatialPromptContext(context: SpatialPromptContext) {
     recentWorldShifts: context.recentWorldShifts,
     activeThreads: context.activeThreads,
     inventory: context.inventory,
+    worldObjects: context.worldObjects,
     sceneAspects: context.sceneAspects,
     localTexture: context.localTexture,
     globalTime: context.globalTime,

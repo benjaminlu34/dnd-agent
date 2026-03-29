@@ -94,6 +94,10 @@ test("parseCampaignRuntimeStateJson normalizes legacy scene object state into pe
     },
   });
   assert.equal(parsed.sceneFocus, null);
+  assert.deepEqual(parsed.characterState, {
+    conditions: [],
+    activeCompanions: [],
+  });
 });
 
 test("parseCampaignRuntimeStateJson defaults missing scene-aspect focus keys to null", () => {

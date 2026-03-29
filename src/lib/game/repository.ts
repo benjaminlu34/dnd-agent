@@ -25,6 +25,7 @@ import type {
   CampaignListItem,
   CampaignRuntimeState,
   CampaignSnapshot,
+  CharacterCommodityStack,
   CharacterInstance,
   CharacterTemplate,
   CharacterTemplateDraft,
@@ -50,6 +51,7 @@ import type {
   NpcSummary,
   PlayerCampaignSnapshot,
   PromptInventoryItem,
+  PromptWorldObject,
   PreparedCampaignLaunch,
   ResolvedLaunchEntry,
   RelationshipHistory,
@@ -58,11 +60,14 @@ import type {
   SceneActorSummary,
   PromptContextProfile,
   RouterDecision,
+  RouterWorldObjectSummary,
   SpatialPromptContext,
   StoryMessage,
   TemporaryActorSummary,
+  ItemInstance,
   TurnRouterContext,
   TurnDigest,
+  WorldObjectSummary,
   WorldShiftSummary,
 } from "@/lib/game/types";
 import { prisma } from "@/lib/prisma";
@@ -98,6 +103,8 @@ type PrismaCommodityStackRecord = Prisma.CharacterCommodityStackGetPayload<{
     commodity: true;
   };
 }>;
+
+type PrismaWorldObjectRecord = Prisma.WorldObjectGetPayload<Record<string, never>>;
 
 function parseWorldTemplate(value: unknown): GeneratedWorldModule {
   return generatedWorldModuleSchema.parse(value);
@@ -881,6 +888,10 @@ function toItemInstanceRecord(
   return {
     id: instance.id,
     characterInstanceId: instance.characterInstanceId,
+    npcId: instance.npcId,
+    worldObjectId: instance.worldObjectId,
+    sceneLocationId: instance.sceneLocationId,
+    sceneFocusKey: instance.sceneFocusKey,
     templateId: instance.templateId,
     template: {
       id: instance.template.id,
@@ -911,6 +922,10 @@ function toCommodityStackRecord(
   return {
     id: stack.id,
     characterInstanceId: stack.characterInstanceId,
+    npcId: stack.npcId,
+    worldObjectId: stack.worldObjectId,
+    sceneLocationId: stack.sceneLocationId,
+    sceneFocusKey: stack.sceneFocusKey,
     commodityId: stack.commodityId,
     quantity: stack.quantity,
     commodity: {
@@ -921,6 +936,44 @@ function toCommodityStackRecord(
       tags: [...stack.commodity.tags],
     },
   };
+}
+
+function toWorldObjectSummary(
+  object: PrismaWorldObjectRecord,
+): WorldObjectSummary {
+  return {
+    id: object.id,
+    name: object.name,
+    characterInstanceId: object.characterInstanceId,
+    npcId: object.npcId,
+    parentWorldObjectId: object.parentWorldObjectId,
+    sceneLocationId: object.sceneLocationId,
+    sceneFocusKey: object.sceneFocusKey,
+    storedGold: object.storedGold,
+    storageCapacity: object.storageCapacity,
+    securityIsLocked: object.securityIsLocked,
+    securityKeyItemTemplateId: object.securityKeyItemTemplateId,
+    concealmentIsHidden: object.concealmentIsHidden,
+    vehicleIsHitched: object.vehicleIsHitched,
+    properties:
+      object.propertiesJson && typeof object.propertiesJson === "object" && !Array.isArray(object.propertiesJson)
+        ? (structuredClone(object.propertiesJson) as Record<string, unknown>)
+        : null,
+  };
+}
+
+function stateTagsForItem(item: CharacterInstance["inventory"][number]) {
+  const tags: string[] = [];
+  if (item.properties?.equipped === true) {
+    tags.push("equipped");
+  }
+  if (item.properties?.lit === true) {
+    tags.push("lit");
+  }
+  if (typeof item.charges === "number") {
+    tags.push(`charges:${item.charges}`);
+  }
+  return tags;
 }
 
 function toPromptInventory(
@@ -936,13 +989,21 @@ function toPromptInventory(
       name: template.name,
       description: template.description,
       quantity: 0,
+      instanceIds: [],
+      stateTags: [],
     });
   }
 
   for (const item of character.inventory) {
+    if (isArchivedInventoryProperties(item.properties as Record<string, unknown> | null)) {
+      continue;
+    }
     const existing = itemsById.get(item.templateId);
+    const itemStateTags = stateTagsForItem(item);
     if (existing) {
       existing.quantity = (existing.quantity ?? 0) + 1;
+      existing.instanceIds = Array.from(new Set([...(existing.instanceIds ?? []), item.id]));
+      existing.stateTags = Array.from(new Set([...(existing.stateTags ?? []), ...itemStateTags]));
       continue;
     }
     itemsById.set(item.templateId, {
@@ -951,6 +1012,8 @@ function toPromptInventory(
       name: item.template.name,
       description: item.template.description,
       quantity: 1,
+      instanceIds: [item.id],
+      stateTags: itemStateTags,
     });
   }
 
@@ -976,21 +1039,26 @@ function toPromptInventory(
 }
 
 function toRouterInventorySummary(character: CharacterInstance) {
-  const itemsById = new Map<string, { templateId: string; name: string; quantity: number }>();
+  const itemsById = new Map<string, { templateId: string; name: string; quantity: number; instanceIds: string[]; stateTags: string[] }>();
 
   for (const item of character.inventory) {
     if (isArchivedInventoryProperties(item.properties as Record<string, unknown> | null)) {
       continue;
     }
+    const itemStateTags = stateTagsForItem(item);
     const existing = itemsById.get(item.templateId);
     if (existing) {
       existing.quantity += 1;
+       existing.instanceIds = Array.from(new Set([...existing.instanceIds, item.id]));
+       existing.stateTags = Array.from(new Set([...existing.stateTags, ...itemStateTags]));
       continue;
     }
     itemsById.set(item.templateId, {
       templateId: item.templateId,
       name: item.template.name,
       quantity: 1,
+      instanceIds: [item.id],
+      stateTags: itemStateTags,
     });
   }
 
@@ -1000,6 +1068,93 @@ function toRouterInventorySummary(character: CharacterInstance) {
     }
     return left.name.localeCompare(right.name);
   });
+}
+
+function worldObjectSummaryLine(input: {
+  object: WorldObjectSummary;
+  itemsByObjectId: Map<string, ItemInstance[]>;
+  commodityStacksByObjectId: Map<string, CharacterCommodityStack[]>;
+}) {
+  const flags: string[] = [];
+  if (input.object.securityIsLocked) {
+    flags.push("locked");
+  }
+  if (input.object.concealmentIsHidden) {
+    flags.push("hidden");
+  }
+  if (input.object.vehicleIsHitched) {
+    flags.push("hitched");
+  }
+  if (typeof input.object.storageCapacity === "number") {
+    flags.push(`cap ${input.object.storageCapacity}`);
+  }
+  if (input.object.storedGold > 0) {
+    flags.push(`${input.object.storedGold}g`);
+  }
+  const itemNames = (input.itemsByObjectId.get(input.object.id) ?? [])
+    .filter((item) => !isArchivedInventoryProperties(item.properties as Record<string, unknown> | null))
+    .map((item) => item.template.name);
+  const commodityNames = (input.commodityStacksByObjectId.get(input.object.id) ?? [])
+    .filter((stack) => stack.quantity > 0)
+    .map((stack) => `${stack.commodity.name} x${stack.quantity}`);
+  const contents = [...itemNames, ...commodityNames].slice(0, 3).join(", ");
+  const suffix = [flags.join(", "), contents ? `contains ${contents}` : null].filter(Boolean).join("; ");
+  return suffix ? `${input.object.name} - ${suffix}` : input.object.name;
+}
+
+function visibleWorldObjectsForPrompt(input: {
+  snapshot: CampaignSnapshot;
+  promptSceneFocus: CampaignRuntimeState["sceneFocus"];
+  routerDecision?: RouterDecision;
+}) {
+  const directRefs = new Set(
+    (input.routerDecision?.attention.resolvedReferents ?? [])
+      .filter((entry) => entry.targetKind === "world_object")
+      .map((entry) => entry.targetRef),
+  );
+  const presentNpcIds = new Set(
+    input.snapshot.presentNpcs.map((npc) => npc.id),
+  );
+  const visibleIds = new Set<string>();
+
+  for (const object of input.snapshot.worldObjects) {
+    if (object.characterInstanceId === input.snapshot.character.instanceId) {
+      visibleIds.add(object.id);
+      continue;
+    }
+    if (directRefs.has(object.id)) {
+      visibleIds.add(object.id);
+      continue;
+    }
+    if (object.npcId && presentNpcIds.has(object.npcId)) {
+      visibleIds.add(object.id);
+      continue;
+    }
+    if (object.sceneLocationId !== input.snapshot.currentLocation.id) {
+      continue;
+    }
+    if (!object.concealmentIsHidden) {
+      visibleIds.add(object.id);
+      continue;
+    }
+    if ((object.sceneFocusKey ?? null) === (input.promptSceneFocus?.key ?? null)) {
+      visibleIds.add(object.id);
+    }
+  }
+
+  for (const object of input.snapshot.worldObjects) {
+    if (!object.parentWorldObjectId) {
+      continue;
+    }
+    if (visibleIds.has(object.parentWorldObjectId) && !object.concealmentIsHidden) {
+      visibleIds.add(object.id);
+    }
+    if (directRefs.has(object.id)) {
+      visibleIds.add(object.id);
+    }
+  }
+
+  return input.snapshot.worldObjects.filter((object) => visibleIds.has(object.id));
 }
 
 function toRouterSceneAspectSummaries(state: CampaignRuntimeState) {
@@ -1087,6 +1242,11 @@ function prunePromptContextForRouter(input: {
       .filter((entry) => entry.targetKind === "information")
       .map((entry) => entry.targetRef),
   );
+  const resolvedWorldObjectRefs = new Set(
+    (input.routerDecision?.attention.resolvedReferents ?? [])
+      .filter((entry) => entry.targetKind === "world_object")
+      .map((entry) => entry.targetRef),
+  );
   const unresolvedKinds = new Set(
     (input.routerDecision?.attention.unresolvedReferents ?? []).map((entry) => entry.intendedKind),
   );
@@ -1117,6 +1277,13 @@ function prunePromptContextForRouter(input: {
   ).slice(0, mustCheck.has("inventory")
     ? input.profile === "local" ? 8 : 12
     : input.profile === "local" ? 4 : 6);
+
+  const worldObjects = rankedEntries(
+    input.promptContext.worldObjects,
+    (entry) => (resolvedWorldObjectRefs.has(entry.id) ? 100 : 0),
+  ).slice(0, mustCheck.has("sceneAspects") || resolvedWorldObjectRefs.size > 0
+    ? input.profile === "local" ? 6 : 8
+    : input.profile === "local" ? 3 : 5);
 
   const rankedSceneAspectEntries = rankedEntries(
     Object.entries(input.promptContext.sceneAspects),
@@ -1154,6 +1321,7 @@ function prunePromptContextForRouter(input: {
     recentWorldShifts: input.profile === "local" ? [] : input.promptContext.recentWorldShifts.slice(0, 2),
     activeThreads: input.profile === "local" ? [] : input.promptContext.activeThreads.slice(0, 3),
     inventory,
+    worldObjects,
     sceneAspects,
   };
 }
@@ -1675,6 +1843,10 @@ async function createCampaignInTx(
     lastActionSummary: input.opening.activeThreat ?? input.opening.scene.summary,
     sceneFocus: null,
     sceneAspects: {},
+    characterState: {
+      conditions: [],
+      activeCompanions: [],
+    },
   };
 
   const campaign = await tx.campaign.create({
@@ -3405,6 +3577,31 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     return null;
   }
 
+  const [campaignItemInstances, campaignCommodityStacks, campaignWorldObjectRecords] = await Promise.all([
+    prisma.itemInstance.findMany({
+      where: {
+        template: {
+          campaignId,
+        },
+      },
+      orderBy: { createdAt: "asc" },
+      include: { template: true },
+    }),
+    prisma.characterCommodityStack.findMany({
+      where: {
+        commodity: {
+          campaignId,
+        },
+      },
+      orderBy: { createdAt: "asc" },
+      include: { commodity: true },
+    }),
+    prisma.worldObject.findMany({
+      where: { campaignId },
+      orderBy: { createdAt: "asc" },
+    }),
+  ]);
+
   const state = parseCampaignRuntimeStateJson(campaign.stateJson);
   const session = campaign.sessions[0];
   const currentLocationRecord = campaign.locationNodes.find((location) => location.id === state.currentLocationId);
@@ -3495,15 +3692,22 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     )
     .map((relation) => toFactionRelationSummary(relation, campaign.factions));
 
+  const assetItems = campaignItemInstances.map(toItemInstanceRecord);
+  const assetCommodityStacks = campaignCommodityStacks.map(toCommodityStackRecord);
+  const worldObjects = campaignWorldObjectRecords.map(toWorldObjectSummary);
   const instance: CharacterInstance = {
     id: campaign.characterInstance.id,
     templateId: campaign.characterInstance.templateId,
     health: campaign.characterInstance.health,
     gold: campaign.characterInstance.gold,
-    inventory: campaign.characterInstance.inventory
-      .map(toItemInstanceRecord)
-      .filter((item) => !isArchivedInventoryProperties(item.properties)),
-    commodityStacks: campaign.characterInstance.commodityStacks.map(toCommodityStackRecord),
+    inventory: assetItems.filter(
+      (item) =>
+        item.characterInstanceId === campaign.characterInstance?.id
+        && !isArchivedInventoryProperties(item.properties),
+    ),
+    commodityStacks: assetCommodityStacks.filter(
+      (stack) => stack.characterInstanceId === campaign.characterInstance?.id,
+    ),
   };
 
   const character = toCampaignCharacter(toTemplateRecord(campaign.template), instance);
@@ -3571,6 +3775,9 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     tone: campaign.module.tone,
     setting: campaign.module.setting,
     state,
+    assetItems,
+    assetCommodityStacks,
+    worldObjects,
     character: {
       ...character,
       stats: toCharacterStats(character),
@@ -3644,6 +3851,31 @@ export async function getTurnSnapshot(
   if (!campaign || !campaign.characterInstance || !campaign.sessions[0]) {
     return null;
   }
+
+  const [campaignItemInstances, campaignCommodityStacks, campaignWorldObjectRecords] = await Promise.all([
+    prisma.itemInstance.findMany({
+      where: {
+        template: {
+          campaignId,
+        },
+      },
+      orderBy: { createdAt: "asc" },
+      include: { template: true },
+    }),
+    prisma.characterCommodityStack.findMany({
+      where: {
+        commodity: {
+          campaignId,
+        },
+      },
+      orderBy: { createdAt: "asc" },
+      include: { commodity: true },
+    }),
+    prisma.worldObject.findMany({
+      where: { campaignId },
+      orderBy: { createdAt: "asc" },
+    }),
+  ]);
 
   const state = parseCampaignRuntimeStateJson(campaign.stateJson);
   const session = campaign.sessions[0];
@@ -3953,15 +4185,22 @@ export async function getTurnSnapshot(
     toFactionRelationSummary(relation, normalizedFactionRecords),
   );
 
+  const assetItems = campaignItemInstances.map(toItemInstanceRecord);
+  const assetCommodityStacks = campaignCommodityStacks.map(toCommodityStackRecord);
+  const worldObjects = campaignWorldObjectRecords.map(toWorldObjectSummary);
   const instance: CharacterInstance = {
     id: campaign.characterInstance.id,
     templateId: campaign.characterInstance.templateId,
     health: campaign.characterInstance.health,
     gold: campaign.characterInstance.gold,
-    inventory: campaign.characterInstance.inventory
-      .map(toItemInstanceRecord)
-      .filter((item) => !isArchivedInventoryProperties(item.properties)),
-    commodityStacks: campaign.characterInstance.commodityStacks.map(toCommodityStackRecord),
+    inventory: assetItems.filter(
+      (item) =>
+        item.characterInstanceId === campaign.characterInstance?.id
+        && !isArchivedInventoryProperties(item.properties),
+    ),
+    commodityStacks: assetCommodityStacks.filter(
+      (stack) => stack.characterInstanceId === campaign.characterInstance?.id,
+    ),
   };
   const character = toCampaignCharacter(toTemplateRecord(campaign.template), instance);
   const activePressures = buildActivePressures({
@@ -4021,6 +4260,9 @@ export async function getTurnSnapshot(
     tone: campaign.module.tone,
     setting: campaign.module.setting,
     state,
+    assetItems,
+    assetCommodityStacks,
+    worldObjects,
     character: {
       ...character,
       stats: toCharacterStats(character),
@@ -4148,6 +4390,27 @@ async function loadRecentLocalEvents(snapshot: CampaignSnapshot) {
 
 export async function getTurnRouterContext(snapshot: CampaignSnapshot): Promise<TurnRouterContext> {
   const sceneFocus = snapshot.state.sceneFocus ?? null;
+  const visibleWorldObjects = visibleWorldObjectsForPrompt({
+    snapshot,
+    promptSceneFocus: sceneFocus,
+  });
+  const itemsByObjectId = new Map<string, ItemInstance[]>();
+  for (const item of snapshot.assetItems) {
+    if (!item.worldObjectId) {
+      continue;
+    }
+    itemsByObjectId.set(item.worldObjectId, [...(itemsByObjectId.get(item.worldObjectId) ?? []), item]);
+  }
+  const commodityStacksByObjectId = new Map<string, CharacterCommodityStack[]>();
+  for (const stack of snapshot.assetCommodityStacks) {
+    if (!stack.worldObjectId) {
+      continue;
+    }
+    commodityStacksByObjectId.set(
+      stack.worldObjectId,
+      [...(commodityStacksByObjectId.get(stack.worldObjectId) ?? []), stack],
+    );
+  }
   return {
     currentLocation: {
       id: snapshot.currentLocation.id,
@@ -4177,6 +4440,15 @@ export async function getTurnRouterContext(snapshot: CampaignSnapshot): Promise<
     activePressures: snapshot.activePressures,
     activeThreads: snapshot.activeThreads,
     inventory: toRouterInventorySummary(snapshot.character),
+    worldObjects: visibleWorldObjects.map<RouterWorldObjectSummary>((object) => ({
+      id: object.id,
+      name: object.name,
+      summary: worldObjectSummaryLine({
+        object,
+        itemsByObjectId,
+        commodityStacksByObjectId,
+      }),
+    })),
     sceneAspects: toRouterSceneAspectSummaries({
       ...snapshot.state,
       sceneAspects: filterSceneAspectsForFocus(snapshot.state.sceneAspects ?? {}, sceneFocus),
@@ -4213,6 +4485,28 @@ export async function getPromptContext(
     },
   });
   const isLocal = profile === "local";
+  const visibleWorldObjects = visibleWorldObjectsForPrompt({
+    snapshot,
+    promptSceneFocus,
+    routerDecision,
+  });
+  const itemsByObjectId = new Map<string, ItemInstance[]>();
+  for (const item of snapshot.assetItems) {
+    if (!item.worldObjectId) {
+      continue;
+    }
+    itemsByObjectId.set(item.worldObjectId, [...(itemsByObjectId.get(item.worldObjectId) ?? []), item]);
+  }
+  const commodityStacksByObjectId = new Map<string, CharacterCommodityStack[]>();
+  for (const stack of snapshot.assetCommodityStacks) {
+    if (!stack.worldObjectId) {
+      continue;
+    }
+    commodityStacksByObjectId.set(
+      stack.worldObjectId,
+      [...(commodityStacksByObjectId.get(stack.worldObjectId) ?? []), stack],
+    );
+  }
 
   const promptContext = {
     currentLocation: routerContext.currentLocation,
@@ -4226,6 +4520,15 @@ export async function getPromptContext(
     recentWorldShifts: isLocal ? [] : snapshot.recentWorldShifts,
     activeThreads: isLocal ? [] : routerContext.activeThreads,
     inventory: toPromptInventory(snapshot.character, campaignItemTemplates),
+    worldObjects: visibleWorldObjects.map<PromptWorldObject>((object) => ({
+      id: object.id,
+      name: object.name,
+      summary: worldObjectSummaryLine({
+        object,
+        itemsByObjectId,
+        commodityStacksByObjectId,
+      }),
+    })),
     sceneAspects: filterSceneAspectsForFocus(
       structuredClone(snapshot.state.sceneAspects ?? {}),
       promptSceneFocus,

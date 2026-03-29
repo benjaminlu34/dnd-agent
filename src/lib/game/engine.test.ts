@@ -28,6 +28,10 @@ function createSnapshot(): CampaignSnapshot {
       lastActionSummary: null,
       sceneFocus: null,
       sceneAspects: {},
+      characterState: {
+        conditions: [],
+        activeCompanions: [],
+      },
     },
     character: {
       id: "char_1",
@@ -57,6 +61,9 @@ function createSnapshot(): CampaignSnapshot {
       inventory: [],
       commodityStacks: [],
     },
+    assetItems: [],
+    assetCommodityStacks: [],
+    worldObjects: [],
     currentLocation: {
       id: "loc_gate",
       name: "Ash Gate",
@@ -1574,6 +1581,321 @@ test("blocked routes reject move_player deterministically", () => {
 
   assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "route_blocked");
   assert.equal(evaluated.nextState.currentLocationId, "loc_gate");
+});
+
+test("set_follow_state persists companion refs into next runtime state", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: createSnapshot(),
+    command: createValidatedCommand("success", [
+      {
+        type: "set_follow_state",
+        actorRef: "npc:npc_guard",
+        isFollowing: true,
+        reason: "The guard agrees to escort me.",
+      },
+      {
+        type: "move_player",
+        routeEdgeId: "edge_gate_market",
+        targetLocationId: "loc_market",
+      },
+    ]),
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse", "investigate"]),
+  });
+
+  assert.deepEqual(evaluated.nextState.characterState.activeCompanions, ["npc:npc_guard"]);
+  assert.equal(evaluated.nextState.currentLocationId, "loc_market");
+});
+
+test("transfer_assets can move a portable world object into storage", () => {
+  const snapshot = structuredClone(createSnapshot());
+  snapshot.worldObjects = [
+    {
+      id: "obj_lockbox",
+      name: "Lockbox",
+      characterInstanceId: snapshot.character.instanceId,
+      npcId: null,
+      parentWorldObjectId: null,
+      sceneLocationId: null,
+      sceneFocusKey: null,
+      storedGold: 0,
+      storageCapacity: 10,
+      securityIsLocked: false,
+      securityKeyItemTemplateId: null,
+      concealmentIsHidden: false,
+      vehicleIsHitched: false,
+      properties: null,
+    },
+    {
+      id: "obj_nook",
+      name: "Fireplace Nook",
+      characterInstanceId: null,
+      npcId: null,
+      parentWorldObjectId: null,
+      sceneLocationId: "loc_gate",
+      sceneFocusKey: null,
+      storedGold: 0,
+      storageCapacity: 20,
+      securityIsLocked: false,
+      securityKeyItemTemplateId: null,
+      concealmentIsHidden: true,
+      vehicleIsHitched: false,
+      properties: null,
+    },
+  ];
+
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot,
+    command: createValidatedCommand("success", [
+      {
+        type: "transfer_assets",
+        source: { kind: "player" },
+        destination: { kind: "world_object", objectId: "obj_nook" },
+        worldObjectIds: ["obj_lockbox"],
+        reason: "Place the lockbox into the hidden nook.",
+      },
+    ]),
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["economy_light"]),
+  });
+
+  assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "assets_transferred");
+  assert.equal(evaluated.stateCommitLog[1]?.status, "applied");
+});
+
+test("update_character_state adds and removes tracked conditions in next runtime state", () => {
+  const snapshot = createSnapshot();
+  snapshot.state.characterState.conditions = ["Exhausted"];
+
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot,
+    command: createValidatedCommand("success", [
+      {
+        type: "update_character_state",
+        conditionsAdded: ["Disguised"],
+        conditionsRemoved: ["Exhausted"],
+        reason: "Change clothes and recover composure.",
+      },
+    ]),
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["economy_light"]),
+  });
+
+  assert.deepEqual(evaluated.nextState.characterState.conditions, ["Disguised"]);
+});
+
+test("transfer_assets rejects moving goods into locked storage", () => {
+  const snapshot = structuredClone(createSnapshot());
+  snapshot.worldObjects = [
+    {
+      id: "obj_locked_box",
+      name: "Locked Box",
+      characterInstanceId: null,
+      npcId: null,
+      parentWorldObjectId: null,
+      sceneLocationId: "loc_gate",
+      sceneFocusKey: null,
+      storedGold: 0,
+      storageCapacity: 10,
+      securityIsLocked: true,
+      securityKeyItemTemplateId: null,
+      concealmentIsHidden: false,
+      vehicleIsHitched: false,
+      properties: null,
+    },
+  ];
+
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot,
+    command: createValidatedCommand("success", [
+      {
+        type: "transfer_assets",
+        source: { kind: "player" },
+        destination: { kind: "world_object", objectId: "obj_locked_box" },
+        goldAmount: 2,
+        reason: "Stash coins in the locked box.",
+      },
+    ]),
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["economy_light"]),
+  });
+
+  assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "invalid_target");
+  assert.equal(evaluated.stateCommitLog[1]?.status, "rejected");
+});
+
+test("transfer_assets supports commodity round-trips between player and world objects in one turn", () => {
+  const snapshot = structuredClone(createSnapshot());
+  snapshot.character.commodityStacks = [
+    {
+      id: "stack_player_iron",
+      characterInstanceId: snapshot.character.instanceId,
+      npcId: null,
+      worldObjectId: null,
+      sceneLocationId: null,
+      sceneFocusKey: null,
+      commodityId: "commodity_iron",
+      quantity: 3,
+      commodity: {
+        id: "commodity_iron",
+        campaignId: snapshot.campaignId,
+        name: "Iron Ingots",
+        baseValue: 4,
+        tags: [],
+      },
+    },
+  ];
+  snapshot.assetCommodityStacks = structuredClone(snapshot.character.commodityStacks);
+  snapshot.worldObjects = [
+    {
+      id: "obj_cart",
+      name: "Handcart",
+      characterInstanceId: null,
+      npcId: null,
+      parentWorldObjectId: null,
+      sceneLocationId: "loc_gate",
+      sceneFocusKey: null,
+      storedGold: 0,
+      storageCapacity: 50,
+      securityIsLocked: false,
+      securityKeyItemTemplateId: null,
+      concealmentIsHidden: false,
+      vehicleIsHitched: false,
+      properties: null,
+    },
+  ];
+
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot,
+    command: createValidatedCommand("success", [
+      {
+        type: "transfer_assets",
+        source: { kind: "player" },
+        destination: { kind: "world_object", objectId: "obj_cart" },
+        commodityTransfers: [{ commodityId: "commodity_iron", quantity: 2 }],
+        reason: "Load ingots into the cart.",
+      },
+      {
+        type: "transfer_assets",
+        source: { kind: "world_object", objectId: "obj_cart" },
+        destination: { kind: "player" },
+        commodityTransfers: [{ commodityId: "commodity_iron", quantity: 1 }],
+        reason: "Take one ingot back out.",
+      },
+    ]),
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["economy_light"]),
+  });
+
+  assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "assets_transferred");
+  assert.equal(evaluated.stateCommitLog[2]?.reasonCode, "assets_transferred");
+});
+
+test("transfer_assets enforces NPC transfer vector semantics for stealth and force", () => {
+  const snapshot = structuredClone(createSnapshot());
+  snapshot.assetItems = [
+    {
+      id: "iteminst_guard_key",
+      characterInstanceId: null,
+      npcId: "npc_guard",
+      worldObjectId: null,
+      sceneLocationId: null,
+      sceneFocusKey: null,
+      templateId: "item_key",
+      template: {
+        id: "item_key",
+        campaignId: snapshot.campaignId,
+        name: "Watch Key",
+        description: "A heavy brass watch key.",
+        value: 1,
+        weight: 0,
+        rarity: "common",
+        tags: [],
+      },
+      isIdentified: true,
+      charges: null,
+      properties: null,
+    },
+  ];
+
+  const stealthRejected = engineTestUtils.evaluateResolvedCommand({
+    snapshot,
+    command: createValidatedCommand("success", [
+      {
+        type: "transfer_assets",
+        source: { kind: "npc", npcId: "npc_guard" },
+        destination: { kind: "player" },
+        itemInstanceIds: ["iteminst_guard_key"],
+        npcTransferMode: "stealth",
+        reason: "Palm the key.",
+      },
+    ]),
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+  });
+  assert.equal(stealthRejected.stateCommitLog[1]?.reasonCode, "unauthorized_vector");
+
+  const forceApplied = engineTestUtils.evaluateResolvedCommand({
+    snapshot,
+    command: createValidatedCommand("success", [
+      {
+        type: "transfer_assets",
+        source: { kind: "npc", npcId: "npc_guard" },
+        destination: { kind: "player" },
+        itemInstanceIds: ["iteminst_guard_key"],
+        npcTransferMode: "force",
+        reason: "Rip the key away.",
+      },
+    ]),
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["violence"]),
+  });
+  assert.equal(forceApplied.stateCommitLog[1]?.reasonCode, "assets_transferred");
+});
+
+test("update_item_state accepts charge and property changes for owned instances", () => {
+  const snapshot = structuredClone(createSnapshot());
+  const lantern = {
+    id: "iteminst_lantern",
+    characterInstanceId: snapshot.character.instanceId,
+    npcId: null,
+    worldObjectId: null,
+    sceneLocationId: null,
+    sceneFocusKey: null,
+    templateId: "item_lantern",
+    template: {
+      id: "item_lantern",
+      campaignId: snapshot.campaignId,
+      name: "Lantern",
+      description: "A hooded lantern.",
+      value: 5,
+      weight: 1,
+      rarity: "common",
+      tags: [],
+    },
+    isIdentified: true,
+    charges: 3,
+    properties: null,
+  };
+  snapshot.character.inventory = [structuredClone(lantern)];
+  snapshot.assetItems = [structuredClone(lantern)];
+
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot,
+    command: createValidatedCommand("success", [
+      {
+        type: "update_item_state",
+        instanceId: "iteminst_lantern",
+        chargesDelta: -1,
+        propertiesPatch: { flame: "lit" },
+        reason: "Light the lantern.",
+      },
+    ]),
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["economy_light"]),
+  });
+
+  assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "item_state_updated");
 });
 
 test("deterministic narration fallback includes simulation-originated commit log entries", () => {

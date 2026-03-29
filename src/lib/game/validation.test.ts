@@ -28,6 +28,10 @@ function createSnapshot(): CampaignSnapshot {
       lastActionSummary: null,
       sceneFocus: null,
       sceneAspects: {},
+      characterState: {
+        conditions: [],
+        activeCompanions: [],
+      },
     },
     character: {
       id: "char_1",
@@ -57,6 +61,9 @@ function createSnapshot(): CampaignSnapshot {
       inventory: [],
       commodityStacks: [],
     },
+    assetItems: [],
+    assetCommodityStacks: [],
+    worldObjects: [],
     currentLocation: {
       id: "loc_gate",
       name: "Ash Gate",

@@ -96,6 +96,7 @@ model Campaign {
   npcRoutines         NpcRoutine[]
   factionMoves        FactionMove[]
   worldEvents         WorldEvent[]
+  worldObjects        WorldObject[]
   temporaryActors     TemporaryActor[]
   npcKnowledge        NpcKnowledge[]
   factionKnowledge    FactionKnowledge[]
@@ -116,20 +117,30 @@ model CharacterInstance {
   template   CharacterTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
   inventory  ItemInstance[]
   commodityStacks CharacterCommodityStack[]
+  worldObjects WorldObject[]   @relation("WorldObjectCharacterHolder")
 }
 
 model CharacterCommodityStack {
   id                  String            @id @default(cuid())
-  characterInstanceId String
+  characterInstanceId String?
+  npcId               String?
+  worldObjectId       String?
+  sceneLocationId     String?
+  sceneFocusKey       String?
   commodityId         String
   quantity            Int               @default(0)
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt
-  characterInstance   CharacterInstance @relation(fields: [characterInstanceId], references: [id], onDelete: Cascade)
+  characterInstance   CharacterInstance? @relation(fields: [characterInstanceId], references: [id], onDelete: Cascade)
+  npc                 NPC?              @relation("NpcCommodityHolder", fields: [npcId], references: [id], onDelete: Cascade)
+  worldObject         WorldObject?      @relation("WorldObjectCommodityHolder", fields: [worldObjectId], references: [id], onDelete: Cascade)
+  sceneLocation       LocationNode?     @relation("SceneCommodityPlacement", fields: [sceneLocationId], references: [id], onDelete: Cascade)
   commodity           Commodity         @relation(fields: [commodityId], references: [id], onDelete: Cascade)
 
-  @@unique([characterInstanceId, commodityId])
   @@index([characterInstanceId])
+  @@index([npcId])
+  @@index([worldObjectId])
+  @@index([sceneLocationId])
   @@index([commodityId])
 }
 
@@ -146,23 +157,34 @@ model ItemTemplate {
   updatedAt     DateTime       @updatedAt
   campaign      Campaign       @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   itemInstances ItemInstance[]
+  securityForWorldObjects WorldObject[] @relation("WorldObjectSecurityKeyTemplate")
 
   @@index([campaignId])
 }
 
 model ItemInstance {
   id                  String            @id @default(cuid())
-  characterInstanceId String
+  characterInstanceId String?
+  npcId               String?
+  worldObjectId       String?
+  sceneLocationId     String?
+  sceneFocusKey       String?
   templateId          String
   isIdentified        Boolean           @default(true)
   charges             Int?
   properties          Json?
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt
-  characterInstance   CharacterInstance @relation(fields: [characterInstanceId], references: [id], onDelete: Cascade)
+  characterInstance   CharacterInstance? @relation(fields: [characterInstanceId], references: [id], onDelete: Cascade)
+  npc                 NPC?              @relation("NpcItemHolder", fields: [npcId], references: [id], onDelete: Cascade)
+  worldObject         WorldObject?      @relation("WorldObjectItemHolder", fields: [worldObjectId], references: [id], onDelete: Cascade)
+  sceneLocation       LocationNode?     @relation("SceneItemPlacement", fields: [sceneLocationId], references: [id], onDelete: Cascade)
   template            ItemTemplate      @relation(fields: [templateId], references: [id], onDelete: Cascade)
 
   @@index([characterInstanceId])
+  @@index([npcId])
+  @@index([worldObjectId])
+  @@index([sceneLocationId])
   @@index([templateId])
 }
 
@@ -264,6 +286,9 @@ model LocationNode {
   worldEvents          WorldEvent[]
   npcRoutineTargets    NpcRoutine[]    @relation("NpcRoutineTarget")
   temporaryActors      TemporaryActor[]
+  sceneItemPlacements  ItemInstance[]  @relation("SceneItemPlacement")
+  sceneCommodityPlacements CharacterCommodityStack[] @relation("SceneCommodityPlacement")
+  sceneWorldObjects    WorldObject[]   @relation("SceneWorldObjectPlacement")
 
   @@index([campaignId])
   @@index([campaignId, controllingFactionId])
@@ -355,6 +380,9 @@ model NPC {
   npcRoutines       NpcRoutine[]
   promotedTemporaryActors TemporaryActor[]
   knowledge         NpcKnowledge[]
+  heldItems         ItemInstance[] @relation("NpcItemHolder")
+  heldCommodityStacks CharacterCommodityStack[] @relation("NpcCommodityHolder")
+  heldWorldObjects  WorldObject[] @relation("WorldObjectNpcHolder")
 
   @@index([campaignId])
   @@index([campaignId, currentLocationId])
@@ -578,6 +606,41 @@ model TemporaryActor {
   @@index([campaignId, currentLocationId])
   @@index([campaignId, lastSeenAtTurn])
   @@unique([campaignId, currentLocationId, label])
+}
+
+model WorldObject {
+  id                        String                 @id @default(cuid())
+  campaignId                String
+  name                      String
+  characterInstanceId       String?
+  npcId                     String?
+  parentWorldObjectId       String?
+  sceneLocationId           String?
+  sceneFocusKey             String?
+  storedGold               Int                    @default(0)
+  storageCapacity           Int?
+  securityIsLocked          Boolean                @default(false)
+  securityKeyItemTemplateId String?
+  concealmentIsHidden       Boolean                @default(false)
+  vehicleIsHitched          Boolean                @default(false)
+  propertiesJson            Json?
+  createdAt                 DateTime               @default(now())
+  updatedAt                 DateTime               @updatedAt
+  campaign                  Campaign               @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  characterInstance         CharacterInstance?     @relation("WorldObjectCharacterHolder", fields: [characterInstanceId], references: [id], onDelete: Cascade)
+  npc                       NPC?                   @relation("WorldObjectNpcHolder", fields: [npcId], references: [id], onDelete: Cascade)
+  parentWorldObject         WorldObject?           @relation("WorldObjectParentChild", fields: [parentWorldObjectId], references: [id], onDelete: Cascade)
+  childWorldObjects         WorldObject[]          @relation("WorldObjectParentChild")
+  sceneLocation             LocationNode?          @relation("SceneWorldObjectPlacement", fields: [sceneLocationId], references: [id], onDelete: Cascade)
+  securityKeyTemplate       ItemTemplate?          @relation("WorldObjectSecurityKeyTemplate", fields: [securityKeyItemTemplateId], references: [id], onDelete: SetNull)
+  storedItems               ItemInstance[]         @relation("WorldObjectItemHolder")
+  storedCommodityStacks     CharacterCommodityStack[] @relation("WorldObjectCommodityHolder")
+
+  @@index([campaignId])
+  @@index([characterInstanceId])
+  @@index([npcId])
+  @@index([parentWorldObjectId])
+  @@index([sceneLocationId])
 }
 
 model ScheduleGenerationJob {

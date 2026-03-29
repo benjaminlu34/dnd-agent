@@ -37,10 +37,13 @@ import {
   runSimulationTick,
 } from "@/lib/game/simulation";
 import type {
+  AssetHolderRef,
   CampaignRuntimeState,
   CampaignSnapshot,
+  CharacterCommodityStack,
   CheckResult,
   InfrastructureFailureCode,
+  ItemInstance,
   LocalTextureSummary,
   MechanicsMutation,
   NpcDetail,
@@ -64,6 +67,7 @@ import type {
   TurnResultPayload,
   TurnSubmissionRequest,
   ValidatedTurnCommand,
+  WorldObjectSummary,
 } from "@/lib/game/types";
 import {
   isLikelyProxyPlayerMovementAction,
@@ -617,6 +621,7 @@ function emptyRollback(snapshot: CampaignSnapshot): TurnRollbackData {
     createdScheduleJobIds: [],
     createdTemporaryActorIds: [],
     createdCommodityStackIds: [],
+    createdWorldObjectIds: [],
   };
 }
 
@@ -1208,6 +1213,162 @@ function resolveItemTemplateIdForEvaluation(input: {
   return input.spawnedItemTemplateIds.get(input.itemId.slice("spawn:".length)) ?? null;
 }
 
+function resolveWorldObjectId(input: {
+  objectId: string;
+  spawnedWorldObjectIds: Map<string, string>;
+}) {
+  if (!isSpawnHandle(input.objectId)) {
+    return input.objectId.trim() || null;
+  }
+
+  return input.spawnedWorldObjectIds.get(input.objectId.slice("spawn:".length)) ?? null;
+}
+
+function resolveCommittedWorldObjectId(input: {
+  objectId: string;
+  spawnedWorldObjectIds: Map<string, string>;
+}) {
+  if (input.objectId.startsWith("spawned_world_object:")) {
+    return input.spawnedWorldObjectIds.get(input.objectId.slice("spawned_world_object:".length)) ?? null;
+  }
+  if (isSpawnHandle(input.objectId)) {
+    return input.spawnedWorldObjectIds.get(input.objectId.slice("spawn:".length)) ?? null;
+  }
+  return input.objectId.trim() || null;
+}
+
+function normalizeHolderRef(holder: AssetHolderRef): AssetHolderRef {
+  if (holder.kind !== "scene") {
+    return holder;
+  }
+
+  return {
+    kind: "scene",
+    locationId: holder.locationId,
+    focusKey: holder.focusKey ?? null,
+  };
+}
+
+function holderKey(holder: AssetHolderRef) {
+  switch (holder.kind) {
+    case "player":
+      return "player";
+    case "npc":
+      return `npc:${holder.npcId}`;
+    case "world_object":
+      return `world_object:${holder.objectId}`;
+    case "scene":
+      return `scene:${holder.locationId}:${holder.focusKey ?? ""}`;
+  }
+}
+
+function holderRefsEqual(left: AssetHolderRef, right: AssetHolderRef) {
+  return holderKey(normalizeHolderRef(left)) === holderKey(normalizeHolderRef(right));
+}
+
+function holderRefForItem(input: {
+  item: ItemInstance;
+  playerInstanceId: string;
+}): AssetHolderRef {
+  if (input.item.characterInstanceId === input.playerInstanceId) {
+    return { kind: "player" };
+  }
+  if (input.item.npcId) {
+    return { kind: "npc", npcId: input.item.npcId };
+  }
+  if (input.item.worldObjectId) {
+    return { kind: "world_object", objectId: input.item.worldObjectId };
+  }
+  return {
+    kind: "scene",
+    locationId: input.item.sceneLocationId ?? "",
+    focusKey: input.item.sceneFocusKey ?? null,
+  };
+}
+
+function holderRefForCommodityStack(input: {
+  stack: CharacterCommodityStack;
+  playerInstanceId: string;
+}): AssetHolderRef {
+  if (input.stack.characterInstanceId === input.playerInstanceId) {
+    return { kind: "player" };
+  }
+  if (input.stack.npcId) {
+    return { kind: "npc", npcId: input.stack.npcId };
+  }
+  if (input.stack.worldObjectId) {
+    return { kind: "world_object", objectId: input.stack.worldObjectId };
+  }
+  return {
+    kind: "scene",
+    locationId: input.stack.sceneLocationId ?? "",
+    focusKey: input.stack.sceneFocusKey ?? null,
+  };
+}
+
+function holderRefForWorldObject(input: {
+  object: WorldObjectSummary;
+  playerInstanceId: string;
+}): AssetHolderRef {
+  if (input.object.characterInstanceId === input.playerInstanceId) {
+    return { kind: "player" };
+  }
+  if (input.object.npcId) {
+    return { kind: "npc", npcId: input.object.npcId };
+  }
+  if (input.object.parentWorldObjectId) {
+    return { kind: "world_object", objectId: input.object.parentWorldObjectId };
+  }
+  return {
+    kind: "scene",
+    locationId: input.object.sceneLocationId ?? "",
+    focusKey: input.object.sceneFocusKey ?? null,
+  };
+}
+
+function canUseSceneHolder(holder: AssetHolderRef, currentLocationId: string) {
+  return holder.kind !== "scene" || holder.locationId === currentLocationId;
+}
+
+function objectParentId(object: WorldObjectSummary) {
+  return object.parentWorldObjectId ?? null;
+}
+
+function wouldCreateObjectCycle(input: {
+  objects: Map<string, WorldObjectSummary>;
+  movingObjectId: string;
+  destinationObjectId: string;
+}) {
+  if (input.movingObjectId === input.destinationObjectId) {
+    return true;
+  }
+
+  let currentId: string | null = input.destinationObjectId;
+  while (currentId) {
+    if (currentId === input.movingObjectId) {
+      return true;
+    }
+    currentId = objectParentId(input.objects.get(currentId) ?? { parentWorldObjectId: null } as WorldObjectSummary);
+  }
+
+  return false;
+}
+
+function wouldExceedObjectNestingLimit(input: {
+  objects: Map<string, WorldObjectSummary>;
+  destinationObjectId: string;
+}) {
+  const destination = input.objects.get(input.destinationObjectId);
+  return Boolean(destination?.parentWorldObjectId);
+}
+
+function normalizeActorRef(actorRef: string) {
+  if (actorRef.startsWith("npc:") || actorRef.startsWith("temp:")) {
+    return actorRef;
+  }
+  return actorRef.trim() || actorRef;
+}
+
 function knownInformationIds(snapshot: CampaignSnapshot, fetchedFacts: TurnFetchToolResult[]) {
   const ids = new Set<string>(
     snapshot.localInformation
@@ -1357,7 +1518,7 @@ function isTraversableRoute(route: CampaignSnapshot["adjacentRoutes"][number]) {
   return route.currentStatus === "open";
 }
 
-function isRemovedInventoryProperties(value: Prisma.JsonValue | null) {
+function isArchivedInventoryProperties(value: Prisma.JsonValue | null) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return false;
   }
@@ -1429,7 +1590,7 @@ function evaluateResolvedCommand(input: {
   const projectedRelationshipDelta = new Map<string, number>();
   const projectedInventoryQuantities = new Map<string, number>();
   for (const item of input.snapshot.character.inventory) {
-    if (isRemovedInventoryProperties(item.properties as Prisma.JsonValue | null)) {
+    if (isArchivedInventoryProperties(item.properties as Prisma.JsonValue | null)) {
       continue;
     }
     projectedInventoryQuantities.set(
@@ -1437,6 +1598,61 @@ function evaluateResolvedCommand(input: {
       (projectedInventoryQuantities.get(item.templateId) ?? 0) + 1,
     );
   }
+  const projectedWorldObjects = new Map<string, WorldObjectSummary>(
+    input.snapshot.worldObjects.map((object) => [
+      object.id,
+      {
+        ...object,
+        properties: object.properties ? structuredClone(object.properties) : null,
+      },
+    ]),
+  );
+  const projectedItemInstances = new Map<string, ItemInstance>(
+    input.snapshot.assetItems.map((item) => [
+      item.id,
+      {
+        ...item,
+        properties: item.properties ? structuredClone(item.properties) : null,
+      },
+    ]),
+  );
+  const projectedCommodityStackEntries = new Map<string, CharacterCommodityStack>(
+    input.snapshot.assetCommodityStacks.map((stack) => [
+      stack.id,
+      {
+        ...stack,
+      },
+    ]),
+  );
+  const projectedItemHolders = new Map<string, AssetHolderRef>();
+  for (const item of projectedItemInstances.values()) {
+    if (isArchivedInventoryProperties(item.properties as Prisma.JsonValue | null)) {
+      continue;
+    }
+    projectedItemHolders.set(
+      item.id,
+      holderRefForItem({
+        item,
+        playerInstanceId: input.snapshot.character.instanceId,
+      }),
+    );
+  }
+  const projectedCommodityByHolder = new Map<string, Map<string, number>>();
+  for (const stack of projectedCommodityStackEntries.values()) {
+    const key = holderKey(
+      holderRefForCommodityStack({
+        stack,
+        playerInstanceId: input.snapshot.character.instanceId,
+      }),
+    );
+    const holderQuantities = projectedCommodityByHolder.get(key) ?? new Map<string, number>();
+    holderQuantities.set(stack.commodityId, stack.quantity);
+    projectedCommodityByHolder.set(key, holderQuantities);
+  }
+  const projectedConditions = new Set(input.snapshot.state.characterState.conditions);
+  const projectedFollowers = new Set(
+    input.snapshot.state.characterState.activeCompanions.map((entry) => normalizeActorRef(entry)),
+  );
   const projectedTemporaryActors = new Map<string, ProjectedTemporaryActor>(
     input.snapshot.temporaryActors.map((actor) => [
       actor.id,
@@ -1451,6 +1667,7 @@ function evaluateResolvedCommand(input: {
   );
   const spawnedTemporaryActorIds = new Map<string, string>();
   const spawnedItemTemplateIds = new Map<string, string>();
+  const spawnedWorldObjectIds = new Map<string, string>();
   const discoveredInformationIds = new Set<string>();
   let projectedGold = input.snapshot.character.gold;
   let projectedLocationId = input.snapshot.state.currentLocationId;
@@ -1856,6 +2073,123 @@ function evaluateResolvedCommand(input: {
       continue;
     }
 
+    if (mutation.type === "spawn_world_object") {
+      if (
+        !hasVector(input.routerDecision, "investigate")
+        && !hasVector(input.routerDecision, "economy_light")
+      ) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "unauthorized_vector",
+          summary: "Durable world objects are not authorized for this turn.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (spawnedWorldObjectIds.has(mutation.spawnKey)) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "duplicate_spawn_key",
+          summary: "That world-object spawn key was already used this turn.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+
+      let resolvedHolder: AssetHolderRef;
+      if (mutation.holder.kind === "world_object") {
+        const objectId = resolveWorldObjectId({
+          objectId: mutation.holder.objectId,
+          spawnedWorldObjectIds,
+        });
+        if (!objectId || !projectedWorldObjects.has(objectId)) {
+          stateCommitLog.push({
+            kind: "mutation",
+            mutationType: mutation.type,
+            status: "rejected",
+            reasonCode: "invalid_target",
+            summary: "That destination container is not available for world-object placement.",
+            metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+          });
+          continue;
+        }
+        if (wouldExceedObjectNestingLimit({ objects: projectedWorldObjects, destinationObjectId: objectId })) {
+          stateCommitLog.push({
+            kind: "mutation",
+            mutationType: mutation.type,
+            status: "rejected",
+            reasonCode: "invalid_target",
+            summary: "World-object nesting is limited to one level.",
+            metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+          });
+          continue;
+        }
+        resolvedHolder = { kind: "world_object", objectId };
+      } else {
+        resolvedHolder = normalizeHolderRef(mutation.holder);
+      }
+
+      if (!canUseSceneHolder(resolvedHolder, projectedLocationId)) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "Scene-ground placement must stay in the current location.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+
+      const objectId = `spawned_world_object:${mutation.spawnKey}`;
+      const object: WorldObjectSummary = {
+        id: objectId,
+        name: normalizeWhitespace(mutation.name),
+        characterInstanceId: resolvedHolder.kind === "player" ? input.snapshot.character.instanceId : null,
+        npcId: resolvedHolder.kind === "npc" ? resolvedHolder.npcId : null,
+        parentWorldObjectId:
+          resolvedHolder.kind === "world_object" ? resolvedHolder.objectId : null,
+        sceneLocationId: resolvedHolder.kind === "scene" ? resolvedHolder.locationId : null,
+        sceneFocusKey: resolvedHolder.kind === "scene" ? resolvedHolder.focusKey ?? null : null,
+        storedGold: 0,
+        storageCapacity: mutation.storageCapacity ?? null,
+        securityIsLocked: mutation.securityIsLocked ?? false,
+        securityKeyItemTemplateId: mutation.securityKeyItemTemplateId ?? null,
+        concealmentIsHidden: mutation.concealmentIsHidden ?? false,
+        vehicleIsHitched: mutation.vehicleIsHitched ?? false,
+        properties: null,
+      };
+      projectedWorldObjects.set(objectId, object);
+      spawnedWorldObjectIds.set(mutation.spawnKey, objectId);
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "world_object_spawned",
+        summary: `${object.name} becomes part of the world.`,
+        metadata: {
+          ...mutation,
+          objectId,
+          holder: resolvedHolder,
+          phase,
+        } as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({
+        mutation: {
+          ...mutation,
+          holder: resolvedHolder,
+          phase,
+        } as MechanicsMutation,
+        entry,
+      });
+      continue;
+    }
+
     if (mutation.type === "record_local_interaction") {
       if (isLikelySoloErrandAction(input.playerAction)) {
         stateCommitLog.push({
@@ -2196,6 +2530,387 @@ function evaluateResolvedCommand(input: {
       continue;
     }
 
+    if (mutation.type === "transfer_assets") {
+      const source =
+        mutation.source.kind === "world_object"
+          ? (() => {
+              const objectId = resolveWorldObjectId({
+                objectId: mutation.source.objectId,
+                spawnedWorldObjectIds,
+              });
+              return objectId ? ({ kind: "world_object", objectId } as const) : null;
+            })()
+          : normalizeHolderRef(mutation.source);
+      const destination =
+        mutation.destination.kind === "world_object"
+          ? (() => {
+              const objectId = resolveWorldObjectId({
+                objectId: mutation.destination.objectId,
+                spawnedWorldObjectIds,
+              });
+              return objectId ? ({ kind: "world_object", objectId } as const) : null;
+            })()
+          : normalizeHolderRef(mutation.destination);
+
+      if (!source || !destination) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "That custody transfer references an unknown holder.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+
+      const transferMode = mutation.npcTransferMode ?? "willing";
+      const sourceIsNpc = source.kind === "npc";
+      const destinationIsNpc = destination.kind === "npc";
+      const authorized =
+        sourceIsNpc
+          ? transferMode === "willing"
+            ? hasVector(input.routerDecision, "converse")
+            : transferMode === "stealth"
+              ? hasVector(input.routerDecision, "investigate")
+              : hasVector(input.routerDecision, "violence")
+          : destinationIsNpc
+            ? hasVector(input.routerDecision, "converse")
+            : hasVector(input.routerDecision, "economy_light");
+      if (!authorized) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "unauthorized_vector",
+          summary: "That custody transfer is not authorized for this turn.",
+          metadata: {
+            ...mutation,
+            source,
+            destination,
+            transferMode,
+            phase,
+          } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (!canUseSceneHolder(source, projectedLocationId) || !canUseSceneHolder(destination, projectedLocationId)) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "Scene-ground transfers must stay in the current location.",
+          metadata: { ...mutation, source, destination, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (holderRefsEqual(source, destination)) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "noop",
+          reasonCode: "already_applied",
+          summary: "Those assets are already in that custody location.",
+          metadata: { ...mutation, source, destination, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+
+      const sourceObject = source.kind === "world_object" ? projectedWorldObjects.get(source.objectId) ?? null : null;
+      const destinationObject =
+        destination.kind === "world_object" ? projectedWorldObjects.get(destination.objectId) ?? null : null;
+      if ((source.kind === "world_object" && !sourceObject) || (destination.kind === "world_object" && !destinationObject)) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "That world object is not available for transfer.",
+          metadata: { ...mutation, source, destination, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (sourceObject?.securityIsLocked || destinationObject?.securityIsLocked) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "Locked storage cannot be moved into or out of until it is unlocked.",
+          metadata: { ...mutation, source, destination, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+
+      let transferRejected = false;
+      const requestedWorldObjectIds = Array.from(new Set(mutation.worldObjectIds ?? []));
+      const resolvedWorldObjectIds: string[] = [];
+      for (const requestedObjectId of requestedWorldObjectIds) {
+        const resolvedObjectId = resolveWorldObjectId({
+          objectId: requestedObjectId,
+          spawnedWorldObjectIds,
+        });
+        const object = resolvedObjectId ? projectedWorldObjects.get(resolvedObjectId) ?? null : null;
+        if (!object || !holderRefsEqual(
+          holderRefForWorldObject({
+            object,
+            playerInstanceId: input.snapshot.character.instanceId,
+          }),
+          source,
+        )) {
+          stateCommitLog.push({
+            kind: "mutation",
+            mutationType: mutation.type,
+            status: "rejected",
+            reasonCode: "invalid_target",
+            summary: "A requested world object is not currently in the source holder.",
+            metadata: { ...mutation, source, destination, phase } as unknown as Record<string, unknown>,
+          });
+          transferRejected = true;
+          break;
+        }
+        if (!resolvedObjectId) {
+          transferRejected = true;
+          break;
+        }
+        if (destination.kind === "world_object") {
+          if (wouldCreateObjectCycle({
+            objects: projectedWorldObjects,
+            movingObjectId: resolvedObjectId,
+            destinationObjectId: destination.objectId,
+          }) || wouldExceedObjectNestingLimit({
+            objects: projectedWorldObjects,
+            destinationObjectId: destination.objectId,
+          })) {
+            stateCommitLog.push({
+              kind: "mutation",
+              mutationType: mutation.type,
+              status: "rejected",
+              reasonCode: "invalid_target",
+              summary: "That world-object move would create an invalid storage chain.",
+              metadata: { ...mutation, source, destination, phase } as unknown as Record<string, unknown>,
+            });
+            transferRejected = true;
+            break;
+          }
+        }
+        resolvedWorldObjectIds.push(resolvedObjectId);
+      }
+
+      if (transferRejected || resolvedWorldObjectIds.length !== requestedWorldObjectIds.length) {
+        continue;
+      }
+
+      const movedItemIds = new Set<string>();
+      for (const itemId of mutation.itemInstanceIds ?? []) {
+        const item = projectedItemInstances.get(itemId);
+        const currentHolder = item ? projectedItemHolders.get(item.id) ?? null : null;
+        if (!item || !currentHolder || !holderRefsEqual(currentHolder, source)) {
+          stateCommitLog.push({
+            kind: "mutation",
+            mutationType: mutation.type,
+            status: "rejected",
+            reasonCode: "invalid_target",
+            summary: "A requested item instance is not currently in the source holder.",
+            metadata: { ...mutation, source, destination, phase } as unknown as Record<string, unknown>,
+          });
+          transferRejected = true;
+          break;
+        }
+        movedItemIds.add(itemId);
+      }
+      if (transferRejected || movedItemIds.size !== (mutation.itemInstanceIds ?? []).length) {
+        continue;
+      }
+
+      for (const templateTransfer of mutation.templateTransfers ?? []) {
+        const matchingItems = Array.from(projectedItemInstances.values())
+          .filter((item) => item.templateId === templateTransfer.templateId)
+          .filter((item) => {
+            const currentHolder = projectedItemHolders.get(item.id);
+            return currentHolder && holderRefsEqual(currentHolder, source) && !movedItemIds.has(item.id);
+          })
+          .slice(0, templateTransfer.quantity);
+        if (matchingItems.length !== templateTransfer.quantity) {
+          stateCommitLog.push({
+            kind: "mutation",
+            mutationType: mutation.type,
+            status: "rejected",
+            reasonCode: "insufficient_inventory",
+            summary: "The source holder does not have enough of the requested item template.",
+            metadata: { ...mutation, source, destination, phase } as unknown as Record<string, unknown>,
+          });
+          transferRejected = true;
+          break;
+        }
+        for (const item of matchingItems) {
+          movedItemIds.add(item.id);
+        }
+      }
+      if (transferRejected) {
+        continue;
+      }
+
+      const sourceCommodityKey = holderKey(source);
+      const destinationCommodityKey = holderKey(destination);
+      for (const transfer of mutation.commodityTransfers ?? []) {
+        const sourceQuantity =
+          projectedCommodityByHolder.get(sourceCommodityKey)?.get(transfer.commodityId) ?? 0;
+        if (sourceQuantity < transfer.quantity) {
+          stateCommitLog.push({
+            kind: "mutation",
+            mutationType: mutation.type,
+            status: "rejected",
+            reasonCode: "insufficient_inventory",
+            summary: "The source holder does not have enough of that commodity.",
+            metadata: { ...mutation, source, destination, phase } as unknown as Record<string, unknown>,
+          });
+          transferRejected = true;
+          break;
+        }
+      }
+      if (transferRejected) {
+        continue;
+      }
+
+      if (mutation.goldAmount) {
+        const playerToOrFromObject =
+          (source.kind === "player" && destination.kind === "world_object")
+          || (source.kind === "world_object" && destination.kind === "player");
+        if (!playerToOrFromObject) {
+          stateCommitLog.push({
+            kind: "mutation",
+            mutationType: mutation.type,
+            status: "rejected",
+            reasonCode: "invalid_target",
+            summary: "Gold transfers currently require the player and a world object.",
+            metadata: { ...mutation, source, destination, phase } as unknown as Record<string, unknown>,
+          });
+          continue;
+        }
+        const sourceGold =
+          source.kind === "player"
+            ? projectedGold
+            : projectedWorldObjects.get(source.objectId)?.storedGold ?? 0;
+        if (sourceGold < mutation.goldAmount) {
+          stateCommitLog.push({
+            kind: "mutation",
+            mutationType: mutation.type,
+            status: "rejected",
+            reasonCode: "insufficient_gold",
+            summary: "The source holder does not have enough gold.",
+            metadata: { ...mutation, source, destination, phase } as unknown as Record<string, unknown>,
+          });
+          continue;
+        }
+      }
+
+      for (const worldObjectId of resolvedWorldObjectIds) {
+        const object = projectedWorldObjects.get(worldObjectId);
+        if (!object) {
+          continue;
+        }
+        object.characterInstanceId = destination.kind === "player" ? input.snapshot.character.instanceId : null;
+        object.npcId = destination.kind === "npc" ? destination.npcId : null;
+        object.parentWorldObjectId = destination.kind === "world_object" ? destination.objectId : null;
+        object.sceneLocationId = destination.kind === "scene" ? destination.locationId : null;
+        object.sceneFocusKey = destination.kind === "scene" ? destination.focusKey ?? null : null;
+      }
+
+      for (const itemId of movedItemIds) {
+        const item = projectedItemInstances.get(itemId);
+        if (!item) {
+          continue;
+        }
+        const previousHolder = projectedItemHolders.get(item.id);
+        if (previousHolder?.kind === "player") {
+          projectedInventoryQuantities.set(
+            item.templateId,
+            Math.max(0, (projectedInventoryQuantities.get(item.templateId) ?? 0) - 1),
+          );
+        }
+        if (destination.kind === "player") {
+          projectedInventoryQuantities.set(
+            item.templateId,
+            (projectedInventoryQuantities.get(item.templateId) ?? 0) + 1,
+          );
+        }
+        projectedItemHolders.set(item.id, destination);
+      }
+
+      for (const transfer of mutation.commodityTransfers ?? []) {
+        const sourceHolderQuantities = projectedCommodityByHolder.get(sourceCommodityKey) ?? new Map<string, number>();
+        sourceHolderQuantities.set(
+          transfer.commodityId,
+          (sourceHolderQuantities.get(transfer.commodityId) ?? 0) - transfer.quantity,
+        );
+        projectedCommodityByHolder.set(sourceCommodityKey, sourceHolderQuantities);
+        const destinationHolderQuantities =
+          projectedCommodityByHolder.get(destinationCommodityKey) ?? new Map<string, number>();
+        destinationHolderQuantities.set(
+          transfer.commodityId,
+          (destinationHolderQuantities.get(transfer.commodityId) ?? 0) + transfer.quantity,
+        );
+        projectedCommodityByHolder.set(destinationCommodityKey, destinationHolderQuantities);
+        if (source.kind === "player" || destination.kind === "player") {
+          projectedCommodityQuantities.set(
+            transfer.commodityId,
+            projectedCommodityByHolder.get("player")?.get(transfer.commodityId) ?? 0,
+          );
+        }
+      }
+
+      if (mutation.goldAmount) {
+        if (source.kind === "player") {
+          projectedGold -= mutation.goldAmount;
+        } else if (source.kind === "world_object") {
+          const object = projectedWorldObjects.get(source.objectId);
+          if (object) {
+            object.storedGold -= mutation.goldAmount;
+          }
+        }
+        if (destination.kind === "player") {
+          projectedGold += mutation.goldAmount;
+        } else if (destination.kind === "world_object") {
+          const object = projectedWorldObjects.get(destination.objectId);
+          if (object) {
+            object.storedGold += mutation.goldAmount;
+          }
+        }
+      }
+
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "assets_transferred",
+        summary: "Assets change custody.",
+        metadata: {
+          ...mutation,
+          source,
+          destination,
+          itemInstanceIds: Array.from(movedItemIds),
+          worldObjectIds: resolvedWorldObjectIds,
+          phase,
+        } as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({
+        mutation: {
+          ...mutation,
+          source,
+          destination,
+          itemInstanceIds: Array.from(movedItemIds),
+          worldObjectIds: resolvedWorldObjectIds,
+          npcTransferMode: sourceIsNpc ? transferMode : mutation.npcTransferMode,
+          phase,
+        } as MechanicsMutation,
+        entry,
+      });
+      continue;
+    }
+
     if (mutation.type === "spawn_environmental_item") {
       if (!allowsGroundedDowntimeMutation(input.routerDecision, input.command.timeMode)) {
         stateCommitLog.push({
@@ -2436,6 +3151,256 @@ function evaluateResolvedCommand(input: {
       };
       stateCommitLog.push(entry);
       appliedMutations.push({ mutation: appliedMutation, entry });
+      continue;
+    }
+
+    if (mutation.type === "update_world_object_state") {
+      if (
+        !hasVector(input.routerDecision, "investigate")
+        && !hasVector(input.routerDecision, "economy_light")
+      ) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "unauthorized_vector",
+          summary: "World-object state changes are not authorized for this turn.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      const objectId = resolveWorldObjectId({
+        objectId: mutation.objectId,
+        spawnedWorldObjectIds,
+      });
+      const object = objectId ? projectedWorldObjects.get(objectId) ?? null : null;
+      if (!object) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "That world object is not available here.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+
+      const nextLocked = mutation.isLocked ?? object.securityIsLocked;
+      const nextHidden = mutation.isHidden ?? object.concealmentIsHidden;
+      const nextHitched = mutation.isHitched ?? object.vehicleIsHitched;
+      if (
+        nextLocked === object.securityIsLocked
+        && nextHidden === object.concealmentIsHidden
+        && nextHitched === object.vehicleIsHitched
+      ) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "noop",
+          reasonCode: "already_applied",
+          summary: `${object.name} is already in that state.`,
+          metadata: { ...mutation, objectId, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+
+      object.securityIsLocked = nextLocked;
+      object.concealmentIsHidden = nextHidden;
+      object.vehicleIsHitched = nextHitched;
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "world_object_state_updated",
+        summary: `${object.name} changes state.`,
+        metadata: { ...mutation, objectId, phase } as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({
+        mutation: { ...mutation, objectId, phase } as MechanicsMutation,
+        entry,
+      });
+      continue;
+    }
+
+    if (mutation.type === "update_item_state") {
+      if (!hasVector(input.routerDecision, "economy_light")) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "unauthorized_vector",
+          summary: "Item-state changes are not authorized for this turn.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      const item = projectedItemInstances.get(mutation.instanceId) ?? null;
+      if (!item) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "That item instance is not available.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      const currentHolder = projectedItemHolders.get(item.id) ?? null;
+      if (mutation.isEquipped != null && currentHolder?.kind !== "player") {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "Only carried items can be equipped or unequipped.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+
+      const currentProperties =
+        item.properties && typeof item.properties === "object" && !Array.isArray(item.properties)
+          ? structuredClone(item.properties)
+          : {};
+      if (mutation.isEquipped != null) {
+        currentProperties.equipped = mutation.isEquipped;
+      }
+      if (mutation.propertiesPatch) {
+        for (const [key, value] of Object.entries(mutation.propertiesPatch)) {
+          currentProperties[key] = value;
+        }
+      }
+      const nextCharges =
+        mutation.chargesDelta != null
+          ? Math.max(0, (item.charges ?? 0) + mutation.chargesDelta)
+          : item.charges;
+      const changed =
+        mutation.isEquipped != null
+        || mutation.chargesDelta != null
+        || Object.keys(mutation.propertiesPatch ?? {}).length > 0;
+      if (!changed) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "noop",
+          reasonCode: "already_applied",
+          summary: "That item already reflects the requested state.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+
+      item.properties = currentProperties;
+      item.charges = nextCharges ?? null;
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "item_state_updated",
+        summary: `${item.template.name} changes state.`,
+        metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({ mutation: { ...mutation, phase } as MechanicsMutation, entry });
+      continue;
+    }
+
+    if (mutation.type === "update_character_state") {
+      if (!hasVector(input.routerDecision, "economy_light")) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "unauthorized_vector",
+          summary: "Character-state changes are not authorized for this turn.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      for (const condition of mutation.conditionsRemoved ?? []) {
+        projectedConditions.delete(condition);
+      }
+      for (const condition of mutation.conditionsAdded ?? []) {
+        const normalized = normalizeWhitespace(condition);
+        if (normalized) {
+          projectedConditions.add(normalized);
+        }
+      }
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "character_state_updated",
+        summary: "Your tracked conditions update.",
+        metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({ mutation: { ...mutation, phase } as MechanicsMutation, entry });
+      continue;
+    }
+
+    if (mutation.type === "set_follow_state") {
+      if (!hasVector(input.routerDecision, "converse")) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "unauthorized_vector",
+          summary: "Follower-state changes are not authorized for this turn.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      const target = resolveSceneActorTargetForEvaluation({
+        actorRef: mutation.actorRef,
+        spawnedTemporaryActorIds,
+        projectedTemporaryActors,
+        projectedNpcLocationIds,
+      });
+      if (!target) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "That follower target is not available.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      const canonicalActorRef =
+        target.kind === "npc" ? npcActorRef(target.actorId) : tempActorRef(target.actorId);
+      if (mutation.isFollowing) {
+        projectedFollowers.add(canonicalActorRef);
+      } else {
+        projectedFollowers.delete(canonicalActorRef);
+      }
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "follow_state_updated",
+        summary: mutation.isFollowing
+          ? "A companion agrees to follow you."
+          : "A companion stops following you.",
+        metadata: {
+          ...mutation,
+          actorRef: canonicalActorRef,
+          phase,
+        } as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({
+        mutation: {
+          ...mutation,
+          actorRef: canonicalActorRef,
+          phase,
+        } as MechanicsMutation,
+        entry,
+      });
       continue;
     }
 
@@ -2683,6 +3648,10 @@ function evaluateResolvedCommand(input: {
         ?? "The situation changes.",
       sceneFocus: projectedSceneFocus,
       sceneAspects: projectedSceneAspects,
+      characterState: {
+        conditions: Array.from(projectedConditions),
+        activeCompanions: Array.from(projectedFollowers),
+      },
     } satisfies CampaignRuntimeState,
   };
 }
@@ -2849,6 +3818,177 @@ async function findReusableEnvironmentalItemTemplate(input: {
   });
 }
 
+function itemHolderData(holder: AssetHolderRef, characterInstanceId: string) {
+  switch (holder.kind) {
+    case "player":
+      return {
+        characterInstanceId,
+        npcId: null,
+        worldObjectId: null,
+        sceneLocationId: null,
+        sceneFocusKey: null,
+      } satisfies Prisma.ItemInstanceUncheckedUpdateInput;
+    case "npc":
+      return {
+        characterInstanceId: null,
+        npcId: holder.npcId,
+        worldObjectId: null,
+        sceneLocationId: null,
+        sceneFocusKey: null,
+      } satisfies Prisma.ItemInstanceUncheckedUpdateInput;
+    case "world_object":
+      return {
+        characterInstanceId: null,
+        npcId: null,
+        worldObjectId: holder.objectId,
+        sceneLocationId: null,
+        sceneFocusKey: null,
+      } satisfies Prisma.ItemInstanceUncheckedUpdateInput;
+    case "scene":
+      return {
+        characterInstanceId: null,
+        npcId: null,
+        worldObjectId: null,
+        sceneLocationId: holder.locationId,
+        sceneFocusKey: holder.focusKey ?? null,
+      } satisfies Prisma.ItemInstanceUncheckedUpdateInput;
+  }
+}
+
+function commodityHolderData(holder: AssetHolderRef, characterInstanceId: string) {
+  switch (holder.kind) {
+    case "player":
+      return {
+        characterInstanceId,
+        npcId: null,
+        worldObjectId: null,
+        sceneLocationId: null,
+        sceneFocusKey: null,
+      } satisfies Prisma.CharacterCommodityStackUncheckedUpdateInput;
+    case "npc":
+      return {
+        characterInstanceId: null,
+        npcId: holder.npcId,
+        worldObjectId: null,
+        sceneLocationId: null,
+        sceneFocusKey: null,
+      } satisfies Prisma.CharacterCommodityStackUncheckedUpdateInput;
+    case "world_object":
+      return {
+        characterInstanceId: null,
+        npcId: null,
+        worldObjectId: holder.objectId,
+        sceneLocationId: null,
+        sceneFocusKey: null,
+      } satisfies Prisma.CharacterCommodityStackUncheckedUpdateInput;
+    case "scene":
+      return {
+        characterInstanceId: null,
+        npcId: null,
+        worldObjectId: null,
+        sceneLocationId: holder.locationId,
+        sceneFocusKey: holder.focusKey ?? null,
+      } satisfies Prisma.CharacterCommodityStackUncheckedUpdateInput;
+  }
+}
+
+function worldObjectHolderData(holder: AssetHolderRef, characterInstanceId: string) {
+  switch (holder.kind) {
+    case "player":
+      return {
+        characterInstanceId,
+        npcId: null,
+        parentWorldObjectId: null,
+        sceneLocationId: null,
+        sceneFocusKey: null,
+      } satisfies Prisma.WorldObjectUncheckedUpdateInput;
+    case "npc":
+      return {
+        characterInstanceId: null,
+        npcId: holder.npcId,
+        parentWorldObjectId: null,
+        sceneLocationId: null,
+        sceneFocusKey: null,
+      } satisfies Prisma.WorldObjectUncheckedUpdateInput;
+    case "world_object":
+      return {
+        characterInstanceId: null,
+        npcId: null,
+        parentWorldObjectId: holder.objectId,
+        sceneLocationId: null,
+        sceneFocusKey: null,
+      } satisfies Prisma.WorldObjectUncheckedUpdateInput;
+    case "scene":
+      return {
+        characterInstanceId: null,
+        npcId: null,
+        parentWorldObjectId: null,
+        sceneLocationId: holder.locationId,
+        sceneFocusKey: holder.focusKey ?? null,
+      } satisfies Prisma.WorldObjectUncheckedUpdateInput;
+  }
+}
+
+function itemHolderWhere(holder: AssetHolderRef, characterInstanceId: string): Prisma.ItemInstanceWhereInput {
+  switch (holder.kind) {
+    case "player":
+      return { characterInstanceId };
+    case "npc":
+      return { npcId: holder.npcId };
+    case "world_object":
+      return { worldObjectId: holder.objectId };
+    case "scene":
+      return { sceneLocationId: holder.locationId, sceneFocusKey: holder.focusKey ?? null };
+  }
+}
+
+function commodityHolderWhere(
+  holder: AssetHolderRef,
+  characterInstanceId: string,
+): Prisma.CharacterCommodityStackWhereInput {
+  switch (holder.kind) {
+    case "player":
+      return { characterInstanceId };
+    case "npc":
+      return { npcId: holder.npcId };
+    case "world_object":
+      return { worldObjectId: holder.objectId };
+    case "scene":
+      return { sceneLocationId: holder.locationId, sceneFocusKey: holder.focusKey ?? null };
+  }
+}
+
+function worldObjectHolderWhere(
+  holder: AssetHolderRef,
+  characterInstanceId: string,
+): Prisma.WorldObjectWhereInput {
+  switch (holder.kind) {
+    case "player":
+      return { characterInstanceId };
+    case "npc":
+      return { npcId: holder.npcId };
+    case "world_object":
+      return { parentWorldObjectId: holder.objectId };
+    case "scene":
+      return { sceneLocationId: holder.locationId, sceneFocusKey: holder.focusKey ?? null };
+  }
+}
+
+async function findCommodityStackByHolder(input: {
+  tx: Prisma.TransactionClient;
+  commodityId: string;
+  holder: AssetHolderRef;
+  characterInstanceId: string;
+}) {
+  return input.tx.characterCommodityStack.findFirst({
+    where: {
+      commodityId: input.commodityId,
+      ...commodityHolderWhere(input.holder, input.characterInstanceId),
+    },
+    orderBy: { createdAt: "asc" },
+  });
+}
+
 async function applyResolvedMutations(input: {
   tx: Prisma.TransactionClient;
   snapshot: CampaignSnapshot;
@@ -2863,7 +4003,15 @@ async function applyResolvedMutations(input: {
   const stateCommitLog: StateCommitLog = [];
   const spawnedTemporaryActorIds = new Map<string, string>();
   const spawnedItemTemplateIds = new Map<string, string>();
+  const spawnedWorldObjectIds = new Map<string, string>();
   let currentLocationId = input.snapshot.state.currentLocationId;
+  const characterInstance = await input.tx.characterInstance.findUnique({
+    where: { campaignId: input.snapshot.campaignId },
+    select: { id: true, gold: true, health: true },
+  });
+  if (!characterInstance) {
+    throw new Error("Character instance not found.");
+  }
 
   for (const { mutation, entry } of input.appliedMutations) {
     if (mutation.type === "move_player") {
@@ -2876,6 +4024,134 @@ async function applyResolvedMutations(input: {
       || mutation.type === "update_scene_object"
       || mutation.type === "set_player_scene_focus"
     ) {
+      continue;
+    }
+
+    if (mutation.type === "spawn_world_object") {
+      const objectId = `wobj_${randomUUID()}`;
+      const holder =
+        mutation.holder.kind === "world_object"
+          ? (() => {
+              const resolvedObjectId = resolveCommittedWorldObjectId({
+                objectId: mutation.holder.objectId,
+                spawnedWorldObjectIds,
+              });
+              if (!resolvedObjectId) {
+                throw new Error("World-object spawn referenced an unresolved parent object.");
+              }
+              return { kind: "world_object", objectId: resolvedObjectId } as const;
+            })()
+          : mutation.holder;
+      await input.tx.worldObject.create({
+        data: {
+          id: objectId,
+          campaignId: input.snapshot.campaignId,
+          name: normalizeWhitespace(mutation.name),
+          storedGold: 0,
+          storageCapacity: mutation.storageCapacity ?? null,
+          securityIsLocked: mutation.securityIsLocked ?? false,
+          securityKeyItemTemplateId: mutation.securityKeyItemTemplateId ?? null,
+          concealmentIsHidden: mutation.concealmentIsHidden ?? false,
+          vehicleIsHitched: mutation.vehicleIsHitched ?? false,
+          propertiesJson: Prisma.JsonNull,
+          ...worldObjectHolderData(holder, characterInstance.id),
+        },
+      });
+      recordCreated(input.rollback, "worldObject", objectId);
+      input.rollback.createdWorldObjectIds.push(objectId);
+      spawnedWorldObjectIds.set(mutation.spawnKey, objectId);
+      continue;
+    }
+
+    if (mutation.type === "update_world_object_state") {
+      const objectId = resolveCommittedWorldObjectId({
+        objectId: mutation.objectId,
+        spawnedWorldObjectIds,
+      });
+      if (!objectId) {
+        throw new Error("World-object state update referenced an unresolved object.");
+      }
+      const object = await input.tx.worldObject.findUnique({
+        where: { id: objectId },
+        select: {
+          id: true,
+          securityIsLocked: true,
+          concealmentIsHidden: true,
+          vehicleIsHitched: true,
+          propertiesJson: true,
+        },
+      });
+      if (!object) {
+        continue;
+      }
+      if (mutation.isLocked != null && mutation.isLocked !== object.securityIsLocked) {
+        recordInverse(input.rollback, "worldObject", object.id, "securityIsLocked", object.securityIsLocked);
+      }
+      if (mutation.isHidden != null && mutation.isHidden !== object.concealmentIsHidden) {
+        recordInverse(
+          input.rollback,
+          "worldObject",
+          object.id,
+          "concealmentIsHidden",
+          object.concealmentIsHidden,
+        );
+      }
+      if (mutation.isHitched != null && mutation.isHitched !== object.vehicleIsHitched) {
+        recordInverse(input.rollback, "worldObject", object.id, "vehicleIsHitched", object.vehicleIsHitched);
+      }
+      await input.tx.worldObject.update({
+        where: { id: object.id },
+        data: {
+          ...(mutation.isLocked != null ? { securityIsLocked: mutation.isLocked } : {}),
+          ...(mutation.isHidden != null ? { concealmentIsHidden: mutation.isHidden } : {}),
+          ...(mutation.isHitched != null ? { vehicleIsHitched: mutation.isHitched } : {}),
+        },
+      });
+      continue;
+    }
+
+    if (mutation.type === "update_item_state") {
+      const item = await input.tx.itemInstance.findUnique({
+        where: { id: mutation.instanceId },
+        select: { id: true, charges: true, properties: true },
+      });
+      if (!item) {
+        continue;
+      }
+      const currentProperties =
+        item.properties && typeof item.properties === "object" && !Array.isArray(item.properties)
+          ? structuredClone(item.properties)
+          : {};
+      const nextProperties = structuredClone(currentProperties) as Record<string, unknown>;
+      if (mutation.isEquipped != null) {
+        nextProperties.equipped = mutation.isEquipped;
+      }
+      if (mutation.propertiesPatch) {
+        for (const [key, value] of Object.entries(mutation.propertiesPatch)) {
+          nextProperties[key] = value;
+        }
+      }
+      const nextCharges =
+        mutation.chargesDelta != null
+          ? Math.max(0, (item.charges ?? 0) + mutation.chargesDelta)
+          : item.charges;
+      if (JSON.stringify(nextProperties) !== JSON.stringify(currentProperties)) {
+        recordInverse(input.rollback, "itemInstance", item.id, "properties", item.properties);
+      }
+      if (nextCharges !== item.charges) {
+        recordInverse(input.rollback, "itemInstance", item.id, "charges", item.charges);
+      }
+      await input.tx.itemInstance.update({
+        where: { id: item.id },
+        data: {
+          properties: nextProperties as Prisma.InputJsonValue,
+          charges: nextCharges,
+        },
+      });
+      continue;
+    }
+
+    if (mutation.type === "update_character_state" || mutation.type === "set_follow_state") {
       continue;
     }
 
@@ -3179,6 +4455,246 @@ async function applyResolvedMutations(input: {
       continue;
     }
 
+    if (mutation.type === "transfer_assets") {
+      const source =
+        mutation.source.kind === "world_object"
+          ? (() => {
+              const objectId = resolveCommittedWorldObjectId({
+                objectId: mutation.source.objectId,
+                spawnedWorldObjectIds,
+              });
+              if (!objectId) {
+                throw new Error("Asset transfer referenced an unresolved source world object.");
+              }
+              return { kind: "world_object", objectId } as const;
+            })()
+          : mutation.source;
+      const destination =
+        mutation.destination.kind === "world_object"
+          ? (() => {
+              const objectId = resolveCommittedWorldObjectId({
+                objectId: mutation.destination.objectId,
+                spawnedWorldObjectIds,
+              });
+              if (!objectId) {
+                throw new Error("Asset transfer referenced an unresolved destination world object.");
+              }
+              return { kind: "world_object", objectId } as const;
+            })()
+          : mutation.destination;
+
+      if (mutation.goldAmount) {
+        if (source.kind === "player") {
+          recordInverse(input.rollback, "characterInstance", characterInstance.id, "gold", characterInstance.gold);
+          await input.tx.characterInstance.update({
+            where: { id: characterInstance.id },
+            data: {
+              gold: {
+                decrement: mutation.goldAmount,
+              },
+            },
+          });
+          characterInstance.gold -= mutation.goldAmount;
+        } else if (source.kind === "world_object") {
+          const sourceObject = await input.tx.worldObject.findUnique({
+            where: { id: source.objectId },
+            select: { id: true, storedGold: true },
+          });
+          if (!sourceObject) {
+            throw new Error("Gold transfer source world object not found.");
+          }
+          recordInverse(input.rollback, "worldObject", sourceObject.id, "storedGold", sourceObject.storedGold);
+          await input.tx.worldObject.update({
+            where: { id: sourceObject.id },
+            data: {
+              storedGold: {
+                decrement: mutation.goldAmount,
+              },
+            },
+          });
+        }
+
+        if (destination.kind === "player") {
+          if (!input.rollback.simulationInverses.some((entry) =>
+            entry.table === "characterInstance" && entry.id === characterInstance.id && entry.field === "gold")) {
+            recordInverse(input.rollback, "characterInstance", characterInstance.id, "gold", characterInstance.gold);
+          }
+          await input.tx.characterInstance.update({
+            where: { id: characterInstance.id },
+            data: {
+              gold: {
+                increment: mutation.goldAmount,
+              },
+            },
+          });
+          characterInstance.gold += mutation.goldAmount;
+        } else if (destination.kind === "world_object") {
+          const destinationObject = await input.tx.worldObject.findUnique({
+            where: { id: destination.objectId },
+            select: { id: true, storedGold: true },
+          });
+          if (!destinationObject) {
+            throw new Error("Gold transfer destination world object not found.");
+          }
+          recordInverse(
+            input.rollback,
+            "worldObject",
+            destinationObject.id,
+            "storedGold",
+            destinationObject.storedGold,
+          );
+          await input.tx.worldObject.update({
+            where: { id: destinationObject.id },
+            data: {
+              storedGold: {
+                increment: mutation.goldAmount,
+              },
+            },
+          });
+        }
+      }
+
+      for (const itemId of mutation.itemInstanceIds ?? []) {
+        const item = await input.tx.itemInstance.findUnique({
+          where: { id: itemId },
+          select: {
+            id: true,
+            characterInstanceId: true,
+            npcId: true,
+            worldObjectId: true,
+            sceneLocationId: true,
+            sceneFocusKey: true,
+          },
+        });
+        if (!item) {
+          throw new Error("Asset transfer item instance not found.");
+        }
+        recordInverse(input.rollback, "itemInstance", item.id, "characterInstanceId", item.characterInstanceId);
+        recordInverse(input.rollback, "itemInstance", item.id, "npcId", item.npcId);
+        recordInverse(input.rollback, "itemInstance", item.id, "worldObjectId", item.worldObjectId);
+        recordInverse(input.rollback, "itemInstance", item.id, "sceneLocationId", item.sceneLocationId);
+        recordInverse(input.rollback, "itemInstance", item.id, "sceneFocusKey", item.sceneFocusKey);
+        await input.tx.itemInstance.update({
+          where: { id: item.id },
+          data: itemHolderData(destination, characterInstance.id),
+        });
+      }
+
+      for (const templateTransfer of mutation.templateTransfers ?? []) {
+        const templateItems = await input.tx.itemInstance.findMany({
+          where: {
+            templateId: templateTransfer.templateId,
+            ...itemHolderWhere(source, characterInstance.id),
+          },
+          orderBy: { createdAt: "asc" },
+          take: templateTransfer.quantity,
+        });
+        if (templateItems.length !== templateTransfer.quantity) {
+          throw new Error("Asset transfer template selection underflowed during commit.");
+        }
+        for (const item of templateItems) {
+          recordInverse(input.rollback, "itemInstance", item.id, "characterInstanceId", item.characterInstanceId);
+          recordInverse(input.rollback, "itemInstance", item.id, "npcId", item.npcId);
+          recordInverse(input.rollback, "itemInstance", item.id, "worldObjectId", item.worldObjectId);
+          recordInverse(input.rollback, "itemInstance", item.id, "sceneLocationId", item.sceneLocationId);
+          recordInverse(input.rollback, "itemInstance", item.id, "sceneFocusKey", item.sceneFocusKey);
+          await input.tx.itemInstance.update({
+            where: { id: item.id },
+            data: itemHolderData(destination, characterInstance.id),
+          });
+        }
+      }
+
+      for (const worldObjectId of mutation.worldObjectIds ?? []) {
+        const resolvedWorldObjectId = resolveCommittedWorldObjectId({
+          objectId: worldObjectId,
+          spawnedWorldObjectIds,
+        });
+        if (!resolvedWorldObjectId) {
+          throw new Error("Asset transfer world object not found.");
+        }
+        const object = await input.tx.worldObject.findUnique({
+          where: { id: resolvedWorldObjectId },
+          select: {
+            id: true,
+            characterInstanceId: true,
+            npcId: true,
+            parentWorldObjectId: true,
+            sceneLocationId: true,
+            sceneFocusKey: true,
+          },
+        });
+        if (!object) {
+          throw new Error("Asset transfer world object record not found.");
+        }
+        recordInverse(input.rollback, "worldObject", object.id, "characterInstanceId", object.characterInstanceId);
+        recordInverse(input.rollback, "worldObject", object.id, "npcId", object.npcId);
+        recordInverse(input.rollback, "worldObject", object.id, "parentWorldObjectId", object.parentWorldObjectId);
+        recordInverse(input.rollback, "worldObject", object.id, "sceneLocationId", object.sceneLocationId);
+        recordInverse(input.rollback, "worldObject", object.id, "sceneFocusKey", object.sceneFocusKey);
+        await input.tx.worldObject.update({
+          where: { id: object.id },
+          data: worldObjectHolderData(destination, characterInstance.id),
+        });
+      }
+
+      for (const transfer of mutation.commodityTransfers ?? []) {
+        const sourceStack = await findCommodityStackByHolder({
+          tx: input.tx,
+          commodityId: transfer.commodityId,
+          holder: source,
+          characterInstanceId: characterInstance.id,
+        });
+        if (!sourceStack) {
+          throw new Error("Commodity transfer source stack not found.");
+        }
+        recordInverse(input.rollback, "characterCommodityStack", sourceStack.id, "quantity", sourceStack.quantity);
+        await input.tx.characterCommodityStack.update({
+          where: { id: sourceStack.id },
+          data: {
+            quantity: {
+              decrement: transfer.quantity,
+            },
+          },
+        });
+
+        const destinationStack = await findCommodityStackByHolder({
+          tx: input.tx,
+          commodityId: transfer.commodityId,
+          holder: destination,
+          characterInstanceId: characterInstance.id,
+        });
+        if (destinationStack) {
+          recordInverse(
+            input.rollback,
+            "characterCommodityStack",
+            destinationStack.id,
+            "quantity",
+            destinationStack.quantity,
+          );
+          await input.tx.characterCommodityStack.update({
+            where: { id: destinationStack.id },
+            data: {
+              quantity: {
+                increment: transfer.quantity,
+              },
+            },
+          });
+        } else {
+          const created = await input.tx.characterCommodityStack.create({
+            data: {
+              commodityId: transfer.commodityId,
+              quantity: transfer.quantity,
+              ...commodityHolderData(destination, characterInstance.id),
+            },
+          });
+          input.rollback.createdCommodityStackIds.push(created.id);
+          recordCreated(input.rollback, "characterCommodityStack", created.id);
+        }
+      }
+      continue;
+    }
+
     if (mutation.type === "spawn_environmental_item") {
       if (spawnedItemTemplateIds.has(mutation.spawnKey)) {
         throw new Error("Duplicate environmental-item spawn key during commit.");
@@ -3260,7 +4776,7 @@ async function applyResolvedMutations(input: {
 
       if (mutation.action === "remove") {
         const removableItems = characterInstance.inventory.filter(
-          (item) => !isRemovedInventoryProperties(item.properties as Prisma.JsonValue | null),
+          (item) => !isArchivedInventoryProperties(item.properties as Prisma.JsonValue | null),
         );
         if (removableItems.length < mutation.quantity) {
           throw new Error("Inventory removal exceeded owned quantity during commit.");
@@ -3339,14 +4855,6 @@ async function applyResolvedMutations(input: {
     }
 
     if (mutation.type === "restore_health") {
-      const characterInstance = await input.tx.characterInstance.findUnique({
-        where: { campaignId: input.snapshot.campaignId },
-        select: { id: true, health: true },
-      });
-      if (!characterInstance) {
-        throw new Error("Character instance not found.");
-      }
-
       let restoredHealth = characterInstance.health;
       if (mutation.mode === "light_rest") {
         restoredHealth = Math.max(characterInstance.health, Math.ceil(input.snapshot.character.maxHealth * 0.5));
@@ -3364,6 +4872,47 @@ async function applyResolvedMutations(input: {
             health: restoredHealth,
           },
         });
+        characterInstance.health = restoredHealth;
+      }
+    }
+  }
+
+  if (currentLocationId !== input.snapshot.state.currentLocationId) {
+    for (const actorRef of input.nextState.characterState.activeCompanions) {
+      const normalizedActorRef = normalizeActorRef(actorRef);
+      if (normalizedActorRef.startsWith("npc:")) {
+        const npcId = normalizedActorRef.slice("npc:".length);
+        const npc = await input.tx.nPC.findUnique({
+          where: { id: npcId },
+          select: { id: true, currentLocationId: true },
+        });
+        if (npc && npc.currentLocationId !== currentLocationId) {
+          recordInverse(input.rollback, "nPC", npc.id, "currentLocationId", npc.currentLocationId);
+          await input.tx.nPC.update({
+            where: { id: npc.id },
+            data: {
+              currentLocationId,
+            },
+          });
+        }
+        continue;
+      }
+
+      if (normalizedActorRef.startsWith("temp:")) {
+        const actorId = normalizedActorRef.slice("temp:".length);
+        const actor = await input.tx.temporaryActor.findUnique({
+          where: { id: actorId },
+          select: { id: true, currentLocationId: true, promotedNpcId: true },
+        });
+        if (actor && actor.promotedNpcId == null && actor.currentLocationId !== currentLocationId) {
+          recordInverse(input.rollback, "temporaryActor", actor.id, "currentLocationId", actor.currentLocationId);
+          await input.tx.temporaryActor.update({
+            where: { id: actor.id },
+            data: {
+              currentLocationId,
+            },
+          });
+        }
       }
     }
   }
