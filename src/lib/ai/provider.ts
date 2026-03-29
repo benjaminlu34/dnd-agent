@@ -62,6 +62,7 @@ import {
   getWorldGenerationStageRunningMessage,
   type WorldGenerationProgressUpdate,
 } from "@/lib/game/world-generation-progress";
+import { wait } from "@/lib/utils";
 
 type CampaignOpeningInput = {
   module: GeneratedWorldModule;
@@ -2423,7 +2424,10 @@ const resolveMechanicsSchema = z.object({
   durationMagnitude: z.enum(["instant", "brief", "standard", "extended", "long"]).optional(),
   suggestedActions: z.array(z.string().trim().min(1)).max(4).default([]),
   memorySummary: z.string().trim().min(1).max(240).optional(),
-  checkIntent: checkIntentSchema.optional(),
+  checkIntent: z.preprocess(
+    (value) => (value === null ? undefined : value),
+    checkIntentSchema.optional(),
+  ),
   mutations: z.array(mechanicsMutationSchema).max(8).default([]),
 });
 
@@ -2595,9 +2599,9 @@ function actionLikelyRequestsMacroTravel(playerAction: string, context?: TurnRou
   const strongTravelIntent =
     /\b(travel|journey|depart|set out|leave|ride|sail|take the road|take ship|make for|set off)\b/.test(normalized);
   const routeWording = /\b(road|route|path|trail|passage|wagon|caravan|ship|boat|ferry)\b/.test(normalized);
-  const mentionsCurrentLocation =
-    Boolean(context?.currentLocation.name)
-    && normalized.includes(context.currentLocation.name.toLowerCase());
+  const currentLocationName = context?.currentLocation.name?.toLowerCase() ?? null;
+  const mentionsCurrentLocation = currentLocationName != null
+    && normalized.includes(currentLocationName);
   const mentionsAdjacentLocation = (context?.adjacentRoutes ?? []).some((route) =>
     normalized.includes(route.targetLocationName.toLowerCase()),
   );
@@ -2635,7 +2639,7 @@ function fallbackRouterDecision(
   context?: TurnRouterContext,
 ): RouterDecision {
   return {
-    profile: "full",
+    profile: context?.sceneFocus ? "local" : "full",
     confidence: "low",
     authorizedVectors: [],
     requiredPrerequisites: [],
@@ -2780,6 +2784,7 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Use spawn_scene_aspect for smoke, damage, noise, weather spillover, improvised cover, and other grounded scene conditions.",
         "Self-directed downtime work may use adjust_inventory, spawn_environmental_item, and spawn_scene_aspect for grounded byproducts, consumed materials, and scene conditions.",
         "Use set_player_scene_focus for self-directed movement within the current location, like stepping back into the forge, crossing to the workbench, or moving from the street to the stall front.",
+        "When using set_player_scene_focus, the label must describe a spatial sub-location or zone, like The Back Room, The Workbench, Alleyway, or Stall Front, never a portable object like Coin Purse or Sword.",
         "Use set_scene_actor_presence whenever someone leaves the current scene or returns during the turn.",
         "Use set_scene_actor_presence only for an actor's own departure or return. Never use it to simulate the player arriving somewhere.",
         "Use record_local_interaction only when the player explicitly engages another person. Do not use it for solo errands, checking your own gear, retrieving your own belongings, or internal repositioning.",
@@ -2789,6 +2794,8 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "If attention_packet.mustCheck lists sceneActors, do not target a named actor through record_local_interaction.",
         "If attention_packet.mustCheck lists sceneAspects or routes, verify those surfaces before depending on them in mutations.",
         "If attention_packet.unresolvedReferents names a plausible ungrounded noun, spawn it before interacting with it when needed.",
+        "TRIVIAL ACTIONS: Checking personal inventory, reviewing known information, or looking around a safe room requires ZERO checks. You must omit checkIntent entirely for these actions.",
+        "ID HALLUCINATION BAN: You are strictly forbidden from using discover_information unless the exact informationId is explicitly provided in fetched_facts or attention_packet.resolvedReferents. Do not invent placeholder IDs.",
         "Only include checkIntent when success or failure meaningfully changes which mutations can happen. If the turn is routine and should simply create a local interaction or consume time, omit checkIntent.",
         "If a check is needed, set checkIntent and list only the success-state mutations. The engine will reject them on failure.",
         "Use advance_time for passive waiting or observation windows.",
@@ -2833,6 +2840,7 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Use adjust_relationship for meaningful social shifts with a present NPC.",
         "Use discover_information only for specific known information ids grounded in context or fetched facts.",
         "Use set_player_scene_focus for self-directed movement within the current location, like heading back to the forge, moving to the workbench, or stepping from the street to a nearby shopfront.",
+        "When using set_player_scene_focus, the label must describe a spatial sub-location or zone, like The Back Room, The Workbench, Alleyway, or Stall Front, never a portable object like Coin Purse or Sword.",
         "Use set_scene_actor_presence whenever someone leaves the current scene or returns during the turn.",
         "If a helper, subordinate, or named scene actor leaves on an errand or comes back later in the turn, represent that mechanically with set_scene_actor_presence.",
         "Use set_scene_actor_presence only for an actor's own departure or return. Never use it to simulate the player arriving somewhere.",
@@ -2843,11 +2851,51 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "If attention_packet.mustCheck lists sceneActors, do not target a named actor through record_local_interaction.",
         "If attention_packet.mustCheck lists sceneAspects or routes, verify those surfaces before depending on them in mutations.",
         "If attention_packet.unresolvedReferents names a plausible ungrounded noun, spawn it before interacting with it when needed.",
+        "TRIVIAL ACTIONS: Checking personal inventory, reviewing known information, or looking around a safe room requires ZERO checks. You must omit checkIntent entirely for these actions.",
+        "ID HALLUCINATION BAN: You are strictly forbidden from using discover_information unless the exact informationId is explicitly provided in fetched_facts or attention_packet.resolvedReferents. Do not invent placeholder IDs.",
         "Use restore_health for rest recovery or explicit healing outcomes the engine should apply.",
         "Use advance_time when the action necessarily consumes time. Suggested actions should stay short and concrete.",
         "Preserve the player's commitment level. Do not upgrade browsing or approach into stronger mechanics unless the wording clearly commits to them.",
         "Use request_clarification only if the action is too ambiguous, impossible to map safely, or missing a required target.",
       ].join("\n");
+}
+
+const NARRATION_TRANSIENT_RETRY_DELAYS_MS = [500, 1000, 2000] as const;
+
+function isTransientNarrationModelError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const errorRecord = error as Error & {
+    status?: unknown;
+    code?: unknown;
+    type?: unknown;
+  };
+  const message = error.message.toLowerCase();
+  const name = error.name.toLowerCase();
+  const code = typeof errorRecord.code === "string" ? errorRecord.code.toLowerCase() : "";
+  const type = typeof errorRecord.type === "string" ? errorRecord.type.toLowerCase() : "";
+  const status = typeof errorRecord.status === "number" ? errorRecord.status : null;
+
+  if (status === 408 || status === 429 || (status !== null && status >= 500)) {
+    return true;
+  }
+
+  return (
+    name.includes("abort")
+    || code.includes("abort")
+    || code.includes("timeout")
+    || type.includes("timeout")
+    || message.includes("aborted")
+    || message.includes("timeout")
+    || message.includes("timed out")
+    || message.includes("network")
+    || message.includes("socket hang up")
+    || message.includes("connection reset")
+    || message.includes("econnreset")
+    || message.includes("fetch failed")
+  );
 }
 
 function buildTurnActionCorrectionNotes(input: {
@@ -3044,6 +3092,16 @@ function buildResolvedNarrationConstraints(input: ResolvedTurnNarrationInput) {
     && appliedMutations.every((entry) => entry.mutationType === "advance_time");
   const appliedNonTimeMutations = appliedMutations.filter((entry) => entry.mutationType !== "advance_time");
   const rejectedNonTimeMutations = rejectedMutations.filter((entry) => entry.mutationType !== "advance_time");
+  const hasRejectedInvalidTargetAttempt = rejectedNonTimeMutations.some(
+    (entry) =>
+      (entry.mutationType === "record_local_interaction" || entry.mutationType === "set_scene_actor_presence")
+      && entry.reasonCode === "invalid_target",
+  );
+  const hasRejectedSemanticAttempt = rejectedNonTimeMutations.some(
+    (entry) =>
+      (entry.mutationType === "record_local_interaction" || entry.mutationType === "set_scene_actor_presence")
+      && entry.reasonCode === "invalid_semantics",
+  );
   const waitingForArrival =
     /\bwait\b/i.test(input.playerAction)
     && /\b(for|until|til)\b/i.test(input.playerAction)
@@ -3063,6 +3121,8 @@ function buildResolvedNarrationConstraints(input: ResolvedTurnNarrationInput) {
           || entry.mutationType === "set_scene_actor_presence",
       ),
     rejectedMutationTypes: rejectedNonTimeMutations.map((entry) => entry.mutationType),
+    hasRejectedInvalidTargetAttempt,
+    hasRejectedSemanticAttempt,
     hasArrivalCommit: sanitizedCommitLog.some((entry) =>
       isAppliedArrivalMutation(entry, input.promptContext.currentLocation.id),
     ),
@@ -3094,6 +3154,8 @@ function buildResolvedTurnNarrationPrompt(input: ResolvedTurnNarrationInput) {
     "Do not imply that someone arrived, returned, or appeared unless the committed log makes that change explicit.",
     "If rejectedOutcomeOnly is true, do not narrate rejected outcomes as if they happened.",
     "If rejectedInteractionOnly is true, you may acknowledge that the attempt stalls or goes unanswered, but do not invent direct replies, quoted dialogue, completed errands, or offscreen returns.",
+    "If state_commit_log includes a rejected record_local_interaction or set_scene_actor_presence with reasonCode invalid_target, narrate that the player looked for or attempted that contact but could not find or reach them. Do not narrate a successful encounter.",
+    "If state_commit_log includes a rejected record_local_interaction or set_scene_actor_presence with reasonCode invalid_semantics, narrate the player as unable to complete that intent through another person or presence change, without inventing that it happened anyway.",
     "If rejectedMutationTypes only cover item or scene changes, do not invent completed crafting outputs, item transfers, or scene transformations that the log rejected.",
     "Do not write quoted dialogue unless it is grounded by a committed interaction, a committed check result, fetched facts, or explicit player speech that is visibly answered in the committed log.",
     "Write in second person to the player character as 'you'.",
@@ -5936,13 +5998,44 @@ class DungeonMasterClient {
           user,
         });
 
-        const response = await runCompletion({
-          system,
-          user,
-          tools: [resolvedTurnNarrationTool],
-          maxTokens: 900,
-          signal: input.signal,
-        });
+        let response!: Awaited<ReturnType<typeof runCompletion>>;
+        let lastTransientError: Error | null = null;
+
+        for (let completionAttempt = 1; completionAttempt <= NARRATION_TRANSIENT_RETRY_DELAYS_MS.length; completionAttempt += 1) {
+          try {
+            response = await runCompletion({
+              system,
+              user,
+              tools: [resolvedTurnNarrationTool],
+              maxTokens: 900,
+              signal: input.signal,
+            });
+            lastTransientError = null;
+            break;
+          } catch (error) {
+            if (
+              !isTransientNarrationModelError(error)
+              || input.signal?.aborted
+              || completionAttempt === NARRATION_TRANSIENT_RETRY_DELAYS_MS.length
+            ) {
+              throw error;
+            }
+
+            lastTransientError = error instanceof Error ? error : new Error(String(error));
+            const backoffMs = NARRATION_TRANSIENT_RETRY_DELAYS_MS[completionAttempt - 1];
+            logNarrationDebug("resolved_turn_narration.retry", {
+              attempt,
+              completionAttempt,
+              backoffMs,
+              message: error instanceof Error ? error.message : String(error),
+            });
+            await wait(backoffMs);
+          }
+        }
+
+        if (!response) {
+          throw lastTransientError ?? new Error("Resolved-turn narration completion failed.");
+        }
 
         logNarrationDebug("resolved_turn_narration.raw_input", {
           attempt,

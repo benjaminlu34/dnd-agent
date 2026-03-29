@@ -83,16 +83,6 @@ export async function POST(request: Request) {
           return;
         }
 
-        if (result.type === "retry_required") {
-          send({
-            type: "retry_required",
-            turnId: result.payload.turnId,
-            previousStatus: result.payload.previousStatus,
-            result: result.payload.result,
-          });
-          return;
-        }
-
         send({
           type: "actions",
           actions: result.suggestedActions,

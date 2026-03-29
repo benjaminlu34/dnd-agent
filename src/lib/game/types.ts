@@ -645,6 +645,7 @@ export type CampaignRuntimeState = {
       label: string;
       state: string;
       duration: SceneAspectDuration;
+      focusKey?: string | null;
     }
   >;
   customTitle?: string | null;
@@ -782,6 +783,7 @@ export type SceneActorSummary = {
   kind: "npc" | "temporary_actor";
   displayLabel: string;
   role: string;
+  focusKey?: string | null;
   detailFetchHint:
     | {
         type: "fetch_npc_detail";
@@ -992,6 +994,7 @@ export type RouterSceneAspectSummary = {
   label: string;
   state: string;
   duration: CampaignRuntimeState["sceneAspects"][string]["duration"];
+  focusKey?: string | null;
 };
 
 export type TurnRouterContext = Pick<

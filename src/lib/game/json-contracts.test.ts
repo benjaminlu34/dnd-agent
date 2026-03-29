@@ -90,7 +90,26 @@ test("parseCampaignRuntimeStateJson normalizes legacy scene object state into pe
       label: "gate winch",
       state: "jammed open",
       duration: "permanent",
+      focusKey: null,
     },
   });
   assert.equal(parsed.sceneFocus, null);
+});
+
+test("parseCampaignRuntimeStateJson defaults missing scene-aspect focus keys to null", () => {
+  const parsed = parseCampaignRuntimeStateJson({
+    currentLocationId: "loc_gate",
+    globalTime: 480,
+    pendingTurnId: null,
+    lastActionSummary: null,
+    sceneAspects: {
+      forge_smoke: {
+        label: "forge smoke",
+        state: "hanging low",
+        duration: "scene",
+      },
+    },
+  });
+
+  assert.equal(parsed.sceneAspects.forge_smoke?.focusKey, null);
 });

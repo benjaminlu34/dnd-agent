@@ -1625,6 +1625,7 @@ function evaluateResolvedCommand(input: {
       const aspectKey = sceneAspectKeyFromName(mutation.aspectName);
       const label = normalizeWhitespace(mutation.aspectName);
       const state = normalizeWhitespace(mutation.state);
+      const focusKey = projectedSceneFocus?.key ?? null;
       const existing = projectedSceneAspects[aspectKey] ?? null;
 
       if (
@@ -1632,6 +1633,7 @@ function evaluateResolvedCommand(input: {
         && existing.label === label
         && existing.state === state
         && existing.duration === mutation.duration
+        && (existing.focusKey ?? null) === focusKey
       ) {
         stateCommitLog.push({
           kind: "mutation",
@@ -1652,6 +1654,7 @@ function evaluateResolvedCommand(input: {
         label,
         state,
         duration: mutation.duration,
+        focusKey,
       };
 
       const entry = {
@@ -1663,6 +1666,7 @@ function evaluateResolvedCommand(input: {
         metadata: {
           ...mutation,
           aspectKey,
+          focusKey,
           phase,
         } as unknown as Record<string, unknown>,
       };
@@ -2309,7 +2313,8 @@ function evaluateResolvedCommand(input: {
       const label = normalizeWhitespace(mutation.objectId.replace(/[_-]+/g, " "));
       const state = normalizeWhitespace(mutation.newState);
       const existing = projectedSceneAspects[aspectKey] ?? null;
-      if (existing && existing.label === label && existing.state === state) {
+      const focusKey = existing?.focusKey ?? projectedSceneFocus?.key ?? null;
+      if (existing && existing.label === label && existing.state === state && (existing.focusKey ?? null) === focusKey) {
         stateCommitLog.push({
           kind: "mutation",
           mutationType: mutation.type,
@@ -2328,6 +2333,7 @@ function evaluateResolvedCommand(input: {
         label,
         state,
         duration: existing?.duration ?? "permanent",
+        focusKey,
       };
       const entry = {
         kind: "mutation" as const,
@@ -2338,6 +2344,7 @@ function evaluateResolvedCommand(input: {
         metadata: {
           ...mutation,
           aspectKey,
+          focusKey,
           phase,
         } as unknown as Record<string, unknown>,
       };
@@ -2760,7 +2767,7 @@ async function applyResolvedMutations(input: {
       const lastSummary = `${normalizeWhitespace(mutation.summary)} Apparent disposition: ${normalizeWhitespace(mutation.apparentDisposition)}.`;
 
       if (reusableActor) {
-        const updateData: Prisma.TemporaryActorUpdateInput = {};
+        const updateData: Prisma.TemporaryActorUncheckedUpdateInput = {};
         if (reusableActor.currentLocationId !== currentLocationId) {
           recordInverse(input.rollback, "temporaryActor", reusableActor.id, "currentLocationId", reusableActor.currentLocationId);
           updateData.currentLocationId = currentLocationId;
@@ -4130,9 +4137,7 @@ async function executeRequiredPrerequisites(input: {
     return [];
   }
 
-  const fetchedFacts: Array<TurnFetchToolResult | null> = Array.from({
-    length: input.prerequisites.length,
-  }).fill(null);
+  const fetchedFacts: Array<TurnFetchToolResult | null> = new Array(input.prerequisites.length).fill(null);
   const npcDetailRequests: Array<{ index: number; npcId: string }> = [];
   const marketPriceRequests: Array<{ index: number; locationId: string }> = [];
   const factionIntelRequests: Array<{ index: number; factionId: string }> = [];

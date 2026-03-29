@@ -16,6 +16,7 @@ const sceneAspectSchema = z.object({
   label: z.string().trim().min(1),
   state: z.string().trim().min(1),
   duration: z.enum(sceneAspectDurationValues),
+  focusKey: z.string().trim().min(1).nullish().default(null),
 });
 
 const rawCampaignRuntimeStateSchema = z.object({
@@ -42,6 +43,7 @@ const campaignRuntimeStateSchema: z.ZodType<CampaignRuntimeState> = rawCampaignR
             label: key.replace(/[_-]+/g, " ").trim() || key,
             state,
             duration: "permanent" as const,
+            focusKey: null,
           },
         ]),
       );

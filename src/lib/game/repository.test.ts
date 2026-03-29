@@ -267,13 +267,122 @@ test("toRouterSceneAspectSummaries emits compact duration-aware aspect records",
       label: "forge smoke",
       state: "hanging in the rafters",
       duration: "scene",
+      focusKey: null,
     },
     {
       key: "guild_notice",
       label: "guild notice",
       state: "nailed by the door",
       duration: "permanent",
+      focusKey: null,
     },
+  ]);
+});
+
+test("filterSceneActorsForFocus keeps only focus-matching actors during micro-scenes", () => {
+  const filtered = repositoryTestUtils.filterSceneActorsForFocus(
+    [
+      {
+        actorRef: "npc:baker",
+        kind: "npc",
+        displayLabel: "Mara Thistle",
+        role: "baker",
+        focusKey: null,
+        detailFetchHint: null,
+        lastSummary: "She is calling out fresh bread prices at the market stall.",
+      },
+      {
+        actorRef: "temp:stablehand",
+        kind: "temporary_actor",
+        displayLabel: "stable hand",
+        role: "stable hand",
+        focusKey: null,
+        detailFetchHint: null,
+        lastSummary: "He is calming a chestnut mare near the stable gate.",
+      },
+      {
+        actorRef: "temp:mare",
+        kind: "temporary_actor",
+        displayLabel: "limping mare",
+        role: "mare",
+        focusKey: "stable_entrance",
+        detailFetchHint: null,
+        lastSummary: "She shifts uneasily in the straw by the stable entrance.",
+      },
+    ],
+    {
+      key: "stable_entrance",
+      label: "Stable Entrance",
+    },
+  );
+
+  assert.deepEqual(
+    filtered.map((actor) => actor.actorRef),
+    ["temp:stablehand", "temp:mare"],
+  );
+});
+
+test("filterSceneAspectsForFocus keeps matching and macro-level aspects", () => {
+  const filtered = repositoryTestUtils.filterSceneAspectsForFocus(
+    {
+      stable_straw: {
+        label: "stable straw",
+        state: "freshly spread",
+        duration: "scene",
+        focusKey: "stable_entrance",
+      },
+      city_bells: {
+        label: "city bells",
+        state: "ringing the hour",
+        duration: "scene",
+        focusKey: null,
+      },
+      market_noise: {
+        label: "market noise",
+        state: "swelling over the stalls",
+        duration: "scene",
+        focusKey: "market_square",
+      },
+    },
+    {
+      key: "stable_entrance",
+      label: "Stable Entrance",
+    },
+  );
+
+  assert.deepEqual(Object.keys(filtered), ["stable_straw", "city_bells"]);
+});
+
+test("buildRecentTurnLedger excludes system diagnostics from story memory", () => {
+  const ledger = repositoryTestUtils.buildRecentTurnLedger({
+    recentMessages: [
+      {
+        id: "msg_1",
+        role: "user",
+        kind: "action",
+        content: "I cross the yard.",
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "msg_2",
+        role: "system",
+        kind: "warning",
+        content: "[System] Mechanics response appears to use set_scene_actor_presence as a proxy for player movement.",
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "msg_3",
+        role: "assistant",
+        kind: "narration",
+        content: "You cross the yard into the stable shadows.",
+        createdAt: new Date().toISOString(),
+      },
+    ],
+  } as unknown as Parameters<typeof repositoryTestUtils.buildRecentTurnLedger>[0]);
+
+  assert.deepEqual(ledger, [
+    "[You] I cross the yard.",
+    "[DM] You cross the yard into the stable shadows.",
   ]);
 });
 

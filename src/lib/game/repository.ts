@@ -1005,8 +1005,88 @@ function toRouterSceneAspectSummaries(state: CampaignRuntimeState) {
       label: aspect.label,
       state: aspect.state,
       duration: aspect.duration,
+      focusKey: aspect.focusKey ?? null,
     }))
     .sort((left, right) => left.key.localeCompare(right.key));
+}
+
+const sceneFocusStopWords = new Set([
+  "the",
+  "and",
+  "for",
+  "with",
+  "into",
+  "from",
+  "your",
+  "inside",
+  "front",
+  "back",
+  "room",
+  "area",
+  "entrance",
+]);
+
+function sceneFocusTokens(sceneFocus: CampaignRuntimeState["sceneFocus"]) {
+  if (!sceneFocus) {
+    return [];
+  }
+
+  const combined = `${sceneFocus.key} ${sceneFocus.label}`.toLowerCase();
+  return Array.from(
+    new Set(
+      combined
+        .split(/[^a-z0-9]+/i)
+        .map((token) => token.trim())
+        .filter((token) => token.length >= 3 && !sceneFocusStopWords.has(token)),
+    ),
+  );
+}
+
+function sceneActorMatchesFocus(
+  actor: SceneActorSummary,
+  sceneFocus: CampaignRuntimeState["sceneFocus"],
+) {
+  if (!sceneFocus) {
+    return true;
+  }
+  if (actor.focusKey && actor.focusKey !== sceneFocus.key) {
+    return false;
+  }
+  if (actor.focusKey === sceneFocus.key) {
+    return true;
+  }
+
+  const tokens = sceneFocusTokens(sceneFocus);
+  if (!tokens.length) {
+    return false;
+  }
+  const haystack = `${actor.displayLabel} ${actor.role} ${actor.lastSummary ?? ""}`.toLowerCase();
+  return tokens.some((token) => haystack.includes(token));
+}
+
+function filterSceneActorsForFocus(
+  sceneActors: SceneActorSummary[],
+  sceneFocus: CampaignRuntimeState["sceneFocus"],
+) {
+  if (!sceneFocus) {
+    return sceneActors;
+  }
+  return sceneActors.filter((actor) => sceneActorMatchesFocus(actor, sceneFocus));
+}
+
+function filterSceneAspectsForFocus(
+  sceneAspects: CampaignRuntimeState["sceneAspects"],
+  sceneFocus: CampaignRuntimeState["sceneFocus"],
+) {
+  if (!sceneFocus) {
+    return structuredClone(sceneAspects ?? {});
+  }
+
+  return Object.fromEntries(
+    Object.entries(sceneAspects ?? {}).filter(([, aspect]) =>
+      aspect.focusKey == null || aspect.focusKey === sceneFocus.key,
+    ),
+  );
 }
 
 function rankedEntries<T>(
@@ -2380,6 +2460,7 @@ function toSceneActorSummaries(input: {
       kind: "npc",
       displayLabel: npc.name,
       role: npc.role,
+      focusKey: null,
       detailFetchHint:
         npc.socialLayer === "promoted_local" && !npc.isNarrativelyHydrated
           ? {
@@ -2396,6 +2477,7 @@ function toSceneActorSummaries(input: {
         kind: "temporary_actor",
         displayLabel: actor.label,
         role: actor.label,
+        focusKey: null,
         detailFetchHint: null,
         lastSummary: actor.lastSummary,
       })),
@@ -4065,7 +4147,9 @@ function timeOfDay(globalTime: number) {
 }
 
 function buildRecentTurnLedger(snapshot: CampaignSnapshot) {
-  const recentEntries = snapshot.recentMessages.slice(-8);
+  const recentEntries = snapshot.recentMessages
+    .filter((message) => message.role !== "system")
+    .slice(-8);
 
   return recentEntries.map((message) => {
     const speaker =
@@ -4106,6 +4190,7 @@ async function loadRecentLocalEvents(snapshot: CampaignSnapshot) {
 }
 
 export async function getTurnRouterContext(snapshot: CampaignSnapshot): Promise<TurnRouterContext> {
+  const sceneFocus = snapshot.state.sceneFocus ?? null;
   return {
     currentLocation: {
       id: snapshot.currentLocation.id,
@@ -4114,13 +4199,16 @@ export async function getTurnRouterContext(snapshot: CampaignSnapshot): Promise<
       summary: snapshot.currentLocation.summary,
       state: snapshot.currentLocation.state,
     },
-    sceneFocus: snapshot.state.sceneFocus ?? null,
+    sceneFocus,
     adjacentRoutes: snapshot.adjacentRoutes,
-    sceneActors: toSceneActorSummaries({
-      presentNpcs: snapshot.presentNpcs,
-      temporaryActors: snapshot.temporaryActors,
-      currentLocationId: snapshot.currentLocation.id,
-    }).slice(0, 8),
+    sceneActors: filterSceneActorsForFocus(
+      toSceneActorSummaries({
+        presentNpcs: snapshot.presentNpcs,
+        temporaryActors: snapshot.temporaryActors,
+        currentLocationId: snapshot.currentLocation.id,
+      }),
+      sceneFocus,
+    ).slice(0, sceneFocus ? 4 : 8),
     recentLocalEvents: await loadRecentLocalEvents(snapshot),
     recentTurnLedger: buildRecentTurnLedger(snapshot),
     discoveredInformation: snapshot.discoveredInformation.map((information) => ({
@@ -4132,7 +4220,10 @@ export async function getTurnRouterContext(snapshot: CampaignSnapshot): Promise<
     activePressures: snapshot.activePressures,
     activeThreads: snapshot.activeThreads,
     inventory: toRouterInventorySummary(snapshot.character),
-    sceneAspects: toRouterSceneAspectSummaries(snapshot.state),
+    sceneAspects: toRouterSceneAspectSummaries({
+      ...snapshot.state,
+      sceneAspects: filterSceneAspectsForFocus(snapshot.state.sceneAspects ?? {}, sceneFocus),
+    }),
     gold: snapshot.character.gold,
   };
 }
@@ -4166,7 +4257,10 @@ export async function getPromptContext(
     recentWorldShifts: isLocal ? [] : snapshot.recentWorldShifts,
     activeThreads: isLocal ? [] : routerContext.activeThreads,
     inventory: toPromptInventory(snapshot.character, campaignItemTemplates),
-    sceneAspects: structuredClone(snapshot.state.sceneAspects ?? {}),
+    sceneAspects: filterSceneAspectsForFocus(
+      structuredClone(snapshot.state.sceneAspects ?? {}),
+      snapshot.state.sceneFocus ?? null,
+    ),
     localTexture: snapshot.currentLocation.localTexture,
     globalTime: snapshot.state.globalTime,
     timeOfDay: timeOfDay(snapshot.state.globalTime),
@@ -4184,6 +4278,9 @@ export const repositoryTestUtils = {
   prunePromptContextForRouter,
   toRouterInventorySummary,
   toRouterSceneAspectSummaries,
+  filterSceneActorsForFocus,
+  filterSceneAspectsForFocus,
+  buildRecentTurnLedger,
   createFallbackResolvedLaunchEntry,
   normalizeLaunchEntrySelection,
   resolveStockLaunchEntry,

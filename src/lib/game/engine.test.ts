@@ -1183,6 +1183,42 @@ test("set_player_scene_focus updates intra-location focus and clears on macro tr
   assert.equal(moved.nextState.sceneFocus, null);
 });
 
+test("spawn_scene_aspect inherits the current scene focus for later context filtering", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: {
+      ...createSnapshot(),
+      state: {
+        ...createSnapshot().state,
+        sceneFocus: {
+          key: "stable_entrance",
+          label: "Stable Entrance",
+        },
+      },
+    },
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Look over the straw"],
+      mutations: [
+        {
+          type: "spawn_scene_aspect",
+          aspectName: "fresh straw",
+          state: "spread across the stable floor",
+          duration: "scene",
+          reason: "You notice the stable was freshly bedded.",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["investigate"]),
+    playerAction: "I look over the stable entrance.",
+  });
+
+  assert.equal(evaluated.nextState.sceneAspects.fresh_straw?.focusKey, "stable_entrance");
+});
+
 test("engine rejects record_local_interaction used for a solo errand with invalid_semantics", () => {
   const evaluated = engineTestUtils.evaluateResolvedCommand({
     snapshot: {

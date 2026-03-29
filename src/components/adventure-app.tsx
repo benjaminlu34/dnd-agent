@@ -692,11 +692,6 @@ export function AdventureApp({
                                 <h3 className="font-serif text-base font-semibold text-zinc-100">
                                   {item.template.name}
                                 </h3>
-                                {typeof item.quantity === "number" ? (
-                                  <span className="rounded-full border border-zinc-700 px-2 py-1 text-[0.68rem] uppercase tracking-[0.16em] text-zinc-400">
-                                    x{item.quantity}
-                                  </span>
-                                ) : null}
                               </div>
                               {item.template.description ? (
                                 <p className="mt-2 text-sm leading-relaxed text-zinc-400">

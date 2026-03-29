@@ -429,6 +429,10 @@ test("validateTurnCommand warns when record_local_interaction reads like a solo 
     playerAction: "I head back to the forge and check my bench for the coin purse.",
   });
 
+  assert.equal(validated.type, "resolve_mechanics");
+  if (validated.type !== "resolve_mechanics") {
+    return;
+  }
   assert.match(
     validated.warnings.join("\n"),
     /record_local_interaction for a self-directed errand/i,
@@ -454,6 +458,10 @@ test("validateTurnCommand warns when actor presence is used as player movement p
     playerAction: "I head back to the forge to get my coin purse.",
   });
 
+  assert.equal(validated.type, "resolve_mechanics");
+  if (validated.type !== "resolve_mechanics") {
+    return;
+  }
   assert.match(
     validated.warnings.join("\n"),
     /set_scene_actor_presence as a proxy for player movement/i,

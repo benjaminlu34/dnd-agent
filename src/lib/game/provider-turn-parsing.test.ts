@@ -59,6 +59,39 @@ test("parseFinalActionToolCall accepts resolve_mechanics payloads", () => {
   assert.equal(parsed.success, true);
 });
 
+test("parseFinalActionToolCall normalizes null checkIntent to omission", () => {
+  const parsed = aiProviderTestUtils.parseFinalActionToolCall({
+    type: "resolve_mechanics",
+    timeMode: "downtime",
+    suggestedActions: ["Check coin purse"],
+    checkIntent: null,
+    mutations: [
+      {
+        type: "advance_time",
+        durationMinutes: 5,
+        phase: "immediate",
+      },
+      {
+        type: "set_player_scene_focus",
+        focusKey: "back_room",
+        label: "The Back Room",
+        reason: "Checking stored belongings",
+        phase: "immediate",
+      },
+    ],
+  });
+
+  assert.equal(parsed.success, true);
+  if (!parsed.success) {
+    return;
+  }
+  assert.equal(parsed.data.type, "resolve_mechanics");
+  if (parsed.data.type !== "resolve_mechanics") {
+    return;
+  }
+  assert.equal(parsed.data.checkIntent, undefined);
+});
+
 test("parseFinalActionToolCall rejects removed legacy monolithic action payloads", () => {
   const parsed = aiProviderTestUtils.parseFinalActionToolCall({
     type: "execute_converse",
@@ -103,8 +136,12 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   assert.match(prompt, /Use set_scene_actor_presence whenever someone leaves the current scene/);
   assert.match(prompt, /comes back later in the turn, represent that mechanically with set_scene_actor_presence/);
   assert.match(prompt, /Use set_player_scene_focus for self-directed movement within the current location/);
+  assert.match(prompt, /label must describe a spatial sub-location or zone/);
+  assert.match(prompt, /never a portable object like Coin Purse or Sword/);
   assert.match(prompt, /Never use it to simulate the player arriving somewhere/);
   assert.match(prompt, /Do not use it for solo errands, checking your own gear, retrieving your own belongings/);
+  assert.match(prompt, /TRIVIAL ACTIONS: Checking personal inventory, reviewing known information, or looking around a safe room requires ZERO checks/);
+  assert.match(prompt, /ID HALLUCINATION BAN: You are strictly forbidden from using discover_information unless the exact informationId is explicitly provided/);
   assert.match(prompt, /Use adjust_inventory for gaining, losing, consuming, or handing over grounded inventory items/);
   assert.match(prompt, /Self-directed downtime work may use adjust_inventory, spawn_environmental_item, and spawn_scene_aspect/);
   assert.match(prompt, /Use spawn_scene_aspect for smoke, damage, noise/);
@@ -120,6 +157,38 @@ test("buildTurnRouterSystemPrompt distinguishes self-talk from on-screen social 
   assert.match(prompt, /routes strictly means macro-travel leaving the current location node/);
   assert.match(prompt, /back to the forge, into the market, over to the bench/);
   assert.match(prompt, /unresolvedReferents/);
+});
+
+test("fallbackRouterDecision stays local when scene focus is active", () => {
+  const decision = aiProviderTestUtils.fallbackRouterDecision(
+    "Router crashed during micro-scene action.",
+    "I check on the mare.",
+    {
+      currentLocation: {
+        id: "loc_city",
+        name: "Waterdeep",
+        type: "city",
+        summary: "A vast city.",
+        state: "busy",
+      },
+      sceneFocus: {
+        key: "stable_entrance",
+        label: "Stable Entrance",
+      },
+      adjacentRoutes: [],
+      sceneActors: [],
+      recentLocalEvents: [],
+      recentTurnLedger: [],
+      discoveredInformation: [],
+      activePressures: [],
+      activeThreads: [],
+      inventory: [],
+      sceneAspects: [],
+      gold: 7,
+    },
+  );
+
+  assert.equal(decision.profile, "local");
 });
 
 test("buildTurnActionCorrectionNotes adds targeted timeMode recovery guidance", () => {
@@ -230,6 +299,69 @@ test("buildResolvedTurnNarrationPrompt includes prompt context and fetched facts
   assert.match(prompt.user, /Blackwater Docks/);
   assert.match(prompt.user, /fetched_facts/);
   assert.match(prompt.user, /Pier Nine Closure/);
+});
+
+test("buildResolvedTurnNarrationPrompt teaches failed invalid-target attempts as failed searches", () => {
+  const prompt = aiProviderTestUtils.buildResolvedTurnNarrationPrompt({
+    playerAction: "I look for the stable master and check on the mare.",
+    promptContext: {
+      currentLocation: {
+        id: "loc_stable",
+        name: "Waterdeep",
+        type: "city",
+        summary: "A sprawling city.",
+        state: "busy",
+      },
+      adjacentRoutes: [],
+      sceneActors: [],
+      recentLocalEvents: [],
+      recentTurnLedger: [],
+      discoveredInformation: [],
+      activePressures: [],
+      recentWorldShifts: [],
+      activeThreads: [],
+      inventory: [],
+      sceneFocus: {
+        key: "stable_entrance",
+        label: "Stable Entrance",
+      },
+      sceneAspects: {},
+      localTexture: null,
+      globalTime: 600,
+      timeOfDay: "morning",
+      dayCount: 1,
+    },
+    fetchedFacts: [],
+    stateCommitLog: [
+      {
+        kind: "mutation",
+        mutationType: "record_local_interaction",
+        status: "rejected",
+        reasonCode: "invalid_target",
+        summary: "That unnamed local is not available here.",
+        metadata: {
+          localEntityId: "temp:stable_master",
+        },
+      },
+      {
+        kind: "mutation",
+        mutationType: "advance_time",
+        status: "applied",
+        reasonCode: "time_advanced",
+        summary: "Five minutes pass.",
+        metadata: {
+          durationMinutes: 5,
+        },
+      },
+    ],
+    checkResult: null,
+    suggestedActions: [],
+  });
+
+  assert.match(prompt.system, /invalid_target/);
+  assert.match(prompt.system, /looked for or attempted that contact but could not find or reach them/);
+  assert.match(prompt.user, /record_local_interaction/);
+  assert.match(prompt.user, /invalid_target/);
 });
 
 test("buildTurnUserPrompt includes attention packet before the main action block", () => {
