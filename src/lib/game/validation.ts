@@ -170,6 +170,59 @@ function normalizePlayerActionText(playerAction: string | undefined) {
   return (playerAction ?? "").trim().toLowerCase();
 }
 
+function resolvedSceneActorRefs(routerDecision: RouterDecision | undefined) {
+  return new Set(
+    (routerDecision?.attention.resolvedReferents ?? [])
+      .filter((entry) => entry.targetKind === "scene_actor")
+      .map((entry) => entry.targetRef),
+  );
+}
+
+function unresolvedTemporaryActorPhrases(routerDecision: RouterDecision | undefined) {
+  return (routerDecision?.attention.unresolvedReferents ?? [])
+    .filter((entry) => entry.intendedKind === "temporary_actor")
+    .map((entry) => entry.phrase.trim())
+    .filter(Boolean);
+}
+
+function targetedActorRefForMutation(mutation: MechanicsMutation): string | null {
+  switch (mutation.type) {
+    case "record_local_interaction":
+      return mutation.localEntityId.trim();
+    case "adjust_relationship":
+      return `npc:${mutation.npcId}`;
+    case "set_npc_state":
+      return `npc:${mutation.npcId}`;
+    case "set_scene_actor_presence":
+      return mutation.actorRef.trim();
+    case "set_follow_state":
+      return mutation.actorRef.trim();
+    default:
+      return null;
+  }
+}
+
+function mutationWouldSubstituteUnresolvedActor(input: {
+  mutation: MechanicsMutation;
+  resolvedActorRefs: Set<string>;
+  unresolvedPhrases: string[];
+}) {
+  if (input.unresolvedPhrases.length === 0) {
+    return false;
+  }
+
+  const actorRef = targetedActorRefForMutation(input.mutation);
+  if (!actorRef) {
+    return false;
+  }
+
+  if (actorRef.startsWith("spawn:") || actorRef.startsWith("temp:")) {
+    return false;
+  }
+
+  return actorRef.startsWith("npc:") && !input.resolvedActorRefs.has(actorRef);
+}
+
 export function isLikelySoloErrandAction(playerAction: string | undefined) {
   const normalized = normalizePlayerActionText(playerAction);
   if (!normalized) {
@@ -383,6 +436,8 @@ export function validateTurnCommand(input: {
   }
 
   const warnings: string[] = [];
+  const resolvedActorRefs = resolvedSceneActorRefs(routerDecision);
+  const unresolvedActorPhrases = unresolvedTemporaryActorPhrases(routerDecision);
   for (const warning of command.warnings ?? []) {
     const normalized = warning.trim();
     if (normalized) {
@@ -392,6 +447,19 @@ export function validateTurnCommand(input: {
   const suggestedActions = normalizedSuggestedActions(command.suggestedActions);
 
   const filteredMutations = command.mutations.filter((mutation) => {
+    if (
+      mutationWouldSubstituteUnresolvedActor({
+        mutation,
+        resolvedActorRefs,
+        unresolvedPhrases: unresolvedActorPhrases,
+      })
+    ) {
+      warnings.push(
+        "Mechanics response tried to redirect an unresolved target onto a different grounded actor; the substituted interaction mutation was dropped.",
+      );
+      return false;
+    }
+
     if (mutation.type !== "record_local_interaction") {
       if (mutation.type === "discover_information" && routerSuggestsManifestationOverKnowledge(routerDecision)) {
         warnings.push(
@@ -424,12 +492,19 @@ export function validateTurnCommand(input: {
     ...command,
     mutations: filteredMutations,
   });
+  const narrationHint =
+    unresolvedActorPhrases.length > 0 && filteredMutations.length !== command.mutations.length
+      ? {
+          unresolvedTargetPhrases: unresolvedActorPhrases,
+        }
+      : null;
 
   return {
     ...command,
     mutations,
     suggestedActions,
     warnings: Array.from(new Set(warnings)),
+    narrationHint,
     timeElapsed: deriveTimeElapsed({ ...command, mutations }, snapshot),
     pendingCheck: derivePendingCheck(snapshot, { ...command, mutations }, fetchedFacts),
     checkResult: undefined,

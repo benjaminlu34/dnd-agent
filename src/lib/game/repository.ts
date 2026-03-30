@@ -4345,16 +4345,54 @@ function timeOfDay(globalTime: number) {
   return "night";
 }
 
-function buildRecentTurnLedger(snapshot: CampaignSnapshot) {
-  const recentEntries = snapshot.recentMessages
-    .filter((message) => message.role !== "system")
-    .slice(-8);
+function storyMessagesForPrompt(snapshot: CampaignSnapshot) {
+  return snapshot.recentMessages.filter((message) => message.role !== "system").slice(-8);
+}
 
-  return recentEntries.map((message) => {
-    const speaker =
-      message.role === "user" ? "You" : message.role === "assistant" ? "DM" : "System";
-    return `[${speaker}] ${message.content}`;
-  });
+function groundedSummaryForStoryMessage(message: StoryMessage) {
+  if (message.role === "user") {
+    return `[You] ${message.content}`;
+  }
+
+  if (message.role !== "assistant") {
+    return null;
+  }
+
+  const whatChanged = Array.isArray(message.payload?.whatChanged)
+    ? message.payload.whatChanged.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+    : [];
+  const why = Array.isArray(message.payload?.why)
+    ? message.payload.why.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+    : [];
+
+  const summaryParts = [...whatChanged.slice(0, 2), ...why.slice(0, 1)];
+  if (summaryParts.length > 0) {
+    return `[DM] ${summaryParts.join(" | ")}`;
+  }
+
+  if (message.kind === "summary") {
+    return `[DM] ${message.content}`;
+  }
+
+  return null;
+}
+
+function buildRecentNarrativeProse(snapshot: CampaignSnapshot) {
+  return storyMessagesForPrompt(snapshot)
+    .slice(-2)
+    .map((message) => {
+      const speaker =
+        message.role === "user" ? "You" : message.role === "assistant" ? "DM" : "System";
+      return `[${speaker}] ${message.content}`;
+    });
+}
+
+function buildRecentTurnLedger(snapshot: CampaignSnapshot) {
+  const recentEntries = storyMessagesForPrompt(snapshot).slice(0, -2);
+
+  return recentEntries
+    .map(groundedSummaryForStoryMessage)
+    .filter((entry): entry is string => Boolean(entry));
 }
 
 async function loadRecentLocalEvents(snapshot: CampaignSnapshot) {
@@ -4514,6 +4552,7 @@ export async function getPromptContext(
     adjacentRoutes: isLocal ? [] : routerContext.adjacentRoutes,
     sceneActors: focusedSceneActors,
     recentLocalEvents: routerContext.recentLocalEvents,
+    recentNarrativeProse: buildRecentNarrativeProse(snapshot),
     recentTurnLedger: routerContext.recentTurnLedger,
     discoveredInformation: isLocal ? [] : routerContext.discoveredInformation,
     activePressures: isLocal ? [] : routerContext.activePressures,
@@ -4554,6 +4593,7 @@ export const repositoryTestUtils = {
   filterSceneActorsForFocus,
   filterSceneAspectsForFocus,
   buildRecentTurnLedger,
+  buildRecentNarrativeProse,
   createFallbackResolvedLaunchEntry,
   normalizeLaunchEntrySelection,
   resolveStockLaunchEntry,

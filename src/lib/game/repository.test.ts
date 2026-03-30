@@ -359,7 +359,7 @@ test("filterSceneAspectsForFocus keeps matching and macro-level aspects", () => 
   assert.deepEqual(Object.keys(filtered), ["stable_straw", "city_bells"]);
 });
 
-test("buildRecentTurnLedger excludes system diagnostics from story memory", () => {
+test("buildRecentTurnLedger compresses older turns into grounded summaries only", () => {
   const ledger = repositoryTestUtils.buildRecentTurnLedger({
     recentMessages: [
       {
@@ -381,6 +381,28 @@ test("buildRecentTurnLedger excludes system diagnostics from story memory", () =
         role: "assistant",
         kind: "narration",
         content: "You cross the yard into the stable shadows.",
+        payload: {
+          whatChanged: ["You crossed the yard."],
+          why: ["You moved through the stable entrance."],
+        },
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "msg_4",
+        role: "user",
+        kind: "action",
+        content: "I scan the stable for the missing porter.",
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "msg_5",
+        role: "assistant",
+        kind: "narration",
+        content: "You search the stable, but the porter is nowhere in sight.",
+        payload: {
+          whatChanged: ["No porter is grounded in the stable."],
+          why: ["Your search turns up nothing immediate."],
+        },
         createdAt: new Date().toISOString(),
       },
     ],
@@ -388,7 +410,47 @@ test("buildRecentTurnLedger excludes system diagnostics from story memory", () =
 
   assert.deepEqual(ledger, [
     "[You] I cross the yard.",
-    "[DM] You cross the yard into the stable shadows.",
+    "[DM] You crossed the yard. | You moved through the stable entrance.",
+  ]);
+});
+
+test("buildRecentNarrativeProse keeps only the immediate prose window", () => {
+  const narrative = repositoryTestUtils.buildRecentNarrativeProse({
+    recentMessages: [
+      {
+        id: "msg_1",
+        role: "user",
+        kind: "action",
+        content: "I cross the yard.",
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "msg_2",
+        role: "assistant",
+        kind: "narration",
+        content: "You cross the yard into the stable shadows.",
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "msg_3",
+        role: "user",
+        kind: "action",
+        content: "I look for the missing porter.",
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "msg_4",
+        role: "assistant",
+        kind: "narration",
+        content: "You search the stable, but the porter is nowhere in sight.",
+        createdAt: new Date().toISOString(),
+      },
+    ],
+  } as unknown as Parameters<typeof repositoryTestUtils.buildRecentNarrativeProse>[0]);
+
+  assert.deepEqual(narrative, [
+    "[You] I look for the missing porter.",
+    "[DM] You search the stable, but the porter is nowhere in sight.",
   ]);
 });
 

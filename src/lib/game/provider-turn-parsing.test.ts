@@ -30,6 +30,68 @@ test("extractToolInput flags clipped resolve_mechanics payloads as likely trunca
   assert.equal(extracted.likelyTruncated, true);
 });
 
+test("extractToolInput preserves plain text when no tool wrapper is returned", () => {
+  const response = {
+    choices: [
+      {
+        finish_reason: "stop",
+        message: {
+          content: "The baker dusts off his hands and points out the morning buns still warm from the oven.",
+        },
+      },
+    ],
+  } as never;
+
+  const extracted = aiProviderTestUtils.extractToolInput(response);
+
+  assert.equal(extracted.name, null);
+  assert.equal(extracted.input, null);
+  assert.match(extracted.rawText ?? "", /morning buns still warm/i);
+});
+
+test("normalizeRouterDecision caps mustCheck to seven entries and drops least authoritative overflow", () => {
+  const normalized = aiProviderTestUtils.normalizeRouterDecision({
+    profile: "local",
+    confidence: "high",
+    authorizedVectors: ["converse"],
+    requiredPrerequisites: [],
+    reason: "Talk to the baker.",
+    clarification: {
+      needed: false,
+      blocker: null,
+      question: null,
+      options: [],
+    },
+    attention: {
+      primaryIntent: "Ask the baker what's fresh this morning.",
+      resolvedReferents: [],
+      unresolvedReferents: [],
+      impliedDestinationFocus: null,
+      mustCheck: [
+        "sceneActors",
+        "sceneAspects",
+        "worldObjects",
+        "inventory",
+        "routes",
+        "gold",
+        "fetchedFacts",
+        "recentTurnLedger",
+      ],
+    },
+  });
+
+  assert.equal(normalized.attention.mustCheck.length, 7);
+  assert.deepEqual(normalized.attention.mustCheck, [
+    "sceneActors",
+    "sceneAspects",
+    "worldObjects",
+    "inventory",
+    "routes",
+    "gold",
+    "fetchedFacts",
+  ]);
+});
+
 test("parseFinalActionToolCall accepts resolve_mechanics payloads", () => {
   const parsed = aiProviderTestUtils.parseFinalActionToolCall({
     type: "resolve_mechanics",
@@ -172,6 +234,8 @@ test("buildTurnRouterSystemPrompt distinguishes self-talk from on-screen social 
   assert.match(prompt, /emit attention\.impliedDestinationFocus/);
   assert.match(prompt, /Do not emit impliedDestinationFocus for macro travel between location nodes/);
   assert.match(prompt, /unresolvedReferents/);
+  assert.match(prompt, /Never remap an unresolved pronoun or stale narrated referent onto a different grounded actor/);
+  assert.match(prompt, /recentGroundedHistory is memory, not authority/);
 });
 
 test("fallbackRouterDecision stays local when scene focus is active", () => {
@@ -242,6 +306,7 @@ test("buildResolvedTurnNarrationPrompt includes prompt context and fetched facts
           lastSummary: "He kept glancing toward the sealed pier.",
         },
       ],
+      recentNarrativeProse: [],
       recentLocalEvents: [],
       recentTurnLedger: [],
       discoveredInformation: [],
@@ -310,6 +375,7 @@ test("buildResolvedTurnNarrationPrompt includes prompt context and fetched facts
     stateCommitLog: [],
     checkResult: null,
     suggestedActions: ["Press for specifics"],
+    narrationHint: null,
   });
 
   assert.match(prompt.user, /context/);
@@ -321,6 +387,9 @@ test("buildResolvedTurnNarrationPrompt includes prompt context and fetched facts
   assert.match(prompt.system, /If a discover_information mutation was rejected, do not convert that into an authoritative negative fact/);
   assert.match(prompt.system, /do not explicitly count minutes unless the exact duration materially matters/i);
   assert.match(prompt.system, /Do not echo engine-summary phrasing like enters the scene, changes state, or time passes for 5 minutes/i);
+  assert.match(prompt.system, /recentNarrativeProse is conversational continuity only/);
+  assert.match(prompt.user, /authoritativeState/);
+  assert.match(prompt.user, /recentGroundedHistory/);
 });
 
 test("buildResolvedTurnNarrationPrompt teaches failed invalid-target attempts as failed searches", () => {
@@ -1121,11 +1190,73 @@ test("formatRouterContextForModel compacts router payload to skinny referent lis
   });
 
   assert.equal(rendered.locationOrientation, "You are in Waterdeep. Your current focus/position is: The Forge.");
-  assert.deepEqual(rendered.inventory, ["coin purse (qty 1) [item_coin_purse]"]);
-  assert.deepEqual(rendered.routes, ["Neverwinter (720m, open, danger 2) [route_neverwinter]"]);
-  assert.match(rendered.sceneActors[0] ?? "", /Captain Thorne \(watch captain\) \[npc:npc_captain_thorne, npc detail-fetch\]/);
-  assert.doesNotMatch(rendered.sceneActors[0] ?? "", /encourage bloated prompts/);
-  assert.doesNotMatch(rendered.routes[0] ?? "", /caravanserais/);
+  assert.deepEqual(rendered.authoritativeState.inventory, ["coin purse (qty 1) [item_coin_purse]"]);
+  assert.deepEqual(rendered.authoritativeState.routes, ["Neverwinter (720m, open, danger 2) [route_neverwinter]"]);
+  assert.match(
+    rendered.authoritativeState.sceneActors[0] ?? "",
+    /Captain Thorne \(watch captain\) \[npc:npc_captain_thorne, npc detail-fetch\]/,
+  );
+  assert.doesNotMatch(rendered.authoritativeState.sceneActors[0] ?? "", /encourage bloated prompts/);
+  assert.doesNotMatch(rendered.authoritativeState.routes[0] ?? "", /caravanserais/);
+  assert.deepEqual(rendered.recentGroundedHistory, [
+    "You finished a complicated exchange with the guild factor and then spent several minutes checking invoices aro",
+  ]);
+});
+
+test("buildResolvedTurnNarrationPrompt surfaces unresolved target failures without substitution", () => {
+  const prompt = aiProviderTestUtils.buildResolvedTurnNarrationPrompt({
+    playerAction: "I grab their wrist before they slip away.",
+    promptContext: {
+      currentLocation: {
+        id: "loc_market",
+        name: "Lantern Market",
+        type: "district",
+        summary: "Rain-dark awnings and crowded stalls.",
+        state: "busy",
+      },
+      sceneFocus: {
+        key: "stall",
+        label: "Your stall",
+      },
+      adjacentRoutes: [],
+      sceneActors: [
+        {
+          actorRef: "npc:npc_guard",
+          kind: "npc",
+          displayLabel: "Bren Thorn",
+          role: "market watchman",
+          detailFetchHint: null,
+          lastSummary: "A grizzled watchman keeps a patient eye on the market.",
+        },
+      ],
+      recentNarrativeProse: [
+        "[DM] A cloaked figure brushes past your stall and disappears into the crowd.",
+      ],
+      recentLocalEvents: [],
+      recentTurnLedger: ["[DM] No cloaked figure is grounded at your stall."],
+      discoveredInformation: [],
+      activePressures: [],
+      recentWorldShifts: [],
+      activeThreads: [],
+      inventory: [],
+      worldObjects: [],
+      sceneAspects: {},
+      localTexture: null,
+      globalTime: 540,
+      timeOfDay: "morning",
+      dayCount: 1,
+    },
+    fetchedFacts: [],
+    stateCommitLog: [],
+    checkResult: null,
+    suggestedActions: [],
+    narrationHint: {
+      unresolvedTargetPhrases: ["they"],
+    },
+  });
+
+  assert.match(prompt.user, /unresolvedTargetFailure: true/);
+  assert.match(prompt.system, /Do not substitute another nearby person/);
 });
 
 test("selectPromptContextProfile keeps local micro-scene context even when router confidence is low", () => {

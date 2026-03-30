@@ -581,3 +581,68 @@ test("validateTurnCommand warns when discover_information is used for local sens
     /router indicates local manifestation semantics/i,
   );
 });
+
+test("validateTurnCommand drops substituted actor mutations when only an unresolved temporary actor was referenced", () => {
+  const validated = validateTurnCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Stay alert"],
+      checkIntent: {
+        type: "challenge",
+        reason: "Friendly grab on a present target",
+        challengeApproach: "influence",
+        citedNpcId: "npc_guard",
+      },
+      mutations: [
+        {
+          type: "advance_time",
+          durationMinutes: 2,
+        },
+        {
+          type: "adjust_relationship",
+          npcId: "npc_guard",
+          delta: 1,
+          reason: "Friendly greeting",
+          phase: "conditional",
+        },
+      ],
+    },
+    playerAction: "While they reach over, I grab their wrist before they can slip away.",
+    routerDecision: createRouterDecision({
+      authorizedVectors: ["investigate"],
+      attention: {
+        primaryIntent: "React to the cloaked figure.",
+        resolvedReferents: [],
+        unresolvedReferents: [
+          {
+            phrase: "they",
+            intendedKind: "temporary_actor",
+            confidence: "high",
+          },
+        ],
+        impliedDestinationFocus: null,
+        mustCheck: ["sceneActors", "recentTurnLedger"],
+      },
+    }),
+  });
+
+  assert.equal(validated.type, "resolve_mechanics");
+  if (validated.type !== "resolve_mechanics") {
+    return;
+  }
+
+  assert.deepEqual(
+    validated.mutations.map((mutation) => mutation.type),
+    ["advance_time"],
+  );
+  assert.equal(validated.pendingCheck, undefined);
+  assert.deepEqual(validated.narrationHint, {
+    unresolvedTargetPhrases: ["they"],
+  });
+  assert.match(
+    validated.warnings.join("\n"),
+    /redirect an unresolved target onto a different grounded actor/i,
+  );
+});

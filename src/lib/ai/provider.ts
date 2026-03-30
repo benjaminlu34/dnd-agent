@@ -164,6 +164,9 @@ type ResolvedTurnNarrationInput = {
   stateCommitLog: StateCommitLog;
   checkResult?: CheckResult | null;
   suggestedActions: string[];
+  narrationHint?: {
+    unresolvedTargetPhrases?: string[];
+  } | null;
   signal?: AbortSignal;
 };
 
@@ -2557,6 +2560,62 @@ const resolvedTurnNarrationTool = createStructuredTool(
   resolvedTurnNarrationSchema,
 );
 
+const ROUTER_MUST_CHECK_DEPRIORITY: RouterDecision["attention"]["mustCheck"] = [
+  "recentTurnLedger",
+  "routes",
+  "gold",
+  "fetchedFacts",
+  "inventory",
+  "worldObjects",
+  "sceneAspects",
+  "sceneActors",
+];
+
+function clampRouterMustCheck(
+  values: readonly RouterDecision["attention"]["mustCheck"][number][],
+): RouterDecision["attention"]["mustCheck"] {
+  const deduped = Array.from(new Set(values));
+  if (deduped.length <= 7) {
+    return deduped as RouterDecision["attention"]["mustCheck"];
+  }
+
+  const prioritized = [...deduped].sort((left, right) => {
+    const leftRank = ROUTER_MUST_CHECK_DEPRIORITY.indexOf(left);
+    const rightRank = ROUTER_MUST_CHECK_DEPRIORITY.indexOf(right);
+    return leftRank - rightRank;
+  });
+  const dropped = new Set(prioritized.slice(0, Math.max(0, prioritized.length - 7)));
+  return deduped.filter((entry) => !dropped.has(entry)) as RouterDecision["attention"]["mustCheck"];
+}
+
+function normalizeRouterDecisionInput(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return value;
+  }
+
+  const record = value as Record<string, unknown>;
+  const attentionRaw =
+    record.attention && typeof record.attention === "object" && !Array.isArray(record.attention)
+      ? { ...(record.attention as Record<string, unknown>) }
+      : null;
+
+  if (!attentionRaw || !Array.isArray(attentionRaw.mustCheck)) {
+    return value;
+  }
+
+  const mustCheck = attentionRaw.mustCheck
+    .filter((entry): entry is RouterDecision["attention"]["mustCheck"][number] => typeof entry === "string")
+    .filter((entry): entry is RouterDecision["attention"]["mustCheck"][number] =>
+      ["sceneActors", "sceneAspects", "worldObjects", "inventory", "routes", "gold", "fetchedFacts", "recentTurnLedger"].includes(entry),
+    );
+
+  attentionRaw.mustCheck = clampRouterMustCheck(mustCheck);
+  return {
+    ...record,
+    attention: attentionRaw,
+  };
+}
+
 function normalizeRouterDecision(value: RouterDecision): RouterDecision {
   const dedupedVectors = Array.from(new Set(value.authorizedVectors));
   const seenPrerequisites = new Set<string>();
@@ -2609,7 +2668,7 @@ function normalizeRouterDecision(value: RouterDecision): RouterDecision {
         label: value.attention.impliedDestinationFocus.label.trim(),
       }
     : null;
-  const mustCheck = Array.from(new Set(value.attention?.mustCheck ?? []));
+  const mustCheck = clampRouterMustCheck(value.attention?.mustCheck ?? []);
   return {
     profile: value.profile,
     confidence: value.confidence,
@@ -2683,15 +2742,17 @@ function formatRouterContextForModel(context: TurnRouterContext) {
       : `You are in ${context.currentLocation.name}.`,
     currentLocation: `${context.currentLocation.name} (${context.currentLocation.type}, state: ${context.currentLocation.state})`,
     gold: context.gold,
-    sceneActors: context.sceneActors.slice(0, 8).map(formatRouterSceneActorLine),
-    inventory: context.inventory.slice(0, 8).map(formatRouterInventoryLine),
-    worldObjects: context.worldObjects.slice(0, 8).map(formatRouterWorldObjectLine),
-    sceneAspects: context.sceneAspects.slice(0, 8).map(formatRouterSceneAspectLine),
-    routes: context.adjacentRoutes.slice(0, 6).map(formatRouterRouteLine),
+    authoritativeState: {
+      sceneActors: context.sceneActors.slice(0, 8).map(formatRouterSceneActorLine),
+      inventory: context.inventory.slice(0, 8).map(formatRouterInventoryLine),
+      worldObjects: context.worldObjects.slice(0, 8).map(formatRouterWorldObjectLine),
+      sceneAspects: context.sceneAspects.slice(0, 8).map(formatRouterSceneAspectLine),
+      routes: context.adjacentRoutes.slice(0, 6).map(formatRouterRouteLine),
+    },
     recentLocalEvents: context.recentLocalEvents
       .slice(0, 2)
       .map((event) => compactPromptText(event.description, 110)),
-    recentTurnLedger: context.recentTurnLedger
+    recentGroundedHistory: context.recentTurnLedger
       .slice(-2)
       .map((entry) => compactPromptText(entry, 110)),
     discoveredInformation: context.discoveredInformation
@@ -2809,6 +2870,7 @@ function extractToolInput(response: OpenAI.Chat.Completions.ChatCompletion) {
     return {
       name: toolCall.function.name,
       input,
+      rawText: content,
       finishReason,
       likelyTruncated,
     };
@@ -2823,6 +2885,7 @@ function extractToolInput(response: OpenAI.Chat.Completions.ChatCompletion) {
   return {
     name: null,
     input,
+    rawText: content,
     finishReason,
     likelyTruncated,
   };
@@ -2872,7 +2935,7 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Do not create combat, market trade, or deliberate social escalation in observe mode.",
         "Use sceneActors.actorRef values exactly when targeting on-screen actors.",
         "Never use record_local_interaction with npc: refs or named sceneActors. It is only for unnamed temporary locals referenced as temp:..., spawn:..., or raw temporary-actor ids.",
-        "If the player reaches for a plausible unlisted local, improvised item, or environmental condition, spawn it first before interacting with it.",
+        "If the player reaches for a plausible unlisted local, improvised item, or environmental condition, spawn it first before interacting with it only when the noun is a fresh generic local role or a new same-scene manifestation implied by the current action.",
         "Use spawn_temporary_actor before record_local_interaction when the local is not already listed in sceneActors.",
         "Use spawn_world_object for durable props like lockboxes, carts, hidden nooks, and other persistent storage or fixtures.",
         "Use spawn_environmental_item before adjust_inventory when the item is plausible in the environment but not already grounded in inventory.",
@@ -2899,10 +2962,13 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Use record_local_interaction only when the player explicitly engages another person. Do not use it for solo errands, checking your own gear, retrieving your own belongings, or internal repositioning.",
         "Review the attention_packet before planning mutations.",
         "If attention_packet.resolvedReferents supplies a grounded ref, use that exact ref instead of inventing or guessing ids.",
-        "If attention_packet.mustCheck lists inventory, do not remove or consume an item unless it is grounded in context.inventory or fetched_facts.",
+        "If attention_packet.mustCheck lists inventory, do not remove or consume an item unless it is grounded in context.authoritativeState.inventory or fetched_facts.",
         "If attention_packet.mustCheck lists sceneActors, do not target a named actor through record_local_interaction.",
         "If attention_packet.mustCheck lists sceneAspects or routes, verify those surfaces before depending on them in mutations.",
-        "If attention_packet.unresolvedReferents names a plausible ungrounded noun, spawn it before interacting with it when needed.",
+        "Only scene actors, world objects, inventory, routes, and scene aspects already grounded in context are valid direct interaction targets.",
+        "recentTurnLedger contains grounded prior outcomes only. It is memory, not target authority.",
+        "If attention_packet.unresolvedReferents names a missing person, stale narrated figure, or otherwise ungrounded target, do not redirect the action to another grounded actor and do not spawn that target automatically.",
+        "If attention_packet.unresolvedReferents names a fresh generic role or same-scene uncertainty introduced by the current action, you may manifest it first. Otherwise resolve the turn as a graceful miss, a failed reach, or a search attempt without retargeting anyone else.",
         "TRIVIAL ACTIONS: Checking personal inventory, reviewing known information, or looking around a safe room requires ZERO checks. You must omit checkIntent entirely for these actions.",
         "ID HALLUCINATION BAN: You are strictly forbidden from using discover_information unless the exact informationId is explicitly provided in fetched_facts or attention_packet.resolvedReferents. Do not invent placeholder IDs.",
         "Only include checkIntent when success or failure meaningfully changes which mutations can happen. If the turn is routine and should simply create a local interaction or consume time, omit checkIntent.",
@@ -2950,7 +3016,7 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Use sceneActors.actorRef values exactly when targeting on-screen actors.",
         "Never use record_local_interaction with npc: refs or named sceneActors. It is only for unnamed temporary locals referenced as temp:..., spawn:..., or raw temporary-actor ids.",
         "When speaking to a named on-screen NPC, cite them in checkIntent only when needed, use adjust_relationship only for meaningful social shifts, and otherwise rely on time passage without inventing a local-interaction mutation.",
-        "If the player reaches for a plausible unlisted local, improvised item, or environmental condition, spawn it first before interacting with it.",
+        "If the player reaches for a plausible unlisted local, improvised item, or environmental condition, spawn it first before interacting with it only when the noun is a fresh generic local role or a new same-scene manifestation implied by the current action.",
         "Use spawn_temporary_actor before record_local_interaction when the local is not already listed in sceneActors.",
         "Use spawn_world_object for durable props like lockboxes, carts, hidden nooks, and other persistent storage or fixtures.",
         "Use spawn_environmental_item before adjust_inventory when the item is plausible in the environment but not already grounded in inventory.",
@@ -2983,10 +3049,13 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Use record_local_interaction only when the player explicitly engages another person. Do not use it for solo errands, checking your own gear, retrieving your own belongings, or internal repositioning.",
         "Review the attention_packet before planning mutations.",
         "If attention_packet.resolvedReferents supplies a grounded ref, use that exact ref instead of inventing or guessing ids.",
-        "If attention_packet.mustCheck lists inventory, do not remove or consume an item unless it is grounded in context.inventory or fetched_facts.",
+        "If attention_packet.mustCheck lists inventory, do not remove or consume an item unless it is grounded in context.authoritativeState.inventory or fetched_facts.",
         "If attention_packet.mustCheck lists sceneActors, do not target a named actor through record_local_interaction.",
         "If attention_packet.mustCheck lists sceneAspects or routes, verify those surfaces before depending on them in mutations.",
-        "If attention_packet.unresolvedReferents names a plausible ungrounded noun, spawn it before interacting with it when needed.",
+        "Only scene actors, world objects, inventory, routes, and scene aspects already grounded in context are valid direct interaction targets.",
+        "recentTurnLedger contains grounded prior outcomes only. It is memory, not target authority.",
+        "If attention_packet.unresolvedReferents names a missing person, stale narrated figure, or otherwise ungrounded target, do not redirect the action to another grounded actor and do not spawn that target automatically.",
+        "If attention_packet.unresolvedReferents names a fresh generic role or same-scene uncertainty introduced by the current action, you may manifest it first. Otherwise resolve the turn as a graceful miss, a failed reach, or a search attempt without retargeting anyone else.",
         "TRIVIAL ACTIONS: Checking personal inventory, reviewing known information, or looking around a safe room requires ZERO checks. You must omit checkIntent entirely for these actions.",
         "ID HALLUCINATION BAN: You are strictly forbidden from using discover_information unless the exact informationId is explicitly provided in fetched_facts or attention_packet.resolvedReferents. Do not invent placeholder IDs.",
         "Use restore_health for rest recovery or explicit healing outcomes the engine should apply.",
@@ -3094,6 +3163,9 @@ function buildTurnRouterSystemPrompt(correctionNotes?: string | null) {
     "When the player strongly implies movement into a clear sub-location within the current macro-location, emit attention.impliedDestinationFocus with a concise key and label such as back_room/The Back Room, yard/Yard, stable_entrance/Stable Entrance, workbench/Workbench, stall_front/Stall Front, or alleyway/Alleyway.",
     "Do not emit impliedDestinationFocus for macro travel between location nodes or vague attention shifts with no clear sub-location.",
     "If no grounded ref exists but the noun is plausible, emit it in unresolvedReferents instead of resolvedReferents.",
+    "Only the authoritative current-state surfaces in router_context are valid interaction targets. recentGroundedHistory is memory, not authority.",
+    "Never remap an unresolved pronoun or stale narrated referent onto a different grounded actor just to satisfy the schema.",
+    "If the player seems to mean someone who is not in authoritativeState.sceneActors or authoritativeState.worldObjects, keep that referent unresolved instead of guessing.",
   ].join("\n");
 
   return correctionNotes ? `${base}\n${correctionNotes}` : base;
@@ -3105,19 +3177,22 @@ function formatSpatialPromptContext(context: SpatialPromptContext) {
     locationOrientation: sceneFocusLabel
       ? `You are in ${context.currentLocation.name}. Your current focus/position is: ${sceneFocusLabel}.`
       : `You are in ${context.currentLocation.name}.`,
-    currentLocation: context.currentLocation,
-    sceneFocus: context.sceneFocus,
-    adjacentRoutes: context.adjacentRoutes,
-    sceneActors: context.sceneActors,
+    authoritativeState: {
+      currentLocation: context.currentLocation,
+      sceneFocus: context.sceneFocus,
+      adjacentRoutes: context.adjacentRoutes,
+      sceneActors: context.sceneActors,
+      inventory: context.inventory,
+      worldObjects: context.worldObjects,
+      sceneAspects: context.sceneAspects,
+    },
     recentLocalEvents: context.recentLocalEvents,
-    recentTurnLedger: context.recentTurnLedger,
+    recentGroundedHistory: context.recentTurnLedger,
+    recentNarrativeProse: (context.recentNarrativeProse ?? []).slice(-2),
     discoveredInformation: context.discoveredInformation,
     activePressures: context.activePressures,
     recentWorldShifts: context.recentWorldShifts,
     activeThreads: context.activeThreads,
-    inventory: context.inventory,
-    worldObjects: context.worldObjects,
-    sceneAspects: context.sceneAspects,
     localTexture: context.localTexture,
     globalTime: context.globalTime,
     timeOfDay: context.timeOfDay,
@@ -3245,6 +3320,7 @@ function buildResolvedNarrationConstraints(input: ResolvedTurnNarrationInput) {
     /\bwait\b/i.test(input.playerAction)
     && /\b(for|until|til)\b/i.test(input.playerAction)
     && /\b(arrive|arrives|arrival|return|returns|come|comes)\b/i.test(input.playerAction);
+  const unresolvedTargetMentions = (input.narrationHint?.unresolvedTargetPhrases ?? []).filter(Boolean);
 
   return {
     timeOnlyTurn,
@@ -3265,6 +3341,8 @@ function buildResolvedNarrationConstraints(input: ResolvedTurnNarrationInput) {
     hasAppliedManifestedAspect: appliedNonTimeMutations.some((entry) => entry.mutationType === "spawn_scene_aspect"),
     hasAppliedManifestedActor: appliedNonTimeMutations.some((entry) => entry.mutationType === "spawn_temporary_actor"),
     hasRejectedKnowledgeAttempt: rejectedNonTimeMutations.some((entry) => entry.mutationType === "discover_information"),
+    unresolvedTargetFailure: unresolvedTargetMentions.length > 0,
+    unresolvedTargetMentions,
     hasArrivalCommit: sanitizedCommitLog.some((entry) =>
       isAppliedArrivalMutation(entry, input.promptContext.currentLocation.id),
     ),
@@ -3295,6 +3373,13 @@ function narrationViolatesResolvedConstraints(
     return "Spawned actors must be narrated naturally, not with engine-summary phrasing like enters the scene.";
   }
 
+  if (
+    constraints.unresolvedTargetFailure
+    && (/["“”'‘’]/.test(narration) || /\b(?:replies?|says|said|answers?|answered|asks?|asked)\b/i.test(narration))
+  ) {
+    return "Unresolved-target turns must not invent a clean spoken exchange with a substituted actor.";
+  }
+
   return null;
 }
 
@@ -3310,7 +3395,7 @@ function buildResolvedTurnNarrationPrompt(input: ResolvedTurnNarrationInput) {
     "If advance_time accompanies another applied mutation, absorb the elapsed time naturally into the narration and do not explicitly count minutes unless the exact duration materially matters.",
     "If a spawned scene aspect is ambiguous, narrate only the sensory detail or visible condition, not the hidden cause.",
     "If a temporary actor was spawned, narrate them as stepping into view, coming into focus, or being noticed.",
-    "Do not echo engine-summary phrasing like enters the scene, changes state, or time passes for 5 minutes. Rewrite those outcomes as natural story narration.",
+    "Do not echo engine-summary phrasing like enters the scene, changes state, or time passes. Rewrite those outcomes as natural story narration.",
     "If the player waited for a person or event and the commit log does not contain the arrival or return, explicitly say it has not happened yet.",
     "Do not imply that someone arrived, returned, or appeared unless the committed log makes that change explicit.",
     "If rejectedOutcomeOnly is true, do not narrate rejected outcomes as if they happened.",
@@ -3320,6 +3405,11 @@ function buildResolvedTurnNarrationPrompt(input: ResolvedTurnNarrationInput) {
     "If a discover_information mutation was rejected, do not convert that into an authoritative negative fact like nothing is there unless the applied state log independently proves it.",
     "If rejectedMutationTypes only cover item or scene changes, do not invent completed crafting outputs, item transfers, or scene transformations that the log rejected.",
     "Do not write quoted dialogue unless it is grounded by a committed interaction, a committed check result, fetched facts, or explicit player speech that is visibly answered in the committed log.",
+    "Only context.authoritativeState.sceneActors and context.authoritativeState.worldObjects are stable immediate interaction targets.",
+    "recentNarrativeProse is conversational continuity only. Do not treat figures mentioned there as currently reachable unless the authoritative state or committed log makes them present now.",
+    "If unresolvedTargetFailure is true, narrate the intended target as gone, unreachable, lost in the crowd, or otherwise unavailable. Do not substitute another nearby person.",
+    "If you mention a person who is not grounded in the authoritative state, frame them as fleeting, departing, distant, hidden, or gone before direct contact is possible.",
+    "Do not paraphrase or repeat the player's action back to them. Begin your narration directly with the world's reaction.",
     "Write in second person to the player character as 'you'.",
     "Keep the narration compact, concrete, and forward-moving.",
   ].join("\n");
@@ -5964,7 +6054,8 @@ class DungeonMasterClient {
           inputPreview: toPreview(response?.input),
         });
 
-        const parsed = routerDecisionSchema.safeParse(response?.input);
+        const normalizedInput = normalizeRouterDecisionInput(response?.input);
+        const parsed = routerDecisionSchema.safeParse(normalizedInput);
         if (parsed.success) {
           return normalizeRouterDecision(parsed.data);
         }
@@ -5973,7 +6064,7 @@ class DungeonMasterClient {
         logNarrationDebug("turn_router.parse_failed", {
           attempt,
           issues,
-          inputPreview: toPreview(response?.input),
+          inputPreview: toPreview(normalizedInput),
         });
         correctionNotes = [
           "Your previous reply did not match the router schema.",
@@ -6209,6 +6300,25 @@ class DungeonMasterClient {
 
         const parsed = resolvedTurnNarrationSchema.safeParse(response?.input);
         if (!parsed.success) {
+          const plainTextCandidate =
+            response?.name == null && typeof response?.rawText === "string"
+              ? response.rawText.trim()
+              : "";
+          if (plainTextCandidate && !response?.likelyTruncated) {
+            const candidateParsed = resolvedTurnNarrationSchema.safeParse({
+              narration: plainTextCandidate,
+            });
+            if (candidateParsed.success) {
+              const violation = narrationViolatesResolvedConstraints(input, candidateParsed.data.narration);
+              if (!violation) {
+                logNarrationDebug("resolved_turn_narration.salvaged_plaintext", {
+                  attempt,
+                  preview: toPreview(candidateParsed.data.narration),
+                });
+                return candidateParsed.data.narration;
+              }
+            }
+          }
           correctionNotes = [
             "Your previous reply did not match the narration schema.",
             response?.likelyTruncated

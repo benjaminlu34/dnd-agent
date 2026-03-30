@@ -6020,10 +6020,37 @@ function deterministicNarrationFallback(input: {
   playerAction: string;
   stateCommitLog: StateCommitLog;
   checkResult?: CheckResult | null;
+  narrationHint?: {
+    unresolvedTargetPhrases?: string[];
+  } | null;
 }) {
+  const appliedEntries = input.stateCommitLog
+    .filter((entry) => entry.status === "applied" && (entry.kind === "mutation" || entry.kind === "simulation"));
+  const hasMeaningfulAppliedEntry = appliedEntries.some((entry) => entry.reasonCode !== "time_advanced");
+
   function summarizeAppliedEntry(entry: StateCommitLog[number]) {
     if (entry.status !== "applied") {
       return null;
+    }
+    if (entry.reasonCode === "time_advanced") {
+      if (hasMeaningfulAppliedEntry) {
+        return null;
+      }
+      const minutesMatch = entry.summary.match(/(\d+)\s+minutes?/i);
+      if (minutesMatch) {
+        const minutes = Number(minutesMatch[1]);
+        if (Number.isFinite(minutes) && minutes <= 5) {
+          return "A few minutes slip by.";
+        }
+      }
+      return "Some time passes.";
+    }
+    if (entry.reasonCode === "local_interaction_recorded" && entry.kind === "mutation") {
+      const interactionSummary = entry.summary.trim().replace(/\.$/, "");
+      if (/^asked\b/i.test(interactionSummary)) {
+        return `You ${interactionSummary.charAt(0).toLowerCase()}${interactionSummary.slice(1)}.`;
+      }
+      return "You make contact and get a response.";
     }
     if (entry.reasonCode === "item_state_updated" && entry.kind === "mutation") {
       const itemName = entry.summary.replace(/ changes state\.$/, "");
@@ -6036,14 +6063,16 @@ function deterministicNarrationFallback(input: {
     return entry.summary;
   }
 
-  const applied = input.stateCommitLog
-    .filter((entry) => entry.status === "applied" && (entry.kind === "mutation" || entry.kind === "simulation"))
+  const applied = appliedEntries
     .map(summarizeAppliedEntry)
     .filter((entry): entry is string => Boolean(entry));
   const hasRejectedEntries = input.stateCommitLog.some((entry) => entry.status === "rejected");
 
   const sentences: string[] = [];
-  if (applied.length) {
+  if ((input.narrationHint?.unresolvedTargetPhrases?.length ?? 0) > 0) {
+    const phrase = input.narrationHint?.unresolvedTargetPhrases?.[0] ?? "them";
+    sentences.push(`You reach for ${phrase}, but the target is already gone from immediate reach.`);
+  } else if (applied.length) {
     sentences.push(applied.join(" "));
   } else if (input.checkResult?.outcome === "failure") {
     sentences.push("Your attempt does not take hold.");
@@ -6894,6 +6923,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
         stateCommitLog: committed.resultPayload.stateCommitLog ?? [],
         checkResult: committed.resultPayload.checkResult ?? null,
         suggestedActions: dedupeStrings(committedCommand.suggestedActions),
+        narrationHint: committedCommand.narrationHint ?? null,
         signal: abortController.signal,
       });
     } catch (error) {
@@ -6901,6 +6931,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
         playerAction,
         stateCommitLog: committed.resultPayload.stateCommitLog ?? [],
         checkResult: committed.resultPayload.checkResult ?? null,
+        narrationHint: committedCommand.narrationHint ?? null,
       });
       logBackendDiagnostic("turn.narration.fallback", {
         campaignId: input.campaignId,
@@ -7364,6 +7395,7 @@ export async function resolvePendingCheck(input: ResolvePendingCheckRequest & {
         playerAction: bundle.playerAction,
         stateCommitLog: committed.resultPayload.stateCommitLog ?? [],
         checkResult: committed.resultPayload.checkResult ?? null,
+        narrationHint: bundle.command.narrationHint ?? null,
       });
       logBackendDiagnostic("turn.narration.fallback", {
         campaignId: input.campaignId,

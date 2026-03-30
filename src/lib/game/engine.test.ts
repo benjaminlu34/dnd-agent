@@ -1245,6 +1245,29 @@ test("wait fallback still marks non-arrival when a departure happened instead", 
   assert.match(narration, /has not happened yet/i);
 });
 
+test("deterministic narration fallback explains unresolved ghost-target attempts without substitution", () => {
+  const narration = engineTestUtils.deterministicNarrationFallback({
+    playerAction: "I grab their wrist before they can slip away.",
+    stateCommitLog: [
+      {
+        kind: "mutation",
+        mutationType: "advance_time",
+        status: "applied",
+        reasonCode: "time_advanced",
+        summary: "Time passes for 2 minutes.",
+        metadata: null,
+      },
+    ],
+    checkResult: null,
+    narrationHint: {
+      unresolvedTargetPhrases: ["them"],
+    },
+  });
+
+  assert.match(narration, /already gone from immediate reach/i);
+  assert.doesNotMatch(narration, /Bren Thorn/i);
+});
+
 test("set_player_scene_focus updates intra-location focus and clears on macro travel", () => {
   const focused = engineTestUtils.evaluateResolvedCommand({
     snapshot: createSnapshot(),
@@ -1947,4 +1970,32 @@ test("deterministic narration fallback does not echo raw rejected mutation summa
 
   assert.match(narration, /adjust silver signet ring with hidden poisoned needle/i);
   assert.doesNotMatch(narration, /Inventory changes are not authorized for this turn/i);
+});
+
+test("deterministic narration fallback softens time plus local interaction summaries", () => {
+  const narration = engineTestUtils.deterministicNarrationFallback({
+    playerAction: "I step inside and ask the baker what's fresh this morning.",
+    stateCommitLog: [
+      {
+        kind: "mutation",
+        mutationType: "advance_time",
+        status: "applied",
+        reasonCode: "time_advanced",
+        summary: "Time passes for 5 minutes.",
+        metadata: null,
+      },
+      {
+        kind: "mutation",
+        mutationType: "record_local_interaction",
+        status: "applied",
+        reasonCode: "local_interaction_recorded",
+        summary: "Asked the baker what's fresh this morning",
+        metadata: null,
+      },
+    ],
+    checkResult: null,
+  });
+
+  assert.match(narration, /you ask the baker what's fresh this morning/i);
+  assert.doesNotMatch(narration, /Time passes for 5 minutes/i);
 });

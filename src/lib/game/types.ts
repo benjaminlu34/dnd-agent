@@ -1024,6 +1024,7 @@ export type SpatialPromptContext = {
   adjacentRoutes: RouteSummary[];
   sceneActors: SceneActorSummary[];
   recentLocalEvents: RecentLocalEventSummary[];
+  recentNarrativeProse?: string[];
   recentTurnLedger: string[];
   discoveredInformation: PromptInformationSummary[];
   activePressures: ActivePressureSummary[];
@@ -1611,6 +1612,9 @@ export type ValidatedTurnCommand =
       warnings: string[];
       timeElapsed: number;
       narrationBounds?: TurnNarrationBounds | null;
+      narrationHint?: {
+        unresolvedTargetPhrases?: string[];
+      } | null;
       pendingCheck?: PendingCheck;
       checkResult?: CheckResult;
     });
