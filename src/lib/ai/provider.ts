@@ -2284,6 +2284,8 @@ const routerAttentionSchema = z.object({
   mustCheck: [],
 });
 
+const ROUTER_REASON_MAX_CHARS = 360;
+
 const routerDecisionSchema = z.object({
   profile: z.enum(["local", "full"]),
   confidence: z.enum(["high", "low"]),
@@ -2292,7 +2294,7 @@ const routerDecisionSchema = z.object({
     .max(5)
     .default([]),
   requiredPrerequisites: z.array(requiredPrerequisiteSchema).max(3).default([]),
-  reason: z.string().trim().min(1).max(240),
+  reason: z.string().trim().min(1).max(ROUTER_REASON_MAX_CHARS),
   clarification: routerClarificationSchema,
   attention: routerAttentionSchema,
 });
@@ -2885,6 +2887,7 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Use transfer_assets for non-market stashing, dropping, storing, retrieving, or handing over items, commodities, or gold between the player, world objects, scenes, and willing NPCs.",
         "Use update_world_object_state to lock, hide, or hitch a durable world object.",
         "Use update_item_state for equipping, changing charges, or toggling durable item state like lit/unlit.",
+        "Keeping an item on your own person still counts as inventory. Pockets, sleeves, belts, boots, packs, and similar on-body storage should not use adjust_inventory or transfer_assets unless the item actually leaves the player's custody.",
         "Use update_character_state for track-only conditions like disguised, poisoned, or exhausted.",
         "Use set_follow_state when someone starts or stops following the player through location and focus changes.",
         "Use set_player_scene_focus for self-directed movement within the current location, like stepping back into the forge, crossing to the workbench, or moving from the street to the stall front.",
@@ -2904,6 +2907,8 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "ID HALLUCINATION BAN: You are strictly forbidden from using discover_information unless the exact informationId is explicitly provided in fetched_facts or attention_packet.resolvedReferents. Do not invent placeholder IDs.",
         "Only include checkIntent when success or failure meaningfully changes which mutations can happen. If the turn is routine and should simply create a local interaction or consume time, omit checkIntent.",
         "If a check is needed, set checkIntent and list only the success-state mutations. The engine will reject them on failure.",
+        "For notice/analyze/search/listen turns that use checkIntent, any newly noticed actor, clue, item, or scene detail must be phase conditional so the roll gates whether it appears.",
+        "Never use placeholder ids like none, null, unknown, or n/a for citedNpcId, targetNpcId, localEntityId, or spawn references. Omit the field instead when there is no real id.",
         "Use advance_time for passive waiting or observation windows.",
         "Suggested actions should stay short and concrete.",
         "Use request_clarification only if the world state is too invalid to produce any passive progression.",
@@ -2934,6 +2939,8 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Only include checkIntent when success or failure meaningfully changes which mutations can happen. If the turn is routine and should simply create a local interaction, spend time, or ask a subordinate to fetch someone, omit checkIntent.",
         "If a check is needed, set checkIntent and list only the success-state mutations. The engine will reject them automatically on failure or partial success.",
         "Only set citedNpcId when the player is directly engaging that NPC on-screen this turn.",
+        "For notice/analyze/search/listen turns that use checkIntent, any newly noticed actor, clue, item, or scene detail must be phase conditional so the roll gates whether it appears.",
+        "Never use placeholder ids like none, null, unknown, or n/a for citedNpcId, targetNpcId, localEntityId, or spawn references. Omit the field instead when there is no real id.",
         "Mark resource costs, fees, and other upfront expenditures as phase immediate.",
         "Mark success-only rewards or outcomes as phase conditional.",
         "Use commit_market_trade only for strict commodity trade backed by fetched market prices.",
@@ -2959,6 +2966,7 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Use transfer_assets under economy_light for stash/drop/store/retrieve, under converse for willing NPC exchange, under investigate for stealthy NPC-source transfers, and under violence for forceful NPC-source transfers.",
         "Use update_world_object_state to lock, hide, or hitch a durable world object.",
         "Use update_item_state for equipping, changing charges, or toggling durable item state like lit/unlit.",
+        "Keeping an item on your own person still counts as inventory. Pockets, sleeves, belts, boots, packs, and similar on-body storage should not use adjust_inventory or transfer_assets unless the item actually leaves the player's custody.",
         "Use update_character_state for track-only conditions like disguised, poisoned, or exhausted.",
         "Use set_follow_state when someone starts or stops following the player through location and focus changes.",
         "Use adjust_inventory for gaining, losing, consuming, or handing over grounded inventory items.",
@@ -3268,8 +3276,23 @@ function narrationViolatesResolvedConstraints(
   narration: string,
 ) {
   const constraints = buildResolvedNarrationConstraints(input);
+  const normalizedNarration = narration.toLowerCase();
   if (constraints.rejectedInteractionOnly && /["“”'‘’]/.test(narration)) {
     return "Rejected interaction-only turns must not invent quoted dialogue.";
+  }
+
+  if (
+    !constraints.timeOnlyTurn
+    && /\b(?:time passes for \d+ minutes?|(?:one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|forty|forty-five|forty five|sixty|\d+)\s+minutes?\s+pass)\b/i.test(narration)
+  ) {
+    return "Mixed turns must absorb elapsed time naturally instead of explicitly saying how many minutes pass.";
+  }
+
+  if (
+    constraints.hasAppliedManifestedActor
+    && /\b(?:enters?|entered|has entered|had entered)\s+the\s+scene\b/i.test(normalizedNarration)
+  ) {
+    return "Spawned actors must be narrated naturally, not with engine-summary phrasing like enters the scene.";
   }
 
   return null;
@@ -3284,8 +3307,10 @@ function buildResolvedTurnNarrationPrompt(input: ResolvedTurnNarrationInput) {
     "Do not invent successful outcomes, prices, discoveries, NPC reactions, travel, or social shifts that are not supported by the log, context, or fetched facts.",
     "If a mutation was rejected or a check failed, make that failure legible in the narration.",
     "If the applied log only advances time, narrate only the time passage and any grounded atmosphere shift. Do not restage the room or repeat the opening setup.",
+    "If advance_time accompanies another applied mutation, absorb the elapsed time naturally into the narration and do not explicitly count minutes unless the exact duration materially matters.",
     "If a spawned scene aspect is ambiguous, narrate only the sensory detail or visible condition, not the hidden cause.",
     "If a temporary actor was spawned, narrate them as stepping into view, coming into focus, or being noticed.",
+    "Do not echo engine-summary phrasing like enters the scene, changes state, or time passes for 5 minutes. Rewrite those outcomes as natural story narration.",
     "If the player waited for a person or event and the commit log does not contain the arrival or return, explicitly say it has not happened yet.",
     "Do not imply that someone arrived, returned, or appeared unless the committed log makes that change explicit.",
     "If rejectedOutcomeOnly is true, do not narrate rejected outcomes as if they happened.",

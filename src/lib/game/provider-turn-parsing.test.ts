@@ -133,6 +133,8 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   assert.match(prompt, /Giving a present subordinate or ally a routine instruction to fetch someone/);
   assert.match(prompt, /Only include checkIntent when success or failure meaningfully changes which mutations can happen/);
   assert.match(prompt, /Only set citedNpcId when the player is directly engaging that NPC on-screen this turn/);
+  assert.match(prompt, /For notice\/analyze\/search\/listen turns that use checkIntent, any newly noticed actor, clue, item, or scene detail must be phase conditional/);
+  assert.match(prompt, /Never use placeholder ids like none, null, unknown, or n\/a for citedNpcId, targetNpcId, localEntityId, or spawn references/);
   assert.match(prompt, /Use only bounded mutations/);
   assert.match(prompt, /The engine will reject them automatically on failure or partial success/);
   assert.match(prompt, /Mark resource costs, fees, and other upfront expenditures as phase immediate/);
@@ -317,6 +319,8 @@ test("buildResolvedTurnNarrationPrompt includes prompt context and fetched facts
   assert.match(prompt.system, /If a spawned scene aspect is ambiguous, narrate only the sensory detail/);
   assert.match(prompt.system, /If a temporary actor was spawned, narrate them as stepping into view/);
   assert.match(prompt.system, /If a discover_information mutation was rejected, do not convert that into an authoritative negative fact/);
+  assert.match(prompt.system, /do not explicitly count minutes unless the exact duration materially matters/i);
+  assert.match(prompt.system, /Do not echo engine-summary phrasing like enters the scene, changes state, or time passes for 5 minutes/i);
 });
 
 test("buildResolvedTurnNarrationPrompt teaches failed invalid-target attempts as failed searches", () => {
@@ -652,6 +656,112 @@ test("narrationViolatesResolvedConstraints rejects invented quoted replies on re
   );
 
   assert.match(violation ?? "", /must not invent quoted dialogue/i);
+});
+
+test("narrationViolatesResolvedConstraints rejects explicit minute counts on mixed turns", () => {
+  const violation = aiProviderTestUtils.narrationViolatesResolvedConstraints(
+    {
+      playerAction: "I hurry back to my stall and draw my dagger.",
+      promptContext: {
+        currentLocation: {
+          id: "loc_market",
+          name: "Lantern Market",
+          type: "district",
+          summary: "Rain-dark awnings and crowded stalls.",
+          state: "busy",
+        },
+        adjacentRoutes: [],
+        sceneActors: [],
+        recentLocalEvents: [],
+        recentTurnLedger: [],
+        discoveredInformation: [],
+        activePressures: [],
+        recentWorldShifts: [],
+        activeThreads: [],
+        inventory: [],
+        worldObjects: [],
+        sceneFocus: null,
+        sceneAspects: {},
+        localTexture: null,
+        globalTime: 540,
+        timeOfDay: "morning",
+        dayCount: 1,
+      },
+      fetchedFacts: [],
+      stateCommitLog: [
+        {
+          kind: "mutation",
+          mutationType: "advance_time",
+          status: "applied",
+          reasonCode: "time_advanced",
+          summary: "Time passes for 5 minutes.",
+          metadata: {},
+        },
+        {
+          kind: "mutation",
+          mutationType: "update_item_state",
+          status: "applied",
+          reasonCode: "item_state_updated",
+          summary: "Dusk & Dawn changes state.",
+          metadata: {},
+        },
+      ],
+      checkResult: null,
+      suggestedActions: [],
+    },
+    "You hurry back toward your stall, hand dropping to Dawn as five minutes pass in the crush of the market.",
+  );
+
+  assert.match(violation ?? "", /absorb elapsed time naturally/i);
+});
+
+test("narrationViolatesResolvedConstraints rejects engine-summary actor spawn phrasing", () => {
+  const violation = aiProviderTestUtils.narrationViolatesResolvedConstraints(
+    {
+      playerAction: "I scan the market for the cloaked figure.",
+      promptContext: {
+        currentLocation: {
+          id: "loc_market",
+          name: "Lantern Market",
+          type: "district",
+          summary: "Rain-dark awnings and crowded stalls.",
+          state: "busy",
+        },
+        adjacentRoutes: [],
+        sceneActors: [],
+        recentLocalEvents: [],
+        recentTurnLedger: [],
+        discoveredInformation: [],
+        activePressures: [],
+        recentWorldShifts: [],
+        activeThreads: [],
+        inventory: [],
+        worldObjects: [],
+        sceneFocus: null,
+        sceneAspects: {},
+        localTexture: null,
+        globalTime: 540,
+        timeOfDay: "morning",
+        dayCount: 1,
+      },
+      fetchedFacts: [],
+      stateCommitLog: [
+        {
+          kind: "mutation",
+          mutationType: "spawn_temporary_actor",
+          status: "applied",
+          reasonCode: "temporary_actor_spawned",
+          summary: "suspicious individual enters the scene.",
+          metadata: {},
+        },
+      ],
+      checkResult: null,
+      suggestedActions: [],
+    },
+    "As you search the stalls, a suspicious individual has entered the scene and moves toward you through the crowd.",
+  );
+
+  assert.match(violation ?? "", /enters the scene/i);
 });
 
 test("buildResolvedTurnNarrationPrompt strips planner-intent metadata for the coin-purse regression turn", () => {

@@ -108,6 +108,69 @@ function focusTokens(value: string) {
     .filter((token) => token.length >= 3 && !focusStopWords.has(token));
 }
 
+function sharedPrefixLength(left: string, right: string) {
+  const limit = Math.min(left.length, right.length);
+  let index = 0;
+  while (index < limit && left[index] === right[index]) {
+    index += 1;
+  }
+  return index;
+}
+
+function editDistanceWithinLimit(left: string, right: string, limit: number) {
+  if (left === right) {
+    return true;
+  }
+  if (Math.abs(left.length - right.length) > limit) {
+    return false;
+  }
+
+  const previous = new Array(right.length + 1).fill(0);
+  const current = new Array(right.length + 1).fill(0);
+
+  for (let j = 0; j <= right.length; j += 1) {
+    previous[j] = j;
+  }
+
+  for (let i = 1; i <= left.length; i += 1) {
+    current[0] = i;
+    let rowMin = current[0];
+
+    for (let j = 1; j <= right.length; j += 1) {
+      const substitutionCost = left[i - 1] === right[j - 1] ? 0 : 1;
+      current[j] = Math.min(
+        previous[j] + 1,
+        current[j - 1] + 1,
+        previous[j - 1] + substitutionCost,
+      );
+      rowMin = Math.min(rowMin, current[j]);
+    }
+
+    if (rowMin > limit) {
+      return false;
+    }
+
+    for (let j = 0; j <= right.length; j += 1) {
+      previous[j] = current[j];
+    }
+  }
+
+  return previous[right.length] <= limit;
+}
+
+function focusTokenMatchesCandidate(focusToken: string, candidateToken: string) {
+  if (focusToken === candidateToken) {
+    return true;
+  }
+  if (Math.min(focusToken.length, candidateToken.length) < 4) {
+    return false;
+  }
+  if (sharedPrefixLength(focusToken, candidateToken) < 4) {
+    return false;
+  }
+  return editDistanceWithinLimit(focusToken, candidateToken, 2);
+}
+
 export function canonicalSceneRoleSignature(value: string) {
   return canonicalRoleTokens(value).sort().join(" ");
 }
@@ -180,10 +243,10 @@ export function sceneActorMatchesFocus(input: {
     return false;
   }
 
-  const haystack = normalizeSceneIdentityText(
+  const candidateTokens = normalizeSceneIdentityText(
     `${input.actor.displayLabel} ${input.actor.role} ${input.actor.lastSummary ?? ""}`,
-  );
-  return tokens.some((token) => haystack.includes(token));
+  ).split(" ");
+  return tokens.some((token) => candidateTokens.some((candidateToken) => focusTokenMatchesCandidate(token, candidateToken)));
 }
 
 export function sceneAspectMatchesFocus(input: {

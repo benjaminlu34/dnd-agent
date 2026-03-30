@@ -6021,18 +6021,34 @@ function deterministicNarrationFallback(input: {
   stateCommitLog: StateCommitLog;
   checkResult?: CheckResult | null;
 }) {
+  function summarizeAppliedEntry(entry: StateCommitLog[number]) {
+    if (entry.status !== "applied") {
+      return null;
+    }
+    if (entry.reasonCode === "item_state_updated" && entry.kind === "mutation") {
+      const itemName = entry.summary.replace(/ changes state\.$/, "");
+      return itemName ? `You adjust ${itemName.toLowerCase()}.` : "You adjust your gear.";
+    }
+    if (entry.reasonCode === "world_object_state_updated" && entry.kind === "mutation") {
+      const objectName = entry.summary.replace(/ changes state\.$/, "");
+      return objectName ? `You adjust ${objectName.toLowerCase()}.` : "You adjust the object.";
+    }
+    return entry.summary;
+  }
+
   const applied = input.stateCommitLog
     .filter((entry) => entry.status === "applied" && (entry.kind === "mutation" || entry.kind === "simulation"))
-    .map((entry) => entry.summary);
-  const rejected = input.stateCommitLog
-    .filter((entry) => entry.status === "rejected")
-    .map((entry) => entry.summary);
+    .map(summarizeAppliedEntry)
+    .filter((entry): entry is string => Boolean(entry));
+  const hasRejectedEntries = input.stateCommitLog.some((entry) => entry.status === "rejected");
 
   const sentences: string[] = [];
   if (applied.length) {
     sentences.push(applied.join(" "));
   } else if (input.checkResult?.outcome === "failure") {
     sentences.push("Your attempt does not take hold.");
+  } else if (hasRejectedEntries) {
+    sentences.push("Part of your attempt does not take hold.");
   } else {
     sentences.push("The turn resolves without a lasting change.");
   }
@@ -6046,9 +6062,6 @@ function deterministicNarrationFallback(input: {
   );
   if (waitedForArrival && !hasArrivalCommit) {
     sentences.push("What you were waiting for has not happened yet.");
-  }
-  if (rejected.length) {
-    sentences.push(rejected.join(" "));
   }
 
   return sentences.join(" ").trim();

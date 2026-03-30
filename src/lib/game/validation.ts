@@ -269,6 +269,47 @@ function hasMeaningfulCheckStakes(command: ResolveMechanicsResponse) {
   });
 }
 
+function canAutoPromoteMutationForInvestigativeCheck(mutation: MechanicsMutation) {
+  if (mutation.phase) {
+    return false;
+  }
+
+  return (
+    mutation.type === "spawn_scene_aspect"
+    || mutation.type === "spawn_temporary_actor"
+    || mutation.type === "spawn_environmental_item"
+  );
+}
+
+function normalizeMutationsForPendingCheck(command: ResolveMechanicsResponse) {
+  const checkIntent = command.checkIntent;
+  if (!checkIntent || checkIntent.type !== "challenge") {
+    return command.mutations;
+  }
+
+  if (checkIntent.challengeApproach !== "notice" && checkIntent.challengeApproach !== "analyze") {
+    return command.mutations;
+  }
+
+  if (hasMeaningfulCheckStakes(command)) {
+    return command.mutations;
+  }
+
+  let promotedAny = false;
+  const mutations = command.mutations.map((mutation) => {
+    if (!canAutoPromoteMutationForInvestigativeCheck(mutation)) {
+      return mutation;
+    }
+    promotedAny = true;
+    return {
+      ...mutation,
+      phase: "conditional",
+    } satisfies MechanicsMutation;
+  });
+
+  return promotedAny ? mutations : command.mutations;
+}
+
 function derivePendingCheck(
   snapshot: CampaignSnapshot,
   command: ResolveMechanicsResponse,
@@ -349,11 +390,8 @@ export function validateTurnCommand(input: {
     }
   }
   const suggestedActions = normalizedSuggestedActions(command.suggestedActions);
-  if (!suggestedActions.length) {
-    warnings.push("Mechanics response returned no suggested actions; engine provided none.");
-  }
 
-  const mutations = command.mutations.filter((mutation) => {
+  const filteredMutations = command.mutations.filter((mutation) => {
     if (mutation.type !== "record_local_interaction") {
       if (mutation.type === "discover_information" && routerSuggestsManifestationOverKnowledge(routerDecision)) {
         warnings.push(
@@ -381,6 +419,10 @@ export function validateTurnCommand(input: {
       "Mechanics response targeted record_local_interaction at an invalid local actor ref; mutation was dropped.",
     );
     return false;
+  });
+  const mutations = normalizeMutationsForPendingCheck({
+    ...command,
+    mutations: filteredMutations,
   });
 
   return {

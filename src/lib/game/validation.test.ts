@@ -281,6 +281,49 @@ test("validateTurnCommand suppresses checks that have no success-gated stakes", 
   assert.equal(validated.checkResult, undefined);
 });
 
+test("validateTurnCommand promotes investigative manifestations to conditional stakes", () => {
+  const validated = validateTurnCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Scan the market"],
+      checkIntent: {
+        type: "challenge",
+        reason: "Search the crowd for the cloaked figure",
+        challengeApproach: "notice",
+      },
+      mutations: [
+        {
+          type: "advance_time",
+          durationMinutes: 5,
+        },
+        {
+          type: "spawn_scene_aspect",
+          aspectName: "Market Crowd",
+          state: "A jostling crowd creates cover and distraction.",
+          duration: "scene",
+          reason: "Crowds make scanning harder.",
+        },
+        {
+          type: "spawn_temporary_actor",
+          spawnKey: "cloaked_figure",
+          role: "suspicious individual",
+          summary: "A hooded figure threads through the crowd.",
+          apparentDisposition: "wary",
+          reason: "A successful scan spots the figure.",
+        },
+      ],
+    },
+  });
+
+  assert.equal(validated.type, "resolve_mechanics");
+  assert.equal(validated.pendingCheck?.stat, "wisdom");
+  assert.equal(validated.pendingCheck?.reason, "Search the crowd for the cloaked figure");
+  assert.equal(validated.mutations[1]?.phase, "conditional");
+  assert.equal(validated.mutations[2]?.phase, "conditional");
+});
+
 test("validateTurnCommand can use fetched npc detail to derive pending combat check dc", () => {
   const fetchedFacts: TurnFetchToolResult[] = [
     {
@@ -317,7 +360,7 @@ test("validateTurnCommand can use fetched npc detail to derive pending combat ch
   assert.equal(validated.checkResult, undefined);
 });
 
-test("validateTurnCommand warns when no suggested actions are provided", () => {
+test("validateTurnCommand does not warn when no suggested actions are provided", () => {
   const command: ResolveMechanicsResponse = {
     type: "resolve_mechanics",
     timeMode: "exploration",
@@ -331,9 +374,7 @@ test("validateTurnCommand warns when no suggested actions are provided", () => {
   });
 
   assert.equal(validated.type, "resolve_mechanics");
-  assert.deepEqual(validated.warnings, [
-    "Mechanics response returned no suggested actions; engine provided none.",
-  ]);
+  assert.deepEqual(validated.warnings, []);
 });
 
 test("validateTurnCommand drops record_local_interaction targeting a named npc ref", () => {

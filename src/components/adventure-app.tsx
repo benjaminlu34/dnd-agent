@@ -124,9 +124,13 @@ const EQUIPMENT_KEYWORDS = [
   "wand",
 ] as const;
 
+function isEquippedItem(item: InventoryItem) {
+  return item.properties?.equipped === true;
+}
+
 function isEquipmentItem(item: InventoryItem) {
   const haystack = `${item.template.name} ${item.template.tags.join(" ")}`.toLowerCase();
-  return EQUIPMENT_KEYWORDS.some((keyword) => haystack.includes(keyword));
+  return isEquippedItem(item) || EQUIPMENT_KEYWORDS.some((keyword) => haystack.includes(keyword));
 }
 
 export function AdventureApp({

@@ -1920,3 +1920,31 @@ test("deterministic narration fallback includes simulation-originated commit log
 
   assert.match(narration, /North Road changes status to blocked/);
 });
+
+test("deterministic narration fallback does not echo raw rejected mutation summaries", () => {
+  const narration = engineTestUtils.deterministicNarrationFallback({
+    playerAction: "Take off the ring and tuck it away.",
+    stateCommitLog: [
+      {
+        kind: "mutation",
+        mutationType: "update_item_state",
+        status: "applied",
+        reasonCode: "item_state_updated",
+        summary: "Silver signet ring with hidden poisoned needle changes state.",
+        metadata: null,
+      },
+      {
+        kind: "mutation",
+        mutationType: "adjust_inventory",
+        status: "rejected",
+        reasonCode: "unauthorized_vector",
+        summary: "Inventory changes are not authorized for this turn.",
+        metadata: null,
+      },
+    ],
+    checkResult: null,
+  });
+
+  assert.match(narration, /adjust silver signet ring with hidden poisoned needle/i);
+  assert.doesNotMatch(narration, /Inventory changes are not authorized for this turn/i);
+});
