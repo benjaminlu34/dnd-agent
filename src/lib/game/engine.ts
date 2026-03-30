@@ -667,47 +667,123 @@ function trimToNull(value: string | null | undefined) {
   return normalized ? normalized : null;
 }
 
+function normalizeNpcIdentityLabel(value: string | null | undefined) {
+  return (value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/^(the|a|an)\s+/i, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function normalizeComparableNpcText(value: string | null | undefined) {
+  return (value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function textMentionsLocalNpcName(text: string, npcName: string) {
+  const normalizedText = normalizeComparableNpcText(text);
+  const normalizedName = normalizeComparableNpcText(npcName);
+  return Boolean(normalizedName) && normalizedText.includes(normalizedName);
+}
+
+function disallowedNamedLocalMentionsInHydration(input: {
+  summary: string;
+  description: string;
+  localNpcNames: string[];
+  priorFactText: string;
+}) {
+  const combinedDraftText = `${input.summary}\n${input.description}`;
+  return input.localNpcNames.filter((npcName) =>
+    textMentionsLocalNpcName(combinedDraftText, npcName)
+    && !textMentionsLocalNpcName(input.priorFactText, npcName),
+  );
+}
+
+function hasGenericNpcRoleLabelName(input: { name: string; role: string }) {
+  const normalizedName = normalizeNpcIdentityLabel(input.name);
+  const normalizedRole = normalizeNpcIdentityLabel(input.role);
+  return Boolean(normalizedName) && Boolean(normalizedRole) && normalizedName === normalizedRole;
+}
+
 function sanitizePromotedNpcHydrationDraft(input: {
   draft: PromotedNpcHydrationDraft;
+  currentName: string;
+  currentRole: string;
   currentLocationId: string;
   localFactionIds: Set<string>;
+  allowNarrativeHydration: boolean;
+  allowRenameFromGenericRoleLabel: boolean;
   fallbackSummary: string;
   fallbackDescription: string;
+  fallbackFactionId: string | null;
+  localNpcNames: string[];
+  priorFactText: string;
 }) {
-  const summary = trimToNull(input.draft.summary) ?? input.fallbackSummary;
-  const description = trimToNull(input.draft.description) ?? input.fallbackDescription;
-  const factionId =
-    input.draft.factionId && input.localFactionIds.has(input.draft.factionId)
-      ? input.draft.factionId
-      : null;
-  const information = input.draft.information.slice(0, 2).flatMap((lead) => {
-    const title = trimToNull(lead.title);
-    const summaryText = trimToNull(lead.summary);
-    const content = trimToNull(lead.content);
-
-    if (!title || !summaryText || !content) {
-      return [];
-    }
-
-    if (lead.locationId && lead.locationId !== input.currentLocationId) {
-      return [];
-    }
-
-    return [
-      {
-        title,
-        summary: summaryText,
-        content,
-        truthfulness: lead.truthfulness,
-        accessibility: lead.accessibility,
-        locationId: input.currentLocationId,
-        factionId:
-          lead.factionId && input.localFactionIds.has(lead.factionId) ? lead.factionId : null,
-      },
-    ];
+  const proposedName = trimToNull(input.draft.name);
+  const canRename = Boolean(
+    input.allowRenameFromGenericRoleLabel
+      && proposedName
+      && !hasGenericNpcRoleLabelName({ name: proposedName, role: input.currentRole }),
+  );
+  const name = canRename ? proposedName : input.currentName;
+  const proposedSummary = trimToNull(input.draft.summary) ?? input.fallbackSummary;
+  const proposedDescription = trimToNull(input.draft.description) ?? input.fallbackDescription;
+  const disallowedNamedLocals = disallowedNamedLocalMentionsInHydration({
+    summary: proposedSummary,
+    description: proposedDescription,
+    localNpcNames: input.localNpcNames,
+    priorFactText: input.priorFactText,
   });
+  const hydrationDriftedFromPriorGrounding = disallowedNamedLocals.length > 0;
+  const summary = input.allowNarrativeHydration
+    ? (hydrationDriftedFromPriorGrounding ? input.fallbackSummary : proposedSummary)
+    : input.fallbackSummary;
+  const description = input.allowNarrativeHydration
+    ? (hydrationDriftedFromPriorGrounding ? input.fallbackDescription : proposedDescription)
+    : input.fallbackDescription;
+  const factionId = input.allowNarrativeHydration
+    ? (hydrationDriftedFromPriorGrounding
+        ? input.fallbackFactionId
+        : (
+        input.draft.factionId && input.localFactionIds.has(input.draft.factionId)
+          ? input.draft.factionId
+          : null
+      ))
+    : input.fallbackFactionId;
+  const information = input.allowNarrativeHydration
+    ? (hydrationDriftedFromPriorGrounding ? [] : input.draft.information.slice(0, 2).flatMap((lead) => {
+        const title = trimToNull(lead.title);
+        const summaryText = trimToNull(lead.summary);
+        const content = trimToNull(lead.content);
+
+        if (!title || !summaryText || !content) {
+          return [];
+        }
+
+        if (lead.locationId && lead.locationId !== input.currentLocationId) {
+          return [];
+        }
+
+        return [
+          {
+            title,
+            summary: summaryText,
+            content,
+            truthfulness: lead.truthfulness,
+            accessibility: lead.accessibility,
+            locationId: input.currentLocationId,
+            factionId:
+              lead.factionId && input.localFactionIds.has(lead.factionId) ? lead.factionId : null,
+          },
+        ];
+      }))
+    : [];
 
   return {
+    name,
     summary,
     description,
     factionId,
@@ -720,8 +796,10 @@ async function buildPromotedNpcHydrationPayload(input: {
   baseResult: NpcDetail;
 }) {
   const npc = input.baseResult;
+  const needsNarrativeHydration = npc.socialLayer === "promoted_local" && !npc.isNarrativelyHydrated;
+  const needsIdentityHydration = hasGenericNpcRoleLabelName({ name: npc.name, role: npc.role });
 
-  if (npc.isNarrativelyHydrated) {
+  if (!needsNarrativeHydration && !needsIdentityHydration) {
     return null;
   }
 
@@ -899,21 +977,37 @@ async function buildPromotedNpcHydrationPayload(input: {
         recentTopics: temporaryActor?.recentTopics ?? [],
         lastSummary: temporaryActor?.lastSummary ?? npc.summary,
       },
+      allowRenameFromGenericRoleLabel: needsIdentityHydration,
     }),
+    currentName: npc.name,
+    currentRole: npc.role,
     currentLocationId: location.id,
     localFactionIds,
-    fallbackSummary: npc.summary,
-    fallbackDescription: npc.description,
-  });
+      allowNarrativeHydration: needsNarrativeHydration,
+      allowRenameFromGenericRoleLabel: needsIdentityHydration,
+      fallbackSummary: npc.summary,
+      fallbackDescription: npc.description,
+      fallbackFactionId: npc.factionId,
+      localNpcNames: localNpcs
+        .filter((localNpc) => localNpc.id !== npc.id)
+        .map((localNpc) => localNpc.name),
+      priorFactText: [
+        npc.summary,
+        npc.description,
+        temporaryActor?.lastSummary ?? null,
+        ...(temporaryActor?.recentTopics ?? []),
+      ].filter((entry): entry is string => Boolean(entry && entry.trim())).join("\n"),
+    });
 
   return {
     npcId: npc.id,
     hydratedResult: {
       ...npc,
+      name: draft.name ?? npc.name,
       summary: draft.summary,
       description: draft.description,
       factionId: draft.factionId,
-      isNarrativelyHydrated: true,
+      isNarrativelyHydrated: npc.isNarrativelyHydrated || needsNarrativeHydration,
     } satisfies NpcDetail,
     hydrationDraft: draft,
   };
@@ -926,6 +1020,7 @@ async function persistPromotedNpcHydrationDraft(input: {
   hydrationDraft: PromotedNpcHydrationDraft;
   nextTurnCount: number;
   rollback: TurnRollbackData;
+  preserveCurrentSummary: boolean;
 }) {
   const npc = await input.tx.nPC.findFirst({
     where: {
@@ -934,6 +1029,8 @@ async function persistPromotedNpcHydrationDraft(input: {
     },
     select: {
       id: true,
+      name: true,
+      role: true,
       summary: true,
       description: true,
       factionId: true,
@@ -943,43 +1040,73 @@ async function persistPromotedNpcHydrationDraft(input: {
     },
   });
 
-  if (!npc || npc.isNarrativelyHydrated) {
+  if (!npc) {
     return;
   }
 
-  recordInverse(input.rollback, "nPC", npc.id, "summary", npc.summary);
-  recordInverse(input.rollback, "nPC", npc.id, "description", npc.description);
-  recordInverse(input.rollback, "nPC", npc.id, "factionId", npc.factionId);
-  recordInverse(input.rollback, "nPC", npc.id, "isNarrativelyHydrated", npc.isNarrativelyHydrated);
-  recordInverse(
-    input.rollback,
-    "nPC",
-    npc.id,
-    "hydrationClaimRequestId",
-    npc.hydrationClaimRequestId,
+  const proposedName = trimToNull(input.hydrationDraft.name);
+  const canRename = Boolean(
+    hasGenericNpcRoleLabelName({ name: npc.name, role: npc.role })
+      && proposedName
+      && !hasGenericNpcRoleLabelName({ name: proposedName, role: npc.role }),
   );
-  recordInverse(
-    input.rollback,
-    "nPC",
-    npc.id,
-    "hydrationClaimExpiresAt",
-    npc.hydrationClaimExpiresAt,
-  );
+
+  if (npc.isNarrativelyHydrated && !canRename) {
+    return;
+  }
+
+  if (canRename) {
+    recordInverse(input.rollback, "nPC", npc.id, "name", npc.name);
+  }
+
+  if (!npc.isNarrativelyHydrated) {
+    if (!input.preserveCurrentSummary) {
+      recordInverse(input.rollback, "nPC", npc.id, "summary", npc.summary);
+    }
+    recordInverse(input.rollback, "nPC", npc.id, "description", npc.description);
+    recordInverse(input.rollback, "nPC", npc.id, "factionId", npc.factionId);
+    recordInverse(input.rollback, "nPC", npc.id, "isNarrativelyHydrated", npc.isNarrativelyHydrated);
+    recordInverse(
+      input.rollback,
+      "nPC",
+      npc.id,
+      "hydrationClaimRequestId",
+      npc.hydrationClaimRequestId,
+    );
+    recordInverse(
+      input.rollback,
+      "nPC",
+      npc.id,
+      "hydrationClaimExpiresAt",
+      npc.hydrationClaimExpiresAt,
+    );
+  }
+
+  const data: Prisma.NPCUncheckedUpdateManyInput = {};
+  if (canRename) {
+    data.name = proposedName!;
+  }
+  if (!npc.isNarrativelyHydrated) {
+    if (!input.preserveCurrentSummary) {
+      data.summary = input.hydrationDraft.summary;
+    }
+    data.description = input.hydrationDraft.description;
+    data.factionId = input.hydrationDraft.factionId;
+    data.isNarrativelyHydrated = true;
+    data.hydrationClaimRequestId = null;
+    data.hydrationClaimExpiresAt = null;
+  }
+
+  if (Object.keys(data).length === 0) {
+    return;
+  }
 
   const updated = await input.tx.nPC.updateMany({
     where: {
       id: npc.id,
       campaignId: input.snapshot.campaignId,
-      isNarrativelyHydrated: false,
     },
-    data: {
-      summary: input.hydrationDraft.summary,
-      description: input.hydrationDraft.description,
-      factionId: input.hydrationDraft.factionId,
-      isNarrativelyHydrated: true,
-      hydrationClaimRequestId: null,
-      hydrationClaimExpiresAt: null,
-    },
+    data,
   });
 
   if (updated.count === 0) {
@@ -1548,6 +1675,9 @@ function mutationPhaseForEvaluation(mutation: MechanicsMutation): "immediate" | 
     return "immediate";
   }
   if (mutation.type === "record_local_interaction") {
+    return "immediate";
+  }
+  if (mutation.type === "record_npc_interaction") {
     return "immediate";
   }
   if (
@@ -2270,6 +2400,84 @@ function evaluateResolvedCommand(input: {
           localEntityId: tempActorRef(actor.id),
           phase,
           interactionCount: actor.interactionCount,
+        } as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({ mutation: { ...mutation, phase } as MechanicsMutation, entry });
+      continue;
+    }
+
+    if (mutation.type === "record_npc_interaction") {
+      if (
+        !hasVector(input.routerDecision, "converse")
+        && !hasVector(input.routerDecision, "economy_light")
+        && !hasVector(input.routerDecision, "investigate")
+      ) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "unauthorized_vector",
+          summary: "Named-NPC interaction is not authorized for this turn.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      const npc = knownNpc(input.snapshot, input.fetchedFacts, mutation.npcId);
+      const projectedNpcLocation = projectedNpcLocationIds.get(mutation.npcId);
+      if (!npc) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "That NPC is not available here.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (projectedNpcLocationIds.has(mutation.npcId) && projectedNpcLocation !== projectedLocationId) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "That NPC is no longer available here.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (targetWasLeftBehindByFocusShift({
+        snapshot: input.snapshot,
+        projectedTemporaryActors,
+        projectedSceneFocus,
+        focusChangedThisTurn,
+        currentFocusActorRefs,
+        actorRef: npcActorRef(mutation.npcId),
+      })) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_semantics",
+          summary: "That NPC was left behind when you changed focus; you cannot keep talking to them here without bringing them into the new focus.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      const topic = mutation.topic?.trim() || undefined;
+      const summary = mutation.interactionSummary.trim();
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "npc_interaction_recorded",
+        summary: summary || `You engage ${npc.name}.`,
+        metadata: {
+          ...mutation,
+          npcId: mutation.npcId,
+          topic,
+          phase,
         } as unknown as Record<string, unknown>,
       };
       stateCommitLog.push(entry);
@@ -4394,6 +4602,40 @@ async function applyResolvedMutations(input: {
       continue;
     }
 
+    if (mutation.type === "record_npc_interaction") {
+      const npc = await input.tx.nPC.findFirst({
+        where: {
+          id: mutation.npcId,
+          campaignId: input.snapshot.campaignId,
+        },
+        select: {
+          id: true,
+          name: true,
+          role: true,
+          summary: true,
+          socialLayer: true,
+          currentLocationId: true,
+        },
+      });
+      if (!npc) {
+        continue;
+      }
+
+      if (npc.socialLayer === "promoted_local" || hasGenericNpcRoleLabelName({ name: npc.name, role: npc.role })) {
+        const nextSummary = mutation.interactionSummary.trim() || npc.summary;
+        if (nextSummary && nextSummary !== npc.summary) {
+          recordInverse(input.rollback, "nPC", npc.id, "summary", npc.summary);
+          await input.tx.nPC.update({
+            where: { id: npc.id },
+            data: {
+              summary: nextSummary,
+            },
+          });
+        }
+      }
+      continue;
+    }
+
     if (mutation.type === "set_scene_actor_presence") {
       const resolvedActorRef =
         typeof entry.metadata?.actorRef === "string" ? entry.metadata.actorRef : mutation.actorRef;
@@ -5286,6 +5528,9 @@ function collectMemoryEntityLinks(input: {
     if (entry.mutationType === "adjust_relationship" || entry.mutationType === "set_npc_state") {
       pushKey("npc", typeof entry.metadata.npcId === "string" ? entry.metadata.npcId : null);
     }
+    if (entry.mutationType === "record_npc_interaction") {
+      pushKey("npc", typeof entry.metadata.npcId === "string" ? entry.metadata.npcId : null);
+    }
     if (entry.mutationType === "commit_market_trade") {
       pushKey("commodity", typeof entry.metadata.commodityId === "string" ? entry.metadata.commodityId : null);
     }
@@ -5517,6 +5762,14 @@ function buildTurnCausality(input: {
         metadata: null,
       });
     }
+    if (entry.mutationType === "record_npc_interaction") {
+      reasonCodes.push({
+        code: "PLAYER_CONVERSATION",
+        entityType: "npc",
+        targetId: typeof entry.metadata?.npcId === "string" ? entry.metadata.npcId : null,
+        metadata: null,
+      });
+    }
     if (entry.mutationType === "restore_health") {
       changeCodes.push({
         code: "CHARACTER_HEALTH_CHANGED",
@@ -5689,6 +5942,18 @@ async function commitResolvedTurn(input: {
       throw new StateConflictError("Campaign state changed before the turn could commit.", expectedStateVersion);
     }
 
+    const preserveHydrationSummaryNpcIds = new Set(
+      stateCommitLog
+        .filter(
+          (entry) =>
+            entry.kind === "mutation"
+            && entry.status === "applied"
+            && entry.mutationType === "record_npc_interaction"
+            && typeof entry.metadata?.npcId === "string",
+        )
+        .map((entry) => entry.metadata?.npcId as string),
+    );
+
     for (const fact of fetchedFacts) {
       if (fact.type !== "fetch_npc_detail" || !fact.hydrationDraft) {
         continue;
@@ -5701,6 +5966,7 @@ async function commitResolvedTurn(input: {
         hydrationDraft: fact.hydrationDraft,
         nextTurnCount,
         rollback,
+        preserveCurrentSummary: preserveHydrationSummaryNpcIds.has(fact.result.id),
       });
     }
 
@@ -5936,7 +6202,10 @@ async function executeRequiredPrerequisites(input: {
       throw new Error("NPC detail not found.");
     }
 
-    if (result.socialLayer === "promoted_local" && !result.isNarrativelyHydrated) {
+    if (
+      (result.socialLayer === "promoted_local" && !result.isNarrativelyHydrated)
+      || hasGenericNpcRoleLabelName({ name: result.name, role: result.role })
+    ) {
       try {
         const hydration = await buildPromotedNpcHydrationPayload({
           campaignId: input.snapshot.campaignId,
@@ -6138,6 +6407,7 @@ export const engineTestUtils = {
   toPromotedTemporaryActorDescriptor,
   toPromotedTemporaryActorName,
   toPromotedTemporaryActorRole,
+  sanitizePromotedNpcHydrationDraft,
   requestHashForSubmission,
   promptContextProfileForRouter,
   routerDecisionForTurnMode,

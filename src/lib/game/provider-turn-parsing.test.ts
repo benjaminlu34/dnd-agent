@@ -202,11 +202,16 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   assert.match(prompt, /Mark resource costs, fees, and other upfront expenditures as phase immediate/);
   assert.match(prompt, /Mark success-only rewards or outcomes as phase conditional/);
   assert.match(prompt, /Use commit_market_trade only for strict commodity trade backed by fetched market prices/);
-  assert.match(prompt, /Use sceneActors.actorRef values exactly when targeting on-screen actors/);
+  assert.match(prompt, /Use sceneActors\.actorRef values exactly only for actorRef fields/);
+  assert.match(prompt, /For npcId, citedNpcId, and targetNpcId fields, use the bare NPC id without the npc: prefix/);
   assert.match(prompt, /Use record_local_interaction for current-scene unnamed locals instead of adjust_relationship/);
+  assert.match(prompt, /Use record_npc_interaction for ordinary same-scene dialogue with a grounded named NPC/);
   assert.match(prompt, /Never use record_local_interaction with npc: refs or named sceneActors/);
-  assert.match(prompt, /When speaking to a named on-screen NPC/);
+  assert.match(prompt, /Never invent temp: ids/i);
+  assert.match(prompt, /When speaking to a named on-screen NPC, use record_npc_interaction for ordinary dialogue/);
   assert.match(prompt, /Use spawn_temporary_actor before record_local_interaction/);
+  assert.match(prompt, /do not redirect them to a named scene actor; spawn_temporary_actor first/i);
+  assert.match(prompt, /asks what to call them, who they are, or another identity-seeking follow-up, request npc_detail for that actor/i);
   assert.match(prompt, /Use spawn_environmental_item before adjust_inventory/);
   assert.match(prompt, /Use set_scene_actor_presence whenever someone leaves the current scene/);
   assert.match(prompt, /comes back later in the turn, represent that mechanically with set_scene_actor_presence/);
@@ -234,8 +239,14 @@ test("buildTurnRouterSystemPrompt distinguishes self-talk from on-screen social 
   assert.match(prompt, /emit attention\.impliedDestinationFocus/);
   assert.match(prompt, /Do not emit impliedDestinationFocus for macro travel between location nodes/);
   assert.match(prompt, /unresolvedReferents/);
+  assert.match(prompt, /resolvedReferents\.targetRef must be an actual grounded ref from router_context/i);
+  assert.match(prompt, /Never use schema words like temporary_actor, scene_actor, inventory_item, world_object, route, information, or location as targetRef values/i);
   assert.match(prompt, /Never remap an unresolved pronoun or stale narrated referent onto a different grounded actor/);
   assert.match(prompt, /recentGroundedHistory is memory, not authority/);
+  assert.match(prompt, /Generic people like someone, passerby, customer, shopper, stranger, or interested local should remain unresolved temporary_actor referents/i);
+  assert.match(prompt, /Do not remap a generic or unresolved person onto a named scene actor merely because one is present/i);
+  assert.match(prompt, /If one present scene actor is already the clear conversational counterpart/i);
+  assert.match(prompt, /If a present scene actor is marked detail-fetch\(name\/identity available\) and the player asks for their name/i);
 });
 
 test("fallbackRouterDecision stays local when scene focus is active", () => {
@@ -365,6 +376,7 @@ test("buildResolvedTurnNarrationPrompt includes prompt context and fetched facts
           temporaryActorId: "temp_dockhand",
         },
         hydrationDraft: {
+          name: null,
           summary: "A dockhand drawn into the night's trouble.",
           description: "He smells of brine and lamp oil.",
           factionId: null,
@@ -382,12 +394,24 @@ test("buildResolvedTurnNarrationPrompt includes prompt context and fetched facts
   assert.match(prompt.user, /Blackwater Docks/);
   assert.match(prompt.user, /fetched_facts/);
   assert.match(prompt.user, /Pier Nine Closure/);
-  assert.match(prompt.system, /If a spawned scene aspect is ambiguous, narrate only the sensory detail/);
-  assert.match(prompt.system, /If a temporary actor was spawned, narrate them as stepping into view/);
-  assert.match(prompt.system, /If a discover_information mutation was rejected, do not convert that into an authoritative negative fact/);
-  assert.match(prompt.system, /do not explicitly count minutes unless the exact duration materially matters/i);
-  assert.match(prompt.system, /Do not echo engine-summary phrasing like enters the scene, changes state, or time passes for 5 minutes/i);
-  assert.match(prompt.system, /recentNarrativeProse is conversational continuity only/);
+  assert.match(prompt.system, /\*\*Role\*\*/);
+  assert.match(prompt.system, /Dungeon Master's prose voice/i);
+  assert.match(prompt.system, /Licensed texture means sensory surface detail/i);
+  assert.match(prompt.system, /Licensed texture never adds new actors/i);
+  assert.match(prompt.system, /Never open by paraphrasing the player's action/i);
+  assert.match(prompt.system, /If the player offers a flavorful hook/i);
+  assert.match(prompt.system, /Include at least one concrete sensory, physical, or character detail/i);
+  assert.match(prompt.system, /on truly thin turns, one short sentence of legible absence, pause, or passage is enough/i);
+  assert.match(prompt.system, /Only use quoted dialogue if the player_action included spoken words/i);
+  assert.match(prompt.system, /\*\*Turn-Type Heuristics\*\*/);
+  assert.match(prompt.system, /Narrate arrival, not the journey/i);
+  assert.match(prompt.system, /- Investigation \/ search: Narrate the act of looking/i);
+  assert.match(prompt.system, /\*\*Anti-Patterns and Better Alternatives\*\*/);
+  assert.match(prompt.system, /Instead of placeholders like standard choice, fresh items, a response, or their offer/i);
+  assert.match(prompt.system, /\*\*Style Examples\*\*/);
+  assert.match(prompt.system, /Example 1 - Routine local interaction:/);
+  assert.match(prompt.system, /recentNarrativeProse is continuity only, not authority/i);
+  assert.match(prompt.system, /Do not use elapsed time as a prompt to generate journey or travel description/i);
   assert.match(prompt.user, /authoritativeState/);
   assert.match(prompt.user, /recentGroundedHistory/);
 });
@@ -833,6 +857,104 @@ test("narrationViolatesResolvedConstraints rejects engine-summary actor spawn ph
   assert.match(violation ?? "", /enters the scene/i);
 });
 
+test("narrationViolatesResolvedConstraints rejects first-person mirrored narration", () => {
+  const violation = aiProviderTestUtils.narrationViolatesResolvedConstraints(
+    {
+      playerAction: "I catch their eye and offer the velvet.",
+      promptContext: {
+        currentLocation: {
+          id: "loc_market",
+          name: "Lantern Market",
+          type: "district",
+          summary: "Rain-dark awnings and crowded stalls.",
+          state: "busy",
+        },
+        adjacentRoutes: [],
+        sceneActors: [],
+        recentLocalEvents: [],
+        recentTurnLedger: [],
+        discoveredInformation: [],
+        activePressures: [],
+        recentWorldShifts: [],
+        activeThreads: [],
+        inventory: [],
+        worldObjects: [],
+        sceneFocus: null,
+        sceneAspects: {},
+        localTexture: null,
+        globalTime: 540,
+        timeOfDay: "morning",
+        dayCount: 1,
+      },
+      fetchedFacts: [],
+      stateCommitLog: [
+        {
+          kind: "mutation",
+          mutationType: "spawn_temporary_actor",
+          status: "applied",
+          reasonCode: "temporary_actor_spawned",
+          summary: "customer enters the scene.",
+          metadata: {},
+        },
+      ],
+      checkResult: null,
+      suggestedActions: [],
+    },
+    'A figure pauses at my stall, and I hold up the velvet. "Looking for something finer?"',
+  );
+
+  assert.match(violation ?? "", /must not mirror the player's first-person wording/i);
+});
+
+test("narrationViolatesResolvedConstraints rejects prose that does not address the player in second person", () => {
+  const violation = aiProviderTestUtils.narrationViolatesResolvedConstraints(
+    {
+      playerAction: "I wait at the stall.",
+      promptContext: {
+        currentLocation: {
+          id: "loc_market",
+          name: "Lantern Market",
+          type: "district",
+          summary: "Rain-dark awnings and crowded stalls.",
+          state: "busy",
+        },
+        adjacentRoutes: [],
+        sceneActors: [],
+        recentLocalEvents: [],
+        recentTurnLedger: [],
+        discoveredInformation: [],
+        activePressures: [],
+        recentWorldShifts: [],
+        activeThreads: [],
+        inventory: [],
+        worldObjects: [],
+        sceneFocus: null,
+        sceneAspects: {},
+        localTexture: null,
+        globalTime: 540,
+        timeOfDay: "morning",
+        dayCount: 1,
+      },
+      fetchedFacts: [],
+      stateCommitLog: [
+        {
+          kind: "mutation",
+          mutationType: "advance_time",
+          status: "applied",
+          reasonCode: "time_advanced",
+          summary: "Time passes for 5 minutes.",
+          metadata: {},
+        },
+      ],
+      checkResult: null,
+      suggestedActions: [],
+    },
+    "The market noise settles into a steady hush.",
+  );
+
+  assert.match(violation ?? "", /must address the player in second person/i);
+});
+
 test("buildResolvedTurnNarrationPrompt strips planner-intent metadata for the coin-purse regression turn", () => {
   const prompt = aiProviderTestUtils.buildResolvedTurnNarrationPrompt({
     playerAction: "I realize I did not bring my coin purse. I head back to the forge to get it and check on the horseshoe order.",
@@ -918,6 +1040,45 @@ test("buildResolvedTurnNarrationPrompt strips planner-intent metadata for the co
   assert.doesNotMatch(prompt.user, /localEntityId: temp:forge_assistant/);
 });
 
+test("buildResolvedTurnNarrationPrompt explicitly forbids mirrored first-person narration", () => {
+  const prompt = aiProviderTestUtils.buildResolvedTurnNarrationPrompt({
+    playerAction: "I greet the worker and ask for the stronger piece.",
+    promptContext: {
+      currentLocation: {
+        id: "loc_market",
+        name: "Lantern Market",
+        type: "district",
+        summary: "Rain-dark awnings and crowded stalls.",
+        state: "busy",
+      },
+      adjacentRoutes: [],
+      sceneActors: [],
+      recentLocalEvents: [],
+      recentTurnLedger: [],
+      discoveredInformation: [],
+      activePressures: [],
+      recentWorldShifts: [],
+      activeThreads: [],
+      inventory: [],
+      worldObjects: [],
+      sceneFocus: null,
+      sceneAspects: {},
+      localTexture: null,
+      globalTime: 540,
+      timeOfDay: "morning",
+      dayCount: 1,
+    },
+    fetchedFacts: [],
+    stateCommitLog: [],
+    checkResult: null,
+    suggestedActions: [],
+  });
+
+  assert.match(prompt.system, /Address the player as you\/your/i);
+  assert.match(prompt.system, /do not mirror the player's first-person wording/i);
+  assert.match(prompt.system, /using you\/your/i);
+});
+
 test("normalizeRouterDecision dedupes vectors and prerequisites", () => {
   const normalized = aiProviderTestUtils.normalizeRouterDecision({
     profile: "local",
@@ -999,6 +1160,51 @@ test("normalizeRouterDecision fills missing clarification and strips invalid res
   ]);
   assert.equal(normalized.attention.impliedDestinationFocus, null);
   assert.deepEqual(normalized.attention.mustCheck, ["gold", "inventory"]);
+});
+
+test("normalizeRouterDecision converts placeholder scene-actor refs into unresolved temporary actors and drops placeholder inventory refs", () => {
+  const normalized = aiProviderTestUtils.normalizeRouterDecision({
+    profile: "local",
+    confidence: "high",
+    authorizedVectors: ["converse"],
+    requiredPrerequisites: [],
+    reason: "Handle the curious customer conservatively.",
+    clarification: {
+      needed: false,
+      blocker: null,
+      question: null,
+      options: [],
+    },
+    attention: {
+      primaryIntent: "Engage a curious customer with a sales pitch.",
+      resolvedReferents: [
+        {
+          phrase: "curious customer",
+          targetRef: "temporary_actor",
+          targetKind: "scene_actor",
+          confidence: "high",
+        },
+        {
+          phrase: "roll of velvet",
+          targetRef: "inventory_item",
+          targetKind: "inventory_item",
+          confidence: "high",
+        },
+      ],
+      unresolvedReferents: [],
+      impliedDestinationFocus: null,
+      mustCheck: ["sceneActors", "inventory"],
+    },
+  });
+
+  assert.deepEqual(normalized.attention.resolvedReferents, []);
+  assert.deepEqual(normalized.attention.unresolvedReferents, [
+    {
+      phrase: "curious customer",
+      intendedKind: "temporary_actor",
+      confidence: "high",
+    },
+  ]);
 });
 
 test("fallbackRouterDecision keeps a conservative non-empty attention packet", () => {
@@ -1194,7 +1400,7 @@ test("formatRouterContextForModel compacts router payload to skinny referent lis
   assert.deepEqual(rendered.authoritativeState.routes, ["Neverwinter (720m, open, danger 2) [route_neverwinter]"]);
   assert.match(
     rendered.authoritativeState.sceneActors[0] ?? "",
-    /Captain Thorne \(watch captain\) \[npc:npc_captain_thorne, npc detail-fetch\]/,
+    /Captain Thorne \(watch captain\) \[npc:npc_captain_thorne, npc detail-fetch\(name\/identity available\)\]/,
   );
   assert.doesNotMatch(rendered.authoritativeState.sceneActors[0] ?? "", /encourage bloated prompts/);
   assert.doesNotMatch(rendered.authoritativeState.routes[0] ?? "", /caravanserais/);
@@ -1256,7 +1462,7 @@ test("buildResolvedTurnNarrationPrompt surfaces unresolved target failures witho
   });
 
   assert.match(prompt.user, /unresolvedTargetFailure: true/);
-  assert.match(prompt.system, /Do not substitute another nearby person/);
+  assert.match(prompt.system, /Unresolved targets must stay unresolved and may not be substituted/i);
 });
 
 test("selectPromptContextProfile keeps local micro-scene context even when router confidence is low", () => {

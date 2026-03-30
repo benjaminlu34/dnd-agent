@@ -153,8 +153,14 @@ function isValidLocalInteractionTarget(snapshot: CampaignSnapshot, localEntityId
   if (!normalized) {
     return false;
   }
-  if (normalized.startsWith("spawn:") || normalized.startsWith("temp:")) {
+  if (normalized.startsWith("spawn:")) {
     return true;
+  }
+  if (normalized.startsWith("temp:")) {
+    const temporaryActorId = normalized.slice("temp:".length).trim();
+    return temporaryActorId
+      ? snapshot.temporaryActors.some((actor) => actor.id === temporaryActorId)
+      : false;
   }
   if (normalized.startsWith("npc:")) {
     return false;
@@ -164,6 +170,44 @@ function isValidLocalInteractionTarget(snapshot: CampaignSnapshot, localEntityId
   }
 
   return snapshot.temporaryActors.some((actor) => actor.id === normalized);
+}
+
+function isValidNpcInteractionTarget(
+  snapshot: CampaignSnapshot,
+  fetchedFacts: TurnFetchToolResult[],
+  npcId: string,
+) {
+  const normalized = npcId.trim();
+  if (!normalized) {
+    return false;
+  }
+
+  return findPresentNpc(snapshot, normalized) != null || findFetchedNpc(fetchedFacts, normalized) != null;
+}
+
+function normalizeNpcIdForTurn(npcId: string) {
+  const normalized = npcId.trim();
+  if (!normalized.startsWith("npc:")) {
+    return normalized;
+  }
+
+  return normalized.slice("npc:".length).trim();
+}
+
+function normalizeLocalInteractionTargetForTurn(
+  mutations: readonly MechanicsMutation[],
+  localEntityId: string,
+) {
+  const normalized = localEntityId.trim();
+  if (!normalized || normalized.includes(":")) {
+    return normalized;
+  }
+
+  return mutations.some(
+    (mutation) => mutation.type === "spawn_temporary_actor" && mutation.spawnKey === normalized,
+  )
+    ? `spawn:${normalized}`
+    : normalized;
 }
 
 function normalizePlayerActionText(playerAction: string | undefined) {
@@ -189,6 +233,8 @@ function targetedActorRefForMutation(mutation: MechanicsMutation): string | null
   switch (mutation.type) {
     case "record_local_interaction":
       return mutation.localEntityId.trim();
+    case "record_npc_interaction":
+      return `npc:${mutation.npcId}`;
     case "adjust_relationship":
       return `npc:${mutation.npcId}`;
     case "set_npc_state":
@@ -295,6 +341,9 @@ function mutationPhaseForCheckStakes(mutation: MechanicsMutation): "immediate" |
     return "immediate";
   }
   if (mutation.type === "record_local_interaction") {
+    return "immediate";
+  }
+  if (mutation.type === "record_npc_interaction") {
     return "immediate";
   }
   if (
@@ -445,8 +494,56 @@ export function validateTurnCommand(input: {
     }
   }
   const suggestedActions = normalizedSuggestedActions(command.suggestedActions);
+  const normalizedMutations = command.mutations.map((mutation) => {
+    if (mutation.type === "record_local_interaction") {
+      const normalizedLocalEntityId = normalizeLocalInteractionTargetForTurn(
+        command.mutations,
+        mutation.localEntityId,
+      );
+      if (normalizedLocalEntityId === mutation.localEntityId) {
+        return mutation;
+      }
 
-  const filteredMutations = command.mutations.filter((mutation) => {
+      return {
+        ...mutation,
+        localEntityId: normalizedLocalEntityId,
+      } satisfies MechanicsMutation;
+    }
+
+    if (
+      mutation.type === "record_npc_interaction"
+      || mutation.type === "adjust_relationship"
+      || mutation.type === "set_npc_state"
+    ) {
+      const normalizedNpcId = normalizeNpcIdForTurn(mutation.npcId);
+      if (normalizedNpcId === mutation.npcId) {
+        return mutation;
+      }
+
+      return {
+        ...mutation,
+        npcId: normalizedNpcId,
+      } satisfies MechanicsMutation;
+    }
+
+    return mutation;
+  });
+  const normalizedCheckIntent = command.checkIntent
+    ? command.checkIntent.type === "challenge"
+      ? {
+          ...command.checkIntent,
+          citedNpcId:
+            command.checkIntent.citedNpcId == null
+              ? undefined
+              : normalizeNpcIdForTurn(command.checkIntent.citedNpcId),
+        }
+      : {
+          ...command.checkIntent,
+          targetNpcId: normalizeNpcIdForTurn(command.checkIntent.targetNpcId),
+        }
+    : undefined;
+
+  const filteredMutations = normalizedMutations.filter((mutation) => {
     if (
       mutationWouldSubstituteUnresolvedActor({
         mutation,
@@ -456,6 +553,17 @@ export function validateTurnCommand(input: {
     ) {
       warnings.push(
         "Mechanics response tried to redirect an unresolved target onto a different grounded actor; the substituted interaction mutation was dropped.",
+      );
+      return false;
+    }
+
+    if (mutation.type === "record_npc_interaction") {
+      if (isValidNpcInteractionTarget(snapshot, fetchedFacts, mutation.npcId)) {
+        return true;
+      }
+
+      warnings.push(
+        "Mechanics response targeted record_npc_interaction at an invalid or unavailable NPC; mutation was dropped.",
       );
       return false;
     }
@@ -490,10 +598,11 @@ export function validateTurnCommand(input: {
   });
   const mutations = normalizeMutationsForPendingCheck({
     ...command,
+    checkIntent: normalizedCheckIntent,
     mutations: filteredMutations,
   });
   const narrationHint =
-    unresolvedActorPhrases.length > 0 && filteredMutations.length !== command.mutations.length
+    unresolvedActorPhrases.length > 0 && filteredMutations.length !== normalizedMutations.length
       ? {
           unresolvedTargetPhrases: unresolvedActorPhrases,
         }
@@ -501,12 +610,17 @@ export function validateTurnCommand(input: {
 
   return {
     ...command,
+    checkIntent: normalizedCheckIntent,
     mutations,
     suggestedActions,
     warnings: Array.from(new Set(warnings)),
     narrationHint,
-    timeElapsed: deriveTimeElapsed({ ...command, mutations }, snapshot),
-    pendingCheck: derivePendingCheck(snapshot, { ...command, mutations }, fetchedFacts),
+    timeElapsed: deriveTimeElapsed({ ...command, checkIntent: normalizedCheckIntent, mutations }, snapshot),
+    pendingCheck: derivePendingCheck(
+      snapshot,
+      { ...command, checkIntent: normalizedCheckIntent, mutations },
+      fetchedFacts,
+    ),
     checkResult: undefined,
   };
 }

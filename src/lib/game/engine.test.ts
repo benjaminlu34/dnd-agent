@@ -208,6 +208,81 @@ test("promoted temporary actor names preserve the seed identity instead of colla
   assert.equal(engineTestUtils.toPromotedTemporaryActorName("dock repairer"), "Dock Repairer");
 });
 
+test("promoted npc hydration falls back when draft attaches the local to a new named npc", () => {
+  const sanitized = engineTestUtils.sanitizePromotedNpcHydrationDraft({
+    draft: {
+      name: "Elias Thorn",
+      summary: "Elias Thorn examines silks at Vesper Darksbane's stall while discussing guild politics.",
+      description:
+        "Elias Thorn lingers at Vesper Darksbane's stall, chatting about trade routes and prices.",
+      factionId: null,
+      information: [
+        {
+          title: "Guild Price Fixing",
+          summary: "Rumors of a price cartel.",
+          content: "Textile merchants may be colluding on silk prices.",
+          truthfulness: "partial",
+          accessibility: "guarded",
+          locationId: "loc_gate",
+          factionId: null,
+        },
+      ],
+    },
+    currentName: "Customer",
+    currentRole: "customer",
+    currentLocationId: "loc_gate",
+    localFactionIds: new Set<string>(),
+    allowNarrativeHydration: true,
+    allowRenameFromGenericRoleLabel: true,
+    fallbackSummary: "Engaged in sales conversation with a present customer at the stall.",
+    fallbackDescription:
+      "Engaged in sales conversation with a present customer at the stall. The player has already spoken with them about finer weave and sales conversation.",
+    fallbackFactionId: null,
+    localNpcNames: ["Vesper Darksbane", "Marric Stillwater"],
+    priorFactText:
+      "Engaged in sales conversation with a present customer at the stall. The player has already spoken with them about finer weave and sales conversation.",
+  });
+
+  assert.equal(sanitized.name, "Elias Thorn");
+  assert.equal(
+    sanitized.summary,
+    "Engaged in sales conversation with a present customer at the stall.",
+  );
+  assert.match(sanitized.description, /present customer at the stall/i);
+  assert.deepEqual(sanitized.information, []);
+});
+
+test("promoted npc hydration preserves named-local references already grounded in prior facts", () => {
+  const sanitized = engineTestUtils.sanitizePromotedNpcHydrationDraft({
+    draft: {
+      name: "Elias Thorn",
+      summary: "Elias Thorn waits at Vesper Darksbane's stall for the noon caravan.",
+      description:
+        "Elias Thorn keeps returning to Vesper Darksbane's stall because the caravan books are handled there.",
+      factionId: null,
+      information: [],
+    },
+    currentName: "Customer",
+    currentRole: "customer",
+    currentLocationId: "loc_gate",
+    localFactionIds: new Set<string>(),
+    allowNarrativeHydration: true,
+    allowRenameFromGenericRoleLabel: true,
+    fallbackSummary: "A customer near Vesper Darksbane's stall asks after the noon caravan.",
+    fallbackDescription:
+      "A customer near Vesper Darksbane's stall asks after the noon caravan. The player has already crossed paths with them there.",
+    fallbackFactionId: null,
+    localNpcNames: ["Vesper Darksbane", "Marric Stillwater"],
+    priorFactText:
+      "A customer near Vesper Darksbane's stall asks after the noon caravan. The player has already crossed paths with them there.",
+  });
+
+  assert.equal(
+    sanitized.summary,
+    "Elias Thorn waits at Vesper Darksbane's stall for the noon caravan.",
+  );
+});
+
 test("request hash includes session and version so request identity matches the full submission", () => {
   const baseHash = engineTestUtils.requestHashForSubmission({
     campaignId: "camp_1",
@@ -676,6 +751,35 @@ test("record_local_interaction is authorized on economy_light turns", () => {
 
   assert.equal(evaluated.stateCommitLog[0]?.reasonCode, "local_interaction_recorded");
   assert.equal(evaluated.stateCommitLog[0]?.status, "applied");
+});
+
+test("record_npc_interaction applies for ordinary dialogue with a present named npc", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Ask another question"],
+      mutations: [
+        {
+          type: "record_npc_interaction",
+          npcId: "npc_guard",
+          interactionSummary: "You keep the guard talking and ask what to call him.",
+          topic: "identity",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+    playerAction: "\"What can I call you, sir?\" I ask the guard politely.",
+  });
+
+  assert.deepEqual(
+    evaluated.stateCommitLog.map((entry) => [entry.mutationType, entry.status, entry.reasonCode]),
+    [["record_npc_interaction", "applied", "npc_interaction_recorded"]],
+  );
 });
 
 test("inventory removal applies as an immediate cost while add stays blocked on failed checks", () => {
@@ -1485,6 +1589,43 @@ test("same-turn focus changes reject named-actor targeting from the prior focus"
   );
 });
 
+test("same-turn focus changes reject record_npc_interaction targeting a named actor from the prior focus", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Find someone nearby"],
+      mutations: [
+        {
+          type: "set_player_scene_focus",
+          focusKey: "back_room",
+          label: "Back Room",
+          reason: "You step into the back room.",
+        },
+        {
+          type: "record_npc_interaction",
+          npcId: "npc_guard",
+          interactionSummary: "You keep talking to the guard from the back room.",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+    playerAction: "I go into the back room and keep talking to the guard.",
+  });
+
+  assert.deepEqual(
+    evaluated.stateCommitLog.map((entry) => [entry.mutationType, entry.status, entry.reasonCode]),
+    [
+      ["set_player_scene_focus", "applied", "scene_focus_updated"],
+      ["record_npc_interaction", "rejected", "invalid_semantics"],
+    ],
+  );
+});
+
 test("engine rejects record_local_interaction used for a solo errand with invalid_semantics", () => {
   const evaluated = engineTestUtils.evaluateResolvedCommand({
     snapshot: {
@@ -1996,6 +2137,6 @@ test("deterministic narration fallback softens time plus local interaction summa
     checkResult: null,
   });
 
-  assert.match(narration, /you ask the baker what's fresh this morning/i);
+  assert.match(narration, /you asked the baker what's fresh this morning/i);
   assert.doesNotMatch(narration, /Time passes for 5 minutes/i);
 });

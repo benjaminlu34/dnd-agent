@@ -155,6 +155,7 @@ const stateCommitLogEntrySchema: z.ZodType<StateCommitLogEntry> = z.object({
       "move_player",
       "adjust_gold",
       "record_local_interaction",
+      "record_npc_interaction",
       "spawn_scene_aspect",
       "spawn_temporary_actor",
       "spawn_world_object",

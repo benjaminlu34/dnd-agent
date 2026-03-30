@@ -407,6 +407,78 @@ test("validateTurnCommand drops record_local_interaction targeting a named npc r
   );
 });
 
+test("validateTurnCommand preserves record_npc_interaction targeting a present named npc", () => {
+  const validated = validateTurnCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Keep talking"],
+      mutations: [
+        {
+          type: "record_npc_interaction",
+          npcId: "npc_guard",
+          interactionSummary: "You keep the guard talking while you ask his name.",
+          topic: "identity",
+        },
+      ],
+    },
+  });
+
+  assert.equal(validated.type, "resolve_mechanics");
+  assert.deepEqual(validated.warnings, []);
+  assert.deepEqual(validated.mutations, [
+    {
+      type: "record_npc_interaction",
+      npcId: "npc_guard",
+      interactionSummary: "You keep the guard talking while you ask his name.",
+      topic: "identity",
+    },
+  ]);
+});
+
+test("validateTurnCommand normalizes actorRef-form npc ids for named npc interaction and checks", () => {
+  const validated = validateTurnCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Keep talking"],
+      checkIntent: {
+        type: "challenge",
+        reason: "Keeping the guard engaged.",
+        challengeApproach: "influence",
+        citedNpcId: "npc:npc_guard",
+      },
+      mutations: [
+        {
+          type: "record_npc_interaction",
+          npcId: "npc:npc_guard",
+          interactionSummary: "You keep the guard talking while you ask his name.",
+          topic: "identity",
+        },
+      ],
+    },
+  });
+
+  assert.equal(validated.type, "resolve_mechanics");
+  assert.deepEqual(validated.warnings, []);
+  assert.deepEqual(validated.checkIntent, {
+    type: "challenge",
+    reason: "Keeping the guard engaged.",
+    challengeApproach: "influence",
+    citedNpcId: "npc_guard",
+  });
+  assert.deepEqual(validated.mutations, [
+    {
+      type: "record_npc_interaction",
+      npcId: "npc_guard",
+      interactionSummary: "You keep the guard talking while you ask his name.",
+      topic: "identity",
+    },
+  ]);
+});
+
 test("validateTurnCommand preserves record_local_interaction targeting a raw temporary actor id", () => {
   const validated = validateTurnCommand({
     snapshot: {
@@ -446,6 +518,112 @@ test("validateTurnCommand preserves record_local_interaction targeting a raw tem
   assert.equal(validated.type, "resolve_mechanics");
   assert.equal(validated.mutations.length, 1);
   assert.equal(validated.mutations[0]?.type, "record_local_interaction");
+});
+
+test("validateTurnCommand preserves record_local_interaction targeting an existing temp-prefixed actor ref", () => {
+  const validated = validateTurnCommand({
+    snapshot: {
+      ...createSnapshot(),
+      temporaryActors: [
+        {
+          id: "temp_apprentice",
+          label: "apprentice",
+          currentLocationId: "loc_gate",
+          interactionCount: 0,
+          firstSeenAtTurn: 0,
+          lastSeenAtTurn: 0,
+          lastSeenAtTime: 480,
+          recentTopics: [],
+          lastSummary: "A young apprentice waiting for instructions.",
+          holdsInventory: false,
+          affectedWorldState: false,
+          isInMemoryGraph: false,
+          promotedNpcId: null,
+        },
+      ],
+    },
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "downtime",
+      suggestedActions: ["Send the apprentice"],
+      mutations: [
+        {
+          type: "record_local_interaction",
+          localEntityId: "temp:temp_apprentice",
+          interactionSummary: "You send the apprentice to find the runeforger.",
+        },
+      ],
+    },
+  });
+
+  assert.equal(validated.type, "resolve_mechanics");
+  assert.equal(validated.mutations.length, 1);
+  assert.equal(validated.mutations[0]?.type, "record_local_interaction");
+});
+
+test("validateTurnCommand normalizes bare same-turn spawn keys for record_local_interaction", () => {
+  const validated = validateTurnCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Discuss pricing"],
+      mutations: [
+        {
+          type: "spawn_temporary_actor",
+          spawnKey: "customer_1",
+          role: "customer",
+          summary: "A curious shopper eyeing the velvet.",
+          apparentDisposition: "interested",
+          reason: "Customer pauses at the stall.",
+        },
+        {
+          type: "record_local_interaction",
+          localEntityId: "customer_1",
+          interactionSummary: "You open with a velvet sales pitch.",
+        },
+      ],
+    },
+  });
+
+  assert.equal(validated.type, "resolve_mechanics");
+  assert.equal(validated.mutations.length, 2);
+  assert.deepEqual(validated.warnings, []);
+  assert.deepEqual(validated.mutations[1], {
+    type: "record_local_interaction",
+    localEntityId: "spawn:customer_1",
+    interactionSummary: "You open with a velvet sales pitch.",
+  });
+});
+
+test("validateTurnCommand drops record_local_interaction targeting a fabricated temp-prefixed actor ref", () => {
+  const validated = validateTurnCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Call out to the crowd"],
+      mutations: [
+        {
+          type: "record_local_interaction",
+          localEntityId: "temp:stall_crowd",
+          interactionSummary: "You call out to the interested crowd around your stall.",
+        },
+        {
+          type: "advance_time",
+          durationMinutes: 10,
+        },
+      ],
+    },
+  });
+
+  assert.equal(validated.type, "resolve_mechanics");
+  assert.equal(validated.mutations.length, 1);
+  assert.equal(validated.mutations[0]?.type, "advance_time");
+  assert.match(
+    validated.warnings.join("\n"),
+    /record_local_interaction at an invalid local actor ref; mutation was dropped/i,
+  );
 });
 
 test("validateTurnCommand preserves explicit command warnings", () => {

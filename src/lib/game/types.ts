@@ -1249,6 +1249,7 @@ export type NpcDetail = NpcSummary & {
 };
 
 export type PromotedNpcHydrationDraft = {
+  name: string | null;
   summary: string;
   description: string;
   factionId: string | null;
@@ -1414,6 +1415,13 @@ export type MechanicsMutation =
   | {
       type: "record_local_interaction";
       localEntityId: string;
+      interactionSummary: string;
+      topic?: string;
+      phase?: MutationPhase;
+    }
+  | {
+      type: "record_npc_interaction";
+      npcId: string;
       interactionSummary: string;
       topic?: string;
       phase?: MutationPhase;

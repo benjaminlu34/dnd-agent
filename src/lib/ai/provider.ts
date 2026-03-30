@@ -145,6 +145,7 @@ type PromotedNpcHydrationInput = {
     recentTopics: string[];
     lastSummary: string | null;
   };
+  allowRenameFromGenericRoleLabel?: boolean;
 };
 
 type TurnInput = {
@@ -2122,6 +2123,7 @@ const customEntryResolutionTool = createStructuredTool(
 );
 
 const promotedNpcHydrationSchema = z.object({
+  name: z.string().trim().min(1).nullable().optional().default(null),
   summary: z.string().trim().min(1),
   description: z.string().trim().min(1),
   factionId: z.string().trim().min(1).nullable(),
@@ -2140,7 +2142,7 @@ const promotedNpcHydrationSchema = z.object({
 
 const promotedNpcHydrationTool = {
   name: "hydrate_promoted_npc",
-  description: "Hydrate a promoted local NPC with grounded summary, description, and optional local leads.",
+  description: "Hydrate a recurring local NPC with grounded identity, summary, description, and optional local leads.",
   input_schema: z.toJSONSchema(promotedNpcHydrationSchema),
 };
 
@@ -2359,6 +2361,13 @@ const mechanicsMutationSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("record_local_interaction"),
     localEntityId: z.string().trim().min(1),
+    interactionSummary: z.string().trim().min(1).max(240),
+    topic: z.string().trim().min(1).max(80).optional(),
+    phase: z.enum(["immediate", "conditional"]).optional(),
+  }),
+  z.object({
+    type: z.literal("record_npc_interaction"),
+    npcId: z.string().trim().min(1),
     interactionSummary: z.string().trim().min(1).max(240),
     topic: z.string().trim().min(1).max(80).optional(),
     phase: z.enum(["immediate", "conditional"]).optional(),
@@ -2616,6 +2625,29 @@ function normalizeRouterDecisionInput(value: unknown): unknown {
   };
 }
 
+function isPlaceholderResolvedTargetRef(entry: {
+  targetRef: string;
+  targetKind: RouterDecision["attention"]["resolvedReferents"][number]["targetKind"];
+}) {
+  const normalized = entry.targetRef.trim().toLowerCase();
+  switch (entry.targetKind) {
+    case "scene_actor":
+      return ["scene_actor", "temporary_actor", "actor", "npc", "person", "customer"].includes(normalized);
+    case "inventory_item":
+      return ["inventory_item", "item", "inventory", "object"].includes(normalized);
+    case "world_object":
+      return ["world_object", "object"].includes(normalized);
+    case "route":
+      return ["route", "path", "destination"].includes(normalized);
+    case "information":
+      return ["information", "clue", "fact"].includes(normalized);
+    case "location":
+      return ["location", "place", "destination"].includes(normalized);
+    default:
+      return false;
+  }
+}
+
 function normalizeRouterDecision(value: RouterDecision): RouterDecision {
   const dedupedVectors = Array.from(new Set(value.authorizedVectors));
   const seenPrerequisites = new Set<string>();
@@ -2649,19 +2681,52 @@ function normalizeRouterDecision(value: RouterDecision): RouterDecision {
     clarification.question = null;
     clarification.options = [];
   }
-  const resolvedReferents = (value.attention?.resolvedReferents ?? [])
-    .filter((entry) => !entry.targetRef.startsWith("spawn:"))
-    .map((entry) => ({
+  const resolvedReferents: RouterDecision["attention"]["resolvedReferents"] = [];
+  const unresolvedReferents: RouterDecision["attention"]["unresolvedReferents"] = [];
+  const seenUnresolved = new Set<string>();
+
+  for (const entry of value.attention?.unresolvedReferents ?? []) {
+    const normalized = {
+      phrase: entry.phrase.trim(),
+      intendedKind: entry.intendedKind,
+      confidence: entry.confidence,
+    };
+    const key = `${normalized.intendedKind}:${normalized.phrase.toLowerCase()}`;
+    if (!seenUnresolved.has(key)) {
+      unresolvedReferents.push(normalized);
+      seenUnresolved.add(key);
+    }
+  }
+
+  for (const entry of value.attention?.resolvedReferents ?? []) {
+    const normalizedEntry = {
       phrase: entry.phrase.trim(),
       targetRef: entry.targetRef.trim(),
       targetKind: entry.targetKind,
       confidence: entry.confidence,
-    }));
-  const unresolvedReferents = (value.attention?.unresolvedReferents ?? []).map((entry) => ({
-    phrase: entry.phrase.trim(),
-    intendedKind: entry.intendedKind,
-    confidence: entry.confidence,
-  }));
+    };
+
+    if (normalizedEntry.targetRef.startsWith("spawn:")) {
+      continue;
+    }
+
+    if (isPlaceholderResolvedTargetRef(normalizedEntry)) {
+      if (normalizedEntry.targetKind === "scene_actor") {
+        const key = `temporary_actor:${normalizedEntry.phrase.toLowerCase()}`;
+        if (!seenUnresolved.has(key)) {
+          unresolvedReferents.push({
+            phrase: normalizedEntry.phrase,
+            intendedKind: "temporary_actor",
+            confidence: normalizedEntry.confidence,
+          });
+          seenUnresolved.add(key);
+        }
+      }
+      continue;
+    }
+
+    resolvedReferents.push(normalizedEntry);
+  }
   const impliedDestinationFocus = value.attention?.impliedDestinationFocus
     ? {
         key: value.attention.impliedDestinationFocus.key.trim(),
@@ -2710,7 +2775,10 @@ function formatRouterSceneActorLine(actor: TurnRouterContext["sceneActors"][numb
   const label = compactPromptText(actor.displayLabel, 80) || "Unknown actor";
   const role = compactPromptText(actor.role, 60);
   const summary = compactPromptText(actor.lastSummary, 90);
-  const detailHint = actor.detailFetchHint?.type === "fetch_npc_detail" ? " detail-fetch" : "";
+  const detailHint =
+    actor.detailFetchHint?.type === "fetch_npc_detail"
+      ? " detail-fetch(name/identity available)"
+      : "";
   return `${label}${role ? ` (${role})` : ""} [${actor.actorRef}, ${actor.kind}${detailHint}]${summary ? ` - ${summary}` : ""}`;
 }
 
@@ -2933,10 +3001,13 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Mark success-only rewards or outcomes as phase conditional.",
         "Advance the scene or world only through passive observation or waiting.",
         "Do not create combat, market trade, or deliberate social escalation in observe mode.",
-        "Use sceneActors.actorRef values exactly when targeting on-screen actors.",
+        "Use sceneActors.actorRef values exactly only for actorRef fields such as set_scene_actor_presence and set_follow_state.",
+        "For npcId, citedNpcId, and targetNpcId fields, use the bare NPC id without the npc: prefix.",
         "Never use record_local_interaction with npc: refs or named sceneActors. It is only for unnamed temporary locals referenced as temp:..., spawn:..., or raw temporary-actor ids.",
+        "Never invent temp: ids. temp: refs are only for temporary actors already grounded in sceneActors; if the person is new, spawn_temporary_actor first and then reference spawn:<key>.",
         "If the player reaches for a plausible unlisted local, improvised item, or environmental condition, spawn it first before interacting with it only when the noun is a fresh generic local role or a new same-scene manifestation implied by the current action.",
         "Use spawn_temporary_actor before record_local_interaction when the local is not already listed in sceneActors.",
+        "If the player addresses a generic person like someone, passerby, customer, shopper, stranger, or interested local, keep them generic: do not redirect them to a named scene actor; spawn_temporary_actor first if the action engages them.",
         "Use spawn_world_object for durable props like lockboxes, carts, hidden nooks, and other persistent storage or fixtures.",
         "Use spawn_environmental_item before adjust_inventory when the item is plausible in the environment but not already grounded in inventory.",
         "Use spawn_scene_aspect for smoke, damage, noise, weather spillover, improvised cover, and other grounded scene conditions.",
@@ -2968,6 +3039,7 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Only scene actors, world objects, inventory, routes, and scene aspects already grounded in context are valid direct interaction targets.",
         "recentTurnLedger contains grounded prior outcomes only. It is memory, not target authority.",
         "If attention_packet.unresolvedReferents names a missing person, stale narrated figure, or otherwise ungrounded target, do not redirect the action to another grounded actor and do not spawn that target automatically.",
+        "If attention_packet.unresolvedReferents names a generic local person, do not remap them onto a named scene actor; spawn a temporary actor first if the player is actually engaging them.",
         "If attention_packet.unresolvedReferents names a fresh generic role or same-scene uncertainty introduced by the current action, you may manifest it first. Otherwise resolve the turn as a graceful miss, a failed reach, or a search attempt without retargeting anyone else.",
         "TRIVIAL ACTIONS: Checking personal inventory, reviewing known information, or looking around a safe room requires ZERO checks. You must omit checkIntent entirely for these actions.",
         "ID HALLUCINATION BAN: You are strictly forbidden from using discover_information unless the exact informationId is explicitly provided in fetched_facts or attention_packet.resolvedReferents. Do not invent placeholder IDs.",
@@ -3013,11 +3085,15 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Use adjust_gold for incidental payments, rewards, bribes, tips, fees, or other non-market gold movement.",
         "Use move_player only for actual route travel to a known adjacent location.",
         "Use record_local_interaction for current-scene unnamed locals instead of adjust_relationship.",
-        "Use sceneActors.actorRef values exactly when targeting on-screen actors.",
+        "Use record_npc_interaction for ordinary same-scene dialogue with a grounded named NPC when the exchange matters but no relationship shift is required.",
+        "Use sceneActors.actorRef values exactly only for actorRef fields such as set_scene_actor_presence and set_follow_state.",
+        "For npcId, citedNpcId, and targetNpcId fields, use the bare NPC id without the npc: prefix.",
         "Never use record_local_interaction with npc: refs or named sceneActors. It is only for unnamed temporary locals referenced as temp:..., spawn:..., or raw temporary-actor ids.",
-        "When speaking to a named on-screen NPC, cite them in checkIntent only when needed, use adjust_relationship only for meaningful social shifts, and otherwise rely on time passage without inventing a local-interaction mutation.",
+        "Never invent temp: ids. temp: refs are only for temporary actors already grounded in sceneActors; if the person is new, spawn_temporary_actor first and then reference spawn:<key>.",
+        "When speaking to a named on-screen NPC, use record_npc_interaction for ordinary dialogue, use adjust_relationship only for meaningful social shifts, and use checkIntent only when success or failure would materially change what can happen.",
         "If the player reaches for a plausible unlisted local, improvised item, or environmental condition, spawn it first before interacting with it only when the noun is a fresh generic local role or a new same-scene manifestation implied by the current action.",
         "Use spawn_temporary_actor before record_local_interaction when the local is not already listed in sceneActors.",
+        "If the player addresses a generic person like someone, passerby, customer, shopper, stranger, or interested local, keep them generic: do not redirect them to a named scene actor; spawn_temporary_actor first if the action engages them.",
         "Use spawn_world_object for durable props like lockboxes, carts, hidden nooks, and other persistent storage or fixtures.",
         "Use spawn_environmental_item before adjust_inventory when the item is plausible in the environment but not already grounded in inventory.",
         "Use spawn_scene_aspect for smoke, damage, noise, weather spillover, improvised cover, and other grounded scene conditions.",
@@ -3055,7 +3131,9 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Only scene actors, world objects, inventory, routes, and scene aspects already grounded in context are valid direct interaction targets.",
         "recentTurnLedger contains grounded prior outcomes only. It is memory, not target authority.",
         "If attention_packet.unresolvedReferents names a missing person, stale narrated figure, or otherwise ungrounded target, do not redirect the action to another grounded actor and do not spawn that target automatically.",
+        "If attention_packet.unresolvedReferents names a generic local person, do not remap them onto a named scene actor; spawn a temporary actor first if the player is actually engaging them.",
         "If attention_packet.unresolvedReferents names a fresh generic role or same-scene uncertainty introduced by the current action, you may manifest it first. Otherwise resolve the turn as a graceful miss, a failed reach, or a search attempt without retargeting anyone else.",
+        "If a present scene actor line includes detail-fetch(name/identity available) and the player asks what to call them, who they are, or another identity-seeking follow-up, request npc_detail for that actor and keep the interaction anchored to them instead of drifting to another bystander.",
         "TRIVIAL ACTIONS: Checking personal inventory, reviewing known information, or looking around a safe room requires ZERO checks. You must omit checkIntent entirely for these actions.",
         "ID HALLUCINATION BAN: You are strictly forbidden from using discover_information unless the exact informationId is explicitly provided in fetched_facts or attention_packet.resolvedReferents. Do not invent placeholder IDs.",
         "Use restore_health for rest recovery or explicit healing outcomes the engine should apply.",
@@ -3163,9 +3241,15 @@ function buildTurnRouterSystemPrompt(correctionNotes?: string | null) {
     "When the player strongly implies movement into a clear sub-location within the current macro-location, emit attention.impliedDestinationFocus with a concise key and label such as back_room/The Back Room, yard/Yard, stable_entrance/Stable Entrance, workbench/Workbench, stall_front/Stall Front, or alleyway/Alleyway.",
     "Do not emit impliedDestinationFocus for macro travel between location nodes or vague attention shifts with no clear sub-location.",
     "If no grounded ref exists but the noun is plausible, emit it in unresolvedReferents instead of resolvedReferents.",
+    "resolvedReferents.targetRef must be an actual grounded ref from router_context, such as npc:..., a real inventory id, a world object id, a route id, an information id, or a location id.",
+    "Never use schema words like temporary_actor, scene_actor, inventory_item, world_object, route, information, or location as targetRef values.",
     "Only the authoritative current-state surfaces in router_context are valid interaction targets. recentGroundedHistory is memory, not authority.",
     "Never remap an unresolved pronoun or stale narrated referent onto a different grounded actor just to satisfy the schema.",
     "If the player seems to mean someone who is not in authoritativeState.sceneActors or authoritativeState.worldObjects, keep that referent unresolved instead of guessing.",
+    "Generic people like someone, passerby, customer, shopper, stranger, or interested local should remain unresolved temporary_actor referents unless the authoritative state already identifies them.",
+    "Do not remap a generic or unresolved person onto a named scene actor merely because one is present in the scene.",
+    "If one present scene actor is already the clear conversational counterpart from the grounded scene summaries, keep polite follow-ups like sir, ma'am, or what can I call you anchored to that actor instead of redirecting to another named bystander.",
+    "If a present scene actor is marked detail-fetch(name/identity available) and the player asks for their name, title, identity, or what to call them, include npc_detail for that actor.",
   ].join("\n");
 
   return correctionNotes ? `${base}\n${correctionNotes}` : base;
@@ -3308,12 +3392,20 @@ function buildResolvedNarrationConstraints(input: ResolvedTurnNarrationInput) {
   const rejectedNonTimeMutations = rejectedMutations.filter((entry) => entry.mutationType !== "advance_time");
   const hasRejectedInvalidTargetAttempt = rejectedNonTimeMutations.some(
     (entry) =>
-      (entry.mutationType === "record_local_interaction" || entry.mutationType === "set_scene_actor_presence")
+      (
+        entry.mutationType === "record_local_interaction"
+        || entry.mutationType === "record_npc_interaction"
+        || entry.mutationType === "set_scene_actor_presence"
+      )
       && entry.reasonCode === "invalid_target",
   );
   const hasRejectedSemanticAttempt = rejectedNonTimeMutations.some(
     (entry) =>
-      (entry.mutationType === "record_local_interaction" || entry.mutationType === "set_scene_actor_presence")
+      (
+        entry.mutationType === "record_local_interaction"
+        || entry.mutationType === "record_npc_interaction"
+        || entry.mutationType === "set_scene_actor_presence"
+      )
       && entry.reasonCode === "invalid_semantics",
   );
   const waitingForArrival =
@@ -3333,6 +3425,7 @@ function buildResolvedNarrationConstraints(input: ResolvedTurnNarrationInput) {
       && rejectedNonTimeMutations.every(
         (entry) =>
           entry.mutationType === "record_local_interaction"
+          || entry.mutationType === "record_npc_interaction"
           || entry.mutationType === "set_scene_actor_presence",
       ),
     rejectedMutationTypes: rejectedNonTimeMutations.map((entry) => entry.mutationType),
@@ -3355,6 +3448,11 @@ function narrationViolatesResolvedConstraints(
 ) {
   const constraints = buildResolvedNarrationConstraints(input);
   const normalizedNarration = narration.toLowerCase();
+  const unquotedNarration = narration
+    .replace(/"[^"]*"/g, " ")
+    .replace(/“[^”]*”/g, " ")
+    .replace(/‘[^’]*’/g, " ");
+
   if (constraints.rejectedInteractionOnly && /["“”'‘’]/.test(narration)) {
     return "Rejected interaction-only turns must not invent quoted dialogue.";
   }
@@ -3380,38 +3478,81 @@ function narrationViolatesResolvedConstraints(
     return "Unresolved-target turns must not invent a clean spoken exchange with a substituted actor.";
   }
 
+  if (
+    /\b(?:me|my|mine|we|us|our|ours)\b/i.test(unquotedNarration)
+    || /\bi(?:\b|['’](?:m|d|ll|ve))\b/i.test(unquotedNarration)
+  ) {
+    return "Narration must not mirror the player's first-person wording or use I/me/my/we/our outside quoted dialogue.";
+  }
+
+  if (
+    !/\b(?:you|your|yours|yourself)\b/i.test(unquotedNarration)
+  ) {
+    return "Narration must address the player in second person with you/your phrasing.";
+  }
+
   return null;
 }
 
 function buildResolvedTurnNarrationPrompt(input: ResolvedTurnNarrationInput) {
   const sanitizedCommitLog = buildSanitizedNarrationCommitLog(input.stateCommitLog);
   const system = [
-    "You are the Dungeon Master narrator for a resolved simulated-world turn.",
-    "Return exactly one structured payload using the provided tool.",
-    "Narrate only what is grounded in the committed state_commit_log, the player's action, the provided spatial context, and the fetched facts.",
-    "Do not invent successful outcomes, prices, discoveries, NPC reactions, travel, or social shifts that are not supported by the log, context, or fetched facts.",
-    "If a mutation was rejected or a check failed, make that failure legible in the narration.",
-    "If the applied log only advances time, narrate only the time passage and any grounded atmosphere shift. Do not restage the room or repeat the opening setup.",
-    "If advance_time accompanies another applied mutation, absorb the elapsed time naturally into the narration and do not explicitly count minutes unless the exact duration materially matters.",
-    "If a spawned scene aspect is ambiguous, narrate only the sensory detail or visible condition, not the hidden cause.",
-    "If a temporary actor was spawned, narrate them as stepping into view, coming into focus, or being noticed.",
-    "Do not echo engine-summary phrasing like enters the scene, changes state, or time passes. Rewrite those outcomes as natural story narration.",
-    "If the player waited for a person or event and the commit log does not contain the arrival or return, explicitly say it has not happened yet.",
-    "Do not imply that someone arrived, returned, or appeared unless the committed log makes that change explicit.",
-    "If rejectedOutcomeOnly is true, do not narrate rejected outcomes as if they happened.",
-    "If rejectedInteractionOnly is true, you may acknowledge that the attempt stalls or goes unanswered, but do not invent direct replies, quoted dialogue, completed errands, or offscreen returns.",
+    "**Role**",
+    "You are the Dungeon Master's prose voice for a resolved turn in a living world.",
+    "",
+    "**Core Job**",
+    "The world has already decided what happened. Your job is to take the committed mutations, authoritative state, fetched facts, and player action and render them into compact, second-person prose that feels alive and trustworthy.",
+    "The truth constraints below are the walls of the room. Craft lives inside those walls.",
+    "Address the player as you/your. Do not mirror the player's first-person wording as I/my/we/our.",
+    "Licensed texture means sensory surface detail, ordinary object specificity, micro-gestures, tone of voice, small role-appropriate habits, and environmental atmosphere directly supported by the committed log, authoritative state, or fetched facts.",
+    "Licensed texture never adds new actors, new interactables, new agreements, prices, discoveries, hidden causes, or other unsupported state.",
+    "",
+    "**Truth Constraints**",
+    "Narrate only what is grounded in the committed state_commit_log, the player's action, the provided spatial context, and the fetched facts; never invent successful outcomes, prices, discoveries, travel, social shifts, or unsupported NPC reactions.",
+    "Preserve failure honestly: rejected or failed actions must remain visibly failed in-world. Make failure legible, but only name a specific cause if it is supported by the committed log, fetched facts, or authoritative context. If rejectedOutcomeOnly is true, do not narrate rejected outcomes as if they happened. If rejectedInteractionOnly is true, the attempt may stall or go unanswered, but do not invent direct replies, completed errands, or offscreen returns.",
+    "Keep committed uncertainty intact: only context.authoritativeState.sceneActors and context.authoritativeState.worldObjects are stable immediate interaction targets. recentNarrativeProse is continuity only, not authority. Unresolved targets must stay unresolved and may not be substituted — if unresolvedTargetFailure is true, the intended target is gone, unreachable, or lost. Arrivals and returns only happened if the committed log makes them explicit; if the player waited for one that did not commit, say it has not happened yet. Ambiguous scene aspects stay ambiguous — narrate only the visible condition, not the hidden cause. Spawned actors are noticed naturally, not announced.",
     "If state_commit_log includes a rejected record_local_interaction or set_scene_actor_presence with reasonCode invalid_target, narrate that the player looked for or attempted that contact but could not find or reach them. Do not narrate a successful encounter.",
     "If state_commit_log includes a rejected record_local_interaction or set_scene_actor_presence with reasonCode invalid_semantics, narrate the player as unable to complete that intent through another person or presence change, without inventing that it happened anyway.",
-    "If a discover_information mutation was rejected, do not convert that into an authoritative negative fact like nothing is there unless the applied state log independently proves it.",
-    "If rejectedMutationTypes only cover item or scene changes, do not invent completed crafting outputs, item transfers, or scene transformations that the log rejected.",
-    "Do not write quoted dialogue unless it is grounded by a committed interaction, a committed check result, fetched facts, or explicit player speech that is visibly answered in the committed log.",
-    "Only context.authoritativeState.sceneActors and context.authoritativeState.worldObjects are stable immediate interaction targets.",
-    "recentNarrativeProse is conversational continuity only. Do not treat figures mentioned there as currently reachable unless the authoritative state or committed log makes them present now.",
-    "If unresolvedTargetFailure is true, narrate the intended target as gone, unreachable, lost in the crowd, or otherwise unavailable. Do not substitute another nearby person.",
-    "If you mention a person who is not grounded in the authoritative state, frame them as fleeting, departing, distant, hidden, or gone before direct contact is possible.",
-    "Do not paraphrase or repeat the player's action back to them. Begin your narration directly with the world's reaction.",
-    "Write in second person to the player character as 'you'.",
-    "Keep the narration compact, concrete, and forward-moving.",
+    "If a discover_information mutation was rejected, do not convert that into an authoritative negative fact unless the applied state log independently proves it. If rejectedMutationTypes only cover item or scene changes, do not invent completed crafting outputs, item transfers, or scene transformations that the log rejected.",
+    "If the applied log only advances time, narrate only the passage and any grounded atmosphere shift; if advance_time accompanies another mutation, absorb elapsed time naturally and do not explicitly count minutes unless the exact duration materially matters. Do not use elapsed time as a prompt to generate journey or travel description.",
+    "Quoted dialogue must be grounded by a committed interaction, a committed check result, fetched facts, or explicit player speech that is visibly answered in the committed log.",
+    "",
+    "**Craft Rules**",
+    "Never open by paraphrasing the player's action. Begin sentence one with the world's reaction, the immediate consequence, or the sensory shift of the moment.",
+    "If the player offers a flavorful hook, preference, tease, compliment, habit, or invitation, answer it with one grounded specific instead of abstract summary.",
+    "Include at least one concrete sensory, physical, or character detail per turn when the committed log supports non-trivial narration; on truly thin turns, one short sentence of legible absence, pause, or passage is enough.",
+    "Prefer one specific noun, gesture, smell, texture, or sound over placeholders like standard choice, fresh items, or a response.",
+    "When a grounded local NPC is involved, allow one small human detail such as a habit, preference, mannerism, tone, or opinion.",
+    "Only use quoted dialogue if the player_action included spoken words, or the committed interaction is clearly social or interpersonal. Otherwise, a concrete gesture, object action, or physical cue is often stronger.",
+    "Add one fresh grounded detail, clarified consequence, or emotional or sensory shift beyond the player's own wording, but do not invent forward plot motion.",
+    "Prefer one tight paragraph for ordinary turns. Use more length only when mutation complexity genuinely requires it.",
+    "Grounded does not mean bland. Favor compact, specific, characterful prose over generic transactional summary.",
+    "",
+    "**Turn-Type Heuristics**",
+    "- Local interaction: Cash in player hooks, add one human or sensory beat, and use a short quoted line only when speech is clearly licensed.",
+    "- Movement / repositioning: Narrate arrival, not the journey. Absorb elapsed time in one grounded detail of the destination or immediate transition; do not invent atmosphere for the path between.",
+    "- Investigation / search: Narrate the act of looking and make absence tangible without turning failure into authoritative certainty.",
+    "- Tense / suspicious: Imply through behavior, spacing, sound, or motion rather than explaining motives.",
+    "- Self-directed / equipment / inventory: Focus on tactile, visual, or material detail and keep the beat intimate and brief.",
+    "- Failure / unavailable target: Make the miss, silence, or absence immediate and legible; never substitute another target.",
+    "",
+    "**Anti-Patterns and Better Alternatives**",
+    "Instead of generic agreement beats like they nod, they smile, or they agree, show agreement through a concrete action, object, or short licensed line.",
+    "Instead of placeholders like standard choice, fresh items, a response, or their offer, name one specific thing or surface detail.",
+    "Instead of filler like the market bustles around you, use one local sensory or physical detail that matters now.",
+    "Instead of engine-speak like enters the scene, changes state, or time passes, rewrite the event as natural scene prose.",
+    "Instead of opening with the player's action, begin with what happens next.",
+    "Instead of ending on flat logistics, end on a living image, gesture, atmosphere beat, or grounded human detail when the turn supports it.",
+    "Instead of mirroring the player's first-person voice, rewrite the beat in second person.",
+    "",
+    "**Style Examples**",
+    "Example 1 - Routine local interaction: The worker glances up from the bench, rubs sawdust from one thumb, and angles the straighter of the two pieces toward you. \"Take this one,\" he says. \"It'll hold longer.\" The grain is warm from his hands.",
+    "Example 2 - Suspicious or uncertain observation: Across the room, a chair leg scrapes once and then goes still. The conversation around it never quite breaks, but one voice drops out for a beat too long. When you look directly that way, all you catch is a sleeve disappearing behind a post.",
+    "Example 3 - Self-directed item handling: You turn the key over in your palm. Its teeth catch the light, still warm from your pocket, and leave a faint smear of oil on your thumb. The small weight feels heavier now that the lock it once opened is gone.",
+    "Example 4 - Missed or unavailable contact: The doorway stands open, but whoever was there a moment ago is gone. A half-finished tool on the step and the still-swinging latch are the only signs you were not quite quick enough.",
+    "",
+    "**Output Instructions**",
+    "Return exactly one structured payload using the provided tool. The narration field must contain only the player-facing DM prose in second person using you/your, with no engine language, no meta commentary, no mirrored first-person phrasing, and no restated action summary.",
   ].join("\n");
 
   const user = [
@@ -5903,18 +6044,23 @@ class DungeonMasterClient {
     try {
       const response = await runCompletion({
         system: [
-          "Hydrate a promoted recurring local in an open-world solo RPG.",
+          "Hydrate a recurring local in an open-world solo RPG.",
           "This NPC is already mechanically real. Your job is to make them narratively grounded without inventing new world entities.",
           "Treat npc.role, npc.summary, npc.description, temporary_actor_memory.label, temporary_actor_memory.recentTopics, and temporary_actor_memory.lastSummary as prior facts from earlier play.",
           "Refine and deepen those prior facts. Do not replace the NPC with a different occupation, social niche, or implied personality.",
           "If the label and prior summaries imply a specific kind of local, preserve that identity and make it feel more concrete rather than recasting them.",
+          "Preserve the established crossing path from prior facts. If prior facts place the NPC at the player's stall, counter, bench, cart, shopfront, or work area, keep that locus instead of relocating them.",
+          "Use local_npcs and local_information only as background context for concerns or optional leads. They do not license attaching this NPC to another named local's stall, shop, crew, employer, or conversation unless that named connection already appears in the prior facts.",
+          "Do not make the NPC's main summary or description orbit another named local NPC unless that relationship is already grounded in npc.summary, npc.description, or temporary_actor_memory.lastSummary.",
+          "If prior facts are thin, stay close to temporary_actor_memory.lastSummary instead of elaborating outward.",
+          "If npc.name is only a generic role label matching npc.role, you may replace it with one ordinary grounded personal name that fits the location and role. Otherwise preserve the existing name.",
           "Use only the provided location id, local faction ids, nearby route names, and referenced local NPCs/information.",
           "Keep the NPC ordinary and socially legible: worker, fixer, clerk, guard, hauler, repairer, vendor, lookout, or another believable local role.",
           "Let the NPC's current concern grow naturally from the prior interaction topics or the local texture whenever possible.",
           "Write one tight summary sentence and one tight description paragraph that bakes in the NPC's current concern and how the player already crosses paths with them.",
           "If no listed faction fits naturally, return factionId as null.",
-          "Return 0 to 2 information leads. These leads must stay local, grounded, and actionable.",
-          "Do not invent new named factions, locations, commodities, or personal names beyond the provided NPC.",
+          "Return 0 to 2 information leads only when the prior facts already suggest a concrete local concern. Otherwise return none.",
+          "Do not invent new named factions, locations, or commodities. Only invent a personal name when the current npc.name is a generic role label and the input explicitly allows that upgrade.",
         ].join("\n"),
         user: [
           formatPromptBlock("npc", input.npc),
@@ -5925,6 +6071,7 @@ class DungeonMasterClient {
             originalLabel: input.temporaryActor.label,
             priorTopics: input.temporaryActor.recentTopics,
             priorLastSummary: input.temporaryActor.lastSummary,
+            allowRenameFromGenericRoleLabel: input.allowRenameFromGenericRoleLabel ?? false,
           }),
           formatPromptBlock("location", input.location),
           formatPromptBlock("local_factions", input.localFactions),
