@@ -95,6 +95,343 @@ test("normalizeRouterDecision caps mustCheck to seven entries and drops least au
   ]);
 });
 
+test("normalizeRouterDecision prefers an exact temporary-role match over a named NPC for explicit local-role nouns", () => {
+  const normalized = aiProviderTestUtils.normalizeRouterDecision(
+    {
+      profile: "local",
+      confidence: "high",
+      authorizedVectors: ["converse"],
+      requiredPrerequisites: [],
+      reason: "The player addresses the baker at the counter.",
+      clarification: {
+        needed: false,
+        blocker: null,
+        question: null,
+        options: [],
+      },
+      attention: {
+        primaryIntent: "Order from the baker.",
+        resolvedReferents: [
+          {
+            phrase: "baker",
+            targetRef: "npc:npc_lira",
+            targetKind: "scene_actor",
+            confidence: "high",
+          },
+        ],
+        unresolvedReferents: [],
+        impliedDestinationFocus: null,
+        mustCheck: ["sceneActors"],
+      },
+    },
+    {
+      currentLocation: {
+        id: "loc_bakery",
+        name: "Copper Oven",
+        type: "shop",
+        summary: "A hot bakery crowded with the morning rush.",
+        state: "active",
+      },
+      sceneFocus: {
+        key: "counter",
+        label: "Bakery Counter",
+      },
+      adjacentRoutes: [],
+      sceneActors: [
+        {
+          actorRef: "npc:npc_lira",
+          kind: "npc",
+          displayLabel: "Lira Thornwood",
+          role: "baker's apprentice",
+          detailFetchHint: {
+            type: "fetch_npc_detail",
+            npcId: "npc_lira",
+          },
+          lastSummary: "The apprentice keeps the order slips tucked under her thumb.",
+        },
+        {
+          actorRef: "temp:tactor_baker",
+          kind: "temporary_actor",
+          displayLabel: "baker",
+          role: "baker",
+          detailFetchHint: null,
+          lastSummary: "The baker is working the ovens behind the counter.",
+        },
+      ],
+      recentLocalEvents: [],
+      recentTurnLedger: [],
+      discoveredInformation: [],
+      activePressures: [],
+      activeThreads: [],
+      inventory: [],
+      worldObjects: [],
+      sceneAspects: [],
+      currency: TEST_CURRENCY,
+    },
+  );
+
+  assert.equal(normalized.attention.resolvedReferents[0]?.targetRef, "temp:tactor_baker");
+});
+
+test("normalizeRouterDecision strips invalid npc_detail prerequisites for temporary actors while preserving named NPC fetches", () => {
+  const normalized = aiProviderTestUtils.normalizeRouterDecision(
+    {
+      profile: "local",
+      confidence: "high",
+      authorizedVectors: ["converse"],
+      requiredPrerequisites: [
+        {
+          type: "npc_detail",
+          npcId: "temp:tactor_baker",
+        },
+        {
+          type: "npc_detail",
+          npcId: "npc:npc_lira",
+        },
+        {
+          type: "relationship_history",
+          npcId: "temp:tactor_baker",
+        },
+      ],
+      reason: "The turn needs named-NPC detail only.",
+      clarification: {
+        needed: false,
+        blocker: null,
+        question: null,
+        options: [],
+      },
+      attention: {
+        primaryIntent: "Ask who runs the bakery.",
+        resolvedReferents: [],
+        unresolvedReferents: [],
+        impliedDestinationFocus: null,
+        mustCheck: ["sceneActors", "fetchedFacts"],
+      },
+    },
+    {
+      currentLocation: {
+        id: "loc_bakery",
+        name: "Copper Oven",
+        type: "shop",
+        summary: "A hot bakery crowded with the morning rush.",
+        state: "active",
+      },
+      sceneFocus: null,
+      adjacentRoutes: [],
+      sceneActors: [
+        {
+          actorRef: "npc:npc_lira",
+          kind: "npc",
+          displayLabel: "Lira Thornwood",
+          role: "baker's apprentice",
+          detailFetchHint: {
+            type: "fetch_npc_detail",
+            npcId: "npc_lira",
+          },
+          lastSummary: "She keeps the order slips tucked under her thumb.",
+        },
+        {
+          actorRef: "temp:tactor_baker",
+          kind: "temporary_actor",
+          displayLabel: "baker",
+          role: "baker",
+          detailFetchHint: null,
+          lastSummary: "The baker is working the ovens behind the counter.",
+        },
+      ],
+      recentLocalEvents: [],
+      recentTurnLedger: [],
+      discoveredInformation: [],
+      activePressures: [],
+      activeThreads: [],
+      inventory: [],
+      worldObjects: [],
+      sceneAspects: [],
+      currency: TEST_CURRENCY,
+    },
+  );
+
+  assert.deepEqual(normalized.requiredPrerequisites, [
+    {
+      type: "npc_detail",
+      npcId: "npc_lira",
+    },
+  ]);
+});
+
+test("normalizeRouterDecision keeps explicit named offscreen locals bound as known_npc targets", () => {
+  const normalized = aiProviderTestUtils.normalizeRouterDecision(
+    {
+      profile: "local",
+      confidence: "high",
+      authorizedVectors: ["investigate", "converse"],
+      requiredPrerequisites: [
+        {
+          type: "npc_detail",
+          npcId: "npc:camp_1:npc:tarn_blackthorn",
+        },
+      ],
+      reason: "The player is explicitly looking for Tarn in the alley.",
+      clarification: {
+        needed: false,
+        blocker: null,
+        question: null,
+        options: [],
+      },
+      attention: {
+        primaryIntent: "Find Tarn Blackthorn without substituting another local.",
+        resolvedReferents: [
+          {
+            phrase: "Tarn Blackthorn",
+            targetRef: "Tarn Blackthorn",
+            targetKind: "known_npc",
+            confidence: "high",
+          },
+        ],
+        unresolvedReferents: [],
+        impliedDestinationFocus: {
+          key: "deep_alley",
+          label: "Deep Alley",
+        },
+        mustCheck: ["sceneActors", "knownNpcs", "fetchedFacts"],
+      },
+    },
+    {
+      currentLocation: {
+        id: "loc_waterdeep",
+        name: "Waterdeep",
+        type: "city",
+        summary: "A city of crowded wards and shadowed lanes.",
+        state: "busy",
+      },
+      sceneFocus: {
+        key: "deep_alley",
+        label: "Deep Alley",
+      },
+      adjacentRoutes: [],
+      sceneActors: [],
+      knownNearbyNpcs: [
+        {
+          id: "camp_1:npc:tarn_blackthorn",
+          name: "Tarn Blackthorn",
+          role: "Street Urchin",
+          summary: "A quick-fingered orphan who knows the Market Square's shadows.",
+          requiresDetailFetch: false,
+        },
+      ],
+      recentLocalEvents: [],
+      recentTurnLedger: [],
+      discoveredInformation: [],
+      activePressures: [],
+      activeThreads: [],
+      inventory: [],
+      worldObjects: [],
+      sceneAspects: [],
+      currency: TEST_CURRENCY,
+    },
+  );
+
+  assert.deepEqual(normalized.requiredPrerequisites, [
+    {
+      type: "npc_detail",
+      npcId: "camp_1:npc:tarn_blackthorn",
+    },
+  ]);
+  assert.deepEqual(normalized.attention.resolvedReferents, [
+    {
+      phrase: "Tarn Blackthorn",
+      targetRef: "camp_1:npc:tarn_blackthorn",
+      targetKind: "known_npc",
+      confidence: "high",
+    },
+  ]);
+});
+
+test("normalizeRouterDecision repairs malformed scoped known_npc ids against authoritative nearby candidates", () => {
+  const normalized = aiProviderTestUtils.normalizeRouterDecision(
+    {
+      profile: "local",
+      confidence: "high",
+      authorizedVectors: ["converse"],
+      requiredPrerequisites: [
+        {
+          type: "npc_detail",
+          npcId: "camp_16e23ba8-ef87-4b6e-a3c3-9c78afcf784f:npc:npc_local_5",
+        },
+      ],
+      reason: "Talk to Tarn.",
+      clarification: {
+        needed: false,
+        blocker: null,
+        question: null,
+        options: [],
+      },
+      attention: {
+        primaryIntent: "Offer Tarn food and reassurance.",
+        resolvedReferents: [
+          {
+            phrase: "Tarn",
+            targetRef: "camp_16e23ba8-ef87-4b6e-a3c3-9c78afcf784f:npc:npc_local_5",
+            targetKind: "known_npc",
+            confidence: "high",
+          },
+        ],
+        unresolvedReferents: [],
+        impliedDestinationFocus: null,
+        mustCheck: ["knownNpcs", "fetchedFacts"],
+      },
+    },
+    {
+      currentLocation: {
+        id: "loc_waterdeep",
+        name: "Waterdeep",
+        type: "city",
+        summary: "A city of crowded wards and shadowed lanes.",
+        state: "busy",
+      },
+      sceneFocus: {
+        key: "deep_alley",
+        label: "Deep Alley",
+      },
+      adjacentRoutes: [],
+      sceneActors: [],
+      knownNearbyNpcs: [
+        {
+          id: "camp_16e23ba8-ef87-4b6e-a7c3-9c78afcf784f:npc:npc_local_5",
+          name: "Tarn Blackthorn",
+          role: "Street Urchin",
+          summary: "A quick-fingered orphan who knows the Market Square's shadows.",
+          requiresDetailFetch: false,
+        },
+      ],
+      recentLocalEvents: [],
+      recentTurnLedger: [],
+      discoveredInformation: [],
+      activePressures: [],
+      activeThreads: [],
+      inventory: [],
+      worldObjects: [],
+      sceneAspects: [],
+      currency: TEST_CURRENCY,
+    },
+  );
+
+  assert.deepEqual(normalized.requiredPrerequisites, [
+    {
+      type: "npc_detail",
+      npcId: "camp_16e23ba8-ef87-4b6e-a7c3-9c78afcf784f:npc:npc_local_5",
+    },
+  ]);
+  assert.deepEqual(normalized.attention.resolvedReferents, [
+    {
+      phrase: "Tarn",
+      targetRef: "camp_16e23ba8-ef87-4b6e-a7c3-9c78afcf784f:npc:npc_local_5",
+      targetKind: "known_npc",
+      confidence: "high",
+    },
+  ]);
+});
+
 test("parseFinalActionToolCall accepts resolve_mechanics payloads", () => {
   const parsed = aiProviderTestUtils.parseFinalActionToolCall({
     type: "resolve_mechanics",
@@ -273,6 +610,7 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   assert.match(prompt, /Do not use it for solo errands, checking your own gear, retrieving your own belongings/);
   assert.match(prompt, /TRIVIAL ACTIONS: Checking personal inventory, reviewing known information, or looking around a safe room requires ZERO checks/);
   assert.match(prompt, /ID HALLUCINATION BAN: You are strictly forbidden from using discover_information unless the exact informationId is explicitly provided/);
+  assert.match(prompt, /For adjust_inventory, use the inventory line's main template\/stack id/i);
   assert.match(prompt, /Use adjust_inventory for gaining, losing, consuming, or handing over grounded inventory items/);
   assert.match(prompt, /Self-directed downtime work may use adjust_inventory, spawn_environmental_item, and spawn_scene_aspect/);
   assert.match(prompt, /Use spawn_scene_aspect for smoke, damage, noise/);
@@ -285,6 +623,8 @@ test("buildTurnRouterSystemPrompt distinguishes self-talk from on-screen social 
   assert.match(prompt, /Directing a present subordinate or ally to pass along a message or fetch someone is a local in-scene action/);
   assert.match(prompt, /Use clarification only for hard blockers/);
   assert.match(prompt, /Do not invent new ids or spawn handles/);
+  assert.match(prompt, /router_context\.knownNearbyNpcs lists authoritative named NPCs in the current location/i);
+  assert.match(prompt, /If the player explicitly names or clearly searches for someone listed in knownNearbyNpcs, resolve them as known_npc/i);
   assert.match(prompt, /routes strictly means macro-travel leaving the current location node/);
   assert.match(prompt, /back to the forge, into the market, over to the bench/);
   assert.match(prompt, /emit attention\.impliedDestinationFocus/);
@@ -296,8 +636,10 @@ test("buildTurnRouterSystemPrompt distinguishes self-talk from on-screen social 
   assert.match(prompt, /recentGroundedHistory is memory, not authority/);
   assert.match(prompt, /Generic people like someone, passerby, customer, shopper, stranger, or interested local should remain unresolved temporary_actor referents/i);
   assert.match(prompt, /Do not remap a generic or unresolved person onto a named scene actor merely because one is present/i);
+  assert.match(prompt, /If the player's noun exactly matches a present temporary actor's local role label/i);
   assert.match(prompt, /If one present scene actor is already the clear conversational counterpart/i);
   assert.match(prompt, /If a present scene actor is marked detail-fetch\(name\/identity available\) and the player asks for their name/i);
+  assert.match(prompt, /Never request npc_detail for temp: actors or unnamed temporary locals/i);
   assert.match(prompt, /If the player is looting, pickpocketing, frisking, searching a body's belongings, or otherwise needs grounded custody detail from a present NPC, include npc_detail for that actor/i);
   assert.match(prompt, /Treat recentNarrativeProse as style continuity only, not evidence of who is present, what they carry, or what objects can be manipulated now/i);
 });

@@ -61,6 +61,7 @@ import type {
   SceneActorSummary,
   PromptContextProfile,
   RouterDecision,
+  RouterKnownNpcSummary,
   RouterWorldObjectSummary,
   SpatialPromptContext,
   StoryMessage,
@@ -2009,6 +2010,7 @@ async function createCampaignInTx(
     campaignId: campaign.id,
     name: npc.name,
     role: npc.role,
+    tags: npc.tags ?? [],
     summary: npc.summary,
     description: npc.description,
     factionId: npc.factionId,
@@ -2031,6 +2033,7 @@ async function createCampaignInTx(
           campaignId: campaign.id,
           name: npc.name,
           role: npc.role,
+          tags: npc.tags ?? [],
           summary: npc.summary,
           description: npc.description,
           socialLayer: "anchor",
@@ -2547,6 +2550,7 @@ function toNpcSummary(
     id: npc.id,
     name: npc.name,
     role: npc.role,
+    tags: [...(npc.tags ?? [])],
     summary: npc.summary,
     description: npc.description,
     socialLayer: npc.socialLayer as NpcSummary["socialLayer"],
@@ -2626,6 +2630,7 @@ function toSceneActorSummaries(input: {
       kind: "npc",
       displayLabel: npc.name,
       role: npc.role,
+      tags: npc.isCompanion ? Array.from(new Set([...(npc.tags ?? []), "companion"])) : [...(npc.tags ?? [])],
       focusKey: null,
       detailFetchHint:
         npc.socialLayer === "promoted_local" && !npc.isNarrativelyHydrated
@@ -2643,11 +2648,35 @@ function toSceneActorSummaries(input: {
         kind: "temporary_actor",
         displayLabel: actor.label,
         role: actor.label,
+        tags: [],
         focusKey: null,
         detailFetchHint: null,
         lastSummary: actor.lastSummary,
       })),
   ];
+}
+
+function toRouterKnownNpcSummaries(input: {
+  presentNpcs: NpcSummary[];
+  focusedSceneActors: SceneActorSummary[];
+}): RouterKnownNpcSummary[] {
+  const visibleNpcIds = new Set(
+    input.focusedSceneActors
+      .filter((actor) => actor.kind === "npc" && actor.actorRef.startsWith("npc:"))
+      .map((actor) => actor.actorRef.slice("npc:".length)),
+  );
+
+  return input.presentNpcs
+    .filter((npc) => !visibleNpcIds.has(npc.id))
+    .map<RouterKnownNpcSummary>((npc) => ({
+      id: npc.id,
+      name: npc.name,
+      role: npc.role,
+      tags: npc.isCompanion ? Array.from(new Set([...(npc.tags ?? []), "companion"])) : [...(npc.tags ?? [])],
+      summary: npc.summary,
+      requiresDetailFetch: npc.socialLayer === "promoted_local" && !npc.isNarrativelyHydrated,
+    }))
+    .slice(0, 8);
 }
 
 function buildCrossLocationLeads(input: {
@@ -4502,6 +4531,14 @@ export async function getTurnRouterContext(snapshot: CampaignSnapshot): Promise<
       [...(commodityStacksByObjectId.get(stack.worldObjectId) ?? []), stack],
     );
   }
+  const focusedSceneActors = filterSceneActorsForFocus(
+    toSceneActorSummaries({
+      presentNpcs: snapshot.presentNpcs,
+      temporaryActors: snapshot.temporaryActors,
+      currentLocationId: snapshot.currentLocation.id,
+    }),
+    sceneFocus,
+  ).slice(0, sceneFocus ? 4 : 8);
   return {
     currentLocation: {
       id: snapshot.currentLocation.id,
@@ -4512,14 +4549,7 @@ export async function getTurnRouterContext(snapshot: CampaignSnapshot): Promise<
     },
     sceneFocus,
     adjacentRoutes: snapshot.adjacentRoutes,
-    sceneActors: filterSceneActorsForFocus(
-      toSceneActorSummaries({
-        presentNpcs: snapshot.presentNpcs,
-        temporaryActors: snapshot.temporaryActors,
-        currentLocationId: snapshot.currentLocation.id,
-      }),
-      sceneFocus,
-    ).slice(0, sceneFocus ? 4 : 8),
+    sceneActors: focusedSceneActors,
     recentLocalEvents: await loadRecentLocalEvents(snapshot),
     recentTurnLedger: buildRecentTurnLedger(snapshot),
     discoveredInformation: snapshot.discoveredInformation.map((information) => ({
@@ -4543,6 +4573,10 @@ export async function getTurnRouterContext(snapshot: CampaignSnapshot): Promise<
     sceneAspects: toRouterSceneAspectSummaries({
       ...snapshot.state,
       sceneAspects: filterSceneAspectsForFocus(snapshot.state.sceneAspects ?? {}, sceneFocus),
+    }),
+    knownNearbyNpcs: toRouterKnownNpcSummaries({
+      presentNpcs: snapshot.presentNpcs,
+      focusedSceneActors,
     }),
     currency: toPromptCurrencySummary(snapshot.character.currencyCp),
   };
@@ -4641,6 +4675,7 @@ export async function getPromptContext(
 
 export const repositoryTestUtils = {
   prunePromptContextForRouter,
+  toRouterKnownNpcSummaries,
   toPromptAssetInventory,
   toPromptWorldObjectSummary,
   toRouterWorldObjectSummary,

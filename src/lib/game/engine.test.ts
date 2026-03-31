@@ -827,6 +827,52 @@ test("inventory removal applies as an immediate cost while add stays blocked on 
   assert.equal(evaluated.stateCommitLog[2]?.status, "rejected");
 });
 
+test("inventory removal accepts a grounded item instance id by normalizing it to the stack template", () => {
+  const snapshot = {
+    ...createSnapshot(),
+    character: {
+      ...createSnapshot().character,
+      inventory: [
+        {
+          id: "iteminst_roll_1",
+          characterInstanceId: "inst_1",
+          templateId: "item_honey_roll",
+          template: {
+            id: "item_honey_roll",
+            campaignId: "camp_1",
+            name: "Honey-wheat roll",
+            description: "A sticky sweet roll glazed with honey.",
+            value: 5,
+            weight: 1,
+            rarity: "common",
+            tags: [],
+          },
+          isIdentified: true,
+          charges: null,
+          properties: null,
+        },
+      ],
+    },
+  } as CampaignSnapshot;
+
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot,
+    command: createValidatedCommand("success", [
+      { type: "adjust_inventory", itemId: "iteminst_roll_1", quantity: 1, action: "remove", reason: "You feed the roll to Safra." },
+    ]),
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["investigate"]),
+  });
+
+  assert.deepEqual(
+    evaluated.stateCommitLog.map((entry) => [entry.mutationType, entry.status, entry.reasonCode]),
+    [
+      [null, "applied", "check_success"],
+      ["adjust_inventory", "applied", "inventory_adjusted"],
+    ],
+  );
+});
+
 test("inventory add accepts newly acquired grounded item types", () => {
   const evaluated = engineTestUtils.evaluateResolvedCommand({
     snapshot: createSnapshot(),

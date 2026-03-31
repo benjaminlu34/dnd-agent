@@ -11,6 +11,7 @@ import {
 } from "@/lib/game/currency";
 import { characterTemplateDraftSchema } from "@/lib/game/characters";
 import { MAX_STARTER_ITEMS, normalizeItemNameList } from "@/lib/game/item-utils";
+import { canonicalizeNpcIdAgainstCandidates } from "@/lib/game/npc-identity";
 import {
   customResolvedLaunchEntryDraftSchema,
   generatedCampaignOpeningSchema,
@@ -2155,6 +2156,7 @@ const promotedNpcHydrationTool = {
 const startingLocalNpcSchema = z.object({
   name: z.string().trim().min(1),
   role: z.string().trim().min(1),
+  tags: z.array(z.string().trim().min(1)).max(6).default([]),
   summary: z.string().trim().min(1),
   description: z.string().trim().min(1),
   factionId: z.string().trim().min(1).nullable(),
@@ -2261,7 +2263,7 @@ const routerResolvedReferentSchema = z.object({
     (value) => !value.startsWith("spawn:"),
     "resolved referents must not use spawn handles",
   ),
-  targetKind: z.enum(["scene_actor", "inventory_item", "world_object", "route", "information", "location"]),
+  targetKind: z.enum(["scene_actor", "known_npc", "inventory_item", "world_object", "route", "information", "location"]),
   confidence: z.enum(["high", "medium"]),
 });
 
@@ -2285,7 +2287,7 @@ const routerImpliedDestinationFocusSchema = z.object({
     routerImpliedDestinationFocusSchema.nullable().optional().default(null),
   ),
   mustCheck: z.array(
-    z.enum(["sceneActors", "sceneAspects", "worldObjects", "inventory", "routes", "currency", "fetchedFacts", "recentTurnLedger"]),
+    z.enum(["sceneActors", "knownNpcs", "sceneAspects", "worldObjects", "inventory", "routes", "currency", "fetchedFacts", "recentTurnLedger"]),
   ).max(7).default([]),
 }).optional().default({
   primaryIntent: "Resolve the player action conservatively from grounded context.",
@@ -2595,6 +2597,7 @@ const ROUTER_MUST_CHECK_DEPRIORITY: RouterDecision["attention"]["mustCheck"] = [
   "inventory",
   "worldObjects",
   "sceneAspects",
+  "knownNpcs",
   "sceneActors",
 ];
 
@@ -2633,7 +2636,7 @@ function normalizeRouterDecisionInput(value: unknown): unknown {
   const mustCheck = attentionRaw.mustCheck
     .filter((entry): entry is RouterDecision["attention"]["mustCheck"][number] => typeof entry === "string")
     .filter((entry): entry is RouterDecision["attention"]["mustCheck"][number] =>
-      ["sceneActors", "sceneAspects", "worldObjects", "inventory", "routes", "currency", "fetchedFacts", "recentTurnLedger"].includes(entry),
+      ["sceneActors", "knownNpcs", "sceneAspects", "worldObjects", "inventory", "routes", "currency", "fetchedFacts", "recentTurnLedger"].includes(entry),
     );
 
   attentionRaw.mustCheck = clampRouterMustCheck(mustCheck);
@@ -2651,6 +2654,8 @@ function isPlaceholderResolvedTargetRef(entry: {
   switch (entry.targetKind) {
     case "scene_actor":
       return ["scene_actor", "temporary_actor", "actor", "npc", "person", "customer"].includes(normalized);
+    case "known_npc":
+      return ["known_npc", "npc", "person", "named_npc"].includes(normalized);
     case "inventory_item":
       return ["inventory_item", "item", "inventory", "object"].includes(normalized);
     case "world_object":
@@ -2666,20 +2671,160 @@ function isPlaceholderResolvedTargetRef(entry: {
   }
 }
 
-function normalizeRouterDecision(value: RouterDecision): RouterDecision {
+function normalizeSceneActorRef(
+  context: TurnRouterContext | undefined,
+  targetRef: string,
+): string {
+  const normalized = targetRef.trim();
+  if (!context) {
+    return normalized;
+  }
+
+  if (normalized.startsWith("npc:") || normalized.startsWith("temp:")) {
+    return normalized;
+  }
+
+  const sceneActor = context.sceneActors.find((actor) => actor.actorRef === `npc:${normalized}` || actor.actorRef === `temp:${normalized}`);
+  return sceneActor?.actorRef ?? normalized;
+}
+
+function normalizeKnownNpcId(
+  context: TurnRouterContext | undefined,
+  targetRef: string,
+  phrase?: string,
+): string {
+  const normalized = targetRef.trim();
+  const candidatePool = [
+    ...(context?.knownNearbyNpcs ?? []),
+    ...(context?.sceneActors
+      .filter((actor) => actor.kind === "npc" && actor.actorRef.startsWith("npc:"))
+      .map((actor) => ({
+        id: actor.actorRef.slice("npc:".length),
+        name: actor.displayLabel,
+        role: actor.role,
+      })) ?? []),
+  ];
+
+  if (!context) {
+    return normalized.startsWith("npc:") ? normalized.slice("npc:".length).trim() : normalized;
+  }
+
+  return canonicalizeNpcIdAgainstCandidates({
+    rawNpcId: normalized,
+    candidates: candidatePool,
+    phrase,
+  });
+}
+
+function sceneActorMatchesExplicitPhrase(actor: TurnRouterContext["sceneActors"][number], phrase: string): boolean {
+  const normalizedPhrase = phrase.trim().toLowerCase();
+  if (!normalizedPhrase) {
+    return false;
+  }
+
+  return actor.displayLabel.trim().toLowerCase() === normalizedPhrase || actor.role.trim().toLowerCase() === normalizedPhrase;
+}
+
+function isGroundedResolvedReferent(
+  context: TurnRouterContext | undefined,
+  entry: {
+    targetRef: string;
+    targetKind: RouterDecision["attention"]["resolvedReferents"][number]["targetKind"];
+  },
+): boolean {
+  if (!context) {
+    return true;
+  }
+
+  switch (entry.targetKind) {
+    case "scene_actor":
+      return context.sceneActors.some((actor) => actor.actorRef === entry.targetRef);
+    case "known_npc":
+      return (context.knownNearbyNpcs ?? []).some((npc) => npc.id === entry.targetRef)
+        || context.sceneActors.some((actor) => actor.kind === "npc" && actor.actorRef === `npc:${entry.targetRef}`);
+    case "world_object":
+      return context.worldObjects.some((object) => object.id === entry.targetRef);
+    case "inventory_item":
+      return context.inventory.some((item) => item.templateId === entry.targetRef || (item.instanceIds ?? []).includes(entry.targetRef));
+    case "route":
+      return context.adjacentRoutes.some((route) => route.id === entry.targetRef);
+    case "information":
+      return context.discoveredInformation.some((information) => information.id === entry.targetRef);
+    case "location":
+      return context.currentLocation.id === entry.targetRef;
+    default:
+      return true;
+  }
+}
+
+function looksLikeActorishTargetRef(targetRef: string): boolean {
+  const normalized = targetRef.trim().toLowerCase();
+  return normalized.startsWith("temp:") || normalized.startsWith("temp_") || normalized.startsWith("npc:") || normalized.startsWith("npc_");
+}
+
+function canonicalizeRouterNpcPrerequisiteId(
+  context: TurnRouterContext | undefined,
+  npcId: string,
+): string | null {
+  const normalized = npcId.trim();
+  if (!context) {
+    return normalized.startsWith("npc:") ? normalized.slice("npc:".length).trim() : normalized;
+  }
+
+  if (normalized.startsWith("temp:")) {
+    return null;
+  }
+
+  if (normalized.startsWith("npc:")) {
+    return normalized.slice("npc:".length).trim();
+  }
+
+  const sceneActor = context.sceneActors.find((actor) => actor.actorRef === `npc:${normalized}` || actor.actorRef === normalized);
+  if (sceneActor?.kind === "npc" && sceneActor.actorRef.startsWith("npc:")) {
+    return sceneActor.actorRef.slice("npc:".length);
+  }
+  if (sceneActor?.kind === "temporary_actor") {
+    return null;
+  }
+
+  const knownNpcId = normalizeKnownNpcId(context, normalized);
+  if ((context.knownNearbyNpcs ?? []).some((npc) => npc.id === knownNpcId)) {
+    return knownNpcId;
+  }
+
+  return normalized;
+}
+
+function normalizeRouterDecision(value: RouterDecision, context?: TurnRouterContext): RouterDecision {
   const dedupedVectors = Array.from(new Set(value.authorizedVectors));
   const seenPrerequisites = new Set<string>();
-  const requiredPrerequisites = value.requiredPrerequisites.filter((entry) => {
+  const requiredPrerequisites: RouterDecision["requiredPrerequisites"] = [];
+  for (const entry of value.requiredPrerequisites) {
+    if (entry.type === "npc_detail" || entry.type === "relationship_history") {
+      const canonicalNpcId = canonicalizeRouterNpcPrerequisiteId(context, entry.npcId);
+      if (!canonicalNpcId) {
+        continue;
+      }
+      const normalizedEntry = { ...entry, npcId: canonicalNpcId };
+      const key = `${normalizedEntry.type}:${normalizedEntry.npcId}`;
+      if (seenPrerequisites.has(key)) {
+        continue;
+      }
+      seenPrerequisites.add(key);
+      requiredPrerequisites.push(normalizedEntry);
+      continue;
+    }
+
     const key =
       entry.type === "information_connections"
         ? `${entry.type}:${entry.informationIds.join(",")}`
         : `${entry.type}:${Object.values(entry).slice(1).join(",")}`;
     if (seenPrerequisites.has(key)) {
-      return false;
+      continue;
     }
     seenPrerequisites.add(key);
-    return true;
-  });
+    requiredPrerequisites.push(entry);
+  }
   const clarification = value.clarification?.needed
     ? {
         needed: true,
@@ -2717,9 +2862,13 @@ function normalizeRouterDecision(value: RouterDecision): RouterDecision {
   }
 
   for (const entry of value.attention?.resolvedReferents ?? []) {
+    const normalizedTargetRef =
+      entry.targetKind === "known_npc"
+        ? normalizeKnownNpcId(context, entry.targetRef, entry.phrase)
+        : normalizeSceneActorRef(context, entry.targetRef);
     const normalizedEntry = {
       phrase: entry.phrase.trim(),
-      targetRef: entry.targetRef.trim(),
+      targetRef: normalizedTargetRef,
       targetKind: entry.targetKind,
       confidence: entry.confidence,
     };
@@ -2740,6 +2889,56 @@ function normalizeRouterDecision(value: RouterDecision): RouterDecision {
           seenUnresolved.add(key);
         }
       }
+      continue;
+    }
+
+    if (normalizedEntry.targetKind === "scene_actor" && context) {
+      const exactTempMatches = context.sceneActors.filter((actor) =>
+        actor.kind === "temporary_actor" && sceneActorMatchesExplicitPhrase(actor, normalizedEntry.phrase),
+      );
+      const currentActor = context.sceneActors.find((actor) => actor.actorRef === normalizedEntry.targetRef);
+      const currentActorMatchesPhrase = currentActor ? sceneActorMatchesExplicitPhrase(currentActor, normalizedEntry.phrase) : false;
+      if (exactTempMatches.length === 1 && !currentActorMatchesPhrase) {
+        normalizedEntry.targetRef = exactTempMatches[0]!.actorRef;
+      }
+      if (!currentActor) {
+        const exactKnownNpcMatches = (context.knownNearbyNpcs ?? []).filter((npc) =>
+          npc.name.trim().toLowerCase() === normalizedEntry.phrase.trim().toLowerCase(),
+        );
+        if (exactKnownNpcMatches.length === 1) {
+          normalizedEntry.targetKind = "known_npc";
+          normalizedEntry.targetRef = exactKnownNpcMatches[0]!.id;
+        }
+      }
+    }
+
+    if (!isGroundedResolvedReferent(context, normalizedEntry)) {
+      if (normalizedEntry.targetKind === "scene_actor" || looksLikeActorishTargetRef(normalizedEntry.targetRef)) {
+        const key = `temporary_actor:${normalizedEntry.phrase.toLowerCase()}`;
+        if (!seenUnresolved.has(key)) {
+          unresolvedReferents.push({
+            phrase: normalizedEntry.phrase,
+            intendedKind: "temporary_actor",
+            confidence: normalizedEntry.confidence,
+          });
+          seenUnresolved.add(key);
+        }
+        continue;
+      }
+
+      if (normalizedEntry.targetKind === "world_object") {
+        const key = `environmental_item:${normalizedEntry.phrase.toLowerCase()}`;
+        if (!seenUnresolved.has(key)) {
+          unresolvedReferents.push({
+            phrase: normalizedEntry.phrase,
+            intendedKind: "environmental_item",
+            confidence: normalizedEntry.confidence,
+          });
+          seenUnresolved.add(key);
+        }
+        continue;
+      }
+
       continue;
     }
 
@@ -2793,11 +2992,12 @@ function formatRouterSceneActorLine(actor: TurnRouterContext["sceneActors"][numb
   const label = compactPromptText(actor.displayLabel, 80) || "Unknown actor";
   const role = compactPromptText(actor.role, 60);
   const summary = compactPromptText(actor.lastSummary, 90);
+  const actorTags = (actor.tags ?? []).length ? ` tags:${(actor.tags ?? []).join("/")}` : "";
   const detailHint =
     actor.detailFetchHint?.type === "fetch_npc_detail"
       ? " detail-fetch(name/identity available)"
       : "";
-  return `${label}${role ? ` (${role})` : ""} [${actor.actorRef}, ${actor.kind}${detailHint}]${summary ? ` - ${summary}` : ""}`;
+  return `${label}${role ? ` (${role})` : ""} [${actor.actorRef}, ${actor.kind}${detailHint}${actorTags}]${summary ? ` - ${summary}` : ""}`;
 }
 
 function formatRouterRouteLine(route: TurnRouterContext["adjacentRoutes"][number]) {
@@ -2805,9 +3005,9 @@ function formatRouterRouteLine(route: TurnRouterContext["adjacentRoutes"][number
 }
 
 function formatRouterInventoryLine(item: TurnRouterContext["inventory"][number]) {
-  const ids = item.instanceIds?.length ? ` ids ${item.instanceIds.slice(0, 3).join(",")}` : "";
+  const ids = item.instanceIds?.length ? ` instanceIds ${item.instanceIds.slice(0, 3).join(",")}` : "";
   const tags = item.stateTags?.length ? ` ${item.stateTags.join("/")}` : "";
-  return `${compactPromptText(item.name, 80)} (qty ${item.quantity}${tags ? `, ${tags}` : ""}) [${item.templateId}${ids}]`;
+  return `${compactPromptText(item.name, 80)} (qty ${item.quantity}${tags ? `, ${tags}` : ""}) [${item.templateId}${ids ? `;${ids}` : ""}]`;
 }
 
 function formatRouterWorldObjectLine(object: TurnRouterContext["worldObjects"][number]) {
@@ -2830,6 +3030,15 @@ function formatRouterSceneAspectLine(aspect: TurnRouterContext["sceneAspects"][n
   return `${label}${state ? `: ${state}` : ""} (${aspect.duration}) [${aspect.key}]`;
 }
 
+function formatRouterKnownNpcLine(npc: NonNullable<TurnRouterContext["knownNearbyNpcs"]>[number]) {
+  const label = compactPromptText(npc.name, 80) || "Unknown NPC";
+  const role = compactPromptText(npc.role, 60);
+  const summary = compactPromptText(npc.summary, 100);
+  const tags = (npc.tags ?? []).length ? ` tags:${(npc.tags ?? []).join("/")}` : "";
+  const detailHint = npc.requiresDetailFetch ? " detail-fetch(name/identity available)" : "";
+  return `${label}${role ? ` (${role})` : ""} [${npc.id}, known-npc${detailHint}${tags}]${summary ? ` - ${summary}` : ""}`;
+}
+
 function formatRouterContextForModel(context: TurnRouterContext) {
   const sceneFocusLabel = context.sceneFocus?.label?.trim() || null;
   return {
@@ -2840,6 +3049,7 @@ function formatRouterContextForModel(context: TurnRouterContext) {
     currency: context.currency,
     authoritativeState: {
       sceneActors: context.sceneActors.slice(0, 8).map(formatRouterSceneActorLine),
+      knownNearbyNpcs: (context.knownNearbyNpcs ?? []).slice(0, 8).map(formatRouterKnownNpcLine),
       inventory: context.inventory.slice(0, 8).map(formatRouterInventoryLine),
       worldObjects: context.worldObjects.slice(0, 8).map(formatRouterWorldObjectLine),
       sceneAspects: context.sceneAspects.slice(0, 8).map(formatRouterSceneAspectLine),
@@ -3100,8 +3310,11 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Do not create combat, market trade, or deliberate social escalation in observe mode.",
         "Use sceneActors.actorRef values exactly only for actorRef fields such as set_scene_actor_presence and set_follow_state.",
         "For npcId, citedNpcId, and targetNpcId fields, use the bare NPC id without the npc: prefix.",
+        "Fetched npc_detail for a named NPC is sufficient grounding for record_npc_interaction, adjust_relationship, and checkIntent npc ids even if that NPC is not currently listed in sceneActors. Do not spawn a duplicate temporary actor just to stand in for a fetched named NPC.",
+        "Living creatures such as mounts, familiars, pets, and animal companions are actors, not world objects. Do not use spawn_world_object for a horse, dog, owl, raven, or similar living companion.",
         "Never use record_local_interaction with npc: refs or named sceneActors. It is only for unnamed temporary locals referenced as temp:..., spawn:..., or raw temporary-actor ids.",
         "Never invent temp: ids. temp: refs are only for temporary actors already grounded in sceneActors; if the person is new, spawn_temporary_actor first and then reference spawn:<key>.",
+        "If an owned or familiar animal is present but not yet grounded, manifest it as a temporary actor first. If a grounded NPC companion or tagged beast is already present, use that actor and prefer set_follow_state or set_scene_actor_presence over creating a prop.",
         "If the player reaches for a plausible unlisted local, improvised item, or environmental condition, spawn it first before interacting with it only when the noun is a fresh generic local role or a new same-scene manifestation implied by the current action.",
         "Use spawn_temporary_actor before record_local_interaction when the local is not already listed in sceneActors.",
         "If the player addresses a generic person like someone, passerby, customer, shopper, stranger, or interested local, keep them generic: do not redirect them to a named scene actor; spawn_temporary_actor first if the action engages them.",
@@ -3126,6 +3339,7 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "When fetched npc_detail exposes grounded held items or commodity stacks on an NPC, use transfer_assets from that NPC holder for looting, stealing, or taking those assets. Do not replace grounded NPC-held goods with spawn_fiat_item.",
         "Use update_world_object_state to lock, hide, or hitch a durable world object.",
         "Use update_item_state for equipping, changing charges, or toggling durable item state like lit/unlit.",
+        "For adjust_inventory, use the inventory line's main template/stack id. Reserve instanceIds for update_item_state or transfer_assets.itemInstanceIds when a specific physical copy matters.",
         "Keeping an item on your own person still counts as inventory. Pockets, sleeves, belts, boots, packs, and similar on-body storage should not use adjust_inventory or transfer_assets unless the item actually leaves the player's custody.",
         "Use update_character_state for track-only conditions like disguised, poisoned, or exhausted.",
         "Use set_follow_state when someone starts or stops following the player through location and focus changes.",
@@ -3140,6 +3354,7 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "If attention_packet.resolvedReferents supplies a grounded ref, use that exact ref instead of inventing or guessing ids.",
         "If attention_packet.mustCheck lists inventory, do not remove or consume an item unless it is grounded in context.authoritativeState.inventory or fetched_facts.",
         "If attention_packet.mustCheck lists sceneActors, do not target a named actor through record_local_interaction.",
+        "If attention_packet.resolvedReferents includes a known_npc or fetched_facts includes npc_detail for a named person the player is seeking, keep the turn anchored to that NPC instead of spawning a generic local stand-in.",
         "If attention_packet.mustCheck lists sceneAspects or routes, verify those surfaces before depending on them in mutations.",
         "Only scene actors, world objects, inventory, routes, and scene aspects already grounded in context are valid direct interaction targets.",
         "recentTurnLedger contains grounded prior outcomes only. It is memory, not target authority.",
@@ -3196,8 +3411,11 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Use record_npc_interaction for ordinary same-scene dialogue with a grounded named NPC when the exchange matters but no relationship shift is required.",
         "Use sceneActors.actorRef values exactly only for actorRef fields such as set_scene_actor_presence and set_follow_state.",
         "For npcId, citedNpcId, and targetNpcId fields, use the bare NPC id without the npc: prefix.",
+        "Fetched npc_detail for a named NPC is sufficient grounding for record_npc_interaction, adjust_relationship, and checkIntent npc ids even if that NPC is not currently listed in sceneActors. Do not spawn a duplicate temporary actor just to stand in for a fetched named NPC.",
+        "Living creatures such as mounts, familiars, pets, and animal companions are actors, not world objects. Do not use spawn_world_object for a horse, dog, owl, raven, or similar living companion.",
         "Never use record_local_interaction with npc: refs or named sceneActors. It is only for unnamed temporary locals referenced as temp:..., spawn:..., or raw temporary-actor ids.",
         "Never invent temp: ids. temp: refs are only for temporary actors already grounded in sceneActors; if the person is new, spawn_temporary_actor first and then reference spawn:<key>.",
+        "If an owned or familiar animal is present but not yet grounded, manifest it as a temporary actor first. If a grounded NPC companion or tagged beast is already present, use that actor and prefer set_follow_state or set_scene_actor_presence over creating a prop.",
         "When speaking to a named on-screen NPC, use record_npc_interaction for ordinary dialogue, use adjust_relationship only for meaningful social shifts, and use checkIntent only when success or failure would materially change what can happen.",
         "If the player reaches for a plausible unlisted local, improvised item, or environmental condition, spawn it first before interacting with it only when the noun is a fresh generic local role or a new same-scene manifestation implied by the current action.",
         "Use spawn_temporary_actor before record_local_interaction when the local is not already listed in sceneActors.",
@@ -3222,6 +3440,7 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "When fetched npc_detail exposes grounded held items or commodity stacks on an NPC, use transfer_assets from that NPC holder for looting, stealing, or taking those assets. Do not replace grounded NPC-held goods with spawn_fiat_item.",
         "Use update_world_object_state to lock, hide, or hitch a durable world object.",
         "Use update_item_state for equipping, changing charges, or toggling durable item state like lit/unlit.",
+        "For adjust_inventory, use the inventory line's main template/stack id. Reserve instanceIds for update_item_state or transfer_assets.itemInstanceIds when a specific physical copy matters.",
         "Keeping an item on your own person still counts as inventory. Pockets, sleeves, belts, boots, packs, and similar on-body storage should not use adjust_inventory or transfer_assets unless the item actually leaves the player's custody.",
         "Use update_character_state for track-only conditions like disguised, poisoned, or exhausted.",
         "Use set_follow_state when someone starts or stops following the player through location and focus changes.",
@@ -3241,6 +3460,7 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "If attention_packet.resolvedReferents supplies a grounded ref, use that exact ref instead of inventing or guessing ids.",
         "If attention_packet.mustCheck lists inventory, do not remove or consume an item unless it is grounded in context.authoritativeState.inventory or fetched_facts.",
         "If attention_packet.mustCheck lists sceneActors, do not target a named actor through record_local_interaction.",
+        "If attention_packet.resolvedReferents includes a known_npc or fetched_facts includes npc_detail for a named person the player is seeking, keep the turn anchored to that NPC instead of spawning a generic local stand-in.",
         "If attention_packet.mustCheck lists sceneAspects or routes, verify those surfaces before depending on them in mutations.",
         "Only scene actors, world objects, inventory, routes, and scene aspects already grounded in context are valid direct interaction targets.",
         "recentTurnLedger contains grounded prior outcomes only. It is memory, not target authority.",
@@ -3356,21 +3576,27 @@ function buildTurnRouterSystemPrompt(correctionNotes?: string | null) {
     "Do not generate gameplay policy, strategy notes, or prohibitions for the mechanics model.",
     "Map player nouns to existing grounded refs when possible.",
     "Do not invent new ids or spawn handles.",
+    "router_context.knownNearbyNpcs lists authoritative named NPCs in the current location who are not immediate scene actors at this focus. They are valid known_npc referents and valid npc_detail or relationship_history fetch targets, but they are not immediate actorRef targets unless later manifested into the scene.",
     "routes strictly means macro-travel leaving the current location node for another adjacent location.",
     "Movement within the same city, district, building, shop, or worksite is intra-location focus, not routes.",
     "Phrases like back to the forge, into the market, over to the bench, or to the tavern inside the same place should not add routes to mustCheck.",
     "When the player strongly implies movement into a clear sub-location within the current macro-location, emit attention.impliedDestinationFocus with a concise key and label such as back_room/The Back Room, yard/Yard, stable_entrance/Stable Entrance, workbench/Workbench, stall_front/Stall Front, or alleyway/Alleyway.",
     "Do not emit impliedDestinationFocus for macro travel between location nodes or vague attention shifts with no clear sub-location.",
     "If no grounded ref exists but the noun is plausible, emit it in unresolvedReferents instead of resolvedReferents.",
-    "resolvedReferents.targetRef must be an actual grounded ref from router_context, such as npc:..., a real inventory id, a world object id, a route id, an information id, or a location id.",
+    "resolvedReferents.targetRef must be an actual grounded ref from router_context, such as npc:... for scene actors, a known NPC id from knownNearbyNpcs, a real inventory id, a world object id, a route id, an information id, or a location id.",
     "Never use schema words like temporary_actor, scene_actor, inventory_item, world_object, route, information, or location as targetRef values.",
     "Only the authoritative current-state surfaces in router_context are valid interaction targets. recentGroundedHistory is memory, not authority.",
     "Never remap an unresolved pronoun or stale narrated referent onto a different grounded actor just to satisfy the schema.",
-    "If the player seems to mean someone who is not in authoritativeState.sceneActors or authoritativeState.worldObjects, keep that referent unresolved instead of guessing.",
+    "If the player explicitly names or clearly searches for someone listed in knownNearbyNpcs, resolve them as known_npc and request npc_detail when needed instead of downgrading them to an unresolved temporary actor.",
+    "If the player seems to mean someone who is not in authoritativeState.sceneActors, authoritativeState.knownNearbyNpcs, or authoritativeState.worldObjects, keep that referent unresolved instead of guessing.",
     "Generic people like someone, passerby, customer, shopper, stranger, or interested local should remain unresolved temporary_actor referents unless the authoritative state already identifies them.",
+    "Animals, mounts, familiars, pets, and other living creatures are actors, not world objects. If they are not already grounded in sceneActors, keep them unresolved as temporary_actor referents rather than resolving them as world objects.",
     "Do not remap a generic or unresolved person onto a named scene actor merely because one is present in the scene.",
+    "If the player's noun exactly matches a present temporary actor's local role label, such as baker, guard, customer, or merchant, keep the referent anchored to that temp actor instead of drifting to a fetchable named NPC in the same scene.",
     "If one present scene actor is already the clear conversational counterpart from the grounded scene summaries, keep polite follow-ups like sir, ma'am, or what can I call you anchored to that actor instead of redirecting to another named bystander.",
     "If a present scene actor is marked detail-fetch(name/identity available) and the player asks for their name, title, identity, or what to call them, include npc_detail for that actor.",
+    "If the player calls for, looks for, or tries to contact a named person listed in knownNearbyNpcs, request npc_detail for that exact NPC rather than spawning a duplicate generic stand-in.",
+    "Never request npc_detail for temp: actors or unnamed temporary locals. npc_detail is only for grounded named NPC ids.",
     "Treat recentNarrativeProse as style continuity only, not evidence of who is present, what they carry, or what objects can be manipulated now.",
   ].join("\n");
 
@@ -4891,6 +5117,7 @@ class DungeonMasterClient {
           id: socialNpcIds[index],
           name: npc.name,
           role: npc.role,
+          tags: npc.tags,
           summary: npc.summary,
           description: `${npc.description} Current concern: ${npc.currentConcern}. You might cross paths because ${npc.playerCrossPath.toLowerCase()}.`,
           factionId: npc.factionId,
@@ -6153,6 +6380,7 @@ class DungeonMasterClient {
 
       return parsed.data.npcs.map((npc) => ({
         ...npc,
+        tags: npc.tags ?? [],
         isCompanion: false,
       }));
     } catch (error) {
@@ -6327,7 +6555,7 @@ class DungeonMasterClient {
         const normalizedInput = normalizeRouterDecisionInput(response?.input);
         const parsed = routerDecisionSchema.safeParse(normalizedInput);
         if (parsed.success) {
-          return normalizeRouterDecision(parsed.data);
+          return normalizeRouterDecision(parsed.data, input.context);
         }
 
         const issues = zodIssuesToText(parsed.error.issues);

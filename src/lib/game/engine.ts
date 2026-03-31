@@ -28,6 +28,7 @@ import {
   getTurnSnapshot,
   toPlayerCampaignSnapshot,
 } from "@/lib/game/repository";
+import { canonicalizeNpcIdAgainstCandidates } from "@/lib/game/npc-identity";
 import { wakeScheduleGenerationJobs } from "@/lib/game/schedule-jobs";
 import {
   MAX_CASCADE_DEPTH,
@@ -1334,12 +1335,18 @@ function resolveSceneActorTargetForEvaluation(input: {
   return null;
 }
 
-function resolveItemTemplateIdForEvaluation(input: {
+function resolveInventoryItemIdForEvaluation(input: {
   itemId: string;
   spawnedItemTemplateIds: Map<string, string>;
+  characterInventory: CampaignSnapshot["character"]["inventory"];
+  projectedItemInstances: Map<string, ItemInstance>;
 }) {
   if (!isSpawnHandle(input.itemId)) {
-    return input.itemId;
+    return (
+      input.characterInventory.find((item) => item.id === input.itemId)?.templateId
+      ?? input.projectedItemInstances.get(input.itemId)?.templateId
+      ?? input.itemId
+    );
   }
 
   return input.spawnedItemTemplateIds.get(input.itemId.slice("spawn:".length)) ?? null;
@@ -3298,9 +3305,11 @@ function evaluateResolvedCommand(input: {
         continue;
       }
 
-      const resolvedItemId = resolveItemTemplateIdForEvaluation({
+      const resolvedItemId = resolveInventoryItemIdForEvaluation({
         itemId: mutation.itemId,
         spawnedItemTemplateIds,
+        characterInventory: input.snapshot.character.inventory,
+        projectedItemInstances,
       });
       if (!resolvedItemId) {
         stateCommitLog.push({
@@ -4693,6 +4702,7 @@ async function applyResolvedMutations(input: {
             campaignId: input.snapshot.campaignId,
             name,
             role,
+            tags: [],
             summary: seedText.summary,
             description: seedText.description,
             socialLayer: "promoted_local",
@@ -5206,9 +5216,19 @@ async function applyResolvedMutations(input: {
     }
 
     if (mutation.type === "adjust_inventory") {
-      const resolvedItemId = resolveItemTemplateIdForEvaluation({
+      const resolvedItemId = resolveInventoryItemIdForEvaluation({
         itemId: mutation.itemId,
         spawnedItemTemplateIds,
+        characterInventory: input.snapshot.character.inventory,
+        projectedItemInstances: new Map(
+          input.snapshot.character.inventory.map((item) => [
+            item.id,
+            {
+              ...item,
+              properties: item.properties ? structuredClone(item.properties) : null,
+            },
+          ]),
+        ),
       });
       if (!resolvedItemId) {
         throw new Error("Inventory adjustment referenced an unresolved spawned item.");
@@ -6370,6 +6390,10 @@ async function executeRequiredPrerequisites(input: {
   }
 
   const fetchedFacts: Array<TurnFetchToolResult | null> = new Array(input.prerequisites.length).fill(null);
+  const canonicalNpcCandidates = [
+    ...input.snapshot.presentNpcs.map((npc) => ({ id: npc.id, name: npc.name })),
+    ...Object.keys(input.snapshot.knownNpcLocationIds).map((id) => ({ id })),
+  ];
   const npcDetailRequests: Array<{ index: number; npcId: string }> = [];
   const marketPriceRequests: Array<{ index: number; locationId: string }> = [];
   const factionIntelRequests: Array<{ index: number; factionId: string }> = [];
@@ -6379,7 +6403,13 @@ async function executeRequiredPrerequisites(input: {
 
   for (const [index, prerequisite] of input.prerequisites.entries()) {
     if (prerequisite.type === "npc_detail") {
-      npcDetailRequests.push({ index, npcId: prerequisite.npcId });
+      npcDetailRequests.push({
+        index,
+        npcId: canonicalizeNpcIdAgainstCandidates({
+          rawNpcId: prerequisite.npcId,
+          candidates: canonicalNpcCandidates,
+        }),
+      });
       continue;
     }
     if (prerequisite.type === "market_prices") {
@@ -6402,7 +6432,13 @@ async function executeRequiredPrerequisites(input: {
       });
       continue;
     }
-    relationshipHistoryRequests.push({ index, npcId: prerequisite.npcId });
+    relationshipHistoryRequests.push({
+      index,
+      npcId: canonicalizeNpcIdAgainstCandidates({
+        rawNpcId: prerequisite.npcId,
+        candidates: canonicalNpcCandidates,
+      }),
+    });
   }
 
   const [

@@ -480,6 +480,123 @@ test("validateTurnCommand normalizes actorRef-form npc ids for named npc interac
   ]);
 });
 
+test("validateTurnCommand repairs uniquely matching bare npc ids missing the npc_ prefix", () => {
+  const snapshot = {
+    ...createSnapshot(),
+    presentNpcs: [
+      ...createSnapshot().presentNpcs,
+      {
+        id: "npc_57621607-d0fb-432a-9d21-7379a58f9d49",
+        name: "Elias Thorn",
+        role: "customer",
+        summary: "A careful buyer.",
+        description: "Merchant's mark on his sleeve.",
+        socialLayer: "promoted_local" as const,
+        isNarrativelyHydrated: true,
+        factionId: null,
+        factionName: null,
+        currentLocationId: "loc_gate",
+        approval: 0,
+        approvalBand: "neutral" as const,
+        isCompanion: false,
+        state: "active" as const,
+        threatLevel: 1,
+      },
+    ],
+    knownNpcLocationIds: {
+      ...createSnapshot().knownNpcLocationIds,
+      "npc_57621607-d0fb-432a-9d21-7379a58f9d49": "loc_gate",
+    },
+  };
+
+  const validated = validateTurnCommand({
+    snapshot,
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Close the sale"],
+      mutations: [
+        {
+          type: "record_npc_interaction",
+          npcId: "57621607-d0fb-432a-9d21-7379a58f9d49",
+          interactionSummary: "You close the sale with Elias and accept his down payment.",
+          phase: "immediate",
+        },
+      ],
+    },
+  });
+
+  assert.equal(validated.type, "resolve_mechanics");
+  assert.deepEqual(validated.warnings, []);
+  assert.deepEqual(validated.mutations, [
+    {
+      type: "record_npc_interaction",
+      npcId: "npc_57621607-d0fb-432a-9d21-7379a58f9d49",
+      interactionSummary: "You close the sale with Elias and accept his down payment.",
+      phase: "immediate",
+    },
+  ]);
+});
+
+test("validateTurnCommand normalizes grounded inventory instance ids for adjust_inventory", () => {
+  const validated = validateTurnCommand({
+    snapshot: {
+      ...createSnapshot(),
+      character: {
+        ...createSnapshot().character,
+        inventory: [
+          {
+            id: "iteminst_roll_1",
+            characterInstanceId: "inst_1",
+            templateId: "item_honey_roll",
+            template: {
+              id: "item_honey_roll",
+              campaignId: "camp_1",
+              name: "Honey-wheat roll",
+              description: "A sticky sweet roll glazed with honey.",
+              value: 5,
+              weight: 1,
+              rarity: "common",
+              tags: [],
+            },
+            isIdentified: true,
+            charges: null,
+            properties: null,
+          },
+        ],
+      },
+    },
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Finish the roll"],
+      mutations: [
+        {
+          type: "adjust_inventory",
+          itemId: "iteminst_roll_1",
+          quantity: 1,
+          action: "remove",
+          reason: "You finish the roll.",
+          phase: "immediate",
+        },
+      ],
+    },
+  });
+
+  assert.equal(validated.type, "resolve_mechanics");
+  assert.deepEqual(validated.warnings, []);
+  assert.deepEqual(validated.mutations, [
+    {
+      type: "adjust_inventory",
+      itemId: "item_honey_roll",
+      quantity: 1,
+      action: "remove",
+      reason: "You finish the roll.",
+      phase: "immediate",
+    },
+  ]);
+});
+
 test("validateTurnCommand preserves record_local_interaction targeting a raw temporary actor id", () => {
   const validated = validateTurnCommand({
     snapshot: {

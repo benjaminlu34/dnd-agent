@@ -316,6 +316,7 @@ export type GeneratedNpc = {
   id: string;
   name: string;
   role: string;
+  tags?: string[];
   summary: string;
   description: string;
   factionId: string | null;
@@ -738,6 +739,7 @@ export type NpcSummary = {
   id: string;
   name: string;
   role: string;
+  tags?: string[];
   summary: string;
   description: string;
   socialLayer: "anchor" | "starting_local" | "promoted_local";
@@ -820,6 +822,7 @@ export type PromptNpcSummary = {
   id: string;
   name: string;
   role: string;
+  tags?: string[];
   requiresDetailFetch: boolean;
 };
 
@@ -830,6 +833,7 @@ export type SceneActorSummary = {
   kind: "npc" | "temporary_actor";
   displayLabel: string;
   role: string;
+  tags?: string[];
   focusKey?: string | null;
   detailFetchHint:
     | {
@@ -1082,6 +1086,15 @@ export type RouterSceneAspectSummary = {
   focusKey?: string | null;
 };
 
+export type RouterKnownNpcSummary = {
+  id: string;
+  name: string;
+  role: string;
+  tags?: string[];
+  summary: string;
+  requiresDetailFetch: boolean;
+};
+
 export type TurnRouterContext = Pick<
   SpatialPromptContext,
   | "currentLocation"
@@ -1097,6 +1110,7 @@ export type TurnRouterContext = Pick<
   inventory: RouterInventorySummary[];
   worldObjects: RouterWorldObjectSummary[];
   sceneAspects: RouterSceneAspectSummary[];
+  knownNearbyNpcs?: RouterKnownNpcSummary[];
   currency?: PromptCurrencySummary;
 };
 
@@ -1148,6 +1162,7 @@ export type RouterClarification = {
 
 export type RouterResolvedReferentTargetKind =
   | "scene_actor"
+  | "known_npc"
   | "inventory_item"
   | "world_object"
   | "route"
@@ -1176,6 +1191,7 @@ export type RouterImpliedDestinationFocus = {
 
 export type RouterAttentionMustCheck =
   | "sceneActors"
+  | "knownNpcs"
   | "sceneAspects"
   | "worldObjects"
   | "inventory"

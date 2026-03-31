@@ -662,6 +662,7 @@ export const generatedRegionalLifeSchema = z.object({
 const generatedSocialNpcSchema = z.object({
   name: z.string().trim().min(1),
   role: z.string().trim().min(1),
+  tags: z.array(z.string().trim().min(1)).max(6).default([]),
   summary: z.string().trim().min(1),
   description: z.string().trim().min(1),
   factionId: z.string().trim().min(1).nullable(),
@@ -1108,6 +1109,7 @@ export const preparedCampaignLaunchSchema = z.object({
       id: z.string().trim().min(1),
       name: z.string().trim().min(1),
       role: z.string().trim().min(1),
+      tags: z.array(z.string().trim().min(1)).max(6).default([]),
       summary: z.string().trim().min(1),
       description: z.string().trim().min(1),
       factionId: z.string().trim().min(1).nullable(),

@@ -721,6 +721,72 @@ test("effectivePromptSceneFocus prefers the router-implied destination focus for
   });
 });
 
+test("toRouterKnownNpcSummaries keeps same-location named NPCs available when focus filtering hides them from scene actors", () => {
+  const knownNearby = repositoryTestUtils.toRouterKnownNpcSummaries({
+    presentNpcs: [
+      {
+        id: "npc_tarn",
+        name: "Tarn Blackthorn",
+        role: "Street Urchin",
+        tags: [],
+        summary: "A quick-fingered orphan who knows the Market Square's shadows.",
+        description: "A wary street urchin with sharp eyes and quicker hands.",
+        socialLayer: "starting_local",
+        isNarrativelyHydrated: true,
+        factionId: null,
+        factionName: null,
+        currentLocationId: "loc_waterdeep",
+        approval: 0,
+        approvalBand: "neutral",
+        isCompanion: false,
+        state: "active",
+        threatLevel: 1,
+      },
+      {
+        id: "npc_mira",
+        name: "Mira Brightstone",
+        role: "Baker",
+        tags: [],
+        summary: "She keeps loaves wrapped under clean cloth at the stall front.",
+        description: "A baker with flour on her sleeves and a watchful eye.",
+        socialLayer: "starting_local",
+        isNarrativelyHydrated: true,
+        factionId: null,
+        factionName: null,
+        currentLocationId: "loc_waterdeep",
+        approval: 0,
+        approvalBand: "neutral",
+        isCompanion: false,
+        state: "active",
+        threatLevel: 1,
+      },
+    ],
+    focusedSceneActors: [
+      {
+        actorRef: "npc:npc_mira",
+        kind: "npc",
+        displayLabel: "Mira Brightstone",
+        role: "Baker",
+        tags: [],
+        focusKey: null,
+        detailFetchHint: null,
+        lastSummary: "She keeps loaves wrapped under clean cloth at the stall front.",
+      },
+    ],
+  });
+
+  assert.deepEqual(knownNearby, [
+    {
+      id: "npc_tarn",
+      name: "Tarn Blackthorn",
+      role: "Street Urchin",
+      tags: [],
+      summary: "A quick-fingered orphan who knows the Market Square's shadows.",
+      requiresDetailFetch: false,
+    },
+  ]);
+});
+
 test("normalizeLaunchEntrySelection returns provided custom entry unchanged", () => {
   const customEntryPoint: ResolvedLaunchEntry = {
     id: "custom_entry_1",

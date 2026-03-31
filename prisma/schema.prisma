@@ -358,6 +358,7 @@ model NPC {
   campaignId        String
   name              String
   role              String
+  tags              String[]     @default([])
   summary           String
   description       String
   socialLayer       String       @default("anchor")

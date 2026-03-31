@@ -1,4 +1,5 @@
 import { flattenCurrencyToCp } from "@/lib/game/currency";
+import { canonicalizeNpcIdAgainstCandidates } from "@/lib/game/npc-identity";
 import type {
   CampaignSnapshot,
   ChallengeApproach,
@@ -149,6 +150,46 @@ function findPresentNpc(snapshot: CampaignSnapshot, npcId: string | undefined) {
   return snapshot.presentNpcs.find((npc) => npc.id === npcId) ?? null;
 }
 
+function canonicalizeNpcIdForTurn(
+  snapshot: CampaignSnapshot,
+  fetchedFacts: TurnFetchToolResult[],
+  npcId: string,
+) {
+  const trimmed = npcId.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+  const candidates = [
+    ...snapshot.presentNpcs.map((npc) => ({ id: npc.id, name: npc.name })),
+    ...fetchedFacts
+      .filter((fact) => fact.type === "fetch_npc_detail")
+      .map((fact) => ({ id: fact.result.id, name: fact.result.name })),
+    ...Object.keys(snapshot.knownNpcLocationIds).map((id) => ({ id })),
+  ];
+
+  return canonicalizeNpcIdAgainstCandidates({
+    rawNpcId: trimmed,
+    candidates,
+  });
+}
+
+function canonicalizeInventoryItemIdForTurn(
+  snapshot: CampaignSnapshot,
+  itemId: string,
+) {
+  const trimmed = itemId.trim();
+  if (!trimmed || trimmed.startsWith("spawn:")) {
+    return trimmed;
+  }
+
+  const inventoryItem = snapshot.character.inventory.find((item) => item.id === trimmed);
+  if (inventoryItem) {
+    return inventoryItem.templateId;
+  }
+
+  return trimmed;
+}
+
 function isValidLocalInteractionTarget(snapshot: CampaignSnapshot, localEntityId: string) {
   const normalized = localEntityId.trim();
   if (!normalized) {
@@ -186,15 +227,6 @@ function isValidNpcInteractionTarget(
   return findPresentNpc(snapshot, normalized) != null || findFetchedNpc(fetchedFacts, normalized) != null;
 }
 
-function normalizeNpcIdForTurn(npcId: string) {
-  const normalized = npcId.trim();
-  if (!normalized.startsWith("npc:")) {
-    return normalized;
-  }
-
-  return normalized.slice("npc:".length).trim();
-}
-
 function normalizeLocalInteractionTargetForTurn(
   mutations: readonly MechanicsMutation[],
   localEntityId: string,
@@ -218,8 +250,18 @@ function normalizePlayerActionText(playerAction: string | undefined) {
 function resolvedSceneActorRefs(routerDecision: RouterDecision | undefined) {
   return new Set(
     (routerDecision?.attention.resolvedReferents ?? [])
-      .filter((entry) => entry.targetKind === "scene_actor")
-      .map((entry) => entry.targetRef),
+      .flatMap((entry) => {
+        if (entry.targetKind === "scene_actor") {
+          return [entry.targetRef];
+        }
+        if (entry.targetKind === "known_npc") {
+          const npcId = entry.targetRef.startsWith("npc:")
+            ? entry.targetRef.slice("npc:".length).trim()
+            : entry.targetRef;
+          return npcId ? [`npc:${npcId}`] : [];
+        }
+        return [];
+      }),
   );
 }
 
@@ -518,7 +560,7 @@ export function validateTurnCommand(input: {
       || mutation.type === "adjust_relationship"
       || mutation.type === "set_npc_state"
     ) {
-      const normalizedNpcId = normalizeNpcIdForTurn(mutation.npcId);
+      const normalizedNpcId = canonicalizeNpcIdForTurn(snapshot, fetchedFacts, mutation.npcId);
       if (normalizedNpcId === mutation.npcId) {
         return mutation;
       }
@@ -526,6 +568,18 @@ export function validateTurnCommand(input: {
       return {
         ...mutation,
         npcId: normalizedNpcId,
+      } satisfies MechanicsMutation;
+    }
+
+    if (mutation.type === "adjust_inventory") {
+      const normalizedItemId = canonicalizeInventoryItemIdForTurn(snapshot, mutation.itemId);
+      if (normalizedItemId === mutation.itemId) {
+        return mutation;
+      }
+
+      return {
+        ...mutation,
+        itemId: normalizedItemId,
       } satisfies MechanicsMutation;
     }
 
@@ -538,11 +592,11 @@ export function validateTurnCommand(input: {
           citedNpcId:
             command.checkIntent.citedNpcId == null
               ? undefined
-              : normalizeNpcIdForTurn(command.checkIntent.citedNpcId),
+              : canonicalizeNpcIdForTurn(snapshot, fetchedFacts, command.checkIntent.citedNpcId),
         }
       : {
           ...command.checkIntent,
-          targetNpcId: normalizeNpcIdForTurn(command.checkIntent.targetNpcId),
+          targetNpcId: canonicalizeNpcIdForTurn(snapshot, fetchedFacts, command.checkIntent.targetNpcId),
         }
     : undefined;
 
