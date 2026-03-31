@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { aiProviderTestUtils } from "../ai/provider";
 
+const TEST_CURRENCY = { totalCp: 300, formatted: "3 gp" } as const;
+const TEST_RICH_CURRENCY = { totalCp: 700, formatted: "7 gp" } as const;
+
 test("extractToolInput flags clipped resolve_mechanics payloads as likely truncated", () => {
   const response = {
     choices: [
@@ -73,7 +76,7 @@ test("normalizeRouterDecision caps mustCheck to seven entries and drops least au
         "worldObjects",
         "inventory",
         "routes",
-        "gold",
+        "currency",
         "fetchedFacts",
         "recentTurnLedger",
       ],
@@ -87,7 +90,7 @@ test("normalizeRouterDecision caps mustCheck to seven entries and drops least au
     "worldObjects",
     "inventory",
     "routes",
-    "gold",
+    "currency",
     "fetchedFacts",
   ]);
 });
@@ -154,6 +157,47 @@ test("parseFinalActionToolCall normalizes null checkIntent to omission", () => {
   assert.equal(parsed.data.checkIntent, undefined);
 });
 
+test("parseFinalActionToolCall hoists misplaced legacy checkIntent pseudo-mutations", () => {
+  const parsed = aiProviderTestUtils.parseFinalActionToolCall({
+    type: "resolve_mechanics",
+    timeMode: "exploration",
+    suggestedActions: ["Keep talking"],
+    mutations: [
+      {
+        type: "checkIntent",
+        reason: "Press the guard for an answer",
+        challengeApproach: "influence",
+        citedNpcId: "npc_guard",
+        mode: "normal",
+      },
+      {
+        type: "record_npc_interaction",
+        npcId: "npc_guard",
+        interactionSummary: "You hold the guard's attention while he weighs your request.",
+        phase: "conditional",
+      },
+    ],
+  });
+
+  assert.equal(parsed.success, true);
+  if (!parsed.success) {
+    return;
+  }
+  assert.equal(parsed.data.type, "resolve_mechanics");
+  if (parsed.data.type !== "resolve_mechanics") {
+    return;
+  }
+  assert.deepEqual(parsed.data.checkIntent, {
+    type: "challenge",
+    reason: "Press the guard for an answer",
+    challengeApproach: "influence",
+    citedNpcId: "npc_guard",
+    mode: "normal",
+  });
+  assert.equal(parsed.data.mutations.length, 1);
+  assert.equal(parsed.data.mutations[0]?.type, "record_npc_interaction");
+});
+
 test("parseFinalActionToolCall rejects removed legacy monolithic action payloads", () => {
   const parsed = aiProviderTestUtils.parseFinalActionToolCall({
     type: "execute_converse",
@@ -194,6 +238,7 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   assert.match(prompt, /Do not treat internal thoughts, mutters to yourself, or naming an item as dialogue/);
   assert.match(prompt, /Giving a present subordinate or ally a routine instruction to fetch someone/);
   assert.match(prompt, /Only include checkIntent when success or failure meaningfully changes which mutations can happen/);
+  assert.match(prompt, /checkIntent is a top-level field on resolve_mechanics, not a mutation/);
   assert.match(prompt, /Only set citedNpcId when the player is directly engaging that NPC on-screen this turn/);
   assert.match(prompt, /For notice\/analyze\/search\/listen turns that use checkIntent, any newly noticed actor, clue, item, or scene detail must be phase conditional/);
   assert.match(prompt, /Never use placeholder ids like none, null, unknown, or n\/a for citedNpcId, targetNpcId, localEntityId, or spawn references/);
@@ -202,6 +247,7 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   assert.match(prompt, /Mark resource costs, fees, and other upfront expenditures as phase immediate/);
   assert.match(prompt, /Mark success-only rewards or outcomes as phase conditional/);
   assert.match(prompt, /Use commit_market_trade only for strict commodity trade backed by fetched market prices/);
+  assert.match(prompt, /Use spawn_fiat_item to instantiate bespoke narrative goods directly into a valid holder/);
   assert.match(prompt, /Use sceneActors\.actorRef values exactly only for actorRef fields/);
   assert.match(prompt, /For npcId, citedNpcId, and targetNpcId fields, use the bare NPC id without the npc: prefix/);
   assert.match(prompt, /Use record_local_interaction for current-scene unnamed locals instead of adjust_relationship/);
@@ -209,10 +255,15 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   assert.match(prompt, /Never use record_local_interaction with npc: refs or named sceneActors/);
   assert.match(prompt, /Never invent temp: ids/i);
   assert.match(prompt, /When speaking to a named on-screen NPC, use record_npc_interaction for ordinary dialogue/);
+  assert.match(prompt, /If economy_light is active and a bespoke trade is actually agreed upon, resolve it immediately with composed asset mutations/);
+  assert.match(prompt, /pending_trade_offer/);
   assert.match(prompt, /Use spawn_temporary_actor before record_local_interaction/);
   assert.match(prompt, /do not redirect them to a named scene actor; spawn_temporary_actor first/i);
+  assert.match(prompt, /If the player is looting, pickpocketing, frisking, searching a body's belongings, or otherwise acting on a grounded NPC's custody, request npc_detail first/i);
+  assert.match(prompt, /When fetched npc_detail exposes grounded held items or commodity stacks on an NPC, use transfer_assets from that NPC holder/i);
   assert.match(prompt, /asks what to call them, who they are, or another identity-seeking follow-up, request npc_detail for that actor/i);
   assert.match(prompt, /Use spawn_environmental_item before adjust_inventory/);
+  assert.match(prompt, /Respect context\.authoritativeState\.worldObjects mechanical state such as isLocked and requiredKeyTemplateId/i);
   assert.match(prompt, /Use set_scene_actor_presence whenever someone leaves the current scene/);
   assert.match(prompt, /comes back later in the turn, represent that mechanically with set_scene_actor_presence/);
   assert.match(prompt, /Use set_player_scene_focus for self-directed movement within the current location/);
@@ -247,6 +298,8 @@ test("buildTurnRouterSystemPrompt distinguishes self-talk from on-screen social 
   assert.match(prompt, /Do not remap a generic or unresolved person onto a named scene actor merely because one is present/i);
   assert.match(prompt, /If one present scene actor is already the clear conversational counterpart/i);
   assert.match(prompt, /If a present scene actor is marked detail-fetch\(name\/identity available\) and the player asks for their name/i);
+  assert.match(prompt, /If the player is looting, pickpocketing, frisking, searching a body's belongings, or otherwise needs grounded custody detail from a present NPC, include npc_detail for that actor/i);
+  assert.match(prompt, /Treat recentNarrativeProse as style continuity only, not evidence of who is present, what they carry, or what objects can be manipulated now/i);
 });
 
 test("fallbackRouterDecision stays local when scene focus is active", () => {
@@ -275,7 +328,7 @@ test("fallbackRouterDecision stays local when scene focus is active", () => {
       inventory: [],
       worldObjects: [],
       sceneAspects: [],
-      gold: 7,
+      currency: { totalCp: 700, formatted: "7 gp" },
     },
   );
 
@@ -371,6 +424,17 @@ test("buildResolvedTurnNarrationPrompt includes prompt context and fetched facts
           isCompanion: false,
           state: "active",
           threatLevel: 0,
+          inventory: [
+            {
+              kind: "item",
+              id: "item_hook",
+              name: "Hook Knife",
+              description: "A short hooked knife with a tar-dark handle.",
+              quantity: 1,
+              instanceIds: ["iteminst_hook_1"],
+              stateTags: [],
+            },
+          ],
           knownInformation: [],
           relationshipHistory: [],
           temporaryActorId: "temp_dockhand",
@@ -536,7 +600,7 @@ test("buildTurnUserPrompt includes attention packet before the main action block
         charisma: 1,
       },
       health: 12,
-      gold: 3,
+      currencyCp: 300,
       inventory: [],
       commodityStacks: [],
     },
@@ -564,7 +628,7 @@ test("buildTurnUserPrompt includes attention packet before the main action block
         ],
         unresolvedReferents: [],
         impliedDestinationFocus: null,
-        mustCheck: ["sceneActors", "gold"],
+        mustCheck: ["sceneActors", "currency"],
       },
     },
   });
@@ -1140,7 +1204,7 @@ test("normalizeRouterDecision fills missing clarification and strips invalid res
       ],
       unresolvedReferents: [],
       impliedDestinationFocus: null,
-      mustCheck: ["gold", "gold", "inventory"],
+      mustCheck: ["currency", "currency", "inventory"],
     },
   } as never);
 
@@ -1159,7 +1223,7 @@ test("normalizeRouterDecision fills missing clarification and strips invalid res
     },
   ]);
   assert.equal(normalized.attention.impliedDestinationFocus, null);
-  assert.deepEqual(normalized.attention.mustCheck, ["gold", "inventory"]);
+  assert.deepEqual(normalized.attention.mustCheck, ["currency", "inventory"]);
 });
 
 test("normalizeRouterDecision converts placeholder scene-actor refs into unresolved temporary actors and drops placeholder inventory refs", () => {
@@ -1240,7 +1304,7 @@ test("fallbackRouterDecision keeps a conservative non-empty attention packet", (
       inventory: [],
       worldObjects: [],
       sceneAspects: [],
-      gold: 3,
+      currency: { totalCp: 300, formatted: "3 gp" },
     },
   );
 
@@ -1288,7 +1352,7 @@ test("fallbackRouterDecision includes routes only for clear macro-travel intent"
       inventory: [],
       worldObjects: [],
       sceneAspects: [],
-      gold: 3,
+      currency: { totalCp: 300, formatted: "3 gp" },
     },
   );
 
@@ -1383,7 +1447,16 @@ test("formatRouterContextForModel compacts router payload to skinny referent lis
         quantity: 1,
       },
     ],
-    worldObjects: [],
+    worldObjects: [
+      {
+        id: "wobj_lockbox",
+        name: "Iron Lockbox",
+        summary: "A compact iron lockbox sits beneath the bench.",
+        isLocked: true,
+        requiredKeyTemplateId: "item_lockbox_key",
+        isHidden: false,
+      },
+    ],
     sceneAspects: [
       {
         key: "forge_heat",
@@ -1392,11 +1465,15 @@ test("formatRouterContextForModel compacts router payload to skinny referent lis
         duration: "scene",
       },
     ],
-    gold: 3,
+    currency: { totalCp: 300, formatted: "3 gp" },
   });
 
   assert.equal(rendered.locationOrientation, "You are in Waterdeep. Your current focus/position is: The Forge.");
   assert.deepEqual(rendered.authoritativeState.inventory, ["coin purse (qty 1) [item_coin_purse]"]);
+  assert.deepEqual(
+    rendered.authoritativeState.worldObjects,
+    ["Iron Lockbox [wobj_lockbox] {locked, key:item_lockbox_key} - A compact iron lockbox sits beneath the bench."],
+  );
   assert.deepEqual(rendered.authoritativeState.routes, ["Neverwinter (720m, open, danger 2) [route_neverwinter]"]);
   assert.match(
     rendered.authoritativeState.sceneActors[0] ?? "",

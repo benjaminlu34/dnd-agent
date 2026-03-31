@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { dmClient, logBackendDiagnostic } from "@/lib/ai/provider";
+import { toPromptCurrencySummary } from "@/lib/game/currency";
 import { toCampaignCharacter, toCharacterStats } from "@/lib/game/characters";
 import { parseTurnResultPayloadJson, parseCampaignRuntimeStateJson, approvalBandForValue, toCampaignRuntimeStateJson, toFactionResourcesJson } from "@/lib/game/json-contracts";
 import { createAdHocCampaignInventoryItem } from "@/lib/game/items";
@@ -949,7 +950,7 @@ function toWorldObjectSummary(
     parentWorldObjectId: object.parentWorldObjectId,
     sceneLocationId: object.sceneLocationId,
     sceneFocusKey: object.sceneFocusKey,
-    storedGold: object.storedGold,
+    storedCurrencyCp: object.storedCurrencyCp,
     storageCapacity: object.storageCapacity,
     securityIsLocked: object.securityIsLocked,
     securityKeyItemTemplateId: object.securityKeyItemTemplateId,
@@ -976,13 +977,14 @@ function stateTagsForItem(item: CharacterInstance["inventory"][number]) {
   return tags;
 }
 
-function toPromptInventory(
-  character: CharacterInstance,
-  campaignItemTemplates: Array<{ id: string; name: string; description: string | null }> = [],
-): PromptInventoryItem[] {
+function toPromptAssetInventory(input: {
+  items: CharacterInstance["inventory"];
+  commodityStacks: CharacterInstance["commodityStacks"];
+  campaignItemTemplates?: Array<{ id: string; name: string; description: string | null }>;
+}) {
   const itemsById = new Map<string, PromptInventoryItem>();
 
-  for (const template of campaignItemTemplates) {
+  for (const template of input.campaignItemTemplates ?? []) {
     itemsById.set(template.id, {
       kind: "item",
       id: template.id,
@@ -994,7 +996,7 @@ function toPromptInventory(
     });
   }
 
-  for (const item of character.inventory) {
+  for (const item of input.items) {
     if (isArchivedInventoryProperties(item.properties as Record<string, unknown> | null)) {
       continue;
     }
@@ -1026,7 +1028,7 @@ function toPromptInventory(
       }
       return left.name.localeCompare(right.name);
     }),
-    ...character.commodityStacks
+    ...input.commodityStacks
       .filter((stack) => stack.quantity > 0)
       .map((stack) => ({
         kind: "commodity" as const,
@@ -1036,6 +1038,41 @@ function toPromptInventory(
         quantity: stack.quantity,
       })),
   ];
+}
+
+function toPromptInventory(
+  character: CharacterInstance,
+  campaignItemTemplates: Array<{ id: string; name: string; description: string | null }> = [],
+): PromptInventoryItem[] {
+  return toPromptAssetInventory({
+    items: character.inventory,
+    commodityStacks: character.commodityStacks,
+    campaignItemTemplates,
+  });
+}
+
+function toPromptWorldObjectSummary(object: WorldObjectSummary, summary: string): PromptWorldObject {
+  return {
+    id: object.id,
+    name: object.name,
+    summary,
+    storedCurrency: object.storedCurrencyCp > 0 ? toPromptCurrencySummary(object.storedCurrencyCp) : null,
+    isLocked: object.securityIsLocked,
+    requiredKeyTemplateId: object.securityKeyItemTemplateId ?? null,
+    isHidden: object.concealmentIsHidden,
+  };
+}
+
+function toRouterWorldObjectSummary(object: WorldObjectSummary, summary: string): RouterWorldObjectSummary {
+  return {
+    id: object.id,
+    name: object.name,
+    summary,
+    storedCurrency: object.storedCurrencyCp > 0 ? toPromptCurrencySummary(object.storedCurrencyCp) : null,
+    isLocked: object.securityIsLocked,
+    requiredKeyTemplateId: object.securityKeyItemTemplateId ?? null,
+    isHidden: object.concealmentIsHidden,
+  };
 }
 
 function toRouterInventorySummary(character: CharacterInstance) {
@@ -1088,8 +1125,8 @@ function worldObjectSummaryLine(input: {
   if (typeof input.object.storageCapacity === "number") {
     flags.push(`cap ${input.object.storageCapacity}`);
   }
-  if (input.object.storedGold > 0) {
-    flags.push(`${input.object.storedGold}g`);
+  if (input.object.storedCurrencyCp > 0) {
+    flags.push(toPromptCurrencySummary(input.object.storedCurrencyCp).formatted);
   }
   const itemNames = (input.itemsByObjectId.get(input.object.id) ?? [])
     .filter((item) => !isArchivedInventoryProperties(item.properties as Record<string, unknown> | null))
@@ -1866,7 +1903,7 @@ async function createCampaignInTx(
         create: {
           templateId: input.template.id,
           health: input.template.maxHealth,
-          gold: 0,
+          currencyCp: 0,
         },
       },
       sessions: {
@@ -2792,6 +2829,18 @@ export async function fetchNpcDetailsBulk(
         in: uniqueNpcIds,
       },
     },
+    include: {
+      heldItems: {
+        include: {
+          template: true,
+        },
+      },
+      heldCommodityStacks: {
+        include: {
+          commodity: true,
+        },
+      },
+    },
     orderBy: { name: "asc" },
   });
   if (!npcRecords.length) {
@@ -2930,6 +2979,10 @@ export async function fetchNpcDetailsBulk(
         knownInformation: Array.from(visibleKnowledgeById.values()).slice(0, 12),
         relationshipHistory: memoriesByNpcId.get(npc.id) ?? [],
         temporaryActorId: temporaryActorByNpcId.get(npc.id) ?? null,
+        inventory: toPromptAssetInventory({
+          items: npc.heldItems.map((item) => toItemInstanceRecord(item)),
+          commodityStacks: npc.heldCommodityStacks.map((stack) => toCommodityStackRecord(stack)),
+        }),
       } satisfies NpcDetail];
     }),
   );
@@ -3699,7 +3752,7 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     id: campaign.characterInstance.id,
     templateId: campaign.characterInstance.templateId,
     health: campaign.characterInstance.health,
-    gold: campaign.characterInstance.gold,
+    currencyCp: campaign.characterInstance.currencyCp,
     inventory: assetItems.filter(
       (item) =>
         item.characterInstanceId === campaign.characterInstance?.id
@@ -4192,7 +4245,7 @@ export async function getTurnSnapshot(
     id: campaign.characterInstance.id,
     templateId: campaign.characterInstance.templateId,
     health: campaign.characterInstance.health,
-    gold: campaign.characterInstance.gold,
+    currencyCp: campaign.characterInstance.currencyCp,
     inventory: assetItems.filter(
       (item) =>
         item.characterInstanceId === campaign.characterInstance?.id
@@ -4478,20 +4531,20 @@ export async function getTurnRouterContext(snapshot: CampaignSnapshot): Promise<
     activePressures: snapshot.activePressures,
     activeThreads: snapshot.activeThreads,
     inventory: toRouterInventorySummary(snapshot.character),
-    worldObjects: visibleWorldObjects.map<RouterWorldObjectSummary>((object) => ({
-      id: object.id,
-      name: object.name,
-      summary: worldObjectSummaryLine({
+    worldObjects: visibleWorldObjects.map<RouterWorldObjectSummary>((object) =>
+      toRouterWorldObjectSummary(
         object,
-        itemsByObjectId,
-        commodityStacksByObjectId,
-      }),
-    })),
+        worldObjectSummaryLine({
+          object,
+          itemsByObjectId,
+          commodityStacksByObjectId,
+        }),
+      )),
     sceneAspects: toRouterSceneAspectSummaries({
       ...snapshot.state,
       sceneAspects: filterSceneAspectsForFocus(snapshot.state.sceneAspects ?? {}, sceneFocus),
     }),
-    gold: snapshot.character.gold,
+    currency: toPromptCurrencySummary(snapshot.character.currencyCp),
   };
 }
 
@@ -4559,15 +4612,16 @@ export async function getPromptContext(
     recentWorldShifts: isLocal ? [] : snapshot.recentWorldShifts,
     activeThreads: isLocal ? [] : routerContext.activeThreads,
     inventory: toPromptInventory(snapshot.character, campaignItemTemplates),
-    worldObjects: visibleWorldObjects.map<PromptWorldObject>((object) => ({
-      id: object.id,
-      name: object.name,
-      summary: worldObjectSummaryLine({
+    currency: toPromptCurrencySummary(snapshot.character.currencyCp),
+    worldObjects: visibleWorldObjects.map<PromptWorldObject>((object) =>
+      toPromptWorldObjectSummary(
         object,
-        itemsByObjectId,
-        commodityStacksByObjectId,
-      }),
-    })),
+        worldObjectSummaryLine({
+          object,
+          itemsByObjectId,
+          commodityStacksByObjectId,
+        }),
+      )),
     sceneAspects: filterSceneAspectsForFocus(
       structuredClone(snapshot.state.sceneAspects ?? {}),
       promptSceneFocus,
@@ -4587,6 +4641,9 @@ export async function getPromptContext(
 
 export const repositoryTestUtils = {
   prunePromptContextForRouter,
+  toPromptAssetInventory,
+  toPromptWorldObjectSummary,
+  toRouterWorldObjectSummary,
   toRouterInventorySummary,
   toRouterSceneAspectSummaries,
   effectivePromptSceneFocus,

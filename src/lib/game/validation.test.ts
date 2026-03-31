@@ -57,7 +57,7 @@ function createSnapshot(): CampaignSnapshot {
         charisma: 1,
       },
       health: 6,
-      gold: 10,
+      currencyCp: 1000,
       inventory: [],
       commodityStacks: [],
     },
@@ -330,6 +330,7 @@ test("validateTurnCommand can use fetched npc detail to derive pending combat ch
       type: "fetch_npc_detail",
       result: {
         ...createSnapshot().presentNpcs[0],
+        inventory: [],
         knownInformation: [],
         relationshipHistory: [],
         temporaryActorId: null,

@@ -77,6 +77,11 @@ import {
   TIME_MODE_BOUNDS,
 } from "@/lib/game/validation";
 import { buildCheckResult } from "@/lib/game/checks";
+import {
+  COPPER_PER_GOLD,
+  flattenCurrencyToCp,
+  formatCurrencyCompact,
+} from "@/lib/game/currency";
 import { normalizeItemName } from "@/lib/game/item-utils";
 import { sceneActorIdentityClearlyMatches, sceneActorMatchesFocus } from "@/lib/game/scene-identity";
 import { env } from "@/lib/env";
@@ -90,7 +95,7 @@ type TurnStream = {
 
 const TURN_LOCK_TTL_MS = 120_000;
 const TURN_INTERNAL_DEADLINE_MS = 115_000;
-const INCIDENTAL_GOLD_MAX = 50;
+const INCIDENTAL_CURRENCY_CP_MAX = 50 * COPPER_PER_GOLD;
 
 const activeTurnControllers = new Map<string, AbortController>();
 const activeCommitTurnKeys = new Set<string>();
@@ -1671,7 +1676,7 @@ function mutationPhaseForEvaluation(mutation: MechanicsMutation): "immediate" | 
   if (mutation.type === "advance_time") {
     return "immediate";
   }
-  if (mutation.type === "adjust_gold" && mutation.delta < 0) {
+  if (mutation.type === "adjust_currency" && flattenCurrencyToCp(mutation.delta) < 0) {
     return "immediate";
   }
   if (mutation.type === "record_local_interaction") {
@@ -1684,6 +1689,7 @@ function mutationPhaseForEvaluation(mutation: MechanicsMutation): "immediate" | 
     mutation.type === "spawn_scene_aspect"
     || mutation.type === "spawn_temporary_actor"
     || mutation.type === "spawn_environmental_item"
+    || mutation.type === "spawn_fiat_item"
     || mutation.type === "set_player_scene_focus"
     || mutation.type === "set_scene_actor_presence"
   ) {
@@ -1699,8 +1705,8 @@ function clampRelationshipDelta(delta: number) {
   return Math.max(-2, Math.min(2, delta));
 }
 
-function clampIncidentalGoldDelta(delta: number) {
-  return delta > 0 ? Math.min(delta, INCIDENTAL_GOLD_MAX) : delta;
+function clampIncidentalCurrencyDelta(deltaCp: number) {
+  return deltaCp > 0 ? Math.min(deltaCp, INCIDENTAL_CURRENCY_CP_MAX) : deltaCp;
 }
 
 function evaluateResolvedCommand(input: {
@@ -1799,7 +1805,7 @@ function evaluateResolvedCommand(input: {
   const spawnedItemTemplateIds = new Map<string, string>();
   const spawnedWorldObjectIds = new Map<string, string>();
   const discoveredInformationIds = new Set<string>();
-  let projectedGold = input.snapshot.character.gold;
+  let projectedCurrencyCp = input.snapshot.character.currencyCp;
   let projectedLocationId = input.snapshot.state.currentLocationId;
   let projectedSceneFocus = input.snapshot.state.sceneFocus ?? null;
   let focusChangedThisTurn = false;
@@ -1977,11 +1983,18 @@ function evaluateResolvedCommand(input: {
       continue;
     }
 
-    if (mutation.type === "adjust_gold") {
-      const appliedDelta = clampIncidentalGoldDelta(mutation.delta);
-      const appliedMutation = { ...mutation, delta: appliedDelta, phase } as MechanicsMutation;
+    if (mutation.type === "adjust_currency") {
+      const requestedDeltaCp = flattenCurrencyToCp(mutation.delta);
+      const appliedDeltaCp = clampIncidentalCurrencyDelta(requestedDeltaCp);
+      const appliedMutation = {
+        ...mutation,
+        delta: {
+          cp: appliedDeltaCp,
+        },
+        phase,
+      } as MechanicsMutation;
       const authorized =
-        mutation.delta < 0
+        requestedDeltaCp < 0
           ? hasVector(input.routerDecision, "economy_light") || hasVector(input.routerDecision, "economy_strict")
           : hasVector(input.routerDecision, "economy_light")
             || hasVector(input.routerDecision, "economy_strict")
@@ -1994,49 +2007,46 @@ function evaluateResolvedCommand(input: {
           mutationType: mutation.type,
           status: "rejected",
           reasonCode: "unauthorized_vector",
-          summary: "The requested gold change is not authorized for this turn.",
+          summary: "The requested currency change is not authorized for this turn.",
           metadata: {
             ...mutation,
-            delta: appliedDelta,
-            requestedDelta: mutation.delta,
-            appliedDelta,
+            requestedDeltaCp,
+            appliedDeltaCp,
             phase,
           } as unknown as Record<string, unknown>,
         });
         continue;
       }
-      if (projectedGold + appliedDelta < 0) {
+      if (projectedCurrencyCp + appliedDeltaCp < 0) {
         stateCommitLog.push({
           kind: "mutation",
           mutationType: mutation.type,
           status: "rejected",
-          reasonCode: "insufficient_gold",
-          summary: "You do not have enough gold for that cost.",
+          reasonCode: "insufficient_currency",
+          summary: "You do not have enough currency for that cost.",
           metadata: {
             ...mutation,
-            delta: appliedDelta,
-            requestedDelta: mutation.delta,
-            appliedDelta,
+            requestedDeltaCp,
+            appliedDeltaCp,
             phase,
           } as unknown as Record<string, unknown>,
         });
         continue;
       }
-      projectedGold += appliedDelta;
+      projectedCurrencyCp += appliedDeltaCp;
       const entry = {
         kind: "mutation" as const,
         mutationType: mutation.type,
         status: "applied" as const,
-        reasonCode: "gold_adjusted",
+        reasonCode: "currency_adjusted",
         summary:
-          appliedDelta >= 0
-            ? `You gain ${appliedDelta} gold.`
-            : `You spend ${Math.abs(appliedDelta)} gold.`,
+          appliedDeltaCp >= 0
+            ? `You gain ${formatCurrencyCompact(appliedDeltaCp)}.`
+            : `You spend ${formatCurrencyCompact(Math.abs(appliedDeltaCp))}.`,
         metadata: {
           ...mutation,
-          delta: appliedDelta,
-          requestedDelta: mutation.delta,
-          appliedDelta,
+          requestedDeltaCp,
+          appliedDeltaCp,
           phase,
         },
       };
@@ -2285,7 +2295,7 @@ function evaluateResolvedCommand(input: {
           resolvedHolder.kind === "world_object" ? resolvedHolder.objectId : null,
         sceneLocationId: resolvedHolder.kind === "scene" ? resolvedHolder.locationId : null,
         sceneFocusKey: resolvedHolder.kind === "scene" ? resolvedHolder.focusKey ?? null : null,
-        storedGold: 0,
+        storedCurrencyCp: 0,
         storageCapacity: mutation.storageCapacity ?? null,
         securityIsLocked: mutation.securityIsLocked ?? false,
         securityKeyItemTemplateId: mutation.securityKeyItemTemplateId ?? null,
@@ -2686,18 +2696,18 @@ function evaluateResolvedCommand(input: {
           });
           continue;
         }
-        if (projectedGold < total) {
+        if (projectedCurrencyCp < total) {
           stateCommitLog.push({
             kind: "mutation",
             mutationType: mutation.type,
             status: "rejected",
-            reasonCode: "insufficient_gold",
-            summary: "You do not have enough gold to complete that trade.",
+            reasonCode: "insufficient_currency",
+            summary: "You do not have enough currency to complete that trade.",
             metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
           });
           continue;
         }
-        projectedGold -= total;
+        projectedCurrencyCp -= total;
         projectedCommodityQuantities.set(mutation.commodityId, ownedQuantity + mutation.quantity);
         if (projectedStock !== -1) {
           projectedMarketStock.set(stockKey, projectedStock - mutation.quantity);
@@ -2714,7 +2724,7 @@ function evaluateResolvedCommand(input: {
           });
           continue;
         }
-        projectedGold += total;
+        projectedCurrencyCp += total;
         projectedCommodityQuantities.set(mutation.commodityId, ownedQuantity - mutation.quantity);
         if (projectedStock !== -1) {
           projectedMarketStock.set(stockKey, projectedStock + mutation.quantity);
@@ -2726,7 +2736,7 @@ function evaluateResolvedCommand(input: {
         mutationType: mutation.type,
         status: "applied" as const,
         reasonCode: "market_trade_committed",
-        summary: `${mutation.action === "buy" ? "Buy" : "Sell"} ${mutation.quantity} commodity units for ${total} gold.`,
+        summary: `${mutation.action === "buy" ? "Buy" : "Sell"} ${mutation.quantity} commodity units for ${formatCurrencyCompact(total)}.`,
         metadata: {
           ...mutation,
           phase,
@@ -2982,7 +2992,9 @@ function evaluateResolvedCommand(input: {
         continue;
       }
 
-      if (mutation.goldAmount) {
+      const transferCurrencyCp = mutation.currencyAmount ? flattenCurrencyToCp(mutation.currencyAmount) : 0;
+
+      if (transferCurrencyCp > 0) {
         const playerToOrFromObject =
           (source.kind === "player" && destination.kind === "world_object")
           || (source.kind === "world_object" && destination.kind === "player");
@@ -2992,22 +3004,22 @@ function evaluateResolvedCommand(input: {
             mutationType: mutation.type,
             status: "rejected",
             reasonCode: "invalid_target",
-            summary: "Gold transfers currently require the player and a world object.",
+            summary: "Currency transfers currently require the player and a world object.",
             metadata: { ...mutation, source, destination, phase } as unknown as Record<string, unknown>,
           });
           continue;
         }
-        const sourceGold =
+        const sourceCurrencyCp =
           source.kind === "player"
-            ? projectedGold
-            : projectedWorldObjects.get(source.objectId)?.storedGold ?? 0;
-        if (sourceGold < mutation.goldAmount) {
+            ? projectedCurrencyCp
+            : projectedWorldObjects.get(source.objectId)?.storedCurrencyCp ?? 0;
+        if (sourceCurrencyCp < transferCurrencyCp) {
           stateCommitLog.push({
             kind: "mutation",
             mutationType: mutation.type,
             status: "rejected",
-            reasonCode: "insufficient_gold",
-            summary: "The source holder does not have enough gold.",
+            reasonCode: "insufficient_currency",
+            summary: "The source holder does not have enough currency.",
             metadata: { ...mutation, source, destination, phase } as unknown as Record<string, unknown>,
           });
           continue;
@@ -3069,21 +3081,21 @@ function evaluateResolvedCommand(input: {
         }
       }
 
-      if (mutation.goldAmount) {
+      if (transferCurrencyCp > 0) {
         if (source.kind === "player") {
-          projectedGold -= mutation.goldAmount;
+          projectedCurrencyCp -= transferCurrencyCp;
         } else if (source.kind === "world_object") {
           const object = projectedWorldObjects.get(source.objectId);
           if (object) {
-            object.storedGold -= mutation.goldAmount;
+            object.storedCurrencyCp -= transferCurrencyCp;
           }
         }
         if (destination.kind === "player") {
-          projectedGold += mutation.goldAmount;
+          projectedCurrencyCp += transferCurrencyCp;
         } else if (destination.kind === "world_object") {
           const object = projectedWorldObjects.get(destination.objectId);
           if (object) {
-            object.storedGold += mutation.goldAmount;
+            object.storedCurrencyCp += transferCurrencyCp;
           }
         }
       }
@@ -3164,6 +3176,101 @@ function evaluateResolvedCommand(input: {
       };
       stateCommitLog.push(entry);
       appliedMutations.push({ mutation: { ...mutation, phase } as MechanicsMutation, entry });
+      continue;
+    }
+
+    if (mutation.type === "spawn_fiat_item") {
+      if (!allowsGroundedDowntimeMutation(input.routerDecision, input.command.timeMode)) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "unauthorized_vector",
+          summary: "Fiat item spawning is not authorized for this turn.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (spawnedItemTemplateIds.has(mutation.spawnKey)) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "duplicate_spawn_key",
+          summary: "That item spawn key was already used this turn.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+
+      const holder =
+        mutation.holder.kind === "world_object"
+          ? (() => {
+              const objectId = resolveWorldObjectId({
+                objectId: mutation.holder.objectId,
+                spawnedWorldObjectIds,
+              });
+              return objectId ? ({ kind: "world_object", objectId } as const) : null;
+            })()
+          : normalizeHolderRef(mutation.holder);
+
+      const holderIsValid =
+        holder != null
+        && canUseSceneHolder(holder, projectedLocationId)
+        && (
+          holder.kind === "player"
+          || holder.kind === "scene"
+          || (holder.kind === "world_object" && projectedWorldObjects.has(holder.objectId))
+          || (
+            holder.kind === "npc"
+            && (
+              input.snapshot.presentNpcs.some((npc) => npc.id === holder.npcId)
+              || projectedNpcLocationIds.get(holder.npcId) === projectedLocationId
+            )
+          )
+        );
+      if (!holderIsValid || !holder) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "That fiat item spawn references an invalid holder.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+
+      const resolvedTemplateId = `spawned_item_template:${mutation.spawnKey}`;
+      spawnedItemTemplateIds.set(mutation.spawnKey, resolvedTemplateId);
+      if (holder.kind === "player") {
+        groundedItemIds.add(resolvedTemplateId);
+        projectedInventoryQuantities.set(
+          resolvedTemplateId,
+          (projectedInventoryQuantities.get(resolvedTemplateId) ?? 0) + mutation.quantity,
+        );
+      }
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "fiat_item_spawned",
+        summary:
+          holder.kind === "player"
+            ? `You secure ${mutation.quantity} ${normalizeWhitespace(mutation.itemName)}.`
+            : `${normalizeWhitespace(mutation.itemName)} enters the deal.`,
+        metadata: {
+          ...mutation,
+          holder,
+          itemId: resolvedTemplateId,
+          phase,
+        } as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({
+        mutation: { ...mutation, holder, phase } as MechanicsMutation,
+        entry,
+      });
       continue;
     }
 
@@ -3893,13 +4000,13 @@ async function applyMarketTradeMutation(input: {
     throw new Error("Character instance not found.");
   }
 
-  recordInverse(input.rollback, "characterInstance", characterInstance.id, "gold", characterInstance.gold);
+  recordInverse(input.rollback, "characterInstance", characterInstance.id, "currencyCp", characterInstance.currencyCp);
 
   if (input.mutation.action === "buy") {
     await input.tx.characterInstance.update({
       where: { id: characterInstance.id },
       data: {
-        gold: {
+        currencyCp: {
           decrement: total,
         },
       },
@@ -3908,7 +4015,7 @@ async function applyMarketTradeMutation(input: {
     await input.tx.characterInstance.update({
       where: { id: characterInstance.id },
       data: {
-        gold: {
+        currencyCp: {
           increment: total,
         },
       },
@@ -4020,6 +4127,27 @@ async function findReusableEnvironmentalItemTemplate(input: {
       rarity: "improvised",
       tags: {
         hasEvery: ["spawned", "environmental", "ephemeral"],
+      },
+    },
+    select: { id: true },
+  });
+}
+
+async function findReusableFiatItemTemplate(input: {
+  tx: Prisma.TransactionClient;
+  campaignId: string;
+  itemName: string;
+  description: string;
+}) {
+  return input.tx.itemTemplate.findFirst({
+    where: {
+      campaignId: input.campaignId,
+      name: input.itemName,
+      description: input.description,
+      value: 0,
+      rarity: "improvised",
+      tags: {
+        hasEvery: ["spawned", "fiat", "ephemeral"],
       },
     },
     select: { id: true },
@@ -4215,7 +4343,7 @@ async function applyResolvedMutations(input: {
   let currentLocationId = input.snapshot.state.currentLocationId;
   const characterInstance = await input.tx.characterInstance.findUnique({
     where: { campaignId: input.snapshot.campaignId },
-    select: { id: true, gold: true, health: true },
+    select: { id: true, currencyCp: true, health: true },
   });
   if (!characterInstance) {
     throw new Error("Character instance not found.");
@@ -4255,7 +4383,7 @@ async function applyResolvedMutations(input: {
           id: objectId,
           campaignId: input.snapshot.campaignId,
           name: normalizeWhitespace(mutation.name),
-          storedGold: 0,
+          storedCurrencyCp: 0,
           storageCapacity: mutation.storageCapacity ?? null,
           securityIsLocked: mutation.securityIsLocked ?? false,
           securityKeyItemTemplateId: mutation.securityKeyItemTemplateId ?? null,
@@ -4386,20 +4514,21 @@ async function applyResolvedMutations(input: {
       continue;
     }
 
-    if (mutation.type === "adjust_gold") {
+    if (mutation.type === "adjust_currency") {
+      const deltaCp = flattenCurrencyToCp(mutation.delta);
       const characterInstance = await input.tx.characterInstance.findUnique({
         where: { campaignId: input.snapshot.campaignId },
-        select: { id: true, gold: true },
+        select: { id: true, currencyCp: true },
       });
       if (!characterInstance) {
         throw new Error("Character instance not found.");
       }
-      recordInverse(input.rollback, "characterInstance", characterInstance.id, "gold", characterInstance.gold);
+      recordInverse(input.rollback, "characterInstance", characterInstance.id, "currencyCp", characterInstance.currencyCp);
       await input.tx.characterInstance.update({
         where: { id: characterInstance.id },
         data: {
-          gold: {
-            increment: mutation.delta,
+          currencyCp: {
+            increment: deltaCp,
           },
         },
       });
@@ -4725,32 +4854,34 @@ async function applyResolvedMutations(input: {
             })()
           : mutation.destination;
 
-      if (mutation.goldAmount) {
+      const transferCurrencyCp = mutation.currencyAmount ? flattenCurrencyToCp(mutation.currencyAmount) : 0;
+
+      if (transferCurrencyCp > 0) {
         if (source.kind === "player") {
-          recordInverse(input.rollback, "characterInstance", characterInstance.id, "gold", characterInstance.gold);
+          recordInverse(input.rollback, "characterInstance", characterInstance.id, "currencyCp", characterInstance.currencyCp);
           await input.tx.characterInstance.update({
             where: { id: characterInstance.id },
             data: {
-              gold: {
-                decrement: mutation.goldAmount,
+              currencyCp: {
+                decrement: transferCurrencyCp,
               },
             },
           });
-          characterInstance.gold -= mutation.goldAmount;
+          characterInstance.currencyCp -= transferCurrencyCp;
         } else if (source.kind === "world_object") {
           const sourceObject = await input.tx.worldObject.findUnique({
             where: { id: source.objectId },
-            select: { id: true, storedGold: true },
+            select: { id: true, storedCurrencyCp: true },
           });
           if (!sourceObject) {
-            throw new Error("Gold transfer source world object not found.");
+            throw new Error("Currency transfer source world object not found.");
           }
-          recordInverse(input.rollback, "worldObject", sourceObject.id, "storedGold", sourceObject.storedGold);
+          recordInverse(input.rollback, "worldObject", sourceObject.id, "storedCurrencyCp", sourceObject.storedCurrencyCp);
           await input.tx.worldObject.update({
             where: { id: sourceObject.id },
             data: {
-              storedGold: {
-                decrement: mutation.goldAmount,
+              storedCurrencyCp: {
+                decrement: transferCurrencyCp,
               },
             },
           });
@@ -4758,38 +4889,38 @@ async function applyResolvedMutations(input: {
 
         if (destination.kind === "player") {
           if (!input.rollback.simulationInverses.some((entry) =>
-            entry.table === "characterInstance" && entry.id === characterInstance.id && entry.field === "gold")) {
-            recordInverse(input.rollback, "characterInstance", characterInstance.id, "gold", characterInstance.gold);
+            entry.table === "characterInstance" && entry.id === characterInstance.id && entry.field === "currencyCp")) {
+            recordInverse(input.rollback, "characterInstance", characterInstance.id, "currencyCp", characterInstance.currencyCp);
           }
           await input.tx.characterInstance.update({
             where: { id: characterInstance.id },
             data: {
-              gold: {
-                increment: mutation.goldAmount,
+              currencyCp: {
+                increment: transferCurrencyCp,
               },
             },
           });
-          characterInstance.gold += mutation.goldAmount;
+          characterInstance.currencyCp += transferCurrencyCp;
         } else if (destination.kind === "world_object") {
           const destinationObject = await input.tx.worldObject.findUnique({
             where: { id: destination.objectId },
-            select: { id: true, storedGold: true },
+            select: { id: true, storedCurrencyCp: true },
           });
           if (!destinationObject) {
-            throw new Error("Gold transfer destination world object not found.");
+            throw new Error("Currency transfer destination world object not found.");
           }
           recordInverse(
             input.rollback,
             "worldObject",
             destinationObject.id,
-            "storedGold",
-            destinationObject.storedGold,
+            "storedCurrencyCp",
+            destinationObject.storedCurrencyCp,
           );
           await input.tx.worldObject.update({
             where: { id: destinationObject.id },
             data: {
-              storedGold: {
-                increment: mutation.goldAmount,
+              storedCurrencyCp: {
+                increment: transferCurrencyCp,
               },
             },
           });
@@ -4982,6 +5113,86 @@ async function applyResolvedMutations(input: {
         const created = await input.tx.itemInstance.create({
           data: {
             characterInstanceId: characterInstance.id,
+            templateId,
+            isIdentified: true,
+            charges: null,
+            properties: Prisma.JsonNull,
+          },
+          select: { id: true },
+        });
+        recordCreated(input.rollback, "itemInstance", created.id);
+      }
+      continue;
+    }
+
+    if (mutation.type === "spawn_fiat_item") {
+      if (spawnedItemTemplateIds.has(mutation.spawnKey)) {
+        throw new Error("Duplicate fiat-item spawn key during commit.");
+      }
+
+      const characterInstance = await input.tx.characterInstance.findUnique({
+        where: { campaignId: input.snapshot.campaignId },
+        select: { id: true },
+      });
+      if (!characterInstance) {
+        throw new Error("Character instance not found.");
+      }
+
+      const holder =
+        mutation.holder.kind === "world_object"
+          ? (() => {
+              const objectId = resolveWorldObjectId({
+                objectId: mutation.holder.objectId,
+                spawnedWorldObjectIds,
+              });
+              return objectId ? ({ kind: "world_object", objectId } as const) : null;
+            })()
+          : normalizeHolderRef(mutation.holder);
+      if (!holder) {
+        throw new Error("Fiat item spawn referenced an unresolved holder.");
+      }
+      if (holder.kind === "world_object") {
+        const object = await input.tx.worldObject.findUnique({
+          where: { id: holder.objectId },
+          select: { id: true },
+        });
+        if (!object) {
+          throw new Error("Fiat item spawn referenced a missing world object.");
+        }
+      }
+
+      const itemName = normalizeItemName(mutation.itemName);
+      const description = normalizedDescription(mutation.description);
+      const reusableTemplate = await findReusableFiatItemTemplate({
+        tx: input.tx,
+        campaignId: input.snapshot.campaignId,
+        itemName,
+        description,
+      });
+
+      let templateId = reusableTemplate?.id ?? null;
+      if (!templateId) {
+        const createdTemplate = await input.tx.itemTemplate.create({
+          data: {
+            campaignId: input.snapshot.campaignId,
+            name: itemName,
+            description,
+            value: 0,
+            weight: 0,
+            rarity: "improvised",
+            tags: ["spawned", "fiat", "ephemeral"],
+          },
+          select: { id: true },
+        });
+        templateId = createdTemplate.id;
+        recordCreated(input.rollback, "itemTemplate", templateId);
+      }
+
+      spawnedItemTemplateIds.set(mutation.spawnKey, templateId);
+      for (let index = 0; index < mutation.quantity; index += 1) {
+        const created = await input.tx.itemInstance.create({
+          data: {
+            ...itemHolderData(holder, characterInstance.id),
             templateId,
             isIdentified: true,
             charges: null,
@@ -5449,6 +5660,12 @@ function determineMemoryKind(input: {
   if (input.stateCommitLog.some((entry) => entry.status === "applied" && entry.mutationType === "commit_market_trade")) {
     return "trade" as const;
   }
+  if (
+    input.stateCommitLog.some((entry) => entry.status === "applied" && entry.mutationType === "adjust_currency")
+    && input.stateCommitLog.some((entry) => entry.status === "applied" && entry.mutationType === "spawn_fiat_item")
+  ) {
+    return "trade" as const;
+  }
   if (input.stateCommitLog.some((entry) => entry.status === "applied" && entry.mutationType === "move_player")) {
     return "travel" as const;
   }
@@ -5521,6 +5738,10 @@ function collectMemoryEntityLinks(input: {
     if (!entry.metadata) {
       continue;
     }
+    const holder =
+      typeof entry.metadata.holder === "object" && entry.metadata.holder !== null
+        ? (entry.metadata.holder as Record<string, unknown>)
+        : null;
     if (entry.mutationType === "move_player") {
       pushKey("location", typeof entry.metadata.targetLocationId === "string" ? entry.metadata.targetLocationId : null);
       pushKey("route", typeof entry.metadata.routeEdgeId === "string" ? entry.metadata.routeEdgeId : null);
@@ -5530,6 +5751,13 @@ function collectMemoryEntityLinks(input: {
     }
     if (entry.mutationType === "record_npc_interaction") {
       pushKey("npc", typeof entry.metadata.npcId === "string" ? entry.metadata.npcId : null);
+    }
+    if (
+      entry.mutationType === "spawn_fiat_item"
+      && typeof holder?.kind === "string"
+      && holder.kind === "npc"
+    ) {
+      pushKey("npc", typeof holder.npcId === "string" ? holder.npcId : null);
     }
     if (entry.mutationType === "commit_market_trade") {
       pushKey("commodity", typeof entry.metadata.commodityId === "string" ? entry.metadata.commodityId : null);
@@ -5646,6 +5874,10 @@ function buildTurnCausality(input: {
     if (entry.status !== "applied") {
       continue;
     }
+    const holder =
+      typeof entry.metadata?.holder === "object" && entry.metadata.holder !== null
+        ? (entry.metadata.holder as Record<string, unknown>)
+        : null;
     if (entry.mutationType === "adjust_relationship") {
       changeCodes.push({
         code: "NPC_APPROVAL_CHANGED",
@@ -5728,11 +5960,25 @@ function buildTurnCausality(input: {
         metadata: null,
       });
     }
-    if (entry.mutationType === "adjust_inventory" || entry.mutationType === "spawn_environmental_item") {
+    if (
+      entry.mutationType === "adjust_inventory"
+      || entry.mutationType === "spawn_environmental_item"
+      || entry.mutationType === "spawn_fiat_item"
+    ) {
       reasonCodes.push({
-        code: "PLAYER_ACTION",
-        entityType: "character",
-        targetId: input.snapshot.character.id,
+        code: entry.mutationType === "spawn_fiat_item" ? "PLAYER_TRADE" : "PLAYER_ACTION",
+        entityType:
+          entry.mutationType === "spawn_fiat_item"
+          && typeof holder?.kind === "string"
+          && holder.kind === "npc"
+            ? "npc"
+            : "character",
+        targetId:
+          entry.mutationType === "spawn_fiat_item"
+          && typeof holder?.kind === "string"
+          && holder.kind === "npc"
+            ? (typeof holder.npcId === "string" ? holder.npcId : null)
+            : input.snapshot.character.id,
         metadata: null,
       });
     }

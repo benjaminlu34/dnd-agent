@@ -57,7 +57,7 @@ function createSnapshot(): CampaignSnapshot {
         charisma: 1,
       },
       health: 12,
-      gold: 10,
+      currencyCp: 1000,
       inventory: [],
       commodityStacks: [],
     },
@@ -407,7 +407,7 @@ test("failed checks still apply immediate costs but block conditional rewards", 
   const evaluated = engineTestUtils.evaluateResolvedCommand({
     snapshot: createSnapshot(),
     command: createValidatedCommand("failure", [
-      { type: "adjust_gold", delta: -3, reason: "guard fee", phase: "immediate" },
+      { type: "adjust_currency", delta: { sp: -3 }, reason: "guard fee", phase: "immediate" },
       { type: "adjust_relationship", npcId: "npc_guard", delta: 2, reason: "push the guard", phase: "conditional" },
       { type: "advance_time", durationMinutes: 5 },
     ]),
@@ -419,13 +419,13 @@ test("failed checks still apply immediate costs but block conditional rewards", 
     evaluated.stateCommitLog.map((entry) => [entry.kind, entry.mutationType, entry.status, entry.reasonCode]),
     [
       ["check", null, "applied", "check_failure"],
-      ["mutation", "adjust_gold", "applied", "gold_adjusted"],
+      ["mutation", "adjust_currency", "applied", "currency_adjusted"],
       ["mutation", "advance_time", "applied", "time_advanced"],
       ["mutation", "adjust_relationship", "rejected", "check_failed"],
     ],
   );
   assert.equal(evaluated.nextState.globalTime, 485);
-  assert.equal(evaluated.stateCommitLog[1]?.metadata?.delta, -3);
+  assert.equal(evaluated.stateCommitLog[1]?.metadata?.appliedDeltaCp, -30);
 });
 
 test("unscoped router fallback does not reject routine local interactions", () => {
@@ -501,7 +501,7 @@ test("partial checks reject requested mutations with check_partial_blocked", () 
   const evaluated = engineTestUtils.evaluateResolvedCommand({
     snapshot: createSnapshot(),
     command: createValidatedCommand("partial", [
-      { type: "adjust_gold", delta: -2, reason: "small fee", phase: "immediate" },
+      { type: "adjust_currency", delta: { sp: -2 }, reason: "small fee", phase: "immediate" },
       { type: "adjust_relationship", npcId: "npc_guard", delta: 4, reason: "press too hard", phase: "conditional" },
       { type: "advance_time", durationMinutes: 5 },
     ]),
@@ -513,7 +513,7 @@ test("partial checks reject requested mutations with check_partial_blocked", () 
     evaluated.stateCommitLog.map((entry) => [entry.kind, entry.mutationType, entry.status, entry.reasonCode]),
     [
       ["check", null, "applied", "check_partial"],
-      ["mutation", "adjust_gold", "applied", "gold_adjusted"],
+      ["mutation", "adjust_currency", "applied", "currency_adjusted"],
       ["mutation", "advance_time", "applied", "time_advanced"],
       ["mutation", "adjust_relationship", "rejected", "check_partial_blocked"],
     ],
@@ -666,7 +666,7 @@ test("successful checks allow requested mutations to resolve normally", () => {
   const evaluated = engineTestUtils.evaluateResolvedCommand({
     snapshot: createSnapshot(),
     command: createValidatedCommand("success", [
-      { type: "adjust_gold", delta: 120, reason: "guard bribe backfires into a tip", phase: "conditional" },
+      { type: "adjust_currency", delta: { gp: 1, sp: 2 }, reason: "guard bribe backfires into a tip", phase: "conditional" },
       { type: "adjust_relationship", npcId: "npc_guard", delta: 5, reason: "guard warms up", phase: "conditional" },
       { type: "advance_time", durationMinutes: 5 },
     ]),
@@ -679,11 +679,12 @@ test("successful checks allow requested mutations to resolve normally", () => {
     [
       ["check", null, "applied", "check_success"],
       ["mutation", "advance_time", "applied", "time_advanced"],
-      ["mutation", "adjust_gold", "applied", "gold_adjusted"],
+      ["mutation", "adjust_currency", "applied", "currency_adjusted"],
       ["mutation", "adjust_relationship", "applied", "relationship_adjusted"],
     ],
   );
-  assert.equal(evaluated.stateCommitLog[2]?.metadata?.delta, 50);
+  assert.deepEqual(evaluated.stateCommitLog[2]?.metadata?.delta, { gp: 1, sp: 2 });
+  assert.equal(evaluated.stateCommitLog[2]?.metadata?.appliedDeltaCp, 120);
   assert.equal(evaluated.stateCommitLog[3]?.metadata?.delta, 2);
   assert.equal(evaluated.nextState.globalTime, 485);
 });
@@ -1153,6 +1154,88 @@ test("environmental item spawn handles can be referenced later in the same turn"
 
   assert.equal(evaluated.stateCommitLog[0]?.reasonCode, "environmental_item_spawned");
   assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "inventory_adjusted");
+});
+
+test("spawn_fiat_item can ground a bespoke traded item directly into player custody", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Close the sale"],
+      mutations: [
+        {
+          type: "adjust_currency",
+          delta: { sp: -5 },
+          reason: "Paid for bespoke silk.",
+        },
+        {
+          type: "spawn_fiat_item",
+          spawnKey: "silk_3_yards",
+          itemName: "Fine Silk",
+          description: "Three yards of shimmering blue silk.",
+          quantity: 1,
+          holder: { kind: "player" },
+          reason: "Received from Elias Thorn.",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse", "economy_light"]),
+  });
+
+  assert.deepEqual(
+    evaluated.stateCommitLog
+      .map((entry) => [entry.mutationType, entry.status, entry.reasonCode] as const)
+      .sort((left, right) => left.join(":").localeCompare(right.join(":"))),
+    [
+      ["adjust_currency", "applied", "currency_adjusted"],
+      ["spawn_fiat_item", "applied", "fiat_item_spawned"],
+    ].sort((left, right) => left.join(":").localeCompare(right.join(":"))),
+  );
+});
+
+test("spawn_fiat_item can ground a bespoke sold good directly into npc custody", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Complete the sale"],
+      mutations: [
+        {
+          type: "adjust_currency",
+          delta: { gp: 19 },
+          reason: "Elias pays for the cloth.",
+        },
+        {
+          type: "spawn_fiat_item",
+          spawnKey: "broadcloth_22ells",
+          itemName: "Dalelands Wool Broadcloth",
+          description: "Twenty-two ells of carefully mordanted broadcloth.",
+          quantity: 1,
+          holder: { kind: "npc", npcId: "npc_guard" },
+          reason: "Delivered to the buyer.",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse", "economy_light"]),
+  });
+
+  assert.deepEqual(
+    evaluated.stateCommitLog
+      .map((entry) => [entry.mutationType, entry.status, entry.reasonCode] as const)
+      .sort((left, right) => left.join(":").localeCompare(right.join(":"))),
+    [
+      ["adjust_currency", "applied", "currency_adjusted"],
+      ["spawn_fiat_item", "applied", "fiat_item_spawned"],
+    ].sort((left, right) => left.join(":").localeCompare(right.join(":"))),
+  );
 });
 
 test("forward spawn references reject cleanly", () => {
@@ -1782,7 +1865,7 @@ test("transfer_assets can move a portable world object into storage", () => {
       parentWorldObjectId: null,
       sceneLocationId: null,
       sceneFocusKey: null,
-      storedGold: 0,
+      storedCurrencyCp: 0,
       storageCapacity: 10,
       securityIsLocked: false,
       securityKeyItemTemplateId: null,
@@ -1798,7 +1881,7 @@ test("transfer_assets can move a portable world object into storage", () => {
       parentWorldObjectId: null,
       sceneLocationId: "loc_gate",
       sceneFocusKey: null,
-      storedGold: 0,
+      storedCurrencyCp: 0,
       storageCapacity: 20,
       securityIsLocked: false,
       securityKeyItemTemplateId: null,
@@ -1859,7 +1942,7 @@ test("transfer_assets rejects moving goods into locked storage", () => {
       parentWorldObjectId: null,
       sceneLocationId: "loc_gate",
       sceneFocusKey: null,
-      storedGold: 0,
+      storedCurrencyCp: 0,
       storageCapacity: 10,
       securityIsLocked: true,
       securityKeyItemTemplateId: null,
@@ -1876,7 +1959,7 @@ test("transfer_assets rejects moving goods into locked storage", () => {
         type: "transfer_assets",
         source: { kind: "player" },
         destination: { kind: "world_object", objectId: "obj_locked_box" },
-        goldAmount: 2,
+        currencyAmount: { sp: 2 },
         reason: "Stash coins in the locked box.",
       },
     ]),
@@ -1919,7 +2002,7 @@ test("transfer_assets supports commodity round-trips between player and world ob
       parentWorldObjectId: null,
       sceneLocationId: "loc_gate",
       sceneFocusKey: null,
-      storedGold: 0,
+      storedCurrencyCp: 0,
       storageCapacity: 50,
       securityIsLocked: false,
       securityKeyItemTemplateId: null,

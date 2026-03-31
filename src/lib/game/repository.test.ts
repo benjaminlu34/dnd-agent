@@ -170,7 +170,7 @@ test("toRouterInventorySummary aggregates quantity and omits removed inventory e
     id: "inst_1",
     templateId: "char_1",
     health: 12,
-    gold: 3,
+    currencyCp: 300,
     commodityStacks: [],
     inventory: [
       {
@@ -239,6 +239,115 @@ test("toRouterInventorySummary aggregates quantity and omits removed inventory e
       stateTags: [],
     },
   ]);
+});
+
+test("toPromptAssetInventory exposes grounded held items and commodity stacks without zero-fill noise", () => {
+  const inventory = repositoryTestUtils.toPromptAssetInventory({
+    items: [
+      {
+        id: "iteminst_ring",
+        characterInstanceId: null,
+        npcId: "npc_guide",
+        templateId: "item_ring",
+        template: {
+          id: "item_ring",
+          campaignId: "camp_1",
+          name: "Signet Ring",
+          description: "A heavy silver ring engraved with a guild mark.",
+          value: 12,
+          weight: 0.1,
+          rarity: "uncommon",
+          tags: [],
+        },
+        isIdentified: true,
+        charges: null,
+        properties: null,
+      },
+    ],
+    commodityStacks: [
+      {
+        id: "stack_spice",
+        characterInstanceId: null,
+        npcId: "npc_guide",
+        worldObjectId: null,
+        sceneLocationId: null,
+        sceneFocusKey: null,
+        commodityId: "com_spice",
+        quantity: 3,
+        commodity: {
+          id: "com_spice",
+          campaignId: "camp_1",
+          name: "Spice Sachets",
+          baseValue: 4,
+          tags: ["trade_good"],
+        },
+      },
+    ],
+  });
+
+  assert.deepEqual(inventory, [
+    {
+      kind: "item",
+      id: "item_ring",
+      name: "Signet Ring",
+      description: "A heavy silver ring engraved with a guild mark.",
+      quantity: 1,
+      instanceIds: ["iteminst_ring"],
+      stateTags: [],
+    },
+    {
+      kind: "commodity",
+      id: "com_spice",
+      name: "Spice Sachets",
+      description: "Trade goods x3",
+      quantity: 3,
+    },
+  ]);
+});
+
+test("world object prompt projections preserve lock and key state", () => {
+  const object = {
+    id: "wobj_chest",
+    name: "Strongbox",
+    characterInstanceId: null,
+    npcId: null,
+    parentWorldObjectId: null,
+    sceneLocationId: "loc_gate",
+    sceneFocusKey: null,
+    storedCurrencyCp: 0,
+    storageCapacity: 10,
+    securityIsLocked: true,
+    securityKeyItemTemplateId: "item_key_iron",
+    concealmentIsHidden: false,
+    vehicleIsHitched: false,
+    properties: null,
+  };
+
+  assert.deepEqual(
+    repositoryTestUtils.toRouterWorldObjectSummary(object, "Iron-bound and warded."),
+    {
+      id: "wobj_chest",
+      name: "Strongbox",
+      summary: "Iron-bound and warded.",
+      storedCurrency: null,
+      isLocked: true,
+      requiredKeyTemplateId: "item_key_iron",
+      isHidden: false,
+    },
+  );
+
+  assert.deepEqual(
+    repositoryTestUtils.toPromptWorldObjectSummary(object, "Iron-bound and warded."),
+    {
+      id: "wobj_chest",
+      name: "Strongbox",
+      summary: "Iron-bound and warded.",
+      storedCurrency: null,
+      isLocked: true,
+      requiredKeyTemplateId: "item_key_iron",
+      isHidden: false,
+    },
+  );
 });
 
 test("toRouterSceneAspectSummaries emits compact duration-aware aspect records", () => {
@@ -481,7 +590,7 @@ test("prunePromptContextForRouter ranks resolved refs and trims unrelated heavy 
         ],
         unresolvedReferents: [],
         impliedDestinationFocus: null,
-        mustCheck: ["sceneActors", "gold"],
+        mustCheck: ["sceneActors", "currency"],
       },
     },
     promptContext: {

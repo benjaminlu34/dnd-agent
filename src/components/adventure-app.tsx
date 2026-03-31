@@ -10,6 +10,7 @@ import {
   Shield,
   X,
 } from "lucide-react";
+import { formatCurrencyCompact } from "@/lib/game/currency";
 import type { StreamEvent } from "@/lib/http/ndjson";
 import type {
   CampaignListItem,
@@ -646,8 +647,10 @@ export function AdventureApp({
                         <p className="mt-2 font-serif text-2xl text-zinc-100">{snapshot.character.health}</p>
                       </div>
                       <div className="rounded-2xl border border-zinc-800 bg-zinc-900/70 p-4">
-                        <p className="text-[0.68rem] uppercase tracking-[0.18em] text-zinc-500">Gold</p>
-                        <p className="mt-2 font-serif text-2xl text-zinc-100">{snapshot.character.gold}</p>
+                        <p className="text-[0.68rem] uppercase tracking-[0.18em] text-zinc-500">Currency</p>
+                        <p className="mt-2 font-serif text-2xl text-zinc-100">
+                          {formatCurrencyCompact(snapshot.character.currencyCp)}
+                        </p>
                       </div>
                     </section>
 

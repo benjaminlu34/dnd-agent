@@ -206,7 +206,7 @@ export type WorldObjectSummary = {
   parentWorldObjectId?: string | null;
   sceneLocationId?: string | null;
   sceneFocusKey?: string | null;
-  storedGold: number;
+  storedCurrencyCp: number;
   storageCapacity?: number | null;
   securityIsLocked: boolean;
   securityKeyItemTemplateId?: string | null;
@@ -219,7 +219,7 @@ export type CharacterInstance = {
   id: string;
   templateId: string;
   health: number;
-  gold: number;
+  currencyCp: number;
   inventory: ItemInstance[];
   commodityStacks: CharacterCommodityStack[];
 };
@@ -229,7 +229,7 @@ export type CampaignCharacter = CharacterTemplate & {
   templateId: string;
   stats: Record<Stat, number>;
   health: number;
-  gold: number;
+  currencyCp: number;
   inventory: ItemInstance[];
   commodityStacks: CharacterCommodityStack[];
 };
@@ -810,6 +810,10 @@ export type PromptWorldObject = {
   id: string;
   name: string;
   summary: string;
+  storedCurrency?: PromptCurrencySummary | null;
+  isLocked: boolean;
+  requiredKeyTemplateId?: string | null;
+  isHidden: boolean;
 };
 
 export type PromptNpcSummary = {
@@ -1018,6 +1022,18 @@ export type PromptInventoryItem = {
   stateTags?: string[];
 };
 
+export type CurrencyDenominations = {
+  cp?: number;
+  sp?: number;
+  gp?: number;
+  pp?: number;
+};
+
+export type PromptCurrencySummary = {
+  totalCp: number;
+  formatted: string;
+};
+
 export type SpatialPromptContext = {
   currentLocation: Pick<LocationSummary, "id" | "name" | "type" | "summary" | "state">;
   sceneFocus: CampaignRuntimeState["sceneFocus"];
@@ -1031,6 +1047,7 @@ export type SpatialPromptContext = {
   recentWorldShifts: WorldShiftSummary[];
   activeThreads: ActiveThreadSummary[];
   inventory: PromptInventoryItem[];
+  currency?: PromptCurrencySummary;
   worldObjects: PromptWorldObject[];
   sceneAspects: CampaignRuntimeState["sceneAspects"];
   localTexture: LocalTextureSummary | null;
@@ -1051,6 +1068,10 @@ export type RouterWorldObjectSummary = {
   id: string;
   name: string;
   summary: string;
+  storedCurrency?: PromptCurrencySummary | null;
+  isLocked: boolean;
+  requiredKeyTemplateId?: string | null;
+  isHidden: boolean;
 };
 
 export type RouterSceneAspectSummary = {
@@ -1076,7 +1097,7 @@ export type TurnRouterContext = Pick<
   inventory: RouterInventorySummary[];
   worldObjects: RouterWorldObjectSummary[];
   sceneAspects: RouterSceneAspectSummary[];
-  gold: number;
+  currency?: PromptCurrencySummary;
 };
 
 export type RouterAuthorizedVector =
@@ -1159,7 +1180,7 @@ export type RouterAttentionMustCheck =
   | "worldObjects"
   | "inventory"
   | "routes"
-  | "gold"
+  | "currency"
   | "fetchedFacts"
   | "recentTurnLedger";
 
@@ -1246,6 +1267,7 @@ export type NpcDetail = NpcSummary & {
   knownInformation: InformationSummary[];
   relationshipHistory: MemoryRecord[];
   temporaryActorId: string | null;
+  inventory: PromptInventoryItem[];
 };
 
 export type PromotedNpcHydrationDraft = {
@@ -1407,8 +1429,8 @@ export type MechanicsMutation =
       phase?: MutationPhase;
     }
   | {
-      type: "adjust_gold";
-      delta: number;
+      type: "adjust_currency";
+      delta: CurrencyDenominations;
       reason: string;
       phase?: MutationPhase;
     }
@@ -1466,6 +1488,16 @@ export type MechanicsMutation =
       phase?: MutationPhase;
     }
   | {
+      type: "spawn_fiat_item";
+      spawnKey: string;
+      itemName: string;
+      description: string;
+      quantity: number;
+      holder: AssetHolderRef;
+      reason: string;
+      phase?: MutationPhase;
+    }
+  | {
       type: "commit_market_trade";
       action: TradeAction;
       marketPriceId: string;
@@ -1477,7 +1509,7 @@ export type MechanicsMutation =
       type: "transfer_assets";
       source: AssetHolderRef;
       destination: AssetHolderRef;
-      goldAmount?: number;
+      currencyAmount?: CurrencyDenominations;
       itemInstanceIds?: string[];
       worldObjectIds?: string[];
       templateTransfers?: Array<{

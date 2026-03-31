@@ -110,7 +110,7 @@ model CharacterInstance {
   campaignId String            @unique
   templateId String
   health     Int
-  gold       Int               @default(0)
+  currencyCp Int               @default(0)
   createdAt  DateTime          @default(now())
   updatedAt  DateTime          @updatedAt
   campaign   Campaign          @relation(fields: [campaignId], references: [id], onDelete: Cascade)
@@ -617,7 +617,7 @@ model WorldObject {
   parentWorldObjectId       String?
   sceneLocationId           String?
   sceneFocusKey             String?
-  storedGold               Int                    @default(0)
+  storedCurrencyCp         Int                    @default(0)
   storageCapacity           Int?
   securityIsLocked          Boolean                @default(false)
   securityKeyItemTemplateId String?

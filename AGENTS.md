@@ -1,6 +1,6 @@
 ## Workspace Instructions
 
-- Treat existing campaign, module, and character data in this repository as disposable test data unless the user explicitly says otherwise.
+- Treat existing campaign instance and character data in this repository as disposable test data unless the user explicitly says otherwise. Treat campaign modules as non-disposable. 
 - When making or reviewing breaking changes that affect stored campaign or character data, safely ignore backward-compatibility concerns by default.
 - Assume the database can be reset, dropped, or otherwise nuked unless the user explicitly instructs otherwise.
 - If a task would destroy local data and the user has not said data must be preserved, prefer the simplest path instead of adding migration or preservation work.

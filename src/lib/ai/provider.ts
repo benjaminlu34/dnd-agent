@@ -3,6 +3,12 @@ import path from "node:path";
 import OpenAI from "openai";
 import { z } from "zod";
 import { env } from "@/lib/env";
+import {
+  COPPER_PER_GOLD,
+  COPPER_PER_PLATINUM,
+  COPPER_PER_SILVER,
+  currencyDenominationsSchema,
+} from "@/lib/game/currency";
 import { characterTemplateDraftSchema } from "@/lib/game/characters";
 import { MAX_STARTER_ITEMS, normalizeItemNameList } from "@/lib/game/item-utils";
 import {
@@ -2270,7 +2276,7 @@ const routerImpliedDestinationFocusSchema = z.object({
   label: z.string().trim().min(1).max(120),
 });
 
-const routerAttentionSchema = z.object({
+  const routerAttentionSchema = z.object({
   primaryIntent: z.string().trim().min(1).max(160),
   resolvedReferents: z.array(routerResolvedReferentSchema).max(6).default([]),
   unresolvedReferents: z.array(routerUnresolvedReferentSchema).max(6).default([]),
@@ -2279,7 +2285,7 @@ const routerAttentionSchema = z.object({
     routerImpliedDestinationFocusSchema.nullable().optional().default(null),
   ),
   mustCheck: z.array(
-    z.enum(["sceneActors", "sceneAspects", "worldObjects", "inventory", "routes", "gold", "fetchedFacts", "recentTurnLedger"]),
+    z.enum(["sceneActors", "sceneAspects", "worldObjects", "inventory", "routes", "currency", "fetchedFacts", "recentTurnLedger"]),
   ).max(7).default([]),
 }).optional().default({
   primaryIntent: "Resolve the player action conservatively from grounded context.",
@@ -2353,8 +2359,8 @@ const mechanicsMutationSchema = z.discriminatedUnion("type", [
     phase: z.enum(["immediate", "conditional"]).optional(),
   }),
   z.object({
-    type: z.literal("adjust_gold"),
-    delta: z.number().int(),
+    type: z.literal("adjust_currency"),
+    delta: currencyDenominationsSchema,
     reason: z.string().trim().min(1).max(120),
     phase: z.enum(["immediate", "conditional"]).optional(),
   }),
@@ -2412,6 +2418,16 @@ const mechanicsMutationSchema = z.discriminatedUnion("type", [
     phase: z.enum(["immediate", "conditional"]).optional(),
   }),
   z.object({
+    type: z.literal("spawn_fiat_item"),
+    spawnKey: z.string().trim().min(1).max(60),
+    itemName: z.string().trim().min(1).max(80),
+    description: z.string().trim().min(1).max(240),
+    quantity: z.number().int().positive().max(12),
+    holder: assetHolderSchema,
+    reason: z.string().trim().min(1).max(120),
+    phase: z.enum(["immediate", "conditional"]).optional(),
+  }),
+  z.object({
     type: z.literal("commit_market_trade"),
     action: z.enum(["buy", "sell"]),
     marketPriceId: z.string().trim().min(1),
@@ -2423,7 +2439,9 @@ const mechanicsMutationSchema = z.discriminatedUnion("type", [
     type: z.literal("transfer_assets"),
     source: assetHolderSchema,
     destination: assetHolderSchema,
-    goldAmount: z.number().int().positive().optional(),
+    currencyAmount: currencyDenominationsSchema.refine((value) => Object.values(value).every((entry) => (entry ?? 0) > 0), {
+      message: "Transfer currency amounts must be positive.",
+    }).optional(),
     itemInstanceIds: z.array(z.string().trim().min(1)).max(12).optional(),
     worldObjectIds: z.array(z.string().trim().min(1)).max(8).optional(),
     templateTransfers: z.array(
@@ -2572,7 +2590,7 @@ const resolvedTurnNarrationTool = createStructuredTool(
 const ROUTER_MUST_CHECK_DEPRIORITY: RouterDecision["attention"]["mustCheck"] = [
   "recentTurnLedger",
   "routes",
-  "gold",
+  "currency",
   "fetchedFacts",
   "inventory",
   "worldObjects",
@@ -2615,7 +2633,7 @@ function normalizeRouterDecisionInput(value: unknown): unknown {
   const mustCheck = attentionRaw.mustCheck
     .filter((entry): entry is RouterDecision["attention"]["mustCheck"][number] => typeof entry === "string")
     .filter((entry): entry is RouterDecision["attention"]["mustCheck"][number] =>
-      ["sceneActors", "sceneAspects", "worldObjects", "inventory", "routes", "gold", "fetchedFacts", "recentTurnLedger"].includes(entry),
+      ["sceneActors", "sceneAspects", "worldObjects", "inventory", "routes", "currency", "fetchedFacts", "recentTurnLedger"].includes(entry),
     );
 
   attentionRaw.mustCheck = clampRouterMustCheck(mustCheck);
@@ -2793,7 +2811,17 @@ function formatRouterInventoryLine(item: TurnRouterContext["inventory"][number])
 }
 
 function formatRouterWorldObjectLine(object: TurnRouterContext["worldObjects"][number]) {
-  return `${compactPromptText(object.name, 80)} [${object.id}] - ${compactPromptText(object.summary, 120)}`;
+  const tags: string[] = [];
+  if (object.isLocked) {
+    tags.push("locked");
+  }
+  if (object.requiredKeyTemplateId) {
+    tags.push(`key:${object.requiredKeyTemplateId}`);
+  }
+  if (object.isHidden) {
+    tags.push("hidden");
+  }
+  return `${compactPromptText(object.name, 80)} [${object.id}]${tags.length ? ` {${tags.join(", ")}}` : ""} - ${compactPromptText(object.summary, 120)}`;
 }
 
 function formatRouterSceneAspectLine(aspect: TurnRouterContext["sceneAspects"][number]) {
@@ -2809,7 +2837,7 @@ function formatRouterContextForModel(context: TurnRouterContext) {
       ? `You are in ${context.currentLocation.name}. Your current focus/position is: ${sceneFocusLabel}.`
       : `You are in ${context.currentLocation.name}.`,
     currentLocation: `${context.currentLocation.name} (${context.currentLocation.type}, state: ${context.currentLocation.state})`,
-    gold: context.gold,
+    currency: context.currency,
     authoritativeState: {
       sceneActors: context.sceneActors.slice(0, 8).map(formatRouterSceneActorLine),
       inventory: context.inventory.slice(0, 8).map(formatRouterInventoryLine),
@@ -2904,8 +2932,77 @@ function buildAttentionPacketBlock(decision: RouterDecision) {
   };
 }
 
+function normalizeLooseCheckIntentInput(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return value;
+  }
+
+  const record = value as Record<string, unknown>;
+  const type = typeof record.type === "string" ? record.type : null;
+  const hasChallengeShape =
+    typeof record.reason === "string"
+    && typeof record.challengeApproach === "string";
+  const hasCombatShape =
+    typeof record.reason === "string"
+    && typeof record.targetNpcId === "string"
+    && typeof record.approach === "string";
+
+  if ((type === "checkIntent" || type == null) && hasChallengeShape) {
+    return {
+      ...record,
+      type: "challenge",
+    };
+  }
+
+  if ((type === "checkIntent" || type == null) && hasCombatShape) {
+    return {
+      ...record,
+      type: "combat",
+    };
+  }
+
+  return value;
+}
+
+function normalizeFinalActionToolCallInput(command: unknown): unknown {
+  if (!command || typeof command !== "object" || Array.isArray(command)) {
+    return command;
+  }
+
+  const record = { ...(command as Record<string, unknown>) };
+  if (record.type !== "resolve_mechanics") {
+    return record;
+  }
+
+  const rawMutations = Array.isArray(record.mutations) ? record.mutations : [];
+  let extractedCheckIntent = normalizeLooseCheckIntentInput(record.checkIntent);
+  const normalizedMutations = rawMutations.filter((mutation) => {
+    const candidate = normalizeLooseCheckIntentInput(mutation);
+    if (
+      extractedCheckIntent == null
+      && candidate
+      && typeof candidate === "object"
+      && !Array.isArray(candidate)
+    ) {
+      const candidateRecord = candidate as Record<string, unknown>;
+      if (candidateRecord.type === "challenge" || candidateRecord.type === "combat") {
+        extractedCheckIntent = candidate;
+        return false;
+      }
+    }
+
+    return true;
+  });
+
+  return {
+    ...record,
+    checkIntent: extractedCheckIntent,
+    mutations: normalizedMutations,
+  };
+}
+
 function parseFinalActionToolCall(command: unknown) {
-  return turnActionToolCallSchema.safeParse(command);
+  return turnActionToolCallSchema.safeParse(normalizeFinalActionToolCallInput(command));
 }
 
 function extractToolInput(response: OpenAI.Chat.Completions.ChatCompletion) {
@@ -3008,8 +3105,11 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "If the player reaches for a plausible unlisted local, improvised item, or environmental condition, spawn it first before interacting with it only when the noun is a fresh generic local role or a new same-scene manifestation implied by the current action.",
         "Use spawn_temporary_actor before record_local_interaction when the local is not already listed in sceneActors.",
         "If the player addresses a generic person like someone, passerby, customer, shopper, stranger, or interested local, keep them generic: do not redirect them to a named scene actor; spawn_temporary_actor first if the action engages them.",
+        "If the player is looting, pickpocketing, frisking, searching a body's belongings, or otherwise acting on a grounded NPC's custody, request npc_detail first so you can see their grounded held items and commodity stacks.",
         "Use spawn_world_object for durable props like lockboxes, carts, hidden nooks, and other persistent storage or fixtures.",
+        "Respect context.authoritativeState.worldObjects mechanical state such as isLocked and requiredKeyTemplateId. Do not narrate a locked object opening unless the turn actually unlocks it or the correct key is grounded.",
         "Use spawn_environmental_item before adjust_inventory when the item is plausible in the environment but not already grounded in inventory.",
+        "Use spawn_fiat_item to instantiate bespoke narrative goods directly into a valid holder when the deal creates or reveals goods that are not already grounded in inventory or fetched market prices.",
         "Use spawn_scene_aspect for smoke, damage, noise, weather spillover, improvised cover, and other grounded scene conditions.",
         "In MANIFEST, do not instantiate value: no free wealth, trade goods, valuables, or mechanically advantageous loot.",
         "In MANIFEST, do not instantiate authority: spawned actors must be ordinary generic locals, never rulers, generals, guildmasters, or specific named plot contacts.",
@@ -3018,7 +3118,12 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Default manifestation pattern: plausible generic nearby people become spawn_temporary_actor such as stablehand, customer, porter, or watch patrol.",
         "Default manifestation pattern: intra-location repositioning becomes set_player_scene_focus.",
         "Self-directed downtime work may use adjust_inventory, spawn_environmental_item, and spawn_scene_aspect for grounded byproducts, consumed materials, and scene conditions.",
-        "Use transfer_assets for non-market stashing, dropping, storing, retrieving, or handing over items, commodities, or gold between the player, world objects, scenes, and willing NPCs.",
+        `The currency system uses cp, sp, gp, and pp. ${COPPER_PER_SILVER} cp = 1 sp, ${COPPER_PER_GOLD} cp = 1 gp, and ${COPPER_PER_PLATINUM} cp = 1 pp.`,
+        "Use adjust_currency for incidental payments, rewards, bribes, tips, fees, and other non-market currency movement; express the delta with denomination fields rather than flattened copper arithmetic.",
+        "If economy_light is active and a bespoke trade is actually agreed upon, resolve it immediately with composed asset mutations such as adjust_currency plus spawn_fiat_item and/or transfer_assets. Do not rely on record_npc_interaction alone to finalize the trade.",
+        "If an offer is still on the table but not yet accepted, you may track it with a scene-duration spawn_scene_aspect such as pending_trade_offer instead of finalizing the exchange early.",
+        "Use transfer_assets for non-market stashing, dropping, storing, retrieving, or handing over items, commodities, or currency between the player, world objects, scenes, and willing NPCs.",
+        "When fetched npc_detail exposes grounded held items or commodity stacks on an NPC, use transfer_assets from that NPC holder for looting, stealing, or taking those assets. Do not replace grounded NPC-held goods with spawn_fiat_item.",
         "Use update_world_object_state to lock, hide, or hitch a durable world object.",
         "Use update_item_state for equipping, changing charges, or toggling durable item state like lit/unlit.",
         "Keeping an item on your own person still counts as inventory. Pockets, sleeves, belts, boots, packs, and similar on-body storage should not use adjust_inventory or transfer_assets unless the item actually leaves the player's custody.",
@@ -3044,7 +3149,8 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "TRIVIAL ACTIONS: Checking personal inventory, reviewing known information, or looking around a safe room requires ZERO checks. You must omit checkIntent entirely for these actions.",
         "ID HALLUCINATION BAN: You are strictly forbidden from using discover_information unless the exact informationId is explicitly provided in fetched_facts or attention_packet.resolvedReferents. Do not invent placeholder IDs.",
         "Only include checkIntent when success or failure meaningfully changes which mutations can happen. If the turn is routine and should simply create a local interaction or consume time, omit checkIntent.",
-        "If a check is needed, set checkIntent and list only the success-state mutations. The engine will reject them on failure.",
+        "checkIntent is a top-level field on resolve_mechanics, not a mutation. Never put an entry with type checkIntent inside mutations.",
+        "If a check is needed, set top-level checkIntent and list only the success-state mutations. The engine will reject them on failure.",
         "For notice/analyze/search/listen turns that use checkIntent, any newly noticed actor, clue, item, or scene detail must be phase conditional so the roll gates whether it appears.",
         "Never use placeholder ids like none, null, unknown, or n/a for citedNpcId, targetNpcId, localEntityId, or spawn references. Omit the field instead when there is no real id.",
         "Use advance_time for passive waiting or observation windows.",
@@ -3075,14 +3181,16 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "If the action is purely atmospheric, stay in FLAVOR and do not escalate it into mechanics.",
         "Use only bounded mutations. The engine will validate, filter, and commit them deterministically.",
         "Only include checkIntent when success or failure meaningfully changes which mutations can happen. If the turn is routine and should simply create a local interaction, spend time, or ask a subordinate to fetch someone, omit checkIntent.",
-        "If a check is needed, set checkIntent and list only the success-state mutations. The engine will reject them automatically on failure or partial success.",
+        "checkIntent is a top-level field on resolve_mechanics, not a mutation. Never put an entry with type checkIntent inside mutations.",
+        "If a check is needed, set top-level checkIntent and list only the success-state mutations. The engine will reject them automatically on failure or partial success.",
         "Only set citedNpcId when the player is directly engaging that NPC on-screen this turn.",
         "For notice/analyze/search/listen turns that use checkIntent, any newly noticed actor, clue, item, or scene detail must be phase conditional so the roll gates whether it appears.",
         "Never use placeholder ids like none, null, unknown, or n/a for citedNpcId, targetNpcId, localEntityId, or spawn references. Omit the field instead when there is no real id.",
         "Mark resource costs, fees, and other upfront expenditures as phase immediate.",
         "Mark success-only rewards or outcomes as phase conditional.",
         "Use commit_market_trade only for strict commodity trade backed by fetched market prices.",
-        "Use adjust_gold for incidental payments, rewards, bribes, tips, fees, or other non-market gold movement.",
+        `The currency system uses cp, sp, gp, and pp. ${COPPER_PER_SILVER} cp = 1 sp, ${COPPER_PER_GOLD} cp = 1 gp, and ${COPPER_PER_PLATINUM} cp = 1 pp.`,
+        "Use adjust_currency for incidental payments, rewards, bribes, tips, fees, or other non-market currency movement.",
         "Use move_player only for actual route travel to a known adjacent location.",
         "Use record_local_interaction for current-scene unnamed locals instead of adjust_relationship.",
         "Use record_npc_interaction for ordinary same-scene dialogue with a grounded named NPC when the exchange matters but no relationship shift is required.",
@@ -3094,8 +3202,11 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "If the player reaches for a plausible unlisted local, improvised item, or environmental condition, spawn it first before interacting with it only when the noun is a fresh generic local role or a new same-scene manifestation implied by the current action.",
         "Use spawn_temporary_actor before record_local_interaction when the local is not already listed in sceneActors.",
         "If the player addresses a generic person like someone, passerby, customer, shopper, stranger, or interested local, keep them generic: do not redirect them to a named scene actor; spawn_temporary_actor first if the action engages them.",
+        "If the player is looting, pickpocketing, frisking, searching a body's belongings, or otherwise acting on a grounded NPC's custody, request npc_detail first so you can see their grounded held items and commodity stacks.",
         "Use spawn_world_object for durable props like lockboxes, carts, hidden nooks, and other persistent storage or fixtures.",
+        "Respect context.authoritativeState.worldObjects mechanical state such as isLocked and requiredKeyTemplateId. Do not narrate a locked object opening unless the turn actually unlocks it or the correct key is grounded.",
         "Use spawn_environmental_item before adjust_inventory when the item is plausible in the environment but not already grounded in inventory.",
+        "Use spawn_fiat_item to instantiate bespoke narrative goods directly into a valid holder when the deal creates or reveals goods that are not already grounded in inventory or fetched market prices.",
         "Use spawn_scene_aspect for smoke, damage, noise, weather spillover, improvised cover, and other grounded scene conditions.",
         "In MANIFEST, do not instantiate value: no free wealth, trade goods, valuables, or mechanically advantageous loot.",
         "In MANIFEST, do not instantiate authority: spawned actors must be ordinary generic locals, never rulers, generals, guildmasters, or specific named plot contacts.",
@@ -3104,8 +3215,11 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Default manifestation pattern: plausible generic nearby people become spawn_temporary_actor such as stablehand, customer, porter, or watch patrol.",
         "Default manifestation pattern: intra-location repositioning becomes set_player_scene_focus.",
         "Self-directed downtime work may use adjust_inventory, spawn_environmental_item, and spawn_scene_aspect for grounded byproducts, consumed materials, and scene conditions.",
+        "If economy_light is active and a bespoke trade is actually agreed upon, resolve it immediately with composed asset mutations such as adjust_currency plus spawn_fiat_item and/or transfer_assets. Do not rely on record_npc_interaction alone to finalize the trade.",
+        "If an offer is still on the table but not yet accepted, you may track it with a scene-duration spawn_scene_aspect such as pending_trade_offer instead of finalizing the exchange early.",
         "Use transfer_assets only for non-market custody changes. Do not use it for buying or selling from fetched market prices.",
         "Use transfer_assets under economy_light for stash/drop/store/retrieve, under converse for willing NPC exchange, under investigate for stealthy NPC-source transfers, and under violence for forceful NPC-source transfers.",
+        "When fetched npc_detail exposes grounded held items or commodity stacks on an NPC, use transfer_assets from that NPC holder for looting, stealing, or taking those assets. Do not replace grounded NPC-held goods with spawn_fiat_item.",
         "Use update_world_object_state to lock, hide, or hitch a durable world object.",
         "Use update_item_state for equipping, changing charges, or toggling durable item state like lit/unlit.",
         "Keeping an item on your own person still counts as inventory. Pockets, sleeves, belts, boots, packs, and similar on-body storage should not use adjust_inventory or transfer_assets unless the item actually leaves the player's custody.",
@@ -3210,6 +3324,10 @@ function buildTurnActionCorrectionNotes(input: {
     notes.push("suggestedActions must be an array of at most 4 short concrete strings. Use [] if none are appropriate.");
   }
 
+  if ((input.validationIssues ?? "").includes("mutations.") && (input.validationIssues ?? "").includes("type: Invalid input")) {
+    notes.push("Only real mutation types may appear inside mutations. checkIntent belongs at the top level of resolve_mechanics, never inside mutations.");
+  }
+
   notes.push("Do not include assistant prose before the tool call.");
   return notes.join("\n");
 }
@@ -3221,8 +3339,8 @@ function buildTurnRouterSystemPrompt(correctionNotes?: string | null) {
     "Choose profile=local only when the action can be resolved from immediate same-scene context alone.",
     "Choose profile=full whenever the action depends on prior clues, rumors, factions, active pressures, broader world state, travel, strategy, or you are unsure.",
     "authorizedVectors should contain only the commitment vectors the player's wording clearly authorizes on this turn.",
-    "economy_light covers incidental spending like meals, drinks, tips, entry fees, and small service payments.",
-    "economy_strict covers commodity trade, barter, or anything that depends on authoritative market prices.",
+    "economy_light covers incidental spending plus bespoke haggling, bartering, discounts, and negotiated deals over ungrounded goods or services.",
+    "economy_strict covers only commodity trades that depend on authoritative fetched market prices.",
     "violence covers direct attack, subdual, assassination, or clear threat-of-harm escalation.",
     "converse covers explicit questioning, negotiation, persuasion, or socially consequential dialogue.",
     "investigate covers explicit searching, clue-seeking, examination, tracking, or analysis.",
@@ -3230,8 +3348,11 @@ function buildTurnRouterSystemPrompt(correctionNotes?: string | null) {
     "Directing a present subordinate or ally to pass along a message or fetch someone is a local in-scene action, not automatically persuasion with the off-screen target.",
     "requiredPrerequisites must list every authoritative fetch the mechanics pass will need before it can safely resolve the turn.",
     "Use market_prices before strict commodity trade, npc_detail before detailed interaction with a present NPC that needs it, and relationship_history only when prior rapport materially matters.",
+    "If the player is looting, pickpocketing, frisking, searching a body's belongings, or otherwise needs grounded custody detail from a present NPC, include npc_detail for that actor.",
     "Confidence governs profile only. authorizedVectors and requiredPrerequisites should still reflect the best conservative reading even when confidence is low.",
     "Use clarification only for hard blockers where a best-effort interpretation would be materially unreliable.",
+    "When the player haggles, barters, negotiates price, or proposes bespoke terms, include economy_light alongside converse.",
+    "Reserve economy_strict for fetched market-price transactions, not bespoke stall haggling.",
     "Do not generate gameplay policy, strategy notes, or prohibitions for the mechanics model.",
     "Map player nouns to existing grounded refs when possible.",
     "Do not invent new ids or spawn handles.",
@@ -3250,6 +3371,7 @@ function buildTurnRouterSystemPrompt(correctionNotes?: string | null) {
     "Do not remap a generic or unresolved person onto a named scene actor merely because one is present in the scene.",
     "If one present scene actor is already the clear conversational counterpart from the grounded scene summaries, keep polite follow-ups like sir, ma'am, or what can I call you anchored to that actor instead of redirecting to another named bystander.",
     "If a present scene actor is marked detail-fetch(name/identity available) and the player asks for their name, title, identity, or what to call them, include npc_detail for that actor.",
+    "Treat recentNarrativeProse as style continuity only, not evidence of who is present, what they carry, or what objects can be manipulated now.",
   ].join("\n");
 
   return correctionNotes ? `${base}\n${correctionNotes}` : base;
@@ -3267,6 +3389,7 @@ function formatSpatialPromptContext(context: SpatialPromptContext) {
       adjacentRoutes: context.adjacentRoutes,
       sceneActors: context.sceneActors,
       inventory: context.inventory,
+      currency: context.currency,
       worldObjects: context.worldObjects,
       sceneAspects: context.sceneAspects,
     },

@@ -1,3 +1,4 @@
+import { flattenCurrencyToCp } from "@/lib/game/currency";
 import type {
   CampaignSnapshot,
   ChallengeApproach,
@@ -337,7 +338,7 @@ function mutationPhaseForCheckStakes(mutation: MechanicsMutation): "immediate" |
   if (mutation.type === "advance_time") {
     return "immediate";
   }
-  if (mutation.type === "adjust_gold" && mutation.delta < 0) {
+  if (mutation.type === "adjust_currency" && flattenCurrencyToCp(mutation.delta) < 0) {
     return "immediate";
   }
   if (mutation.type === "record_local_interaction") {
@@ -350,6 +351,7 @@ function mutationPhaseForCheckStakes(mutation: MechanicsMutation): "immediate" |
     mutation.type === "spawn_scene_aspect"
     || mutation.type === "spawn_temporary_actor"
     || mutation.type === "spawn_environmental_item"
+    || mutation.type === "spawn_fiat_item"
     || mutation.type === "set_player_scene_focus"
     || mutation.type === "set_scene_actor_presence"
   ) {
@@ -380,6 +382,7 @@ function canAutoPromoteMutationForInvestigativeCheck(mutation: MechanicsMutation
     mutation.type === "spawn_scene_aspect"
     || mutation.type === "spawn_temporary_actor"
     || mutation.type === "spawn_environmental_item"
+    || mutation.type === "spawn_fiat_item"
   );
 }
 

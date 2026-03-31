@@ -84,7 +84,7 @@ export function toCampaignCharacter(
     templateId: instance.templateId,
     stats: toCharacterStats(template),
     health: instance.health,
-    gold: instance.gold,
+    currencyCp: instance.currencyCp,
     inventory: cloneInventory(instance.inventory),
     commodityStacks: cloneCommodityStacks(instance.commodityStacks),
   };
@@ -102,7 +102,7 @@ export function toCampaignSeedCharacter(
     templateId,
     stats: toCharacterStats(template),
     health: template.maxHealth,
-    gold: 0,
+    currencyCp: 0,
     inventory: [],
     commodityStacks: [],
   };
