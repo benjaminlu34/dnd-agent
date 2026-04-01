@@ -390,6 +390,7 @@ test("validateTurnCommand drops record_local_interaction targeting a named npc r
           type: "record_local_interaction",
           localEntityId: "npc:npc_guard",
           interactionSummary: "You buy breakfast from the guard.",
+          socialOutcome: "accepts",
         },
         {
           type: "advance_time",
@@ -421,6 +422,7 @@ test("validateTurnCommand preserves record_npc_interaction targeting a present n
           npcId: "npc_guard",
           interactionSummary: "You keep the guard talking while you ask his name.",
           topic: "identity",
+          socialOutcome: "asks_question",
         },
       ],
     },
@@ -434,6 +436,7 @@ test("validateTurnCommand preserves record_npc_interaction targeting a present n
       npcId: "npc_guard",
       interactionSummary: "You keep the guard talking while you ask his name.",
       topic: "identity",
+      socialOutcome: "asks_question",
     },
   ]);
 });
@@ -457,6 +460,7 @@ test("validateTurnCommand normalizes actorRef-form npc ids for named npc interac
           npcId: "npc:npc_guard",
           interactionSummary: "You keep the guard talking while you ask his name.",
           topic: "identity",
+          socialOutcome: "asks_question",
         },
       ],
     },
@@ -476,6 +480,7 @@ test("validateTurnCommand normalizes actorRef-form npc ids for named npc interac
       npcId: "npc_guard",
       interactionSummary: "You keep the guard talking while you ask his name.",
       topic: "identity",
+      socialOutcome: "asks_question",
     },
   ]);
 });
@@ -520,6 +525,7 @@ test("validateTurnCommand repairs uniquely matching bare npc ids missing the npc
           type: "record_npc_interaction",
           npcId: "57621607-d0fb-432a-9d21-7379a58f9d49",
           interactionSummary: "You close the sale with Elias and accept his down payment.",
+          socialOutcome: "accepts",
           phase: "immediate",
         },
       ],
@@ -533,6 +539,7 @@ test("validateTurnCommand repairs uniquely matching bare npc ids missing the npc
       type: "record_npc_interaction",
       npcId: "npc_57621607-d0fb-432a-9d21-7379a58f9d49",
       interactionSummary: "You close the sale with Elias and accept his down payment.",
+      socialOutcome: "accepts",
       phase: "immediate",
     },
   ]);
@@ -616,6 +623,7 @@ test("validateTurnCommand preserves record_local_interaction targeting a raw tem
           affectedWorldState: false,
           isInMemoryGraph: false,
           promotedNpcId: null,
+          inventory: [],
         },
       ],
     },
@@ -628,6 +636,7 @@ test("validateTurnCommand preserves record_local_interaction targeting a raw tem
           type: "record_local_interaction",
           localEntityId: "temp_apprentice",
           interactionSummary: "You send the apprentice to find the runeforger.",
+          socialOutcome: "complies",
         },
       ],
     },
@@ -657,6 +666,7 @@ test("validateTurnCommand preserves record_local_interaction targeting an existi
           affectedWorldState: false,
           isInMemoryGraph: false,
           promotedNpcId: null,
+          inventory: [],
         },
       ],
     },
@@ -669,6 +679,7 @@ test("validateTurnCommand preserves record_local_interaction targeting an existi
           type: "record_local_interaction",
           localEntityId: "temp:temp_apprentice",
           interactionSummary: "You send the apprentice to find the runeforger.",
+          socialOutcome: "complies",
         },
       ],
     },
@@ -699,6 +710,7 @@ test("validateTurnCommand normalizes bare same-turn spawn keys for record_local_
           type: "record_local_interaction",
           localEntityId: "customer_1",
           interactionSummary: "You open with a velvet sales pitch.",
+          socialOutcome: "acknowledges",
         },
       ],
     },
@@ -711,6 +723,7 @@ test("validateTurnCommand normalizes bare same-turn spawn keys for record_local_
     type: "record_local_interaction",
     localEntityId: "spawn:customer_1",
     interactionSummary: "You open with a velvet sales pitch.",
+    socialOutcome: "acknowledges",
   });
 });
 
@@ -726,6 +739,7 @@ test("validateTurnCommand drops record_local_interaction targeting a fabricated 
           type: "record_local_interaction",
           localEntityId: "temp:stall_crowd",
           interactionSummary: "You call out to the interested crowd around your stall.",
+          socialOutcome: "acknowledges",
         },
         {
           type: "advance_time",
@@ -785,6 +799,7 @@ test("validateTurnCommand warns when record_local_interaction reads like a solo 
           affectedWorldState: false,
           isInMemoryGraph: false,
           promotedNpcId: null,
+          inventory: [],
         },
       ],
     },
@@ -797,6 +812,7 @@ test("validateTurnCommand warns when record_local_interaction reads like a solo 
           type: "record_local_interaction",
           localEntityId: "temp_apprentice",
           interactionSummary: "You head back to the forge and check your bench.",
+          socialOutcome: "acknowledges",
         },
       ],
     },

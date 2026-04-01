@@ -39,7 +39,21 @@ test("parseTurnResultPayloadJson round-trips the versioned structured result pay
     whatChanged: ["15 minutes passed."],
     why: ["Because you let time pass."],
     warnings: [],
-    stateCommitLog: [],
+    stateCommitLog: [
+      {
+        kind: "mutation" as const,
+        mutationType: "record_npc_interaction" as const,
+        status: "applied" as const,
+        reasonCode: "npc_interaction_recorded",
+        summary: "Tarn declines the bath and chooses the cot instead.",
+        metadata: {
+          npcId: "npc_tarn",
+          topic: "lodging",
+          socialOutcome: "declines",
+          phase: "immediate",
+        },
+      },
+    ],
     narrationBounds: null,
     pendingCheck: null,
     checkResult: null,
@@ -49,6 +63,42 @@ test("parseTurnResultPayloadJson round-trips the versioned structured result pay
   };
 
   assert.deepEqual(parseTurnResultPayloadJson(toTurnResultPayloadJson(payload)), payload);
+});
+
+test("parseTurnResultPayloadJson rejects invalid socialOutcome metadata", () => {
+  assert.equal(
+    parseTurnResultPayloadJson({
+      schemaVersion: 2,
+      data: {
+        stateVersionAfter: 4,
+        changeCodes: [],
+        reasonCodes: [],
+        whatChanged: [],
+        why: [],
+        warnings: [],
+        stateCommitLog: [
+          {
+            kind: "mutation",
+            mutationType: "record_local_interaction",
+            status: "applied",
+            reasonCode: "local_interaction_recorded",
+            summary: "The porter gives a neutral shrug.",
+            metadata: {
+              localEntityId: "temp:temp_porter",
+              socialOutcome: "neutral",
+            },
+          },
+        ],
+        narrationBounds: null,
+        pendingCheck: null,
+        checkResult: null,
+        rollback: null,
+        clarification: null,
+        error: null,
+      },
+    }),
+    null,
+  );
 });
 
 test("parseTurnResultPayloadJson migrates legacy result payloads into the canonical structure", () => {

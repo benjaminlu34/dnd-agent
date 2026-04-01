@@ -1245,6 +1245,17 @@ type AppliedMutationRecord = {
   entry: StateCommitLogEntry;
 };
 
+type EvaluatedResolvedCommand = {
+  stateCommitLog: StateCommitLog;
+  appliedMutations: AppliedMutationRecord[];
+  discoveredInformationIds: string[];
+  spawnedTemporaryActorIds: Map<string, string>;
+  spawnedItemTemplateIds: Map<string, string>;
+  spawnedItemInstanceIds: Map<string, string[]>;
+  spawnedWorldObjectIds: Map<string, string>;
+  nextState: CampaignRuntimeState;
+};
+
 type ProjectedTemporaryActor = {
   id: string;
   label: string;
@@ -1283,6 +1294,15 @@ function orderedMutationsForProcessing(mutations: MechanicsMutation[]) {
     mutations.filter((mutation) => mutationPhaseForOrdering(mutation) === phase),
   );
 }
+
+const CONFLICT_INTERACTION_OUTCOMES = new Set([
+  "declines",
+  "agrees_conditionally",
+  "counteroffers",
+  "withholds",
+  "resists",
+  "withdraws",
+]);
 
 function resolveSpawnedTemporaryActorId(input: {
   actorRef: string;
@@ -1352,6 +1372,23 @@ function resolveInventoryItemIdForEvaluation(input: {
   return input.spawnedItemTemplateIds.get(input.itemId.slice("spawn:".length)) ?? null;
 }
 
+function resolveInventoryTemplateIdForCommit(input: {
+  templateId: string;
+  spawnedItemTemplateIds: Map<string, string>;
+}) {
+  if (input.templateId.startsWith("spawned_item_template:")) {
+    return input.spawnedItemTemplateIds.get(input.templateId.slice("spawned_item_template:".length)) ?? null;
+  }
+  if (isSpawnHandle(input.templateId)) {
+    return input.spawnedItemTemplateIds.get(input.templateId.slice("spawn:".length)) ?? null;
+  }
+  return input.templateId.trim() || null;
+}
+
+function isEvaluatedSpawnedItemTemplateId(value: string | null | undefined, spawnKey: string) {
+  return value === `spawned_item_template:${spawnKey}`;
+}
+
 function resolveWorldObjectId(input: {
   objectId: string;
   spawnedWorldObjectIds: Map<string, string>;
@@ -1394,6 +1431,8 @@ function holderKey(holder: AssetHolderRef) {
       return "player";
     case "npc":
       return `npc:${holder.npcId}`;
+    case "temporary_actor":
+      return `temporary_actor:${holder.actorId}`;
     case "world_object":
       return `world_object:${holder.objectId}`;
     case "scene":
@@ -1415,6 +1454,9 @@ function holderRefForItem(input: {
   if (input.item.npcId) {
     return { kind: "npc", npcId: input.item.npcId };
   }
+  if (input.item.temporaryActorId) {
+    return { kind: "temporary_actor", actorId: input.item.temporaryActorId };
+  }
   if (input.item.worldObjectId) {
     return { kind: "world_object", objectId: input.item.worldObjectId };
   }
@@ -1435,6 +1477,9 @@ function holderRefForCommodityStack(input: {
   if (input.stack.npcId) {
     return { kind: "npc", npcId: input.stack.npcId };
   }
+  if (input.stack.temporaryActorId) {
+    return { kind: "temporary_actor", actorId: input.stack.temporaryActorId };
+  }
   if (input.stack.worldObjectId) {
     return { kind: "world_object", objectId: input.stack.worldObjectId };
   }
@@ -1454,6 +1499,9 @@ function holderRefForWorldObject(input: {
   }
   if (input.object.npcId) {
     return { kind: "npc", npcId: input.object.npcId };
+  }
+  if (input.object.temporaryActorId) {
+    return { kind: "temporary_actor", actorId: input.object.temporaryActorId };
   }
   if (input.object.parentWorldObjectId) {
     return { kind: "world_object", objectId: input.object.parentWorldObjectId };
@@ -1723,7 +1771,7 @@ function evaluateResolvedCommand(input: {
   routerDecision: RouterDecision;
   groundedItemIds?: string[];
   playerAction?: string;
-}) {
+}): EvaluatedResolvedCommand {
   const stateCommitLog: StateCommitLog = [];
   const appliedMutations: AppliedMutationRecord[] = [];
   const projectedCommodityQuantities = new Map(
@@ -1810,6 +1858,7 @@ function evaluateResolvedCommand(input: {
   );
   const spawnedTemporaryActorIds = new Map<string, string>();
   const spawnedItemTemplateIds = new Map<string, string>();
+  const spawnedItemInstanceIds = new Map<string, string[]>();
   const spawnedWorldObjectIds = new Map<string, string>();
   const discoveredInformationIds = new Set<string>();
   let projectedCurrencyCp = input.snapshot.character.currencyCp;
@@ -2169,7 +2218,7 @@ function evaluateResolvedCommand(input: {
           })
         );
 
-      const resolvedActorId = matchingActor?.id ?? `spawned_temp:${mutation.spawnKey}`;
+      const resolvedActorId = matchingActor?.id ?? `tactor_${randomUUID()}`;
       const wasOffscene = matchingActor?.currentLocationId == null;
       if (matchingActor) {
         matchingActor.currentLocationId = projectedLocationId;
@@ -2291,13 +2340,31 @@ function evaluateResolvedCommand(input: {
         });
         continue;
       }
+      if (
+        (resolvedHolder.kind === "npc" && projectedNpcLocationIds.get(resolvedHolder.npcId) !== projectedLocationId)
+        || (
+          resolvedHolder.kind === "temporary_actor"
+          && projectedTemporaryActors.get(resolvedHolder.actorId)?.currentLocationId !== projectedLocationId
+        )
+      ) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "That holder is not available for world-object placement here.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
 
-      const objectId = `spawned_world_object:${mutation.spawnKey}`;
+      const objectId = `wobj_${randomUUID()}`;
       const object: WorldObjectSummary = {
         id: objectId,
         name: normalizeWhitespace(mutation.name),
         characterInstanceId: resolvedHolder.kind === "player" ? input.snapshot.character.instanceId : null,
         npcId: resolvedHolder.kind === "npc" ? resolvedHolder.npcId : null,
+        temporaryActorId: resolvedHolder.kind === "temporary_actor" ? resolvedHolder.actorId : null,
         parentWorldObjectId:
           resolvedHolder.kind === "world_object" ? resolvedHolder.objectId : null,
         sceneLocationId: resolvedHolder.kind === "scene" ? resolvedHolder.locationId : null,
@@ -2413,14 +2480,23 @@ function evaluateResolvedCommand(input: {
         reasonCode: "local_interaction_recorded",
         summary: actor.lastSummary || `You engage ${actor.label}.`,
         metadata: {
-          ...mutation,
           localEntityId: tempActorRef(actor.id),
+          topic: topic ?? null,
+          socialOutcome: mutation.socialOutcome,
           phase,
           interactionCount: actor.interactionCount,
         } as unknown as Record<string, unknown>,
       };
       stateCommitLog.push(entry);
-      appliedMutations.push({ mutation: { ...mutation, phase } as MechanicsMutation, entry });
+      appliedMutations.push({
+        mutation: {
+          ...mutation,
+          localEntityId: tempActorRef(actor.id),
+          topic,
+          phase,
+        } as MechanicsMutation,
+        entry,
+      });
       continue;
     }
 
@@ -2491,14 +2567,21 @@ function evaluateResolvedCommand(input: {
         reasonCode: "npc_interaction_recorded",
         summary: summary || `You engage ${npc.name}.`,
         metadata: {
-          ...mutation,
           npcId: mutation.npcId,
-          topic,
+          topic: topic ?? null,
+          socialOutcome: mutation.socialOutcome,
           phase,
         } as unknown as Record<string, unknown>,
       };
       stateCommitLog.push(entry);
-      appliedMutations.push({ mutation: { ...mutation, phase } as MechanicsMutation, entry });
+      appliedMutations.push({
+        mutation: {
+          ...mutation,
+          topic,
+          phase,
+        } as MechanicsMutation,
+        entry,
+      });
       continue;
     }
 
@@ -2790,16 +2873,16 @@ function evaluateResolvedCommand(input: {
       }
 
       const transferMode = mutation.npcTransferMode ?? "willing";
-      const sourceIsNpc = source.kind === "npc";
-      const destinationIsNpc = destination.kind === "npc";
+      const sourceIsActor = source.kind === "npc" || source.kind === "temporary_actor";
+      const destinationIsActor = destination.kind === "npc" || destination.kind === "temporary_actor";
       const authorized =
-        sourceIsNpc
+        sourceIsActor
           ? transferMode === "willing"
             ? hasVector(input.routerDecision, "converse")
             : transferMode === "stealth"
               ? hasVector(input.routerDecision, "investigate")
               : hasVector(input.routerDecision, "violence")
-          : destinationIsNpc
+          : destinationIsActor
             ? hasVector(input.routerDecision, "converse")
             : hasVector(input.routerDecision, "economy_light");
       if (!authorized) {
@@ -2845,6 +2928,10 @@ function evaluateResolvedCommand(input: {
       const sourceObject = source.kind === "world_object" ? projectedWorldObjects.get(source.objectId) ?? null : null;
       const destinationObject =
         destination.kind === "world_object" ? projectedWorldObjects.get(destination.objectId) ?? null : null;
+      const sourceTemporaryActor =
+        source.kind === "temporary_actor" ? projectedTemporaryActors.get(source.actorId) ?? null : null;
+      const destinationTemporaryActor =
+        destination.kind === "temporary_actor" ? projectedTemporaryActors.get(destination.actorId) ?? null : null;
       if ((source.kind === "world_object" && !sourceObject) || (destination.kind === "world_object" && !destinationObject)) {
         stateCommitLog.push({
           kind: "mutation",
@@ -2852,6 +2939,23 @@ function evaluateResolvedCommand(input: {
           status: "rejected",
           reasonCode: "invalid_target",
           summary: "That world object is not available for transfer.",
+          metadata: { ...mutation, source, destination, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (
+        (source.kind === "temporary_actor" && (!sourceTemporaryActor || sourceTemporaryActor.currentLocationId !== projectedLocationId))
+        || (
+          destination.kind === "temporary_actor"
+          && (!destinationTemporaryActor || destinationTemporaryActor.currentLocationId !== projectedLocationId)
+        )
+      ) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "That temporary actor is not available for transfer here.",
           metadata: { ...mutation, source, destination, phase } as unknown as Record<string, unknown>,
         });
         continue;
@@ -2949,9 +3053,28 @@ function evaluateResolvedCommand(input: {
         continue;
       }
 
+      const resolvedTemplateTransfers: Array<{ templateId: string; quantity: number }> = [];
       for (const templateTransfer of mutation.templateTransfers ?? []) {
+        const resolvedTemplateId = resolveInventoryItemIdForEvaluation({
+          itemId: templateTransfer.templateId,
+          spawnedItemTemplateIds,
+          characterInventory: input.snapshot.character.inventory,
+          projectedItemInstances,
+        });
+        if (!resolvedTemplateId) {
+          stateCommitLog.push({
+            kind: "mutation",
+            mutationType: mutation.type,
+            status: "rejected",
+            reasonCode: "invalid_target",
+            summary: "A requested item template is not grounded in the current turn context.",
+            metadata: { ...mutation, source, destination, phase } as unknown as Record<string, unknown>,
+          });
+          transferRejected = true;
+          break;
+        }
         const matchingItems = Array.from(projectedItemInstances.values())
-          .filter((item) => item.templateId === templateTransfer.templateId)
+          .filter((item) => item.templateId === resolvedTemplateId)
           .filter((item) => {
             const currentHolder = projectedItemHolders.get(item.id);
             return currentHolder && holderRefsEqual(currentHolder, source) && !movedItemIds.has(item.id);
@@ -2972,6 +3095,10 @@ function evaluateResolvedCommand(input: {
         for (const item of matchingItems) {
           movedItemIds.add(item.id);
         }
+        resolvedTemplateTransfers.push({
+          templateId: resolvedTemplateId,
+          quantity: templateTransfer.quantity,
+        });
       }
       if (transferRejected) {
         continue;
@@ -3040,6 +3167,7 @@ function evaluateResolvedCommand(input: {
         }
         object.characterInstanceId = destination.kind === "player" ? input.snapshot.character.instanceId : null;
         object.npcId = destination.kind === "npc" ? destination.npcId : null;
+        object.temporaryActorId = destination.kind === "temporary_actor" ? destination.actorId : null;
         object.parentWorldObjectId = destination.kind === "world_object" ? destination.objectId : null;
         object.sceneLocationId = destination.kind === "scene" ? destination.locationId : null;
         object.sceneFocusKey = destination.kind === "scene" ? destination.focusKey ?? null : null;
@@ -3106,6 +3234,12 @@ function evaluateResolvedCommand(input: {
           }
         }
       }
+      if (destination.kind === "temporary_actor") {
+        const actor = projectedTemporaryActors.get(destination.actorId);
+        if (actor) {
+          actor.holdsInventory = true;
+        }
+      }
 
       const entry = {
         kind: "mutation" as const,
@@ -3118,6 +3252,7 @@ function evaluateResolvedCommand(input: {
           source,
           destination,
           itemInstanceIds: Array.from(movedItemIds),
+          templateTransfers: resolvedTemplateTransfers,
           worldObjectIds: resolvedWorldObjectIds,
           phase,
         } as unknown as Record<string, unknown>,
@@ -3129,8 +3264,9 @@ function evaluateResolvedCommand(input: {
           source,
           destination,
           itemInstanceIds: Array.from(movedItemIds),
+          templateTransfers: resolvedTemplateTransfers,
           worldObjectIds: resolvedWorldObjectIds,
-          npcTransferMode: sourceIsNpc ? transferMode : mutation.npcTransferMode,
+          npcTransferMode: sourceIsActor ? transferMode : mutation.npcTransferMode,
           phase,
         } as MechanicsMutation,
         entry,
@@ -3163,12 +3299,41 @@ function evaluateResolvedCommand(input: {
       }
 
       const resolvedTemplateId = `spawned_item_template:${mutation.spawnKey}`;
+      const spawnedInstanceIds = Array.from({ length: mutation.quantity }, () => `iteminst_${randomUUID()}`);
       spawnedItemTemplateIds.set(mutation.spawnKey, resolvedTemplateId);
+      spawnedItemInstanceIds.set(mutation.spawnKey, [...spawnedInstanceIds]);
       groundedItemIds.add(resolvedTemplateId);
       projectedInventoryQuantities.set(
         resolvedTemplateId,
         (projectedInventoryQuantities.get(resolvedTemplateId) ?? 0) + mutation.quantity,
       );
+      for (const instanceId of spawnedInstanceIds) {
+        const projectedItem: ItemInstance = {
+          id: instanceId,
+          characterInstanceId: input.snapshot.character.instanceId,
+          npcId: null,
+          temporaryActorId: null,
+          worldObjectId: null,
+          sceneLocationId: null,
+          sceneFocusKey: null,
+          templateId: resolvedTemplateId,
+          template: {
+            id: resolvedTemplateId,
+            campaignId: input.snapshot.campaignId,
+            name: normalizeItemName(mutation.itemName),
+            description: normalizedDescription(mutation.description),
+            value: 0,
+            weight: 0,
+            rarity: "improvised",
+            tags: ["spawned", "environmental", "ephemeral"],
+          },
+          isIdentified: true,
+          charges: null,
+          properties: null,
+        };
+        projectedItemInstances.set(instanceId, projectedItem);
+        projectedItemHolders.set(instanceId, { kind: "player" });
+      }
       const entry = {
         kind: "mutation" as const,
         mutationType: mutation.type,
@@ -3178,6 +3343,7 @@ function evaluateResolvedCommand(input: {
         metadata: {
           ...mutation,
           itemId: resolvedTemplateId,
+          itemInstanceIds: spawnedInstanceIds,
           phase,
         } as unknown as Record<string, unknown>,
       };
@@ -3229,6 +3395,12 @@ function evaluateResolvedCommand(input: {
           || holder.kind === "scene"
           || (holder.kind === "world_object" && projectedWorldObjects.has(holder.objectId))
           || (
+            holder.kind === "temporary_actor"
+            && (
+              projectedTemporaryActors.get(holder.actorId)?.currentLocationId === projectedLocationId
+            )
+          )
+          || (
             holder.kind === "npc"
             && (
               input.snapshot.presentNpcs.some((npc) => npc.id === holder.npcId)
@@ -3249,13 +3421,47 @@ function evaluateResolvedCommand(input: {
       }
 
       const resolvedTemplateId = `spawned_item_template:${mutation.spawnKey}`;
+      const spawnedInstanceIds = Array.from({ length: mutation.quantity }, () => `iteminst_${randomUUID()}`);
       spawnedItemTemplateIds.set(mutation.spawnKey, resolvedTemplateId);
+      spawnedItemInstanceIds.set(mutation.spawnKey, [...spawnedInstanceIds]);
       if (holder.kind === "player") {
         groundedItemIds.add(resolvedTemplateId);
         projectedInventoryQuantities.set(
           resolvedTemplateId,
           (projectedInventoryQuantities.get(resolvedTemplateId) ?? 0) + mutation.quantity,
         );
+      } else if (holder.kind === "temporary_actor") {
+        const actor = projectedTemporaryActors.get(holder.actorId);
+        if (actor) {
+          actor.holdsInventory = true;
+        }
+      }
+      for (const instanceId of spawnedInstanceIds) {
+        const projectedItem: ItemInstance = {
+          id: instanceId,
+          characterInstanceId: holder.kind === "player" ? input.snapshot.character.instanceId : null,
+          npcId: holder.kind === "npc" ? holder.npcId : null,
+          temporaryActorId: holder.kind === "temporary_actor" ? holder.actorId : null,
+          worldObjectId: holder.kind === "world_object" ? holder.objectId : null,
+          sceneLocationId: holder.kind === "scene" ? holder.locationId : null,
+          sceneFocusKey: holder.kind === "scene" ? holder.focusKey ?? null : null,
+          templateId: resolvedTemplateId,
+          template: {
+            id: resolvedTemplateId,
+            campaignId: input.snapshot.campaignId,
+            name: normalizeItemName(mutation.itemName),
+            description: normalizedDescription(mutation.description),
+            value: 0,
+            weight: 0,
+            rarity: "improvised",
+            tags: ["spawned", "fiat", "ephemeral"],
+          },
+          isIdentified: true,
+          charges: null,
+          properties: null,
+        };
+        projectedItemInstances.set(instanceId, projectedItem);
+        projectedItemHolders.set(instanceId, holder);
       }
       const entry = {
         kind: "mutation" as const,
@@ -3270,6 +3476,7 @@ function evaluateResolvedCommand(input: {
           ...mutation,
           holder,
           itemId: resolvedTemplateId,
+          itemInstanceIds: spawnedInstanceIds,
           phase,
         } as unknown as Record<string, unknown>,
       };
@@ -3961,6 +4168,10 @@ function evaluateResolvedCommand(input: {
     stateCommitLog,
     appliedMutations,
     discoveredInformationIds: Array.from(discoveredInformationIds),
+    spawnedTemporaryActorIds,
+    spawnedItemTemplateIds,
+    spawnedItemInstanceIds,
+    spawnedWorldObjectIds,
     nextState: {
       ...input.snapshot.state,
       currentLocationId: projectedLocationId,
@@ -4169,6 +4380,7 @@ function itemHolderData(holder: AssetHolderRef, characterInstanceId: string) {
       return {
         characterInstanceId,
         npcId: null,
+        temporaryActorId: null,
         worldObjectId: null,
         sceneLocationId: null,
         sceneFocusKey: null,
@@ -4177,6 +4389,16 @@ function itemHolderData(holder: AssetHolderRef, characterInstanceId: string) {
       return {
         characterInstanceId: null,
         npcId: holder.npcId,
+        temporaryActorId: null,
+        worldObjectId: null,
+        sceneLocationId: null,
+        sceneFocusKey: null,
+      } satisfies Prisma.ItemInstanceUncheckedUpdateInput;
+    case "temporary_actor":
+      return {
+        characterInstanceId: null,
+        npcId: null,
+        temporaryActorId: holder.actorId,
         worldObjectId: null,
         sceneLocationId: null,
         sceneFocusKey: null,
@@ -4185,6 +4407,7 @@ function itemHolderData(holder: AssetHolderRef, characterInstanceId: string) {
       return {
         characterInstanceId: null,
         npcId: null,
+        temporaryActorId: null,
         worldObjectId: holder.objectId,
         sceneLocationId: null,
         sceneFocusKey: null,
@@ -4193,6 +4416,7 @@ function itemHolderData(holder: AssetHolderRef, characterInstanceId: string) {
       return {
         characterInstanceId: null,
         npcId: null,
+        temporaryActorId: null,
         worldObjectId: null,
         sceneLocationId: holder.locationId,
         sceneFocusKey: holder.focusKey ?? null,
@@ -4206,6 +4430,7 @@ function commodityHolderData(holder: AssetHolderRef, characterInstanceId: string
       return {
         characterInstanceId,
         npcId: null,
+        temporaryActorId: null,
         worldObjectId: null,
         sceneLocationId: null,
         sceneFocusKey: null,
@@ -4214,6 +4439,16 @@ function commodityHolderData(holder: AssetHolderRef, characterInstanceId: string
       return {
         characterInstanceId: null,
         npcId: holder.npcId,
+        temporaryActorId: null,
+        worldObjectId: null,
+        sceneLocationId: null,
+        sceneFocusKey: null,
+      } satisfies Prisma.CharacterCommodityStackUncheckedUpdateInput;
+    case "temporary_actor":
+      return {
+        characterInstanceId: null,
+        npcId: null,
+        temporaryActorId: holder.actorId,
         worldObjectId: null,
         sceneLocationId: null,
         sceneFocusKey: null,
@@ -4222,6 +4457,7 @@ function commodityHolderData(holder: AssetHolderRef, characterInstanceId: string
       return {
         characterInstanceId: null,
         npcId: null,
+        temporaryActorId: null,
         worldObjectId: holder.objectId,
         sceneLocationId: null,
         sceneFocusKey: null,
@@ -4230,6 +4466,7 @@ function commodityHolderData(holder: AssetHolderRef, characterInstanceId: string
       return {
         characterInstanceId: null,
         npcId: null,
+        temporaryActorId: null,
         worldObjectId: null,
         sceneLocationId: holder.locationId,
         sceneFocusKey: holder.focusKey ?? null,
@@ -4243,6 +4480,7 @@ function worldObjectHolderData(holder: AssetHolderRef, characterInstanceId: stri
       return {
         characterInstanceId,
         npcId: null,
+        temporaryActorId: null,
         parentWorldObjectId: null,
         sceneLocationId: null,
         sceneFocusKey: null,
@@ -4251,6 +4489,16 @@ function worldObjectHolderData(holder: AssetHolderRef, characterInstanceId: stri
       return {
         characterInstanceId: null,
         npcId: holder.npcId,
+        temporaryActorId: null,
+        parentWorldObjectId: null,
+        sceneLocationId: null,
+        sceneFocusKey: null,
+      } satisfies Prisma.WorldObjectUncheckedUpdateInput;
+    case "temporary_actor":
+      return {
+        characterInstanceId: null,
+        npcId: null,
+        temporaryActorId: holder.actorId,
         parentWorldObjectId: null,
         sceneLocationId: null,
         sceneFocusKey: null,
@@ -4259,6 +4507,7 @@ function worldObjectHolderData(holder: AssetHolderRef, characterInstanceId: stri
       return {
         characterInstanceId: null,
         npcId: null,
+        temporaryActorId: null,
         parentWorldObjectId: holder.objectId,
         sceneLocationId: null,
         sceneFocusKey: null,
@@ -4267,6 +4516,7 @@ function worldObjectHolderData(holder: AssetHolderRef, characterInstanceId: stri
       return {
         characterInstanceId: null,
         npcId: null,
+        temporaryActorId: null,
         parentWorldObjectId: null,
         sceneLocationId: holder.locationId,
         sceneFocusKey: holder.focusKey ?? null,
@@ -4280,6 +4530,8 @@ function itemHolderWhere(holder: AssetHolderRef, characterInstanceId: string): P
       return { characterInstanceId };
     case "npc":
       return { npcId: holder.npcId };
+    case "temporary_actor":
+      return { temporaryActorId: holder.actorId };
     case "world_object":
       return { worldObjectId: holder.objectId };
     case "scene":
@@ -4296,6 +4548,8 @@ function commodityHolderWhere(
       return { characterInstanceId };
     case "npc":
       return { npcId: holder.npcId };
+    case "temporary_actor":
+      return { temporaryActorId: holder.actorId };
     case "world_object":
       return { worldObjectId: holder.objectId };
     case "scene":
@@ -4312,6 +4566,8 @@ function worldObjectHolderWhere(
       return { characterInstanceId };
     case "npc":
       return { npcId: holder.npcId };
+    case "temporary_actor":
+      return { temporaryActorId: holder.actorId };
     case "world_object":
       return { parentWorldObjectId: holder.objectId };
     case "scene":
@@ -4342,13 +4598,18 @@ async function applyResolvedMutations(input: {
   rollback: TurnRollbackData;
   nextTurnCount: number;
   nextState: CampaignRuntimeState;
+  spawnedTemporaryActorIds: Map<string, string>;
+  spawnedItemTemplateIds: Map<string, string>;
+  spawnedItemInstanceIds: Map<string, string[]>;
+  spawnedWorldObjectIds: Map<string, string>;
 }) {
   const affectedFactionIds = new Set<string>();
   const discoveredInformationIds: string[] = [];
   const stateCommitLog: StateCommitLog = [];
-  const spawnedTemporaryActorIds = new Map<string, string>();
-  const spawnedItemTemplateIds = new Map<string, string>();
-  const spawnedWorldObjectIds = new Map<string, string>();
+  const spawnedTemporaryActorIds = new Map(input.spawnedTemporaryActorIds);
+  const spawnedItemTemplateIds = new Map(input.spawnedItemTemplateIds);
+  const spawnedItemInstanceIds = new Map(input.spawnedItemInstanceIds);
+  const spawnedWorldObjectIds = new Map(input.spawnedWorldObjectIds);
   let currentLocationId = input.snapshot.state.currentLocationId;
   const characterInstance = await input.tx.characterInstance.findUnique({
     where: { campaignId: input.snapshot.campaignId },
@@ -4373,7 +4634,10 @@ async function applyResolvedMutations(input: {
     }
 
     if (mutation.type === "spawn_world_object") {
-      const objectId = `wobj_${randomUUID()}`;
+      const objectId = spawnedWorldObjectIds.get(mutation.spawnKey);
+      if (!objectId) {
+        throw new Error("World-object spawn is missing its evaluated canonical id.");
+      }
       const holder =
         mutation.holder.kind === "world_object"
           ? (() => {
@@ -4404,7 +4668,19 @@ async function applyResolvedMutations(input: {
       });
       recordCreated(input.rollback, "worldObject", objectId);
       input.rollback.createdWorldObjectIds.push(objectId);
-      spawnedWorldObjectIds.set(mutation.spawnKey, objectId);
+      if (holder.kind === "temporary_actor") {
+        const actor = await input.tx.temporaryActor.findUnique({
+          where: { id: holder.actorId },
+          select: { id: true, holdsInventory: true },
+        });
+        if (actor && !actor.holdsInventory) {
+          recordInverse(input.rollback, "temporaryActor", actor.id, "holdsInventory", actor.holdsInventory);
+          await input.tx.temporaryActor.update({
+            where: { id: actor.id },
+            data: { holdsInventory: true },
+          });
+        }
+      }
       continue;
     }
 
@@ -4545,21 +4821,27 @@ async function applyResolvedMutations(input: {
     }
 
     if (mutation.type === "spawn_temporary_actor") {
-      if (spawnedTemporaryActorIds.has(mutation.spawnKey)) {
-        throw new Error("Duplicate temporary-actor spawn key during commit.");
+      const actorId = spawnedTemporaryActorIds.get(mutation.spawnKey);
+      if (!actorId) {
+        throw new Error("Temporary-actor spawn is missing its evaluated canonical id.");
       }
-
-      const reusableActor = await findReusableTemporaryActor({
-        tx: input.tx,
-        campaignId: input.snapshot.campaignId,
-        currentLocationId,
-        role: mutation.role,
-        summary: normalizeWhitespace(mutation.summary),
-        apparentDisposition: normalizeWhitespace(mutation.apparentDisposition),
-      });
       const lastSummary = `${normalizeWhitespace(mutation.summary)} Apparent disposition: ${normalizeWhitespace(mutation.apparentDisposition)}.`;
+      const existingActor = input.snapshot.temporaryActors.find((actor) => actor.id === actorId) ?? null;
 
-      if (reusableActor) {
+      if (existingActor) {
+        const reusableActor = await input.tx.temporaryActor.findUnique({
+          where: { id: actorId },
+          select: {
+            id: true,
+            currentLocationId: true,
+            lastSummary: true,
+            lastSeenAtTurn: true,
+            lastSeenAtTime: true,
+          },
+        });
+        if (!reusableActor) {
+          throw new Error("Evaluated temporary-actor reuse target no longer exists.");
+        }
         const updateData: Prisma.TemporaryActorUncheckedUpdateInput = {};
         if (reusableActor.currentLocationId !== currentLocationId) {
           recordInverse(input.rollback, "temporaryActor", reusableActor.id, "currentLocationId", reusableActor.currentLocationId);
@@ -4583,11 +4865,9 @@ async function applyResolvedMutations(input: {
             data: updateData,
           });
         }
-        spawnedTemporaryActorIds.set(mutation.spawnKey, reusableActor.id);
         continue;
       }
 
-      const actorId = `tactor_${randomUUID()}`;
       await input.tx.temporaryActor.create({
         data: {
           id: actorId,
@@ -4608,7 +4888,6 @@ async function applyResolvedMutations(input: {
       });
       recordCreated(input.rollback, "temporaryActor", actorId);
       input.rollback.createdTemporaryActorIds.push(actorId);
-      spawnedTemporaryActorIds.set(mutation.spawnKey, actorId);
       continue;
     }
 
@@ -4944,6 +5223,7 @@ async function applyResolvedMutations(input: {
             id: true,
             characterInstanceId: true,
             npcId: true,
+            temporaryActorId: true,
             worldObjectId: true,
             sceneLocationId: true,
             sceneFocusKey: true,
@@ -4954,6 +5234,7 @@ async function applyResolvedMutations(input: {
         }
         recordInverse(input.rollback, "itemInstance", item.id, "characterInstanceId", item.characterInstanceId);
         recordInverse(input.rollback, "itemInstance", item.id, "npcId", item.npcId);
+        recordInverse(input.rollback, "itemInstance", item.id, "temporaryActorId", item.temporaryActorId);
         recordInverse(input.rollback, "itemInstance", item.id, "worldObjectId", item.worldObjectId);
         recordInverse(input.rollback, "itemInstance", item.id, "sceneLocationId", item.sceneLocationId);
         recordInverse(input.rollback, "itemInstance", item.id, "sceneFocusKey", item.sceneFocusKey);
@@ -4964,9 +5245,16 @@ async function applyResolvedMutations(input: {
       }
 
       for (const templateTransfer of mutation.templateTransfers ?? []) {
+        const resolvedTemplateId = resolveInventoryTemplateIdForCommit({
+          templateId: templateTransfer.templateId,
+          spawnedItemTemplateIds,
+        });
+        if (!resolvedTemplateId) {
+          throw new Error("Asset transfer template id could not be resolved during commit.");
+        }
         const templateItems = await input.tx.itemInstance.findMany({
           where: {
-            templateId: templateTransfer.templateId,
+            templateId: resolvedTemplateId,
             ...itemHolderWhere(source, characterInstance.id),
           },
           orderBy: { createdAt: "asc" },
@@ -4978,6 +5266,7 @@ async function applyResolvedMutations(input: {
         for (const item of templateItems) {
           recordInverse(input.rollback, "itemInstance", item.id, "characterInstanceId", item.characterInstanceId);
           recordInverse(input.rollback, "itemInstance", item.id, "npcId", item.npcId);
+          recordInverse(input.rollback, "itemInstance", item.id, "temporaryActorId", item.temporaryActorId);
           recordInverse(input.rollback, "itemInstance", item.id, "worldObjectId", item.worldObjectId);
           recordInverse(input.rollback, "itemInstance", item.id, "sceneLocationId", item.sceneLocationId);
           recordInverse(input.rollback, "itemInstance", item.id, "sceneFocusKey", item.sceneFocusKey);
@@ -5002,6 +5291,7 @@ async function applyResolvedMutations(input: {
             id: true,
             characterInstanceId: true,
             npcId: true,
+            temporaryActorId: true,
             parentWorldObjectId: true,
             sceneLocationId: true,
             sceneFocusKey: true,
@@ -5012,6 +5302,7 @@ async function applyResolvedMutations(input: {
         }
         recordInverse(input.rollback, "worldObject", object.id, "characterInstanceId", object.characterInstanceId);
         recordInverse(input.rollback, "worldObject", object.id, "npcId", object.npcId);
+        recordInverse(input.rollback, "worldObject", object.id, "temporaryActorId", object.temporaryActorId);
         recordInverse(input.rollback, "worldObject", object.id, "parentWorldObjectId", object.parentWorldObjectId);
         recordInverse(input.rollback, "worldObject", object.id, "sceneLocationId", object.sceneLocationId);
         recordInverse(input.rollback, "worldObject", object.id, "sceneFocusKey", object.sceneFocusKey);
@@ -5075,11 +5366,26 @@ async function applyResolvedMutations(input: {
           recordCreated(input.rollback, "characterCommodityStack", created.id);
         }
       }
+      if (destination.kind === "temporary_actor") {
+        const actor = await input.tx.temporaryActor.findUnique({
+          where: { id: destination.actorId },
+          select: { id: true, holdsInventory: true },
+        });
+        if (actor && !actor.holdsInventory) {
+          recordInverse(input.rollback, "temporaryActor", actor.id, "holdsInventory", actor.holdsInventory);
+          await input.tx.temporaryActor.update({
+            where: { id: actor.id },
+            data: { holdsInventory: true },
+          });
+        }
+      }
       continue;
     }
 
     if (mutation.type === "spawn_environmental_item") {
-      if (spawnedItemTemplateIds.has(mutation.spawnKey)) {
+      const existingTemplateId = spawnedItemTemplateIds.get(mutation.spawnKey) ?? null;
+      const spawnedInstanceIds = spawnedItemInstanceIds.get(mutation.spawnKey) ?? [];
+      if (existingTemplateId && !isEvaluatedSpawnedItemTemplateId(existingTemplateId, mutation.spawnKey)) {
         throw new Error("Duplicate environmental-item spawn key during commit.");
       }
 
@@ -5119,9 +5425,13 @@ async function applyResolvedMutations(input: {
       }
 
       spawnedItemTemplateIds.set(mutation.spawnKey, templateId);
-      for (let index = 0; index < mutation.quantity; index += 1) {
+      if (spawnedInstanceIds.length !== mutation.quantity) {
+        throw new Error("Environmental item spawn lost its evaluated instance ids.");
+      }
+      for (const instanceId of spawnedInstanceIds) {
         const created = await input.tx.itemInstance.create({
           data: {
+            id: instanceId,
             characterInstanceId: characterInstance.id,
             templateId,
             isIdentified: true,
@@ -5132,11 +5442,26 @@ async function applyResolvedMutations(input: {
         });
         recordCreated(input.rollback, "itemInstance", created.id);
       }
+      if (holder.kind === "temporary_actor") {
+        const actor = await input.tx.temporaryActor.findUnique({
+          where: { id: holder.actorId },
+          select: { id: true, holdsInventory: true },
+        });
+        if (actor && !actor.holdsInventory) {
+          recordInverse(input.rollback, "temporaryActor", actor.id, "holdsInventory", actor.holdsInventory);
+          await input.tx.temporaryActor.update({
+            where: { id: actor.id },
+            data: { holdsInventory: true },
+          });
+        }
+      }
       continue;
     }
 
     if (mutation.type === "spawn_fiat_item") {
-      if (spawnedItemTemplateIds.has(mutation.spawnKey)) {
+      const existingTemplateId = spawnedItemTemplateIds.get(mutation.spawnKey) ?? null;
+      const spawnedInstanceIds = spawnedItemInstanceIds.get(mutation.spawnKey) ?? [];
+      if (existingTemplateId && !isEvaluatedSpawnedItemTemplateId(existingTemplateId, mutation.spawnKey)) {
         throw new Error("Duplicate fiat-item spawn key during commit.");
       }
 
@@ -5199,9 +5524,13 @@ async function applyResolvedMutations(input: {
       }
 
       spawnedItemTemplateIds.set(mutation.spawnKey, templateId);
-      for (let index = 0; index < mutation.quantity; index += 1) {
+      if (spawnedInstanceIds.length !== mutation.quantity) {
+        throw new Error("Fiat item spawn lost its evaluated instance ids.");
+      }
+      for (const instanceId of spawnedInstanceIds) {
         const created = await input.tx.itemInstance.create({
           data: {
+            id: instanceId,
             ...itemHolderData(holder, characterInstance.id),
             templateId,
             isIdentified: true,
@@ -5695,6 +6024,19 @@ function determineMemoryKind(input: {
   if (input.stateCommitLog.some((entry) => entry.status === "applied" && entry.mutationType === "adjust_relationship")) {
     return "relationship_shift" as const;
   }
+  if (
+    input.stateCommitLog.some((entry) =>
+      entry.status === "applied"
+      && (
+        entry.mutationType === "record_npc_interaction"
+        || entry.mutationType === "record_local_interaction"
+      )
+      && typeof entry.metadata?.socialOutcome === "string"
+      && CONFLICT_INTERACTION_OUTCOMES.has(entry.metadata.socialOutcome)
+    )
+  ) {
+    return "conflict" as const;
+  }
 
   const promiseText = input.command.memorySummary?.toLowerCase() ?? "";
   if (/\b(promise|promised|swear|swore|vow|vowed|agree|agreed|deal|owed|owe|return with|meet again)\b/.test(promiseText)) {
@@ -6134,17 +6476,16 @@ async function commitResolvedTurn(input: {
   const rollback = emptyRollback(snapshot);
   let resultPayload: TurnResultPayload | null = null;
   let memoryEntryId: string | null = null;
+  const evaluated = evaluateResolvedCommand({
+    snapshot,
+    command,
+    fetchedFacts,
+    routerDecision,
+    groundedItemIds: input.groundedItemIds,
+    playerAction,
+  });
 
   await prisma.$transaction(async (tx) => {
-    const evaluated = evaluateResolvedCommand({
-      snapshot,
-      command,
-      fetchedFacts,
-      routerDecision,
-      groundedItemIds: input.groundedItemIds,
-      playerAction,
-    });
-
     const actionEffects = await applyResolvedMutations({
       tx,
       snapshot,
@@ -6153,6 +6494,10 @@ async function commitResolvedTurn(input: {
       rollback,
       nextTurnCount,
       nextState: evaluated.nextState,
+      spawnedTemporaryActorIds: evaluated.spawnedTemporaryActorIds,
+      spawnedItemTemplateIds: evaluated.spawnedItemTemplateIds,
+      spawnedItemInstanceIds: evaluated.spawnedItemInstanceIds,
+      spawnedWorldObjectIds: evaluated.spawnedWorldObjectIds,
     });
 
     const simulationOutcome = await runTemporalSimulation({
@@ -6369,6 +6714,9 @@ async function commitResolvedTurn(input: {
         resultJson: toPrismaJsonValue(toTurnResultPayloadJson(resultPayload)),
       },
     });
+  }, {
+    maxWait: 5000,
+    timeout: 20000,
   });
 
   if (!resultPayload) {
@@ -6596,12 +6944,18 @@ function deterministicNarrationFallback(input: {
       }
       return "Some time passes.";
     }
-    if (entry.reasonCode === "local_interaction_recorded" && entry.kind === "mutation") {
+    if (
+      (entry.reasonCode === "local_interaction_recorded" || entry.reasonCode === "npc_interaction_recorded")
+      && entry.kind === "mutation"
+    ) {
       const interactionSummary = entry.summary.trim().replace(/\.$/, "");
+      if (!interactionSummary) {
+        return "The exchange lands without a clear change.";
+      }
       if (/^asked\b/i.test(interactionSummary)) {
         return `You ${interactionSummary.charAt(0).toLowerCase()}${interactionSummary.slice(1)}.`;
       }
-      return "You make contact and get a response.";
+      return `${interactionSummary}.`;
     }
     if (entry.reasonCode === "item_state_updated" && entry.kind === "mutation") {
       const itemName = entry.summary.replace(/ changes state\.$/, "");
@@ -6693,6 +7047,7 @@ export const engineTestUtils = {
   requestHashForSubmission,
   promptContextProfileForRouter,
   routerDecisionForTurnMode,
+  determineMemoryKind,
   deterministicNarrationFallback,
   evaluateResolvedCommand,
 };

@@ -124,6 +124,7 @@ model CharacterCommodityStack {
   id                  String            @id @default(cuid())
   characterInstanceId String?
   npcId               String?
+  temporaryActorId    String?
   worldObjectId       String?
   sceneLocationId     String?
   sceneFocusKey       String?
@@ -133,12 +134,14 @@ model CharacterCommodityStack {
   updatedAt           DateTime          @updatedAt
   characterInstance   CharacterInstance? @relation(fields: [characterInstanceId], references: [id], onDelete: Cascade)
   npc                 NPC?              @relation("NpcCommodityHolder", fields: [npcId], references: [id], onDelete: Cascade)
+  temporaryActor      TemporaryActor?   @relation("TemporaryActorCommodityHolder", fields: [temporaryActorId], references: [id], onDelete: Cascade)
   worldObject         WorldObject?      @relation("WorldObjectCommodityHolder", fields: [worldObjectId], references: [id], onDelete: Cascade)
   sceneLocation       LocationNode?     @relation("SceneCommodityPlacement", fields: [sceneLocationId], references: [id], onDelete: Cascade)
   commodity           Commodity         @relation(fields: [commodityId], references: [id], onDelete: Cascade)
 
   @@index([characterInstanceId])
   @@index([npcId])
+  @@index([temporaryActorId])
   @@index([worldObjectId])
   @@index([sceneLocationId])
   @@index([commodityId])
@@ -166,6 +169,7 @@ model ItemInstance {
   id                  String            @id @default(cuid())
   characterInstanceId String?
   npcId               String?
+  temporaryActorId    String?
   worldObjectId       String?
   sceneLocationId     String?
   sceneFocusKey       String?
@@ -177,12 +181,14 @@ model ItemInstance {
   updatedAt           DateTime          @updatedAt
   characterInstance   CharacterInstance? @relation(fields: [characterInstanceId], references: [id], onDelete: Cascade)
   npc                 NPC?              @relation("NpcItemHolder", fields: [npcId], references: [id], onDelete: Cascade)
+  temporaryActor      TemporaryActor?   @relation("TemporaryActorItemHolder", fields: [temporaryActorId], references: [id], onDelete: Cascade)
   worldObject         WorldObject?      @relation("WorldObjectItemHolder", fields: [worldObjectId], references: [id], onDelete: Cascade)
   sceneLocation       LocationNode?     @relation("SceneItemPlacement", fields: [sceneLocationId], references: [id], onDelete: Cascade)
   template            ItemTemplate      @relation(fields: [templateId], references: [id], onDelete: Cascade)
 
   @@index([characterInstanceId])
   @@index([npcId])
+  @@index([temporaryActorId])
   @@index([worldObjectId])
   @@index([sceneLocationId])
   @@index([templateId])
@@ -603,6 +609,9 @@ model TemporaryActor {
   campaign            Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   currentLocation     LocationNode? @relation(fields: [currentLocationId], references: [id], onDelete: SetNull)
   promotedNpc         NPC?         @relation(fields: [promotedNpcId], references: [id], onDelete: SetNull)
+  heldItems           ItemInstance[] @relation("TemporaryActorItemHolder")
+  heldCommodityStacks CharacterCommodityStack[] @relation("TemporaryActorCommodityHolder")
+  heldWorldObjects    WorldObject[] @relation("WorldObjectTemporaryActorHolder")
 
   @@index([campaignId, currentLocationId])
   @@index([campaignId, lastSeenAtTurn])
@@ -615,6 +624,7 @@ model WorldObject {
   name                      String
   characterInstanceId       String?
   npcId                     String?
+  temporaryActorId          String?
   parentWorldObjectId       String?
   sceneLocationId           String?
   sceneFocusKey             String?
@@ -630,6 +640,7 @@ model WorldObject {
   campaign                  Campaign               @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   characterInstance         CharacterInstance?     @relation("WorldObjectCharacterHolder", fields: [characterInstanceId], references: [id], onDelete: Cascade)
   npc                       NPC?                   @relation("WorldObjectNpcHolder", fields: [npcId], references: [id], onDelete: Cascade)
+  temporaryActor            TemporaryActor?        @relation("WorldObjectTemporaryActorHolder", fields: [temporaryActorId], references: [id], onDelete: Cascade)
   parentWorldObject         WorldObject?           @relation("WorldObjectParentChild", fields: [parentWorldObjectId], references: [id], onDelete: Cascade)
   childWorldObjects         WorldObject[]          @relation("WorldObjectParentChild")
   sceneLocation             LocationNode?          @relation("SceneWorldObjectPlacement", fields: [sceneLocationId], references: [id], onDelete: Cascade)
@@ -640,6 +651,7 @@ model WorldObject {
   @@index([campaignId])
   @@index([characterInstanceId])
   @@index([npcId])
+  @@index([temporaryActorId])
   @@index([parentWorldObjectId])
   @@index([sceneLocationId])
 }

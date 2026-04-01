@@ -53,6 +53,7 @@ import type {
   StateCommitLog,
   WorldGenerationStageName,
 } from "@/lib/game/types";
+import { SOCIAL_OUTCOMES } from "@/lib/game/types";
 import {
   validateEntryContexts,
   validateFactionFootprints,
@@ -2338,6 +2339,10 @@ const assetHolderSchema = z.discriminatedUnion("kind", [
     npcId: z.string().trim().min(1),
   }),
   z.object({
+    kind: z.literal("temporary_actor"),
+    actorId: z.string().trim().min(1),
+  }),
+  z.object({
     kind: z.literal("world_object"),
     objectId: z.string().trim().min(1),
   }),
@@ -2371,6 +2376,7 @@ const mechanicsMutationSchema = z.discriminatedUnion("type", [
     localEntityId: z.string().trim().min(1),
     interactionSummary: z.string().trim().min(1).max(240),
     topic: z.string().trim().min(1).max(80).optional(),
+    socialOutcome: z.enum(SOCIAL_OUTCOMES),
     phase: z.enum(["immediate", "conditional"]).optional(),
   }),
   z.object({
@@ -2378,6 +2384,7 @@ const mechanicsMutationSchema = z.discriminatedUnion("type", [
     npcId: z.string().trim().min(1),
     interactionSummary: z.string().trim().min(1).max(240),
     topic: z.string().trim().min(1).max(80).optional(),
+    socialOutcome: z.enum(SOCIAL_OUTCOMES),
     phase: z.enum(["immediate", "conditional"]).optional(),
   }),
   z.object({
@@ -3310,6 +3317,10 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Do not create combat, market trade, or deliberate social escalation in observe mode.",
         "Use sceneActors.actorRef values exactly only for actorRef fields such as set_scene_actor_presence and set_follow_state.",
         "For npcId, citedNpcId, and targetNpcId fields, use the bare NPC id without the npc: prefix.",
+        "Every record_local_interaction and record_npc_interaction mutation must include socialOutcome.",
+        "Choose the most specific valid socialOutcome available; do not default to acknowledges if the NPC accepts, declines, hesitates, redirects, asks a question, shares a fact, resists, withdraws, counteroffers, or agrees conditionally.",
+        "acknowledges is the only low-intensity fallback outcome and must not silently imply agreement.",
+        "interactionSummary is the single grounded detail field and should state the concrete result when relevant.",
         "Fetched npc_detail for a named NPC is sufficient grounding for record_npc_interaction, adjust_relationship, and checkIntent npc ids even if that NPC is not currently listed in sceneActors. Do not spawn a duplicate temporary actor just to stand in for a fetched named NPC.",
         "Living creatures such as mounts, familiars, pets, and animal companions are actors, not world objects. Do not use spawn_world_object for a horse, dog, owl, raven, or similar living companion.",
         "Never use record_local_interaction with npc: refs or named sceneActors. It is only for unnamed temporary locals referenced as temp:..., spawn:..., or raw temporary-actor ids.",
@@ -3335,12 +3346,14 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Use adjust_currency for incidental payments, rewards, bribes, tips, fees, and other non-market currency movement; express the delta with denomination fields rather than flattened copper arithmetic.",
         "If economy_light is active and a bespoke trade is actually agreed upon, resolve it immediately with composed asset mutations such as adjust_currency plus spawn_fiat_item and/or transfer_assets. Do not rely on record_npc_interaction alone to finalize the trade.",
         "If an offer is still on the table but not yet accepted, you may track it with a scene-duration spawn_scene_aspect such as pending_trade_offer instead of finalizing the exchange early.",
-        "Use transfer_assets for non-market stashing, dropping, storing, retrieving, or handing over items, commodities, or currency between the player, world objects, scenes, and willing NPCs.",
+        "Use transfer_assets for non-market stashing, dropping, storing, retrieving, feeding, lending, or handing over items, commodities, or currency between the player, world objects, scenes, temporary actors, and willing NPCs.",
+        "If the player gives, feeds, hands over, drops off, retrieves, stores, or takes a concrete item, include the matching asset mutation. record_local_interaction and record_npc_interaction alone never finalize custody or consumption.",
         "When fetched npc_detail exposes grounded held items or commodity stacks on an NPC, use transfer_assets from that NPC holder for looting, stealing, or taking those assets. Do not replace grounded NPC-held goods with spawn_fiat_item.",
         "Use update_world_object_state to lock, hide, or hitch a durable world object.",
         "Use update_item_state for equipping, changing charges, or toggling durable item state like lit/unlit.",
         "For adjust_inventory, use the inventory line's main template/stack id. Reserve instanceIds for update_item_state or transfer_assets.itemInstanceIds when a specific physical copy matters.",
         "Keeping an item on your own person still counts as inventory. Pockets, sleeves, belts, boots, packs, and similar on-body storage should not use adjust_inventory or transfer_assets unless the item actually leaves the player's custody.",
+        "If you spawn a new item and another holder ends the turn with it, either spawn_fiat_item directly into that holder or immediately pair the spawn with a transfer_assets mutation. Do not leave the item in player custody while narrating that someone else now has it.",
         "Use update_character_state for track-only conditions like disguised, poisoned, or exhausted.",
         "Use set_follow_state when someone starts or stops following the player through location and focus changes.",
         "Use set_player_scene_focus for self-directed movement within the current location, like stepping back into the forge, crossing to the workbench, or moving from the street to the stall front.",
@@ -3409,6 +3422,10 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Use move_player only for actual route travel to a known adjacent location.",
         "Use record_local_interaction for current-scene unnamed locals instead of adjust_relationship.",
         "Use record_npc_interaction for ordinary same-scene dialogue with a grounded named NPC when the exchange matters but no relationship shift is required.",
+        "Every record_local_interaction and record_npc_interaction mutation must include socialOutcome.",
+        "Choose the most specific valid socialOutcome available; do not default to acknowledges if the NPC accepts, declines, hesitates, redirects, asks a question, shares a fact, resists, withdraws, counteroffers, or agrees conditionally.",
+        "acknowledges is the only low-intensity fallback outcome and must not silently imply agreement.",
+        "interactionSummary is the single grounded detail field and should state the concrete result when relevant.",
         "Use sceneActors.actorRef values exactly only for actorRef fields such as set_scene_actor_presence and set_follow_state.",
         "For npcId, citedNpcId, and targetNpcId fields, use the bare NPC id without the npc: prefix.",
         "Fetched npc_detail for a named NPC is sufficient grounding for record_npc_interaction, adjust_relationship, and checkIntent npc ids even if that NPC is not currently listed in sceneActors. Do not spawn a duplicate temporary actor just to stand in for a fetched named NPC.",
@@ -3436,12 +3453,14 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "If economy_light is active and a bespoke trade is actually agreed upon, resolve it immediately with composed asset mutations such as adjust_currency plus spawn_fiat_item and/or transfer_assets. Do not rely on record_npc_interaction alone to finalize the trade.",
         "If an offer is still on the table but not yet accepted, you may track it with a scene-duration spawn_scene_aspect such as pending_trade_offer instead of finalizing the exchange early.",
         "Use transfer_assets only for non-market custody changes. Do not use it for buying or selling from fetched market prices.",
-        "Use transfer_assets under economy_light for stash/drop/store/retrieve, under converse for willing NPC exchange, under investigate for stealthy NPC-source transfers, and under violence for forceful NPC-source transfers.",
+        "Use transfer_assets under economy_light for stash/drop/store/retrieve, under converse for willing NPC or temporary-actor exchange, under investigate for stealthy NPC-source transfers, and under violence for forceful NPC-source transfers.",
+        "If the player gives, feeds, hands over, drops off, retrieves, stores, or takes a concrete item, include the matching asset mutation. record_local_interaction and record_npc_interaction alone never finalize custody or consumption.",
         "When fetched npc_detail exposes grounded held items or commodity stacks on an NPC, use transfer_assets from that NPC holder for looting, stealing, or taking those assets. Do not replace grounded NPC-held goods with spawn_fiat_item.",
         "Use update_world_object_state to lock, hide, or hitch a durable world object.",
         "Use update_item_state for equipping, changing charges, or toggling durable item state like lit/unlit.",
         "For adjust_inventory, use the inventory line's main template/stack id. Reserve instanceIds for update_item_state or transfer_assets.itemInstanceIds when a specific physical copy matters.",
         "Keeping an item on your own person still counts as inventory. Pockets, sleeves, belts, boots, packs, and similar on-body storage should not use adjust_inventory or transfer_assets unless the item actually leaves the player's custody.",
+        "If you spawn a new item and another holder ends the turn with it, either spawn_fiat_item directly into that holder or immediately pair the spawn with a transfer_assets mutation. Do not leave the item in player custody while narrating that someone else now has it.",
         "Use update_character_state for track-only conditions like disguised, poisoned, or exhausted.",
         "Use set_follow_state when someone starts or stops following the player through location and focus changes.",
         "Use adjust_inventory for gaining, losing, consuming, or handing over grounded inventory items.",
@@ -3705,6 +3724,18 @@ function sanitizeNarrationMetadata(entry: StateCommitLog[number]) {
   if (typeof metadata.npcId === "string") {
     sanitized.npcId = metadata.npcId;
   }
+  if (typeof metadata.localEntityId === "string") {
+    sanitized.localEntityId = metadata.localEntityId;
+  }
+  if (typeof metadata.topic === "string") {
+    sanitized.topic = metadata.topic;
+  }
+  if (typeof metadata.socialOutcome === "string") {
+    sanitized.socialOutcome = metadata.socialOutcome;
+  }
+  if (typeof metadata.phase === "string") {
+    sanitized.phase = metadata.phase;
+  }
   if (typeof metadata.focusKey === "string") {
     sanitized.focusKey = metadata.focusKey;
   }
@@ -3860,6 +3891,8 @@ function buildResolvedTurnNarrationPrompt(input: ResolvedTurnNarrationInput) {
     "Narrate only what is grounded in the committed state_commit_log, the player's action, the provided spatial context, and the fetched facts; never invent successful outcomes, prices, discoveries, travel, social shifts, or unsupported NPC reactions.",
     "Preserve failure honestly: rejected or failed actions must remain visibly failed in-world. Make failure legible, but only name a specific cause if it is supported by the committed log, fetched facts, or authoritative context. If rejectedOutcomeOnly is true, do not narrate rejected outcomes as if they happened. If rejectedInteractionOnly is true, the attempt may stall or go unanswered, but do not invent direct replies, completed errands, or offscreen returns.",
     "Keep committed uncertainty intact: only context.authoritativeState.sceneActors and context.authoritativeState.worldObjects are stable immediate interaction targets. recentNarrativeProse is continuity only, not authority. Unresolved targets must stay unresolved and may not be substituted — if unresolvedTargetFailure is true, the intended target is gone, unreachable, or lost. Arrivals and returns only happened if the committed log makes them explicit; if the player waited for one that did not commit, say it has not happened yet. Ambiguous scene aspects stay ambiguous — narrate only the visible condition, not the hidden cause. Spawned actors are noticed naturally, not announced.",
+    "For applied record_local_interaction and record_npc_interaction entries, state_commit_log.metadata.socialOutcome is immutable truth. Reflect it exactly. Do not soften declines into acceptance, withholds into full answers, counteroffers into closed deals, or acknowledges into agreement.",
+    "Do not narrate completed item custody changes, consumption, gifting, feeding, storage, or item use by another holder unless state_commit_log includes the applied asset mutation that makes it true.",
     "If state_commit_log includes a rejected record_local_interaction or set_scene_actor_presence with reasonCode invalid_target, narrate that the player looked for or attempted that contact but could not find or reach them. Do not narrate a successful encounter.",
     "If state_commit_log includes a rejected record_local_interaction or set_scene_actor_presence with reasonCode invalid_semantics, narrate the player as unable to complete that intent through another person or presence change, without inventing that it happened anyway.",
     "If a discover_information mutation was rejected, do not convert that into an authoritative negative fact unless the applied state log independently proves it. If rejectedMutationTypes only cover item or scene changes, do not invent completed crafting outputs, item transfers, or scene transformations that the log rejected.",

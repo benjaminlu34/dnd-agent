@@ -135,6 +135,7 @@ function createSnapshot(): CampaignSnapshot {
         affectedWorldState: false,
         isInMemoryGraph: false,
         promotedNpcId: null,
+        inventory: [],
       },
     ],
     memories: [],
@@ -447,6 +448,7 @@ test("unscoped router fallback does not reject routine local interactions", () =
           isInMemoryGraph: false,
           lastSeenAtTurn: 0,
           lastSeenAtTime: 480,
+          inventory: [],
         },
       ],
     },
@@ -460,6 +462,7 @@ test("unscoped router fallback does not reject routine local interactions", () =
           localEntityId: "temp_apprentice",
           interactionSummary: "You send the apprentice to find the runeforger.",
           topic: "runeforger",
+          socialOutcome: "complies",
         },
         {
           type: "advance_time",
@@ -698,6 +701,7 @@ test("record_local_interaction applies on failed checks and updates temp-local s
         localEntityId: "temp_dockhand",
         interactionSummary: "The dockhand finally answers and points toward the market stairs.",
         topic: "sealed stairs",
+        socialOutcome: "shares_fact",
       },
     ]),
     fetchedFacts: [],
@@ -728,6 +732,7 @@ test("record_local_interaction is authorized on economy_light turns", () => {
           affectedWorldState: false,
           isInMemoryGraph: false,
           promotedNpcId: null,
+          inventory: [],
         },
       ],
     },
@@ -741,6 +746,7 @@ test("record_local_interaction is authorized on economy_light turns", () => {
           localEntityId: "temp:temp_baker_boy",
           interactionSummary: "You stop the baker's boy and buy a quick breakfast.",
           topic: "breakfast",
+          socialOutcome: "accepts",
         },
       ],
       warnings: [],
@@ -767,6 +773,7 @@ test("record_npc_interaction applies for ordinary dialogue with a present named 
           npcId: "npc_guard",
           interactionSummary: "You keep the guard talking and ask what to call him.",
           topic: "identity",
+          socialOutcome: "asks_question",
         },
       ],
       warnings: [],
@@ -780,6 +787,166 @@ test("record_npc_interaction applies for ordinary dialogue with a present named 
   assert.deepEqual(
     evaluated.stateCommitLog.map((entry) => [entry.mutationType, entry.status, entry.reasonCode]),
     [["record_npc_interaction", "applied", "npc_interaction_recorded"]],
+  );
+  assert.deepEqual(evaluated.stateCommitLog[0]?.metadata, {
+    npcId: "npc_guard",
+    topic: "identity",
+    socialOutcome: "asks_question",
+    phase: "immediate",
+  });
+});
+
+test("interaction commit logs carry socialOutcome metadata for narration and memory", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Ask what happened"],
+      mutations: [
+        {
+          type: "record_local_interaction",
+          localEntityId: "temp:temp_dockhand",
+          interactionSummary: "The dockhand refuses to say more and looks back toward the pier.",
+          topic: "pier closure",
+          socialOutcome: "withholds",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+  });
+
+  assert.deepEqual(evaluated.stateCommitLog[0]?.metadata, {
+    localEntityId: "temp:temp_dockhand",
+    topic: "pier closure",
+    socialOutcome: "withholds",
+    phase: "immediate",
+    interactionCount: 2,
+  });
+});
+
+test("socially high-friction interaction outcomes classify memories as conflict", () => {
+  const memoryKind = engineTestUtils.determineMemoryKind({
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: [],
+      mutations: [],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    stateCommitLog: [
+      {
+        kind: "mutation",
+        mutationType: "record_npc_interaction",
+        status: "applied",
+        reasonCode: "npc_interaction_recorded",
+        summary: "Tarn declines the offer and keeps his distance.",
+        metadata: {
+          npcId: "npc_guard",
+          topic: "lodging",
+          socialOutcome: "declines",
+          phase: "immediate",
+        },
+      },
+    ],
+  });
+
+  assert.equal(memoryKind, "conflict");
+});
+
+test("low-friction acknowledgement interactions stay out of conflict memory by default", () => {
+  const memoryKind = engineTestUtils.determineMemoryKind({
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: [],
+      mutations: [],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    stateCommitLog: [
+      {
+        kind: "mutation",
+        mutationType: "record_npc_interaction",
+        status: "applied",
+        reasonCode: "npc_interaction_recorded",
+        summary: "The guard acknowledges the question with a brief nod.",
+        metadata: {
+          npcId: "npc_guard",
+          topic: "identity",
+          socialOutcome: "acknowledges",
+          phase: "immediate",
+        },
+      },
+    ],
+  });
+
+  assert.equal(memoryKind, "world_change");
+});
+
+test("evaluation assigns canonical spawn ids and eliminates placeholder prefixes", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Set things up"],
+      mutations: [
+        {
+          type: "spawn_temporary_actor",
+          spawnKey: "customer",
+          role: "customer",
+          summary: "A customer pauses at the stall with a measuring eye.",
+          apparentDisposition: "cautious",
+          reason: "A plausible buyer appears.",
+        },
+        {
+          type: "record_local_interaction",
+          localEntityId: "spawn:customer",
+          interactionSummary: "The customer counters with a lower opening offer.",
+          topic: "price",
+          socialOutcome: "counteroffers",
+        },
+        {
+          type: "spawn_world_object",
+          spawnKey: "crate",
+          name: "oak crate",
+          holder: { kind: "scene", locationId: "loc_gate" },
+          reason: "A crate is dragged into the lane.",
+        },
+        {
+          type: "update_world_object_state",
+          objectId: "spawn:crate",
+          isLocked: true,
+          reason: "The crate is quickly locked shut.",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse", "investigate"]),
+  });
+
+  const spawnedActorId = evaluated.spawnedTemporaryActorIds.get("customer");
+  const spawnedObjectId = evaluated.spawnedWorldObjectIds.get("crate");
+  assert.match(spawnedActorId ?? "", /^tactor_/);
+  assert.match(spawnedObjectId ?? "", /^wobj_/);
+  assert.equal(
+    evaluated.stateCommitLog[1]?.metadata?.localEntityId,
+    spawnedActorId ? `temp:${spawnedActorId}` : null,
+  );
+  assert.equal(evaluated.stateCommitLog[2]?.metadata?.objectId, spawnedObjectId);
+  assert.equal(evaluated.stateCommitLog[3]?.metadata?.objectId, spawnedObjectId);
+  assert.ok(
+    evaluated.stateCommitLog.every((entry) => JSON.stringify(entry).includes("spawned_world_object:") === false),
+  );
+  assert.ok(
+    evaluated.stateCommitLog.every((entry) => JSON.stringify(entry).includes("spawned_temp:") === false),
   );
 });
 
@@ -1004,6 +1171,7 @@ test("temporary actor spawn handles can be referenced later in the same turn", (
           localEntityId: "spawn:apprentice",
           interactionSummary: "You send the apprentice to fetch the runeforger.",
           topic: "runeforger",
+          socialOutcome: "complies",
         },
       ],
       warnings: [],
@@ -1036,6 +1204,7 @@ test("reused offscene temporary actors can be brought back and referenced later 
           affectedWorldState: false,
           isInMemoryGraph: false,
           promotedNpcId: null,
+          inventory: [],
         },
       ],
     },
@@ -1057,6 +1226,7 @@ test("reused offscene temporary actors can be brought back and referenced later 
           localEntityId: "spawn:apprentice",
           interactionSummary: "You send the apprentice to fetch the runeforger.",
           topic: "runeforger",
+          socialOutcome: "complies",
         },
       ],
       warnings: [],
@@ -1124,6 +1294,7 @@ test("temporary actor reuse prefers the most recently seen matching actor", () =
           affectedWorldState: false,
           isInMemoryGraph: false,
           promotedNpcId: null,
+          inventory: [],
         },
         {
           id: "temp_newer",
@@ -1139,6 +1310,7 @@ test("temporary actor reuse prefers the most recently seen matching actor", () =
           affectedWorldState: false,
           isInMemoryGraph: false,
           promotedNpcId: null,
+          inventory: [],
         },
       ],
     },
@@ -1296,6 +1468,7 @@ test("forward spawn references reject cleanly", () => {
           type: "record_local_interaction",
           localEntityId: "spawn:apprentice",
           interactionSummary: "You ask the apprentice to wait.",
+          socialOutcome: "acknowledges",
         },
         {
           type: "spawn_temporary_actor",
@@ -1422,6 +1595,7 @@ test("scene actor presence updates remove temporary actors from projected availa
           type: "record_local_interaction",
           localEntityId: "temp:temp_dockhand",
           interactionSummary: "You call the dockhand back immediately.",
+          socialOutcome: "redirects",
         },
       ],
       warnings: [],
@@ -1615,6 +1789,7 @@ test("same-turn focus changes reject interactions with stale prior-focus actors"
           type: "record_local_interaction",
           localEntityId: "temp:temp_dockhand",
           interactionSummary: "You ask the dockhand what he saw.",
+          socialOutcome: "shares_fact",
         },
       ],
       warnings: [],
@@ -1660,6 +1835,7 @@ test("same-turn focus changes can interact with actors manifested into the new f
           type: "record_local_interaction",
           localEntityId: "spawn:customer",
           interactionSummary: "You answer the customer's first question.",
+          socialOutcome: "acknowledges",
         },
       ],
       warnings: [],
@@ -1736,6 +1912,7 @@ test("same-turn focus changes reject record_npc_interaction targeting a named ac
           type: "record_npc_interaction",
           npcId: "npc_guard",
           interactionSummary: "You keep talking to the guard from the back room.",
+          socialOutcome: "resists",
         },
       ],
       warnings: [],
@@ -1774,6 +1951,7 @@ test("engine rejects record_local_interaction used for a solo errand with invali
           affectedWorldState: false,
           isInMemoryGraph: false,
           promotedNpcId: null,
+          inventory: [],
         },
       ],
     },
@@ -1786,6 +1964,7 @@ test("engine rejects record_local_interaction used for a solo errand with invali
           type: "record_local_interaction",
           localEntityId: "temp_apprentice",
           interactionSummary: "You head back to the forge and check your bench.",
+          socialOutcome: "acknowledges",
         },
       ],
       warnings: [],
@@ -2084,6 +2263,85 @@ test("transfer_assets supports commodity round-trips between player and world ob
   assert.equal(evaluated.stateCommitLog[2]?.reasonCode, "assets_transferred");
 });
 
+test("transfer_assets can hand grounded items to a temporary actor", () => {
+  const snapshot = structuredClone(createSnapshot());
+  snapshot.assetItems = [
+    {
+      id: "iteminst_roll_1",
+      characterInstanceId: snapshot.character.instanceId,
+      npcId: null,
+      temporaryActorId: null,
+      worldObjectId: null,
+      sceneLocationId: null,
+      sceneFocusKey: null,
+      templateId: "item_honey_roll",
+      template: {
+        id: "item_honey_roll",
+        campaignId: snapshot.campaignId,
+        name: "Honey-wheat roll",
+        description: "A sweet roll glazed with honey.",
+        value: 1,
+        weight: 0.1,
+        rarity: "common",
+        tags: [],
+      },
+      isIdentified: true,
+      charges: null,
+      properties: null,
+    },
+  ];
+  snapshot.character.inventory = structuredClone(snapshot.assetItems);
+
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot,
+    command: createValidatedCommand("success", [
+      {
+        type: "transfer_assets",
+        source: { kind: "player" },
+        destination: { kind: "temporary_actor", actorId: "temp_dockhand" },
+        templateTransfers: [{ templateId: "item_honey_roll", quantity: 1 }],
+        reason: "Pass the roll to the dockhand.",
+      },
+    ]),
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+  });
+
+  assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "assets_transferred");
+  assert.equal(evaluated.stateCommitLog[1]?.status, "applied");
+});
+
+test("spawned environmental items can be transferred to a temporary actor in the same turn", () => {
+  const snapshot = structuredClone(createSnapshot());
+
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot,
+    command: createValidatedCommand("success", [
+      {
+        type: "spawn_environmental_item",
+        spawnKey: "wash_cloth",
+        itemName: "Wash Cloth",
+        description: "A folded linen wash cloth from the basin stand.",
+        quantity: 1,
+        reason: "Take a clean cloth from the wash stand.",
+      },
+      {
+        type: "transfer_assets",
+        source: { kind: "player" },
+        destination: { kind: "temporary_actor", actorId: "temp_dockhand" },
+        templateTransfers: [{ templateId: "spawn:wash_cloth", quantity: 1 }],
+        reason: "Hand the cloth to the dockhand.",
+      },
+    ]),
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse", "investigate"]),
+  });
+
+  assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "environmental_item_spawned");
+  assert.equal(evaluated.stateCommitLog[2]?.reasonCode, "assets_transferred");
+  assert.equal(evaluated.stateCommitLog[2]?.status, "applied");
+});
+
 test("transfer_assets enforces NPC transfer vector semantics for stealth and force", () => {
   const snapshot = structuredClone(createSnapshot());
   snapshot.assetItems = [
@@ -2268,4 +2526,29 @@ test("deterministic narration fallback softens time plus local interaction summa
 
   assert.match(narration, /you asked the baker what's fresh this morning/i);
   assert.doesNotMatch(narration, /Time passes for 5 minutes/i);
+});
+
+test("deterministic narration fallback preserves socially negative interaction outcomes verbatim", () => {
+  const narration = engineTestUtils.deterministicNarrationFallback({
+    playerAction: "I offer Tarn the bath again.",
+    stateCommitLog: [
+      {
+        kind: "mutation",
+        mutationType: "record_npc_interaction",
+        status: "applied",
+        reasonCode: "npc_interaction_recorded",
+        summary: "Tarn declines the bath and chooses the cot instead.",
+        metadata: {
+          npcId: "npc_tarn",
+          topic: "lodging",
+          socialOutcome: "declines",
+          phase: "immediate",
+        },
+      },
+    ],
+    checkResult: null,
+  });
+
+  assert.match(narration, /declines the bath/i);
+  assert.doesNotMatch(narration, /accept/i);
 });

@@ -22,6 +22,22 @@ export type RestType = "light" | "full";
 export type ApprovalBand = "hostile" | "cold" | "neutral" | "warm" | "trusted";
 export type DurationMagnitude = "instant" | "brief" | "standard" | "extended" | "long";
 export type SceneAspectDuration = "scene" | "permanent";
+export const SOCIAL_OUTCOMES = [
+  "accepts",
+  "declines",
+  "hesitates",
+  "agrees_conditionally",
+  "counteroffers",
+  "shares_fact",
+  "withholds",
+  "redirects",
+  "asks_question",
+  "complies",
+  "resists",
+  "withdraws",
+  "acknowledges",
+] as const;
+export type SocialOutcome = (typeof SOCIAL_OUTCOMES)[number];
 export type RelationshipMove = "worsen" | "slip" | "steady" | "warm" | "bond";
 export type DiscoveryIntent = "none" | "surface" | "focused" | "deep";
 export type ChallengeApproach = "force" | "finesse" | "endure" | "analyze" | "notice" | "influence";
@@ -161,6 +177,7 @@ export type ItemTemplate = {
 export type AssetHolderRef =
   | { kind: "player" }
   | { kind: "npc"; npcId: string }
+  | { kind: "temporary_actor"; actorId: string }
   | { kind: "world_object"; objectId: string }
   | { kind: "scene"; locationId: string; focusKey?: string | null };
 
@@ -168,6 +185,7 @@ export type ItemInstance = {
   id: string;
   characterInstanceId: string | null;
   npcId?: string | null;
+  temporaryActorId?: string | null;
   worldObjectId?: string | null;
   sceneLocationId?: string | null;
   sceneFocusKey?: string | null;
@@ -190,6 +208,7 @@ export type CharacterCommodityStack = {
   id: string;
   characterInstanceId: string | null;
   npcId?: string | null;
+  temporaryActorId?: string | null;
   worldObjectId?: string | null;
   sceneLocationId?: string | null;
   sceneFocusKey?: string | null;
@@ -203,6 +222,7 @@ export type WorldObjectSummary = {
   name: string;
   characterInstanceId?: string | null;
   npcId?: string | null;
+  temporaryActorId?: string | null;
   parentWorldObjectId?: string | null;
   sceneLocationId?: string | null;
   sceneFocusKey?: string | null;
@@ -790,6 +810,7 @@ export type TemporaryActorSummary = {
   affectedWorldState: boolean;
   isInMemoryGraph: boolean;
   promotedNpcId: string | null;
+  inventory: PromptInventoryItem[];
 };
 
 export type RecentLocalEventSummary = {
@@ -835,6 +856,7 @@ export type SceneActorSummary = {
   role: string;
   tags?: string[];
   focusKey?: string | null;
+  inventory?: PromptInventoryItem[];
   detailFetchHint:
     | {
         type: "fetch_npc_detail";
@@ -1455,6 +1477,7 @@ export type MechanicsMutation =
       localEntityId: string;
       interactionSummary: string;
       topic?: string;
+      socialOutcome: SocialOutcome;
       phase?: MutationPhase;
     }
   | {
@@ -1462,6 +1485,7 @@ export type MechanicsMutation =
       npcId: string;
       interactionSummary: string;
       topic?: string;
+      socialOutcome: SocialOutcome;
       phase?: MutationPhase;
     }
   | {

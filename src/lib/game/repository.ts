@@ -891,6 +891,7 @@ function toItemInstanceRecord(
     id: instance.id,
     characterInstanceId: instance.characterInstanceId,
     npcId: instance.npcId,
+    temporaryActorId: instance.temporaryActorId,
     worldObjectId: instance.worldObjectId,
     sceneLocationId: instance.sceneLocationId,
     sceneFocusKey: instance.sceneFocusKey,
@@ -925,6 +926,7 @@ function toCommodityStackRecord(
     id: stack.id,
     characterInstanceId: stack.characterInstanceId,
     npcId: stack.npcId,
+    temporaryActorId: stack.temporaryActorId,
     worldObjectId: stack.worldObjectId,
     sceneLocationId: stack.sceneLocationId,
     sceneFocusKey: stack.sceneFocusKey,
@@ -948,6 +950,7 @@ function toWorldObjectSummary(
     name: object.name,
     characterInstanceId: object.characterInstanceId,
     npcId: object.npcId,
+    temporaryActorId: object.temporaryActorId,
     parentWorldObjectId: object.parentWorldObjectId,
     sceneLocationId: object.sceneLocationId,
     sceneFocusKey: object.sceneFocusKey,
@@ -2599,9 +2602,11 @@ function toInformationSummary(
   };
 }
 
-function toTemporaryActorSummary(
-  actor: Prisma.TemporaryActorGetPayload<Record<string, never>>,
-): TemporaryActorSummary {
+function toTemporaryActorSummary(input: {
+  actor: Prisma.TemporaryActorGetPayload<Record<string, never>>;
+  inventory: PromptInventoryItem[];
+}): TemporaryActorSummary {
+  const { actor, inventory } = input;
   return {
     id: actor.id,
     label: actor.label,
@@ -2616,6 +2621,7 @@ function toTemporaryActorSummary(
     affectedWorldState: actor.affectedWorldState,
     isInMemoryGraph: actor.isInMemoryGraph,
     promotedNpcId: actor.promotedNpcId,
+    inventory,
   };
 }
 
@@ -2648,8 +2654,9 @@ function toSceneActorSummaries(input: {
         kind: "temporary_actor",
         displayLabel: actor.label,
         role: actor.label,
-        tags: [],
+        tags: actor.inventory.length > 0 ? ["holds_inventory"] : [],
         focusKey: null,
+        inventory: actor.inventory,
         detailFetchHint: null,
         lastSummary: actor.lastSummary,
       })),
@@ -3831,9 +3838,25 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
           : null,
     }));
 
+  const temporaryActorInventoryById = new Map<string, PromptInventoryItem[]>();
+  for (const actor of campaign.temporaryActors) {
+    if (actor.promotedNpcId != null) {
+      continue;
+    }
+    temporaryActorInventoryById.set(
+      actor.id,
+      toPromptAssetInventory({
+        items: assetItems.filter((item) => item.temporaryActorId === actor.id),
+        commodityStacks: assetCommodityStacks.filter((stack) => stack.temporaryActorId === actor.id),
+      }),
+    );
+  }
   const temporaryActors = campaign.temporaryActors
     .filter((actor) => actor.promotedNpcId == null)
-    .map(toTemporaryActorSummary);
+    .map((actor) => toTemporaryActorSummary({
+      actor,
+      inventory: temporaryActorInventoryById.get(actor.id) ?? [],
+    }));
   const knownNpcLocationIds = Object.fromEntries(
     campaign.npcs.map((npc) => [npc.id, npc.currentLocationId]),
   );
@@ -4321,7 +4344,20 @@ export async function getTurnSnapshot(
           ? (structuredClone(message.payload) as Record<string, unknown>)
           : null,
     }));
-  const temporaryActors = temporaryActorRecords.map(toTemporaryActorSummary);
+  const temporaryActorInventoryById = new Map<string, PromptInventoryItem[]>();
+  for (const actor of temporaryActorRecords) {
+    temporaryActorInventoryById.set(
+      actor.id,
+      toPromptAssetInventory({
+        items: assetItems.filter((item) => item.temporaryActorId === actor.id),
+        commodityStacks: assetCommodityStacks.filter((stack) => stack.temporaryActorId === actor.id),
+      }),
+    );
+  }
+  const temporaryActors = temporaryActorRecords.map((actor) => toTemporaryActorSummary({
+    actor,
+    inventory: temporaryActorInventoryById.get(actor.id) ?? [],
+  }));
   const latestRetryableTurnId =
     env.enableTurnUndo && campaign.turns[0]?.sessionId === session.id
       ? campaign.turns[0]?.id ?? null

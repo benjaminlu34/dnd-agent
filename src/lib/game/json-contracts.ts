@@ -9,8 +9,10 @@ import type {
   TurnNarrationBounds,
   TurnResultPayload,
 } from "@/lib/game/types";
+import { SOCIAL_OUTCOMES } from "@/lib/game/types";
 
 const sceneAspectDurationValues = ["scene", "permanent"] as const satisfies readonly SceneAspectDuration[];
+const socialOutcomeSchema = z.enum(SOCIAL_OUTCOMES);
 
 const sceneAspectSchema = z.object({
   label: z.string().trim().min(1),
@@ -181,7 +183,21 @@ const stateCommitLogEntrySchema: z.ZodType<StateCommitLogEntry> = z.object({
   status: z.enum(["applied", "rejected", "noop"]),
   reasonCode: z.string().trim().min(1),
   summary: z.string().trim().min(1),
-  metadata: z.record(z.string(), z.unknown()).optional().nullable(),
+  metadata: z.record(z.string(), z.unknown()).superRefine((value, ctx) => {
+    if (!value) {
+      return;
+    }
+
+    if ("socialOutcome" in value && value.socialOutcome !== undefined) {
+      const parsed = socialOutcomeSchema.safeParse(value.socialOutcome);
+      if (!parsed.success) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Invalid socialOutcome in state commit log metadata.",
+        });
+      }
+    }
+  }).optional().nullable(),
 });
 
 const turnResultPayloadSchema: z.ZodType<TurnResultPayload> = z.object({
@@ -349,6 +365,21 @@ export function parseTurnResultPayloadJson(value: unknown): TurnResultPayload | 
   const versioned = versionedTurnResultSchema.safeParse(value);
   if (versioned.success) {
     return versioned.data.data;
+  }
+
+  if (
+    typeof value === "object"
+    && value !== null
+    && !Array.isArray(value)
+    && (
+      "schemaVersion" in value
+      || "stateVersionAfter" in value
+      || "changeCodes" in value
+      || "reasonCodes" in value
+      || "stateCommitLog" in value
+    )
+  ) {
+    return null;
   }
 
   const legacy = z

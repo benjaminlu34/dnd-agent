@@ -511,6 +511,7 @@ test("parseFinalActionToolCall hoists misplaced legacy checkIntent pseudo-mutati
         type: "record_npc_interaction",
         npcId: "npc_guard",
         interactionSummary: "You hold the guard's attention while he weighs your request.",
+        socialOutcome: "hesitates",
         phase: "conditional",
       },
     ],
@@ -533,6 +534,7 @@ test("parseFinalActionToolCall hoists misplaced legacy checkIntent pseudo-mutati
   });
   assert.equal(parsed.data.mutations.length, 1);
   assert.equal(parsed.data.mutations[0]?.type, "record_npc_interaction");
+  assert.equal(parsed.data.mutations[0]?.socialOutcome, "hesitates");
 });
 
 test("parseFinalActionToolCall rejects removed legacy monolithic action payloads", () => {
@@ -540,6 +542,41 @@ test("parseFinalActionToolCall rejects removed legacy monolithic action payloads
     type: "execute_converse",
     interlocutor: "Gate Guard",
     topic: "gate trouble",
+  });
+
+  assert.equal(parsed.success, false);
+});
+
+test("parseFinalActionToolCall rejects interaction mutations missing socialOutcome", () => {
+  const parsed = aiProviderTestUtils.parseFinalActionToolCall({
+    type: "resolve_mechanics",
+    timeMode: "exploration",
+    suggestedActions: ["Keep talking"],
+    mutations: [
+      {
+        type: "record_npc_interaction",
+        npcId: "npc_guard",
+        interactionSummary: "You keep the guard talking while he considers the question.",
+      },
+    ],
+  });
+
+  assert.equal(parsed.success, false);
+});
+
+test("parseFinalActionToolCall rejects invalid socialOutcome values", () => {
+  const parsed = aiProviderTestUtils.parseFinalActionToolCall({
+    type: "resolve_mechanics",
+    timeMode: "exploration",
+    suggestedActions: ["Keep talking"],
+    mutations: [
+      {
+        type: "record_local_interaction",
+        localEntityId: "spawn:customer_1",
+        interactionSummary: "The customer gives you a noncommittal shrug.",
+        socialOutcome: "neutral",
+      },
+    ],
   });
 
   assert.equal(parsed.success, false);
@@ -589,6 +626,9 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   assert.match(prompt, /For npcId, citedNpcId, and targetNpcId fields, use the bare NPC id without the npc: prefix/);
   assert.match(prompt, /Use record_local_interaction for current-scene unnamed locals instead of adjust_relationship/);
   assert.match(prompt, /Use record_npc_interaction for ordinary same-scene dialogue with a grounded named NPC/);
+  assert.match(prompt, /Every record_local_interaction and record_npc_interaction mutation must include socialOutcome/);
+  assert.match(prompt, /Choose the most specific valid socialOutcome available/);
+  assert.match(prompt, /acknowledges is the only low-intensity fallback outcome/i);
   assert.match(prompt, /Never use record_local_interaction with npc: refs or named sceneActors/);
   assert.match(prompt, /Never invent temp: ids/i);
   assert.match(prompt, /When speaking to a named on-screen NPC, use record_npc_interaction for ordinary dialogue/);
@@ -598,6 +638,9 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   assert.match(prompt, /do not redirect them to a named scene actor; spawn_temporary_actor first/i);
   assert.match(prompt, /If the player is looting, pickpocketing, frisking, searching a body's belongings, or otherwise acting on a grounded NPC's custody, request npc_detail first/i);
   assert.match(prompt, /When fetched npc_detail exposes grounded held items or commodity stacks on an NPC, use transfer_assets from that NPC holder/i);
+  assert.match(prompt, /willing NPC or temporary-actor exchange/i);
+  assert.match(prompt, /record_local_interaction and record_npc_interaction alone never finalize custody or consumption/i);
+  assert.match(prompt, /Do not leave the item in player custody while narrating that someone else now has it/i);
   assert.match(prompt, /asks what to call them, who they are, or another identity-seeking follow-up, request npc_detail for that actor/i);
   assert.match(prompt, /Use spawn_environmental_item before adjust_inventory/);
   assert.match(prompt, /Respect context\.authoritativeState\.worldObjects mechanical state such as isLocked and requiredKeyTemplateId/i);
@@ -884,6 +927,61 @@ test("buildResolvedTurnNarrationPrompt teaches failed invalid-target attempts as
   assert.match(prompt.system, /looked for or attempted that contact but could not find or reach them/);
   assert.match(prompt.user, /record_local_interaction/);
   assert.match(prompt.user, /invalid_target/);
+});
+
+test("buildResolvedTurnNarrationPrompt treats socialOutcome metadata as immutable narration truth", () => {
+  const prompt = aiProviderTestUtils.buildResolvedTurnNarrationPrompt({
+    playerAction: "I offer Tarn the warm bath again.",
+    promptContext: {
+      currentLocation: {
+        id: "loc_inn",
+        name: "The Hearthside",
+        type: "inn",
+        summary: "A warm common room and narrow sleeping loft.",
+        state: "settled",
+      },
+      adjacentRoutes: [],
+      sceneActors: [],
+      recentLocalEvents: [],
+      recentTurnLedger: [],
+      discoveredInformation: [],
+      activePressures: [],
+      recentWorldShifts: [],
+      activeThreads: [],
+      inventory: [],
+      worldObjects: [],
+      sceneFocus: null,
+      sceneAspects: {},
+      localTexture: null,
+      globalTime: 600,
+      timeOfDay: "night",
+      dayCount: 1,
+    },
+    fetchedFacts: [],
+    stateCommitLog: [
+      {
+        kind: "mutation",
+        mutationType: "record_npc_interaction",
+        status: "applied",
+        reasonCode: "npc_interaction_recorded",
+        summary: "Tarn declines the bath and chooses the cot instead.",
+        metadata: {
+          npcId: "npc_tarn",
+          topic: "lodging",
+          socialOutcome: "declines",
+          phase: "immediate",
+        },
+      },
+    ],
+    checkResult: null,
+    suggestedActions: [],
+  });
+
+  assert.match(prompt.system, /socialOutcome is immutable truth/i);
+  assert.match(prompt.system, /Do not soften declines into acceptance/i);
+  assert.match(prompt.user, /socialOutcome/);
+  assert.match(prompt.user, /declines/);
+  assert.match(prompt.system, /Do not narrate completed item custody changes, consumption, gifting, feeding, storage, or item use by another holder unless state_commit_log includes the applied asset mutation/i);
 });
 
 test("buildTurnUserPrompt includes attention packet before the main action block", () => {
