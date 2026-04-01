@@ -888,6 +888,71 @@ test("low-friction acknowledgement interactions stay out of conflict memory by d
   assert.equal(memoryKind, "world_change");
 });
 
+test("fast-forward turns stay salient as world_change memories", () => {
+  const memoryKind = engineTestUtils.determineMemoryKind({
+    command: {
+      type: "execute_fast_forward",
+      requestedDurationMinutes: 2880,
+      routineSummary: "You settle into a steady routine around the stable.",
+      recurringActivities: ["feed Safra", "sweep the yard"],
+      intendedOutcomes: ["stay inconspicuous"],
+      warnings: [],
+      timeElapsed: 2880,
+      narrationBounds: {
+        requestedAdvanceMinutes: 2880,
+        committedAdvanceMinutes: 2880,
+        availableAdvanceMinutes: 2880,
+        wasCapped: false,
+        overrideText: null,
+        isFastForward: true,
+        interruptionReason: null,
+      },
+      narrationHint: null,
+      pendingCheck: undefined,
+      checkResult: undefined,
+    },
+    stateCommitLog: [
+      {
+        kind: "mutation",
+        mutationType: "advance_time",
+        status: "applied",
+        reasonCode: "fast_forward_executed",
+        summary: "You settle into a steady routine around the stable.",
+        metadata: {
+          isFastForward: true,
+        },
+      },
+    ],
+  });
+
+  assert.equal(memoryKind, "world_change");
+});
+
+test("deterministic narration fallback uses montage phrasing for fast-forward turns", () => {
+  const narration = engineTestUtils.deterministicNarrationFallback({
+    playerAction: "We spend the next several days helping around the stable until something changes.",
+    stateCommitLog: [
+      {
+        kind: "mutation",
+        mutationType: "advance_time",
+        status: "applied",
+        reasonCode: "fast_forward_executed",
+        summary: "You settle into a quiet rhythm of mucking stalls and tending tack.",
+        metadata: {
+          isFastForward: true,
+        },
+      },
+    ],
+    narrationBounds: {
+      isFastForward: true,
+      interruptionReason: "A rider comes in hard from the north road.",
+    },
+  });
+
+  assert.match(narration, /quiet rhythm of mucking stalls and tending tack/i);
+  assert.match(narration, /rider comes in hard from the north road/i);
+});
+
 test("evaluation assigns canonical spawn ids and eliminates placeholder prefixes", () => {
   const evaluated = engineTestUtils.evaluateResolvedCommand({
     snapshot: createSnapshot(),

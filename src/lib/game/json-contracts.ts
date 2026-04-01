@@ -147,6 +147,8 @@ const turnNarrationBoundsSchema: z.ZodType<TurnNarrationBounds> = z.object({
   availableAdvanceMinutes: z.number().int().min(0),
   wasCapped: z.boolean(),
   overrideText: z.string().trim().min(1).nullable(),
+  isFastForward: z.boolean().optional(),
+  interruptionReason: z.string().trim().min(1).nullable().optional(),
 });
 
 const stateCommitLogEntrySchema: z.ZodType<StateCommitLogEntry> = z.object({

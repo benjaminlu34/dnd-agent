@@ -461,6 +461,27 @@ test("parseFinalActionToolCall accepts resolve_mechanics payloads", () => {
   assert.equal(parsed.success, true);
 });
 
+test("parseFinalActionToolCall accepts execute_fast_forward payloads", () => {
+  const parsed = aiProviderTestUtils.parseFinalActionToolCall({
+    type: "execute_fast_forward",
+    requestedDurationMinutes: 4320,
+    routineSummary: "You settle into a quiet three-day routine at the stable.",
+    recurringActivities: ["tend Safra", "help with tack repairs"],
+    intendedOutcomes: ["earn the stablemaster's trust"],
+    resourceCosts: {
+      currencyCp: 45,
+      itemRemovals: [
+        {
+          templateId: "item_oats",
+          quantity: 1,
+        },
+      ],
+    },
+  });
+
+  assert.equal(parsed.success, true);
+});
+
 test("parseFinalActionToolCall normalizes null checkIntent to omission", () => {
   const parsed = aiProviderTestUtils.parseFinalActionToolCall({
     type: "resolve_mechanics",
@@ -582,10 +603,11 @@ test("parseFinalActionToolCall rejects invalid socialOutcome values", () => {
   assert.equal(parsed.success, false);
 });
 
-test("buildTurnSystemPrompt hard-locks observe mode to resolve_mechanics or clarification", () => {
+test("buildTurnSystemPrompt hard-locks observe mode away from fast-forward output", () => {
   const prompt = aiProviderTestUtils.buildTurnSystemPrompt("observe");
 
-  assert.match(prompt, /resolve_mechanics or request_clarification/);
+  assert.match(prompt, /resolve_mechanics, execute_fast_forward, or request_clarification/);
+  assert.match(prompt, /never use it for a single scene or ordinary short observation/i);
   assert.match(prompt, /Do not output narration or any freeform prose/);
   assert.match(prompt, /Do not create combat, market trade, or deliberate social escalation in observe mode/);
 });
@@ -633,6 +655,8 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   assert.match(prompt, /Never invent temp: ids/i);
   assert.match(prompt, /When speaking to a named on-screen NPC, use record_npc_interaction for ordinary dialogue/);
   assert.match(prompt, /If economy_light is active and a bespoke trade is actually agreed upon, resolve it immediately with composed asset mutations/);
+  assert.match(prompt, /Use execute_fast_forward only when the player explicitly asks to compress multiple days or weeks into a routine montage/);
+  assert.match(prompt, /execute_fast_forward carries aggregate upkeep only\. It must not contain scene mutations/i);
   assert.match(prompt, /pending_trade_offer/);
   assert.match(prompt, /Use spawn_temporary_actor before record_local_interaction/);
   assert.match(prompt, /do not redirect them to a named scene actor; spawn_temporary_actor first/i);
@@ -863,6 +887,65 @@ test("buildResolvedTurnNarrationPrompt includes prompt context and fetched facts
   assert.match(prompt.system, /Do not use elapsed time as a prompt to generate journey or travel description/i);
   assert.match(prompt.user, /authoritativeState/);
   assert.match(prompt.user, /recentGroundedHistory/);
+});
+
+test("buildResolvedTurnNarrationPrompt teaches montage framing for fast-forward turns", () => {
+  const prompt = aiProviderTestUtils.buildResolvedTurnNarrationPrompt({
+    playerAction: "We spend the next several days helping around the stable until something changes.",
+    promptContext: {
+      currentLocation: {
+        id: "loc_stable",
+        name: "South Stable",
+        type: "stable",
+        summary: "Hay, leather, and the damp warmth of horses.",
+        state: "steady",
+      },
+      adjacentRoutes: [],
+      sceneActors: [],
+      recentLocalEvents: [],
+      recentTurnLedger: [],
+      discoveredInformation: [],
+      activePressures: [],
+      recentWorldShifts: [],
+      activeThreads: [],
+      inventory: [],
+      worldObjects: [],
+      sceneFocus: null,
+      sceneAspects: {},
+      localTexture: null,
+      globalTime: 600,
+      timeOfDay: "morning",
+      dayCount: 3,
+    },
+    fetchedFacts: [],
+    stateCommitLog: [
+      {
+        kind: "mutation",
+        mutationType: "advance_time",
+        status: "applied",
+        reasonCode: "fast_forward_executed",
+        summary: "You settle into a quiet routine among the stalls and tack room.",
+        metadata: {
+          isFastForward: true,
+          requestedDurationMinutes: 4320,
+          committedDurationMinutes: 2880,
+          interruptionReason: "A rider comes in hard from the north road.",
+        },
+      },
+    ],
+    narrationBounds: {
+      committedAdvanceMinutes: 2880,
+      isFastForward: true,
+      interruptionReason: "A rider comes in hard from the north road.",
+    },
+    checkResult: null,
+    suggestedActions: [],
+    narrationHint: null,
+  });
+
+  assert.match(prompt.system, /Do not narrate minute-by-minute/i);
+  assert.match(prompt.system, /Summarize the recurring activities in 2-4 sentences using montage language/i);
+  assert.match(prompt.system, /A rider comes in hard from the north road\./i);
 });
 
 test("buildResolvedTurnNarrationPrompt teaches failed invalid-target attempts as failed searches", () => {

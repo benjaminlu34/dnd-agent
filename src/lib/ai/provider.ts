@@ -171,6 +171,11 @@ type ResolvedTurnNarrationInput = {
   promptContext: SpatialPromptContext;
   fetchedFacts: TurnFetchToolResult[];
   stateCommitLog: StateCommitLog;
+  narrationBounds?: {
+    committedAdvanceMinutes: number;
+    isFastForward?: boolean;
+    interruptionReason?: string | null;
+  } | null;
   checkResult?: CheckResult | null;
   suggestedActions: string[];
   narrationHint?: {
@@ -2569,15 +2574,44 @@ const resolveMechanicsSchema = z.object({
   mutations: z.array(mechanicsMutationSchema).max(8).default([]),
 });
 
+const executeFastForwardSchema = z.object({
+  type: z.literal("execute_fast_forward"),
+  requestedDurationMinutes: z.number().int().positive(),
+  routineSummary: z.string().trim().min(1).max(240),
+  recurringActivities: z.array(z.string().trim().min(1).max(160)).max(6).default([]),
+  intendedOutcomes: z.array(z.string().trim().min(1).max(160)).max(6).default([]),
+  resourceCosts: z.object({
+    currencyCp: z.number().int().positive().optional(),
+    itemRemovals: z.array(z.object({
+      templateId: z.string().trim().min(1),
+      quantity: z.number().int().positive(),
+    })).max(8).optional(),
+  }).optional(),
+  warnings: z.array(z.string().trim().min(1)).max(6).optional(),
+  memorySummary: z.string().trim().min(1).max(240).optional(),
+});
+
 const turnActionToolCallSchema = z.discriminatedUnion("type", [
   requestClarificationSchema,
   resolveMechanicsSchema,
+  executeFastForwardSchema,
 ]);
 
 const resolveMechanicsTool = createStructuredTool(
   "resolve_mechanics",
   "Return the bounded mechanical plan for this turn using only engine-validated mutations.",
   resolveMechanicsSchema.omit({ type: true }),
+);
+
+const executeFastForwardTool = createStructuredTool(
+  "execute_fast_forward",
+  [
+    "Use only when the player explicitly asks to compress multiple days or weeks into a routine montage.",
+    "Do not use for a single evening, a single day of downtime, or any scene-by-scene interaction.",
+    "Do not use during combat, active pursuit, or unstable tactical play.",
+    "Provide aggregate upkeep only; do not include scene mutations.",
+  ].join(" "),
+  executeFastForwardSchema.omit({ type: true }),
 );
 
 const classifyTurnIntentTool = createStructuredTool(
@@ -3294,9 +3328,10 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
   return turnMode === "observe"
     ? [
         "You are the mechanical planner for a passive observation turn in a simulated world.",
-        "Return exactly one structured payload using resolve_mechanics or request_clarification.",
+        "Return exactly one structured payload using resolve_mechanics, execute_fast_forward, or request_clarification.",
         "Do not output narration or any freeform prose.",
         "If you use resolve_mechanics, always include top-level timeMode, suggestedActions, and mutations.",
+        "Use execute_fast_forward only when the player explicitly asks to compress multiple days into a routine montage; never use it for a single scene or ordinary short observation.",
         "timeMode must be exactly one of: combat, exploration, travel, rest, downtime.",
         "Use exploration for passive noticing, investigation, searching, or cautious local movement within the current scene.",
         "Use downtime for routine work, crafting, errands, waiting, or other non-travel non-combat activity.",
@@ -3387,9 +3422,13 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
       ].join("\n")
     : [
         "You are the mechanical planner for a simulated world turn.",
-        "Return exactly one structured payload using resolve_mechanics or request_clarification.",
+        "Return exactly one structured payload using resolve_mechanics, execute_fast_forward, or request_clarification.",
         "Do not output narration or any freeform prose.",
         "If you use resolve_mechanics, always include top-level timeMode, suggestedActions, and mutations.",
+        "Use execute_fast_forward only when the player explicitly asks to compress multiple days or weeks into a routine montage.",
+        "Do not use execute_fast_forward for one evening, one day of normal downtime, or any turn where the player expects scene-by-scene interaction.",
+        "Do not use execute_fast_forward during combat, active pursuit, or unstable tactical play.",
+        "execute_fast_forward carries aggregate upkeep only. It must not contain scene mutations, item transfers, or other step-by-step mechanics.",
         "timeMode must be exactly one of: combat, exploration, travel, rest, downtime.",
         "Use combat for an active fight or immediate violence.",
         "Use travel only for route movement between known adjacent locations.",
@@ -3543,6 +3582,7 @@ function buildTurnActionCorrectionNotes(input: {
       "Your previous reply did not match the final action schema.",
       "The previous payload was cut off. Return a much shorter complete replacement payload.",
       "If you use resolve_mechanics, include top-level timeMode, suggestedActions, and mutations.",
+      "If you use execute_fast_forward, include requestedDurationMinutes, routineSummary, recurringActivities, and intendedOutcomes.",
       "Do not include assistant prose before the tool call.",
     ].join("\n");
   }
@@ -3556,6 +3596,13 @@ function buildTurnActionCorrectionNotes(input: {
     notes.push(
       "For resolve_mechanics, always include top-level timeMode as exactly one of: combat, exploration, travel, rest, downtime.",
       "Choose timeMode before writing mutations. Use downtime for crafting, routine work, errands, or commissioning help. Use exploration for investigation, searching, talking within the current scene, or cautious local movement.",
+    );
+  }
+
+  if ((input.validationIssues ?? "").includes("requestedDurationMinutes")) {
+    notes.push(
+      "For execute_fast_forward, always include a positive requestedDurationMinutes.",
+      "Use execute_fast_forward only for explicit multi-day or multi-week routine montages, not scene-scale actions.",
     );
   }
 
@@ -3876,6 +3923,17 @@ function narrationViolatesResolvedConstraints(
 
 function buildResolvedTurnNarrationPrompt(input: ResolvedTurnNarrationInput) {
   const sanitizedCommitLog = buildSanitizedNarrationCommitLog(input.stateCommitLog);
+  const fastForwardConstraint =
+    input.narrationBounds?.isFastForward
+      ? [
+          `The player executed a fast-forward routine covering ${input.narrationBounds.committedAdvanceMinutes} committed minutes.`,
+          "Do not narrate minute-by-minute.",
+          "Summarize the recurring activities in 2-4 sentences using montage language.",
+          input.narrationBounds.interruptionReason
+            ? `Pivot sharply on the final sentence to this interruption: ${input.narrationBounds.interruptionReason}`
+            : "Conclude by noting that the time passes without a sharp interruption.",
+        ].join(" ")
+      : null;
   const system = [
     "**Role**",
     "You are the Dungeon Master's prose voice for a resolved turn in a living world.",
@@ -3897,6 +3955,7 @@ function buildResolvedTurnNarrationPrompt(input: ResolvedTurnNarrationInput) {
     "If state_commit_log includes a rejected record_local_interaction or set_scene_actor_presence with reasonCode invalid_semantics, narrate the player as unable to complete that intent through another person or presence change, without inventing that it happened anyway.",
     "If a discover_information mutation was rejected, do not convert that into an authoritative negative fact unless the applied state log independently proves it. If rejectedMutationTypes only cover item or scene changes, do not invent completed crafting outputs, item transfers, or scene transformations that the log rejected.",
     "If the applied log only advances time, narrate only the passage and any grounded atmosphere shift; if advance_time accompanies another mutation, absorb elapsed time naturally and do not explicitly count minutes unless the exact duration materially matters. Do not use elapsed time as a prompt to generate journey or travel description.",
+    fastForwardConstraint ? `If narrationBounds.isFastForward is true: ${fastForwardConstraint}` : null,
     "Quoted dialogue must be grounded by a committed interaction, a committed check result, fetched facts, or explicit player speech that is visibly answered in the committed log.",
     "",
     "**Craft Rules**",
@@ -6656,7 +6715,7 @@ class DungeonMasterClient {
         const response = await runCompletion({
           system,
           user,
-          tools: [resolveMechanicsTool, requestClarificationTool],
+          tools: [resolveMechanicsTool, executeFastForwardTool, requestClarificationTool],
           maxTokens: 1200,
           signal: input.signal,
         });
@@ -6702,7 +6761,7 @@ class DungeonMasterClient {
               "Observe mode is active.",
               "Return exactly one final action tool call using resolve_mechanics or request_clarification only.",
               "Use request_clarification only if the world state is too invalid to produce passive progression.",
-              "Do not emit any combat, trade, travel, or deliberate social escalation in observe mode.",
+              "Do not emit any combat, trade, travel, fast-forward montage, or deliberate social escalation in observe mode.",
               "Do not give the player character dialogue or chosen actions.",
             ].join("\n");
             continue;
@@ -6740,14 +6799,15 @@ class DungeonMasterClient {
         lastFailureSummary = response?.likelyTruncated
           ? "The previous payload was cut off before a complete tool payload could be read."
           : "The model did not produce a complete valid tool payload.";
-        correctionNotes = [
-          "Your previous reply did not produce a complete valid tool payload.",
-          response?.likelyTruncated
-            ? "The previous payload was cut off. Return a complete replacement payload with fewer mutations."
-            : "Return a complete replacement payload that exactly matches one tool schema.",
-          "If you use resolve_mechanics, include top-level timeMode, suggestedActions, and mutations.",
-          "Do not include assistant prose before the tool call.",
-        ].join("\n");
+          correctionNotes = [
+            "Your previous reply did not produce a complete valid tool payload.",
+            response?.likelyTruncated
+              ? "The previous payload was cut off. Return a complete replacement payload with fewer mutations."
+              : "Return a complete replacement payload that exactly matches one tool schema.",
+            "If you use resolve_mechanics, include top-level timeMode, suggestedActions, and mutations.",
+            "If you use execute_fast_forward, include requestedDurationMinutes, routineSummary, recurringActivities, and intendedOutcomes.",
+            "Do not include assistant prose before the tool call.",
+          ].join("\n");
       }
 
       throw new Error(

@@ -209,6 +209,81 @@ test("validateTurnCommand derives explicit advance_time duration", () => {
   assert.equal(validated.timeElapsed, 25);
 });
 
+test("validateTurnCommand normalizes execute_fast_forward payloads", () => {
+  const snapshot = createSnapshot();
+  snapshot.character.inventory = [
+    {
+      id: "iteminst_oats_1",
+      characterInstanceId: "inst_1",
+      templateId: "item_oats",
+      template: {
+        id: "item_oats",
+        campaignId: "camp_1",
+        name: "Feed Oats",
+        description: null,
+        value: 1,
+        weight: 1,
+        rarity: "common",
+        tags: [],
+      },
+      isIdentified: true,
+      charges: null,
+      properties: null,
+    },
+  ];
+
+  const validated = validateTurnCommand({
+    snapshot,
+    command: {
+      type: "execute_fast_forward",
+      requestedDurationMinutes: 8 * 1440,
+      routineSummary: "You settle into a week of stable work.",
+      recurringActivities: ["feed the horses", "sweep the tack room", "help repair harnesses", "rub Safra down", "haul water", "patch blankets", "chat with stablehands"],
+      intendedOutcomes: ["earn trust", "save money", "keep Safra settled", "stay inconspicuous", "learn the gossip", "restock", "find work"],
+      resourceCosts: {
+        itemRemovals: [
+          {
+            templateId: "iteminst_oats_1",
+            quantity: 1,
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(validated.type, "execute_fast_forward");
+  if (validated.type !== "execute_fast_forward") {
+    return;
+  }
+  assert.equal(validated.requestedDurationMinutes, 7 * 1440);
+  assert.equal(validated.timeElapsed, 7 * 1440);
+  assert.match(validated.warnings[0] ?? "", /7 days maximum/i);
+  assert.equal(validated.resourceCosts?.itemRemovals?.[0]?.templateId, "item_oats");
+  assert.equal(validated.recurringActivities.length, 6);
+  assert.equal(validated.intendedOutcomes.length, 6);
+  assert.equal(validated.pendingCheck, undefined);
+  assert.equal(validated.checkResult, undefined);
+});
+
+test("validateTurnCommand rejects fast-forward during active pursuit", () => {
+  const snapshot = createSnapshot();
+  snapshot.state.characterState.conditions = ["being_pursued"];
+
+  assert.throws(
+    () => validateTurnCommand({
+      snapshot,
+      command: {
+        type: "execute_fast_forward",
+        requestedDurationMinutes: 1440,
+        routineSummary: "You try to lie low for the day.",
+        recurringActivities: ["keep your head down"],
+        intendedOutcomes: ["avoid notice"],
+      },
+    }),
+    /Cannot fast-forward during active combat or pursuit/i,
+  );
+});
+
 test("validateTurnCommand derives rest duration from restore_health mutations", () => {
   const validated = validateTurnCommand({
     snapshot: createSnapshot(),

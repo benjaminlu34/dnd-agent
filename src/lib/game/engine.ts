@@ -94,6 +94,10 @@ type TurnStream = {
   checkResult?: (result: CheckResult) => void;
 };
 
+type ValidatedResolvedMechanicsCommand = Extract<ValidatedTurnCommand, { type: "resolve_mechanics" }>;
+type ValidatedExecuteFastForwardCommand = Extract<ValidatedTurnCommand, { type: "execute_fast_forward" }>;
+type ValidatedTurnActionCommand = Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
+
 const TURN_LOCK_TTL_MS = 120_000;
 const TURN_INTERNAL_DEADLINE_MS = 115_000;
 const INCIDENTAL_CURRENCY_CP_MAX = 50 * COPPER_PER_GOLD;
@@ -103,7 +107,7 @@ const activeCommitTurnKeys = new Set<string>();
 
 type PendingCheckToolBundle = {
   type: "pending_check";
-  command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall> & {
+  command: ValidatedResolvedMechanicsCommand & {
     pendingCheck: PendingCheck;
     checkResult?: undefined;
   };
@@ -246,7 +250,7 @@ function buildNarrationOverride(input: {
 
 function applyCommittedTimeWindow(input: {
   snapshot: CampaignSnapshot;
-  command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
+  command: ValidatedResolvedMechanicsCommand;
   overrideText: string | null;
   requestedAdvanceMinutes: number | null;
 }) {
@@ -263,7 +267,59 @@ function applyCommittedTimeWindow(input: {
       wasCapped: committedAdvanceMinutes < input.command.timeElapsed,
       overrideText: input.overrideText,
     },
-  } satisfies Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
+  } satisfies ValidatedResolvedMechanicsCommand;
+}
+
+function buildFastForwardNarrationBounds(input: {
+  snapshot: CampaignSnapshot;
+  requestedDurationMinutes: number;
+  committedDurationMinutes: number;
+  interruptionReason: string | null;
+}) {
+  return {
+    requestedAdvanceMinutes: input.requestedDurationMinutes,
+    committedAdvanceMinutes: input.committedDurationMinutes,
+    availableAdvanceMinutes: availableAdvanceMinutes(input.snapshot),
+    wasCapped: input.committedDurationMinutes < input.requestedDurationMinutes,
+    overrideText: null,
+    isFastForward: true,
+    interruptionReason: input.interruptionReason,
+  };
+}
+
+function countOwnedTemplateQuantity(snapshot: CampaignSnapshot, templateId: string) {
+  return snapshot.character.inventory.filter(
+    (item) =>
+      item.templateId === templateId
+      && !isArchivedInventoryProperties(item.properties as Prisma.JsonValue | null),
+  ).length;
+}
+
+function labelForTemplateId(snapshot: CampaignSnapshot, templateId: string) {
+  const item =
+    snapshot.character.inventory.find((entry) => entry.templateId === templateId)
+    ?? snapshot.assetItems.find((entry) => entry.templateId === templateId);
+  return item?.template.name ?? "supplies";
+}
+
+function simulationPayloadTouchesLocation(payload: Prisma.JsonValue, locationId: string): boolean {
+  const parsed = parseSimulationPayload(payload);
+  if (!parsed.success) {
+    return false;
+  }
+
+  switch (parsed.data.type) {
+    case "change_location_state":
+    case "change_faction_control":
+    case "transfer_location_control":
+      return parsed.data.locationId === locationId;
+    case "spawn_world_event":
+      return parsed.data.event.locationId === locationId;
+    case "change_npc_location":
+      return parsed.data.newLocationId === locationId;
+    default:
+      return false;
+  }
 }
 
 function promptContextProfileForRouter(decision: RouterDecision) {
@@ -1766,7 +1822,7 @@ function clampIncidentalCurrencyDelta(deltaCp: number) {
 
 function evaluateResolvedCommand(input: {
   snapshot: CampaignSnapshot;
-  command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
+  command: ValidatedResolvedMechanicsCommand;
   fetchedFacts: TurnFetchToolResult[];
   routerDecision: RouterDecision;
   groundedItemIds?: string[];
@@ -5907,6 +5963,7 @@ async function runTemporalSimulation(input: {
   nextState: CampaignRuntimeState;
   rollback: TurnRollbackData;
   initialAffectedFactionIds: string[];
+  mode?: "normal" | "fast_forward";
 }): Promise<{
   stateCommitLog: StateCommitLogEntry[];
   changeCodes: TurnCausalityCode[];
@@ -5916,6 +5973,7 @@ async function runTemporalSimulation(input: {
     stateCommitLog: [] as StateCommitLogEntry[],
     changeCodes: [] as TurnCausalityCode[],
   };
+  const simulationMode = input.mode ?? "normal";
   let windowStart = input.snapshot.state.globalTime;
   let firstWindow = true;
 
@@ -5942,6 +6000,11 @@ async function runTemporalSimulation(input: {
       initialAffectedFactionIds: firstWindow ? input.initialAffectedFactionIds : [],
       outcomes,
     });
+
+    if (simulationMode === "fast_forward") {
+      // Fast-forward consumes only already committed schedules and simulation
+      // payloads; it must not trigger JIT schedule generation for skipped days.
+    }
 
     firstWindow = false;
     windowStart = chunkEnd;
@@ -5981,11 +6044,15 @@ function normalizeMemorySummary(value: string | undefined) {
 }
 
 function isSalientMemory(input: {
-  command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
+  command: ValidatedTurnActionCommand;
   memoryKind: ReturnType<typeof determineMemoryKind>;
   stateCommitLog: StateCommitLog;
   scheduleChangeCodes: TurnCausalityCode[];
 }) {
+  if (input.command.type === "execute_fast_forward" && input.command.timeElapsed > 0) {
+    return true;
+  }
+
   if (input.memoryKind !== "world_change") {
     return true;
   }
@@ -6000,7 +6067,7 @@ function isSalientMemory(input: {
 }
 
 function determineMemoryKind(input: {
-  command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
+  command: ValidatedTurnActionCommand;
   stateCommitLog: StateCommitLog;
 }) {
   if (input.stateCommitLog.some((entry) => entry.status === "applied" && entry.mutationType === "set_npc_state")) {
@@ -6048,7 +6115,7 @@ function determineMemoryKind(input: {
 
 function buildSystemFallbackMemorySummary(input: {
   snapshot: CampaignSnapshot;
-  command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
+  command: ValidatedTurnActionCommand;
   memoryKind: ReturnType<typeof determineMemoryKind>;
   stateCommitLog: StateCommitLog;
 }) {
@@ -6073,6 +6140,11 @@ function buildSystemFallbackMemorySummary(input: {
     case "trade":
       return `Trade shifted the scene in ${locationName}.`;
     case "world_change":
+      if (input.command.type === "execute_fast_forward") {
+        return input.command.narrationBounds?.interruptionReason
+          ? `You settled into a routine in ${locationName}, but outside events broke it.`
+          : `You spent considerable time settled into a routine in ${locationName}.`;
+      }
       if (input.command.narrationBounds?.wasCapped) {
         return `Time advanced only to the edge of the committed world window in ${locationName}.`;
       }
@@ -6177,7 +6249,7 @@ function collectMemoryEntityLinks(input: {
 
 function buildTurnCausality(input: {
   snapshot: CampaignSnapshot;
-  command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
+  command: ValidatedTurnActionCommand;
   stateCommitLog: StateCommitLog;
   nextState: CampaignRuntimeState;
   simulationChangeCodes: TurnCausalityCode[];
@@ -6386,7 +6458,9 @@ function buildTurnCausality(input: {
         metadata: null,
       });
       reasonCodes.push({
-        code: input.command.timeMode === "rest" ? "PLAYER_REST" : "PLAYER_ACTION",
+        code: input.command.type === "resolve_mechanics" && input.command.timeMode === "rest"
+          ? "PLAYER_REST"
+          : "PLAYER_ACTION",
         entityType: "character",
         targetId: input.snapshot.character.id,
         metadata: null,
@@ -6429,9 +6503,9 @@ function buildTurnCausality(input: {
       code:
         onlyAdvancedTime
           ? "PLAYER_WAIT"
-          : input.command.timeMode === "rest"
+          : input.command.type === "resolve_mechanics" && input.command.timeMode === "rest"
           ? "PLAYER_REST"
-          : input.command.timeMode === "combat"
+          : input.command.type === "resolve_mechanics" && input.command.timeMode === "combat"
             ? "PLAYER_COMBAT"
             : "PLAYER_ACTION",
       entityType: "campaign",
@@ -6455,7 +6529,7 @@ async function commitResolvedTurn(input: {
   expectedStateVersion: number;
   playerAction: string;
   turnMode: TurnMode;
-  command: Exclude<ValidatedTurnCommand, RequestClarificationToolCall>;
+  command: ValidatedResolvedMechanicsCommand;
   fetchedFacts: TurnFetchToolResult[];
   routerDecision: RouterDecision;
   groundedItemIds: string[];
@@ -6729,6 +6803,465 @@ async function commitResolvedTurn(input: {
   };
 }
 
+async function commitFastForwardTurn(input: {
+  snapshot: CampaignSnapshot;
+  sessionId: string;
+  turnId: string;
+  requestId: string;
+  expectedStateVersion: number;
+  playerAction: string;
+  turnMode: TurnMode;
+  command: ValidatedExecuteFastForwardCommand;
+  fetchedFacts: TurnFetchToolResult[];
+}): Promise<{ resultPayload: TurnResultPayload; memoryEntryId: string | null }> {
+  const {
+    snapshot,
+    sessionId,
+    turnId,
+    requestId,
+    expectedStateVersion,
+    playerAction,
+    turnMode,
+    command,
+    fetchedFacts,
+  } = input;
+  const nextTurnCount = snapshot.sessionTurnCount + 1;
+  const rollback = emptyRollback(snapshot);
+  let resultPayload: TurnResultPayload | null = null;
+  let memoryEntryId: string | null = null;
+
+  await prisma.$transaction(async (tx) => {
+    const characterInstance = await tx.characterInstance.findUnique({
+      where: { campaignId: snapshot.campaignId },
+      include: {
+        inventory: {
+          orderBy: { createdAt: "asc" },
+        },
+      },
+    });
+    if (!characterInstance) {
+      throw new Error("Character instance not found.");
+    }
+
+    const startTime = snapshot.state.globalTime;
+    const requestedMinutes = command.requestedDurationMinutes;
+    const worldWindowMinutes = availableAdvanceMinutes(snapshot);
+    const hardCapMinutes = 7 * 1440;
+    const initialMaxMinutes = Math.min(requestedMinutes, worldWindowMinutes, hardCapMinutes);
+
+    let provisionalMinutes = initialMaxMinutes;
+    let interruptionReason: string | null = null;
+    let limitingResourceLabel: string | null = null;
+    let maxAffordableRatio = 1;
+
+    if (command.resourceCosts?.currencyCp && command.resourceCosts.currencyCp > 0) {
+      const ratio = characterInstance.currencyCp / command.resourceCosts.currencyCp;
+      if (ratio < maxAffordableRatio) {
+        maxAffordableRatio = ratio;
+        limitingResourceLabel = "funds";
+      }
+    }
+
+    for (const entry of command.resourceCosts?.itemRemovals ?? []) {
+      const available = characterInstance.inventory.filter(
+        (item) =>
+          item.templateId === entry.templateId
+          && !isArchivedInventoryProperties(item.properties as Prisma.JsonValue | null),
+      ).length;
+      const ratio = available / entry.quantity;
+      if (ratio < maxAffordableRatio) {
+        maxAffordableRatio = ratio;
+        limitingResourceLabel = labelForTemplateId(snapshot, entry.templateId);
+      }
+    }
+
+    if (maxAffordableRatio < 1) {
+      const rawAffordableMinutes = requestedMinutes * maxAffordableRatio;
+      const resourceBoundMinutes = Math.floor(rawAffordableMinutes / 720) * 720;
+      if (resourceBoundMinutes <= 0) {
+        interruptionReason = `You do not have enough ${limitingResourceLabel ?? "supplies"} to begin this routine.`;
+        provisionalMinutes = 0;
+      } else {
+        provisionalMinutes = Math.min(provisionalMinutes, resourceBoundMinutes);
+        interruptionReason = `You maintained your routine for as long as possible, but ran out of ${limitingResourceLabel ?? "supplies"}.`;
+      }
+    }
+
+    const provisionalEndTime = startTime + provisionalMinutes;
+    let interruptAtTime: number | null = null;
+
+    if (provisionalMinutes > 0) {
+      const localWorldEvent = await tx.worldEvent.findFirst({
+        where: {
+          campaignId: snapshot.campaignId,
+          locationId: snapshot.currentLocation.id,
+          isProcessed: false,
+          isCancelled: false,
+          triggerTime: {
+            gt: startTime,
+            lte: provisionalEndTime,
+          },
+        },
+        orderBy: [{ triggerTime: "asc" }, { createdAt: "asc" }],
+        select: {
+          id: true,
+          triggerTime: true,
+          description: true,
+        },
+      });
+
+      const factionMoveCandidates = await tx.factionMove.findMany({
+        where: {
+          campaignId: snapshot.campaignId,
+          isExecuted: false,
+          isCancelled: false,
+          scheduledAtTime: {
+            gt: startTime,
+            lte: provisionalEndTime,
+          },
+        },
+        orderBy: [{ scheduledAtTime: "asc" }, { createdAt: "asc" }],
+        select: {
+          id: true,
+          scheduledAtTime: true,
+          description: true,
+          payload: true,
+        },
+      });
+
+      const localFactionMove = factionMoveCandidates.find((move) =>
+        simulationPayloadTouchesLocation(move.payload as Prisma.JsonValue, snapshot.currentLocation.id),
+      ) ?? null;
+
+      if (
+        localWorldEvent
+        && (!localFactionMove || localWorldEvent.triggerTime <= localFactionMove.scheduledAtTime)
+      ) {
+        interruptAtTime = localWorldEvent.triggerTime;
+        interruptionReason = localWorldEvent.description;
+      } else if (localFactionMove) {
+        interruptAtTime = localFactionMove.scheduledAtTime;
+        interruptionReason = localFactionMove.description;
+      }
+    }
+
+    const committedEndTime = interruptAtTime ?? provisionalEndTime;
+    const committedMinutes = Math.max(0, committedEndTime - startTime);
+    const nextState: CampaignRuntimeState = {
+      ...snapshot.state,
+      globalTime: committedEndTime,
+      pendingTurnId: null,
+      lastActionSummary: command.memorySummary ?? command.routineSummary,
+    };
+
+    const simulationOutcome = await runTemporalSimulation({
+      tx,
+      snapshot,
+      nextState,
+      rollback,
+      initialAffectedFactionIds: [],
+      mode: "fast_forward",
+    });
+
+    const actualCurrencyCost =
+      command.resourceCosts?.currencyCp && committedMinutes > 0
+        ? Math.ceil(command.resourceCosts.currencyCp * committedMinutes / requestedMinutes)
+        : 0;
+    if (actualCurrencyCost > characterInstance.currencyCp) {
+      throw new Error("Fast-forward currency upkeep exceeded affordable committed duration.");
+    }
+
+    const actualItemRemovals = (command.resourceCosts?.itemRemovals ?? []).map((entry) => ({
+      templateId: entry.templateId,
+      quantity:
+        committedMinutes > 0
+          ? Math.ceil(entry.quantity * committedMinutes / requestedMinutes)
+          : 0,
+    })).filter((entry) => entry.quantity > 0);
+
+    for (const removal of actualItemRemovals) {
+      const availableItems = characterInstance.inventory.filter(
+        (item) =>
+          item.templateId === removal.templateId
+          && !isArchivedInventoryProperties(item.properties as Prisma.JsonValue | null),
+      );
+      if (availableItems.length < removal.quantity) {
+        throw new Error("Fast-forward item upkeep exceeded affordable committed duration.");
+      }
+    }
+
+    const stateCommitLog: StateCommitLog = [{
+      kind: "mutation",
+      mutationType: "advance_time",
+      status: "applied",
+      reasonCode: "fast_forward_executed",
+      summary: command.routineSummary,
+      metadata: {
+        isFastForward: true,
+        requestedDurationMinutes: requestedMinutes,
+        committedDurationMinutes: committedMinutes,
+        interruptionReason,
+      },
+    }];
+
+    if (actualCurrencyCost > 0) {
+      recordInverse(rollback, "characterInstance", characterInstance.id, "currencyCp", characterInstance.currencyCp);
+      await tx.characterInstance.update({
+        where: { id: characterInstance.id },
+        data: {
+          currencyCp: {
+            decrement: actualCurrencyCost,
+          },
+        },
+      });
+      characterInstance.currencyCp -= actualCurrencyCost;
+      stateCommitLog.push({
+        kind: "mutation",
+        mutationType: "adjust_currency",
+        status: "applied",
+        reasonCode: "montage_upkeep_currency",
+        summary: `You spend ${formatCurrencyCompact(actualCurrencyCost)} on routine upkeep.`,
+        metadata: {
+          deltaCp: -actualCurrencyCost,
+        },
+      });
+    }
+
+    for (const removal of actualItemRemovals) {
+      const availableItems = characterInstance.inventory.filter(
+        (item) =>
+          item.templateId === removal.templateId
+          && !isArchivedInventoryProperties(item.properties as Prisma.JsonValue | null),
+      );
+      for (const item of availableItems.slice(0, removal.quantity)) {
+        recordInverse(rollback, "itemInstance", item.id, "properties", item.properties);
+        await tx.itemInstance.update({
+          where: { id: item.id },
+          data: {
+            properties: withRemovedInventoryMarker(item.properties),
+          },
+        });
+        item.properties = withRemovedInventoryMarker(item.properties) as Prisma.JsonValue;
+      }
+      stateCommitLog.push({
+        kind: "mutation",
+        mutationType: "adjust_inventory",
+        status: "applied",
+        reasonCode: "montage_upkeep_item",
+        summary: `${labelForTemplateId(snapshot, removal.templateId)} x${removal.quantity} are consumed by the routine.`,
+        metadata: {
+          itemId: removal.templateId,
+          quantity: removal.quantity,
+          action: "remove",
+        },
+      });
+    }
+
+    stateCommitLog.push(...simulationOutcome.stateCommitLog);
+
+    const scheduleChangeCodes = await enqueueFutureScheduleBuffer({
+      tx,
+      snapshot,
+      nextState,
+      turnId,
+      rollback,
+    });
+
+    const committedCommand: ValidatedExecuteFastForwardCommand = {
+      ...command,
+      timeElapsed: committedMinutes,
+      narrationBounds: buildFastForwardNarrationBounds({
+        snapshot,
+        requestedDurationMinutes: requestedMinutes,
+        committedDurationMinutes: committedMinutes,
+        interruptionReason,
+      }),
+      warnings: command.warnings,
+      pendingCheck: undefined,
+      checkResult: undefined,
+      narrationHint: null,
+    };
+
+    const finalCausality = buildTurnCausality({
+      snapshot,
+      command: committedCommand,
+      stateCommitLog,
+      nextState,
+      simulationChangeCodes: simulationOutcome.changeCodes,
+      simulationReasonCodes: simulationOutcome.reasonCodes,
+      scheduleChangeCodes,
+    });
+
+    const campaignUpdate = await tx.campaign.updateMany({
+      where: {
+        id: snapshot.campaignId,
+        stateVersion: expectedStateVersion,
+        turnLockRequestId: requestId,
+      },
+      data: {
+        stateVersion: {
+          increment: 1,
+        },
+        stateJson: toCampaignRuntimeStateJson(nextState),
+        turnLockRequestId: null,
+        turnLockSessionId: null,
+        turnLockExpiresAt: null,
+      },
+    });
+
+    if (campaignUpdate.count === 0) {
+      throw new StateConflictError("Campaign state changed before the turn could commit.", expectedStateVersion);
+    }
+
+    for (const fact of fetchedFacts) {
+      if (fact.type !== "fetch_npc_detail" || !fact.hydrationDraft) {
+        continue;
+      }
+
+      await persistPromotedNpcHydrationDraft({
+        tx,
+        snapshot,
+        npcId: fact.result.id,
+        hydrationDraft: fact.hydrationDraft,
+        nextTurnCount,
+        rollback,
+        preserveCurrentSummary: false,
+      });
+    }
+
+    await tx.session.update({
+      where: { id: sessionId },
+      data: {
+        turnCount: {
+          increment: 1,
+        },
+      },
+    });
+
+    await createMessage({
+      tx,
+      sessionId,
+      role: "user",
+      kind: "action",
+      content: playerAction,
+      payload:
+        turnMode === "observe"
+          ? ({ turnMode: "observe" } as Prisma.JsonObject)
+          : undefined,
+      rollback,
+    });
+
+    for (const warning of committedCommand.warnings) {
+      await createMessage({
+        tx,
+        sessionId,
+        role: "system",
+        kind: "warning",
+        content: warning,
+        rollback,
+      });
+    }
+
+    const memoryKind = determineMemoryKind({
+      command: committedCommand,
+      stateCommitLog,
+    });
+    const modelMemorySummary = normalizeMemorySummary(committedCommand.memorySummary);
+    const shouldRecordMemory = modelMemorySummary != null || isSalientMemory({
+      command: committedCommand,
+      memoryKind,
+      stateCommitLog,
+      scheduleChangeCodes,
+    });
+
+    if (shouldRecordMemory) {
+      const memorySummary = modelMemorySummary ?? buildSystemFallbackMemorySummary({
+        snapshot,
+        command: committedCommand,
+        memoryKind,
+        stateCommitLog,
+      });
+      const memoryEntityLinks = collectMemoryEntityLinks({
+        snapshot,
+        stateCommitLog,
+        changeCodes: finalCausality.changeCodes,
+        reasonCodes: finalCausality.reasonCodes,
+        affectedFactionIds: [],
+      });
+
+      if (!memorySummary) {
+        throw new Error("A salient memory was selected without a usable summary.");
+      }
+
+      const memory = await tx.memoryEntry.create({
+        data: {
+          campaignId: snapshot.campaignId,
+          sessionId,
+          turnId,
+          type: "turn_memory",
+          memoryKind,
+          isLongArcCandidate:
+            memoryKind === "conflict"
+            || memoryKind === "promise"
+            || memoryKind === "relationship_shift",
+          summary: memorySummary,
+          summarySource: modelMemorySummary ? "model" : "system_fallback",
+          narrativeNote: null,
+        },
+      });
+      rollback.createdMemoryIds.push(memory.id);
+      memoryEntryId = memory.id;
+
+      for (const [index, entityLink] of memoryEntityLinks.entries()) {
+        const link = await tx.memoryEntityLink.create({
+          data: {
+            memoryId: memory.id,
+            campaignId: snapshot.campaignId,
+            entityType: entityLink.entityType,
+            entityId: entityLink.entityId,
+            isPrimary: index === 0,
+          },
+        });
+        rollback.createdMemoryLinkIds.push(link.id);
+      }
+    }
+
+    resultPayload = {
+      stateVersionAfter: expectedStateVersion + 1,
+      changeCodes: finalCausality.changeCodes,
+      reasonCodes: finalCausality.reasonCodes,
+      whatChanged: renderWhatChanged(finalCausality.changeCodes),
+      why: renderWhy(finalCausality.reasonCodes),
+      warnings: committedCommand.warnings,
+      stateCommitLog,
+      narrationBounds: committedCommand.narrationBounds ?? null,
+      checkResult: null,
+      rollback,
+      clarification: null,
+      error: null,
+    };
+
+    await tx.turn.update({
+      where: { id: turnId },
+      data: {
+        status: "resolved",
+        stateVersionAfter: expectedStateVersion + 1,
+        toolCallJson: toPrismaJsonValue(committedCommand),
+        resultJson: toPrismaJsonValue(toTurnResultPayloadJson(resultPayload)),
+      },
+    });
+  });
+
+  if (!resultPayload) {
+    throw new Error("Fast-forward turn commit completed without a result payload.");
+  }
+
+  return {
+    resultPayload,
+    memoryEntryId,
+  };
+}
+
 async function executeRequiredPrerequisites(input: {
   snapshot: CampaignSnapshot;
   prerequisites: RouterDecision["requiredPrerequisites"];
@@ -6918,6 +7451,10 @@ async function executeRequiredPrerequisites(input: {
 function deterministicNarrationFallback(input: {
   playerAction: string;
   stateCommitLog: StateCommitLog;
+  narrationBounds?: {
+    isFastForward?: boolean;
+    interruptionReason?: string | null;
+  } | null;
   checkResult?: CheckResult | null;
   narrationHint?: {
     unresolvedTargetPhrases?: string[];
@@ -6974,7 +7511,20 @@ function deterministicNarrationFallback(input: {
   const hasRejectedEntries = input.stateCommitLog.some((entry) => entry.status === "rejected");
 
   const sentences: string[] = [];
-  if ((input.narrationHint?.unresolvedTargetPhrases?.length ?? 0) > 0) {
+  if (input.narrationBounds?.isFastForward) {
+    const routineSummary =
+      input.stateCommitLog.find(
+        (entry) =>
+          entry.status === "applied"
+          && entry.mutationType === "advance_time"
+          && entry.reasonCode === "fast_forward_executed",
+      )?.summary
+      ?? "You settle into a routine for a while.";
+    sentences.push(routineSummary);
+    if (input.narrationBounds.interruptionReason) {
+      sentences.push(input.narrationBounds.interruptionReason);
+    }
+  } else if ((input.narrationHint?.unresolvedTargetPhrases?.length ?? 0) > 0) {
     const phrase = input.narrationHint?.unresolvedTargetPhrases?.[0] ?? "them";
     sentences.push(`You reach for ${phrase}, but the target is already gone from immediate reach.`);
   } else if (applied.length) {
@@ -7760,12 +8310,15 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       };
     }
 
-    const committedCommand = applyCommittedTimeWindow({
-      snapshot,
-      command: validated,
-      overrideText: narrationOverride.overrideText,
-      requestedAdvanceMinutes: narrationOverride.requestedAdvanceMinutes,
-    });
+    const committedCommand =
+      validated.type === "execute_fast_forward"
+        ? validated
+        : applyCommittedTimeWindow({
+            snapshot,
+            command: validated,
+            overrideText: narrationOverride.overrideText,
+            requestedAdvanceMinutes: narrationOverride.requestedAdvanceMinutes,
+          });
 
     for (const warning of committedCommand.warnings) {
       input.stream?.warning?.(warning);
@@ -7785,21 +8338,34 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       commandType: committedCommand.type,
       expectedStateVersion: input.expectedStateVersion,
     });
-    const committed = await commitResolvedTurn({
-      snapshot,
-      sessionId: input.sessionId,
-      turnId: turn.id,
-      requestId: input.requestId,
-      expectedStateVersion: input.expectedStateVersion,
-      playerAction,
-      turnMode,
-      command: committedCommand,
-      fetchedFacts: resolution.fetchedFacts,
-      routerDecision,
-      groundedItemIds: promptContext.inventory
-        .filter((entry) => entry.kind === "item")
-        .map((entry) => entry.id),
-    });
+    const committed =
+      committedCommand.type === "execute_fast_forward"
+        ? await commitFastForwardTurn({
+            snapshot,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            requestId: input.requestId,
+            expectedStateVersion: input.expectedStateVersion,
+            playerAction,
+            turnMode,
+            command: committedCommand,
+            fetchedFacts: resolution.fetchedFacts,
+          })
+        : await commitResolvedTurn({
+            snapshot,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            requestId: input.requestId,
+            expectedStateVersion: input.expectedStateVersion,
+            playerAction,
+            turnMode,
+            command: committedCommand,
+            fetchedFacts: resolution.fetchedFacts,
+            routerDecision,
+            groundedItemIds: promptContext.inventory
+              .filter((entry) => entry.kind === "item")
+              .map((entry) => entry.id),
+          });
     commitStarted = false;
     activeCommitTurnKeys.delete(turnKey);
     logBackendDiagnostic("turn.commit.success", {
@@ -7828,6 +8394,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
         promptContext,
         fetchedFacts: resolution.fetchedFacts,
         stateCommitLog: committed.resultPayload.stateCommitLog ?? [],
+        narrationBounds: committed.resultPayload.narrationBounds ?? null,
         checkResult: committed.resultPayload.checkResult ?? null,
         suggestedActions: dedupeStrings(committedCommand.suggestedActions),
         narrationHint: committedCommand.narrationHint ?? null,
@@ -7837,6 +8404,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       narration = deterministicNarrationFallback({
         playerAction,
         stateCommitLog: committed.resultPayload.stateCommitLog ?? [],
+        narrationBounds: committed.resultPayload.narrationBounds ?? null,
         checkResult: committed.resultPayload.checkResult ?? null,
         narrationHint: committedCommand.narrationHint ?? null,
       });
@@ -8294,6 +8862,7 @@ export async function resolvePendingCheck(input: ResolvePendingCheckRequest & {
         promptContext,
         fetchedFacts: bundle.fetchedFacts,
         stateCommitLog: committed.resultPayload.stateCommitLog ?? [],
+        narrationBounds: committed.resultPayload.narrationBounds ?? null,
         checkResult: committed.resultPayload.checkResult ?? null,
         suggestedActions: dedupeStrings(committedCommand.suggestedActions),
       });
@@ -8301,6 +8870,7 @@ export async function resolvePendingCheck(input: ResolvePendingCheckRequest & {
       narration = deterministicNarrationFallback({
         playerAction: bundle.playerAction,
         stateCommitLog: committed.resultPayload.stateCommitLog ?? [],
+        narrationBounds: committed.resultPayload.narrationBounds ?? null,
         checkResult: committed.resultPayload.checkResult ?? null,
         narrationHint: bundle.command.narrationHint ?? null,
       });

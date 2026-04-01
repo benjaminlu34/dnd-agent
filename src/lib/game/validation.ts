@@ -3,6 +3,7 @@ import { canonicalizeNpcIdAgainstCandidates } from "@/lib/game/npc-identity";
 import type {
   CampaignSnapshot,
   ChallengeApproach,
+  ExecuteFastForwardCommand,
   MechanicsMutation,
   PendingCheck,
   ResolveMechanicsResponse,
@@ -69,6 +70,8 @@ function requestedDurationMinutes(command: ResolveMechanicsResponse) {
 
   return null;
 }
+
+const FAST_FORWARD_MAX_MINUTES = 7 * 1440;
 
 function deriveTimeElapsed(command: ResolveMechanicsResponse, snapshot: CampaignSnapshot) {
   const explicitDuration = requestedDurationMinutes(command);
@@ -526,6 +529,66 @@ export function validateTurnCommand(input: {
       ...command,
       options: command.options.map((entry) => entry.trim()).filter(Boolean).slice(0, 4),
       question: command.question.trim(),
+    };
+  }
+
+  if (command.type === "execute_fast_forward") {
+    const warnings = Array.from(new Set(
+      (command.warnings ?? [])
+        .map((warning) => warning.trim())
+        .filter(Boolean),
+    ));
+    const requestedDurationMinutes = Number.isFinite(command.requestedDurationMinutes)
+      ? Math.trunc(command.requestedDurationMinutes)
+      : 0;
+
+    if (requestedDurationMinutes <= 0) {
+      return {
+        type: "request_clarification",
+        question: "I couldn't determine how long you wanted to maintain that routine. How much time would you like to pass?",
+        options: ["A few hours", "A couple days", "A week"],
+      };
+    }
+
+    if (
+      snapshot.state.characterState.conditions.includes("in_combat")
+      || snapshot.state.characterState.conditions.includes("being_pursued")
+    ) {
+      return {
+        type: "request_clarification",
+        question: "You cannot fast-forward time during active combat or pursuit. What would you like to do right now?",
+        options: ["Attack", "Defend", "Flee", "Take cover"],
+      };
+    }
+
+    const cappedDurationMinutes = Math.min(requestedDurationMinutes, FAST_FORWARD_MAX_MINUTES);
+    if (cappedDurationMinutes !== requestedDurationMinutes) {
+      warnings.push("Duration capped at 7 days maximum.");
+    }
+
+    const normalizedItemRemovals = command.resourceCosts?.itemRemovals?.map((entry) => ({
+      templateId: canonicalizeInventoryItemIdForTurn(snapshot, entry.templateId),
+      quantity: entry.quantity,
+    }));
+
+    return {
+      ...command,
+      requestedDurationMinutes: cappedDurationMinutes,
+      recurringActivities: command.recurringActivities.slice(0, 6),
+      intendedOutcomes: command.intendedOutcomes.slice(0, 6),
+      resourceCosts:
+        command.resourceCosts
+          ? {
+              ...command.resourceCosts,
+              itemRemovals: normalizedItemRemovals,
+            } satisfies ExecuteFastForwardCommand["resourceCosts"]
+          : undefined,
+      warnings: Array.from(new Set(warnings)),
+      narrationHint: null,
+      narrationBounds: null,
+      timeElapsed: cappedDurationMinutes,
+      pendingCheck: undefined,
+      checkResult: undefined,
     };
   }
 

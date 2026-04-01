@@ -902,6 +902,8 @@ export type TurnNarrationBounds = {
   availableAdvanceMinutes: number;
   wasCapped: boolean;
   overrideText: string | null;
+  isFastForward?: boolean;
+  interruptionReason?: string | null;
 };
 
 export type MemoryRecord = {
@@ -1661,6 +1663,23 @@ export type ResolveMechanicsResponse = {
   mutations: MechanicsMutation[];
 };
 
+export type ExecuteFastForwardCommand = {
+  type: "execute_fast_forward";
+  requestedDurationMinutes: number;
+  routineSummary: string;
+  recurringActivities: string[];
+  intendedOutcomes: string[];
+  resourceCosts?: {
+    currencyCp?: number;
+    itemRemovals?: Array<{
+      templateId: string;
+      quantity: number;
+    }>;
+  };
+  warnings?: string[];
+  memorySummary?: string;
+};
+
 export type StateCommitLogStatus = "applied" | "rejected" | "noop";
 
 export type StateCommitLogEntry = {
@@ -1674,12 +1693,16 @@ export type StateCommitLogEntry = {
 
 export type StateCommitLog = StateCommitLogEntry[];
 
-export type TurnActionToolCall = RequestClarificationToolCall | ResolveMechanicsResponse;
+export type TurnActionToolCall =
+  | RequestClarificationToolCall
+  | ResolveMechanicsResponse
+  | ExecuteFastForwardCommand;
 
 export type TurnModelToolCall =
   | TurnFetchToolCall
   | RequestClarificationToolCall
-  | ResolveMechanicsResponse;
+  | ResolveMechanicsResponse
+  | ExecuteFastForwardCommand;
 
 export type TurnResolution = {
   command: TurnActionToolCall;
@@ -1697,6 +1720,14 @@ export type ValidatedTurnCommand =
       } | null;
       pendingCheck?: PendingCheck;
       checkResult?: CheckResult;
+    })
+  | (ExecuteFastForwardCommand & {
+      warnings: string[];
+      timeElapsed: number;
+      narrationBounds?: TurnNarrationBounds | null;
+      narrationHint?: null;
+      pendingCheck?: undefined;
+      checkResult?: undefined;
     });
 
 export type NpcRoutineCondition =
