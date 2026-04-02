@@ -1526,6 +1526,7 @@ export type MechanicsMutation =
       itemName: string;
       description: string;
       quantity: number;
+      holder: AssetHolderRef;
       reason: string;
       phase?: MutationPhase;
     }

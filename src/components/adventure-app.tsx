@@ -134,6 +134,27 @@ function isEquipmentItem(item: InventoryItem) {
   return isEquippedItem(item) || EQUIPMENT_KEYWORDS.some((keyword) => haystack.includes(keyword));
 }
 
+function describeWorldTime(globalTime: number) {
+  const minuteOfDay = ((globalTime % 1440) + 1440) % 1440;
+  const day = Math.floor(globalTime / 1440) + 1;
+  const hours24 = Math.floor(minuteOfDay / 60);
+  const minutes = minuteOfDay % 60;
+  const meridiem = hours24 >= 12 ? "PM" : "AM";
+  const hours12 = hours24 % 12 || 12;
+
+  let timeOfDay = "Night";
+  if (minuteOfDay >= 300 && minuteOfDay < 420) timeOfDay = "Pre-Dawn";
+  else if (minuteOfDay >= 420 && minuteOfDay < 720) timeOfDay = "Morning";
+  else if (minuteOfDay >= 720 && minuteOfDay < 1020) timeOfDay = "Afternoon";
+  else if (minuteOfDay >= 1020 && minuteOfDay < 1200) timeOfDay = "Evening";
+
+  return {
+    dayLabel: `Day ${day}`,
+    clockLabel: `${hours12}:${String(minutes).padStart(2, "0")} ${meridiem}`,
+    timeOfDay,
+  };
+}
+
 export function AdventureApp({
   initialCampaignId = null,
 }: {
@@ -166,6 +187,7 @@ export function AdventureApp({
   const [streamedNarration, setStreamedNarration] = useState("");
   const [suggestedActions, setSuggestedActions] = useState<string[]>([]);
   const [missedTurnDigests, setMissedTurnDigests] = useState<TurnDigest[]>([]);
+  const worldTime = snapshot ? describeWorldTime(snapshot.state.globalTime) : null;
 
   useEffect(() => {
     let active = true;
@@ -835,16 +857,29 @@ export function AdventureApp({
                 </div>
 
                 <header className="border-b border-zinc-800 pb-8">
-                  <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Current Chapter</p>
-                  <h1 className="mt-3 font-serif text-4xl font-semibold tracking-tight text-zinc-100 md:text-5xl">
-                    {snapshot.currentLocation.name}
-                  </h1>
-                  <p className="mt-3 font-serif text-lg text-zinc-300">{snapshot.title}</p>
-                  <p className="mt-4 text-sm leading-relaxed text-zinc-300">{snapshot.currentLocation.summary}</p>
-                  <p className="mt-4 text-sm leading-relaxed text-zinc-400">{snapshot.premise}</p>
-                  <p className="mt-5 text-xs uppercase tracking-[0.18em] text-zinc-500">
-                    {snapshot.currentLocation.type} · {snapshot.currentLocation.state} · {snapshot.tone}
-                  </p>
+                  <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
+                    <div className="min-w-0">
+                      <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Current Chapter</p>
+                      <h1 className="mt-3 font-serif text-4xl font-semibold tracking-tight text-zinc-100 md:text-5xl">
+                        {snapshot.currentLocation.name}
+                      </h1>
+                      <p className="mt-3 font-serif text-lg text-zinc-300">{snapshot.title}</p>
+                      <p className="mt-4 text-sm leading-relaxed text-zinc-300">{snapshot.currentLocation.summary}</p>
+                      <p className="mt-4 text-sm leading-relaxed text-zinc-400">{snapshot.premise}</p>
+                      <p className="mt-5 text-xs uppercase tracking-[0.18em] text-zinc-500">
+                        {snapshot.currentLocation.type} · {snapshot.currentLocation.state} · {snapshot.tone}
+                      </p>
+                    </div>
+
+                    {worldTime ? (
+                      <div className="w-full max-w-xs rounded-2xl border border-zinc-800 bg-zinc-950/70 px-5 py-4 lg:mt-2 lg:w-auto lg:min-w-52">
+                        <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Current Time</p>
+                        <p className="mt-3 font-serif text-2xl font-semibold text-zinc-100">{worldTime.clockLabel}</p>
+                        <p className="mt-1 text-sm text-zinc-300">{worldTime.timeOfDay}</p>
+                        <p className="mt-2 text-xs uppercase tracking-[0.18em] text-zinc-500">{worldTime.dayLabel}</p>
+                      </div>
+                    ) : null}
+                  </div>
                 </header>
 
                 <div className="mt-8 space-y-6">

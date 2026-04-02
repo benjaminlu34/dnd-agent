@@ -1573,6 +1573,46 @@ function canUseSceneHolder(holder: AssetHolderRef, currentLocationId: string) {
   return holder.kind !== "scene" || holder.locationId === currentLocationId;
 }
 
+const INTERACTION_SUMMARY_PLAYER_RELOCATION_PATTERNS = [
+  /\byou\s+(?:step|steps|stepped|walk|walks|walked|move|moves|moved|cross|crosses|crossed|head|heads|headed|go|goes|went|enter|enters|entered|exit|exits|exited|leave|leaves|left|return|returns|returned)\b/i,
+  /\byou\s+(?:come|comes|came)\s+back\b/i,
+];
+
+const INTERACTION_SUMMARY_ACTOR_MOVEMENT_PATTERNS = [
+  /\barrives?\b/i,
+  /\bcomes?\s+back\b/i,
+  /\breturns?\s+(?:to|from|with|into|toward|towards|by)\b/i,
+  /\bleaves?\b/i,
+  /\bdeparts?\b/i,
+  /\benters?\b/i,
+  /\bexits?\b/i,
+  /\bemerges?\b/i,
+  /\bapproaches?\b/i,
+  /\bwalks?\s+(?:in|off|over|away|back)\b/i,
+  /\bsteps?\s+(?:away|closer|forward|back|over)\b/i,
+  /\bcomes?\s+over\b/i,
+  /\bmoves?\s+(?:closer|away|back|into|toward|towards)\b/i,
+];
+
+const INTERACTION_SUMMARY_ACTOR_STAGING_PATTERNS = [
+  /\bstands?\s+(?:quietly\s+|silently\s+|waiting\s+|still\s+)?(?:by|beside|near|at)\b/i,
+  /\bwaits?\s+by\b/i,
+  /\bhovers?\s+near\b/i,
+  /\blingers?\s+by\b/i,
+  /\btakes?\s+position\b/i,
+  /\bsettles?\s+by\b/i,
+];
+
+const SOFT_SOCIAL_OUTCOMES = new Set([
+  "acknowledges",
+  "hesitates",
+  "withholds",
+  "asks_question",
+  "redirects",
+  "resists",
+  "withdraws",
+]);
+
 function objectParentId(object: WorldObjectSummary) {
   return object.parentWorldObjectId ?? null;
 }
@@ -1610,6 +1650,102 @@ function normalizeActorRef(actorRef: string) {
     return actorRef;
   }
   return actorRef.trim() || actorRef;
+}
+
+function interactionSummaryMatchesAnyPattern(summary: string, patterns: readonly RegExp[]) {
+  return patterns.some((pattern) => pattern.test(summary));
+}
+
+function normalizeActorRefForMovementSupport(input: {
+  actorRef: string;
+  spawnedTemporaryActorIds: Map<string, string>;
+}) {
+  const resolvedActorId = resolveSpawnedTemporaryActorId({
+    actorRef: input.actorRef,
+    spawnedTemporaryActorIds: input.spawnedTemporaryActorIds,
+  });
+
+  if (resolvedActorId && !input.actorRef.startsWith("npc:")) {
+    return tempActorRef(resolvedActorId);
+  }
+
+  return normalizeActorRef(input.actorRef);
+}
+
+function commandSupportsActorPresence(input: {
+  mutations: MechanicsMutation[];
+  actorRef: string;
+  spawnedTemporaryActorIds: Map<string, string>;
+}) {
+  return input.mutations.some((candidate) =>
+    candidate.type === "set_scene_actor_presence"
+    && normalizeActorRefForMovementSupport({
+      actorRef: candidate.actorRef,
+      spawnedTemporaryActorIds: input.spawnedTemporaryActorIds,
+    }) === input.actorRef);
+}
+
+function commandSupportsPlayerRelocation(mutations: MechanicsMutation[]) {
+  return mutations.some((candidate) =>
+    candidate.type === "set_player_scene_focus" || candidate.type === "move_player");
+}
+
+function resolveSpawnItemHolderForEvaluation(input: {
+  holder: AssetHolderRef;
+  spawnedWorldObjectIds: Map<string, string>;
+  projectedWorldObjects: Map<string, WorldObjectSummary>;
+  projectedTemporaryActors: Map<string, TemporaryActorSummary>;
+  projectedNpcLocationIds: Map<string, string>;
+  presentNpcs: CampaignSnapshot["presentNpcs"];
+  projectedLocationId: string;
+}) {
+  const holder =
+    input.holder.kind === "world_object"
+      ? (() => {
+          const objectId = resolveWorldObjectId({
+            objectId: input.holder.objectId,
+            spawnedWorldObjectIds: input.spawnedWorldObjectIds,
+          });
+          return objectId ? ({ kind: "world_object", objectId } as const) : null;
+        })()
+      : normalizeHolderRef(input.holder);
+
+  const holderIsValid =
+    holder != null
+    && canUseSceneHolder(holder, input.projectedLocationId)
+    && (
+      holder.kind === "player"
+      || holder.kind === "scene"
+      || (holder.kind === "world_object" && input.projectedWorldObjects.has(holder.objectId))
+      || (
+        holder.kind === "temporary_actor"
+        && input.projectedTemporaryActors.get(holder.actorId)?.currentLocationId === input.projectedLocationId
+      )
+      || (
+        holder.kind === "npc"
+        && (
+          input.presentNpcs.some((npc) => npc.id === holder.npcId)
+          || input.projectedNpcLocationIds.get(holder.npcId) === input.projectedLocationId
+        )
+      )
+    );
+
+  return holderIsValid ? holder : null;
+}
+
+function resolveSpawnItemHolderForCommit(input: {
+  holder: AssetHolderRef;
+  spawnedWorldObjectIds: Map<string, string>;
+}) {
+  return input.holder.kind === "world_object"
+    ? (() => {
+        const objectId = resolveCommittedWorldObjectId({
+          objectId: input.holder.objectId,
+          spawnedWorldObjectIds: input.spawnedWorldObjectIds,
+        });
+        return objectId ? ({ kind: "world_object", objectId } as const) : null;
+      })()
+    : normalizeHolderRef(input.holder);
 }
 
 function knownInformationIds(snapshot: CampaignSnapshot, fetchedFacts: TurnFetchToolResult[]) {
@@ -2521,9 +2657,62 @@ function evaluateResolvedCommand(input: {
         });
         continue;
       }
+      const interactionSummary = mutation.interactionSummary.trim();
+      const targetActorRef = tempActorRef(actor.id);
+      const impliesPlayerRelocation = interactionSummaryMatchesAnyPattern(
+        interactionSummary,
+        INTERACTION_SUMMARY_PLAYER_RELOCATION_PATTERNS,
+      );
+      const impliesActorMovement = interactionSummaryMatchesAnyPattern(
+        interactionSummary,
+        INTERACTION_SUMMARY_ACTOR_MOVEMENT_PATTERNS,
+      );
+      const impliesActorStaging = interactionSummaryMatchesAnyPattern(
+        interactionSummary,
+        INTERACTION_SUMMARY_ACTOR_STAGING_PATTERNS,
+      );
+      const supportsPlayerRelocation = commandSupportsPlayerRelocation(input.command.mutations);
+      const supportsActorPresence = commandSupportsActorPresence({
+        mutations: input.command.mutations,
+        actorRef: targetActorRef,
+        spawnedTemporaryActorIds,
+      });
+      if (impliesPlayerRelocation && !supportsPlayerRelocation) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_semantics",
+          summary: "That interaction summary implies player movement. Use set_player_scene_focus or move_player to progress the physical scene.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (impliesActorMovement && !supportsActorPresence) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_semantics",
+          summary: "That interaction summary implies physical movement or arrival. Use set_scene_actor_presence to progress the physical scene.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (impliesActorStaging) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_semantics",
+          summary: "That interaction summary implies new physical staging or blocking. Manifest physical progression with explicit scene mutations instead.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
       const topic = mutation.topic?.trim() || undefined;
       actor.interactionCount += 1;
-      actor.lastSummary = mutation.interactionSummary.trim();
+      actor.lastSummary = interactionSummary;
       if (topic) {
         actor.recentTopics = dedupeStrings([...actor.recentTopics, topic]).slice(-4);
       }
@@ -2616,6 +2805,58 @@ function evaluateResolvedCommand(input: {
       }
       const topic = mutation.topic?.trim() || undefined;
       const summary = mutation.interactionSummary.trim();
+      const targetActorRef = npcActorRef(mutation.npcId);
+      const impliesPlayerRelocation = interactionSummaryMatchesAnyPattern(
+        summary,
+        INTERACTION_SUMMARY_PLAYER_RELOCATION_PATTERNS,
+      );
+      const impliesActorMovement = interactionSummaryMatchesAnyPattern(
+        summary,
+        INTERACTION_SUMMARY_ACTOR_MOVEMENT_PATTERNS,
+      );
+      const impliesActorStaging = interactionSummaryMatchesAnyPattern(
+        summary,
+        INTERACTION_SUMMARY_ACTOR_STAGING_PATTERNS,
+      );
+      const supportsPlayerRelocation = commandSupportsPlayerRelocation(input.command.mutations);
+      const supportsActorPresence = commandSupportsActorPresence({
+        mutations: input.command.mutations,
+        actorRef: targetActorRef,
+        spawnedTemporaryActorIds,
+      });
+      if (impliesPlayerRelocation && !supportsPlayerRelocation) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_semantics",
+          summary: "That interaction summary implies player movement. Use set_player_scene_focus or move_player to progress the physical scene.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (impliesActorMovement && !supportsActorPresence) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_semantics",
+          summary: "That interaction summary implies physical movement or arrival. Use set_scene_actor_presence to progress the physical scene.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (impliesActorStaging) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_semantics",
+          summary: "That interaction summary implies new physical staging or blocking. Manifest physical progression with explicit scene mutations instead.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
       const entry = {
         kind: "mutation" as const,
         mutationType: mutation.type,
@@ -3354,24 +3595,52 @@ function evaluateResolvedCommand(input: {
         continue;
       }
 
+      const holder = resolveSpawnItemHolderForEvaluation({
+        holder: mutation.holder,
+        spawnedWorldObjectIds,
+        projectedWorldObjects,
+        projectedTemporaryActors,
+        projectedNpcLocationIds,
+        presentNpcs: input.snapshot.presentNpcs,
+        projectedLocationId,
+      });
+      if (!holder) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "That environmental item spawn references an invalid holder.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+
       const resolvedTemplateId = `spawned_item_template:${mutation.spawnKey}`;
       const spawnedInstanceIds = Array.from({ length: mutation.quantity }, () => `iteminst_${randomUUID()}`);
       spawnedItemTemplateIds.set(mutation.spawnKey, resolvedTemplateId);
       spawnedItemInstanceIds.set(mutation.spawnKey, [...spawnedInstanceIds]);
-      groundedItemIds.add(resolvedTemplateId);
-      projectedInventoryQuantities.set(
-        resolvedTemplateId,
-        (projectedInventoryQuantities.get(resolvedTemplateId) ?? 0) + mutation.quantity,
-      );
+      if (holder.kind === "player") {
+        groundedItemIds.add(resolvedTemplateId);
+        projectedInventoryQuantities.set(
+          resolvedTemplateId,
+          (projectedInventoryQuantities.get(resolvedTemplateId) ?? 0) + mutation.quantity,
+        );
+      } else if (holder.kind === "temporary_actor") {
+        const actor = projectedTemporaryActors.get(holder.actorId);
+        if (actor) {
+          actor.holdsInventory = true;
+        }
+      }
       for (const instanceId of spawnedInstanceIds) {
         const projectedItem: ItemInstance = {
           id: instanceId,
-          characterInstanceId: input.snapshot.character.instanceId,
-          npcId: null,
-          temporaryActorId: null,
-          worldObjectId: null,
-          sceneLocationId: null,
-          sceneFocusKey: null,
+          characterInstanceId: holder.kind === "player" ? input.snapshot.character.instanceId : null,
+          npcId: holder.kind === "npc" ? holder.npcId : null,
+          temporaryActorId: holder.kind === "temporary_actor" ? holder.actorId : null,
+          worldObjectId: holder.kind === "world_object" ? holder.objectId : null,
+          sceneLocationId: holder.kind === "scene" ? holder.locationId : null,
+          sceneFocusKey: holder.kind === "scene" ? holder.focusKey ?? null : null,
           templateId: resolvedTemplateId,
           template: {
             id: resolvedTemplateId,
@@ -3388,16 +3657,20 @@ function evaluateResolvedCommand(input: {
           properties: null,
         };
         projectedItemInstances.set(instanceId, projectedItem);
-        projectedItemHolders.set(instanceId, { kind: "player" });
+        projectedItemHolders.set(instanceId, holder);
       }
       const entry = {
         kind: "mutation" as const,
         mutationType: mutation.type,
         status: "applied" as const,
         reasonCode: "environmental_item_spawned",
-        summary: `You secure ${mutation.quantity} ${normalizeWhitespace(mutation.itemName)}.`,
+        summary:
+          holder.kind === "player"
+            ? `You secure ${mutation.quantity} ${normalizeWhitespace(mutation.itemName)}.`
+            : `${normalizeWhitespace(mutation.itemName)} becomes part of the scene.`,
         metadata: {
           ...mutation,
+          holder,
           itemId: resolvedTemplateId,
           itemInstanceIds: spawnedInstanceIds,
           phase,
@@ -3432,39 +3705,16 @@ function evaluateResolvedCommand(input: {
         continue;
       }
 
-      const holder =
-        mutation.holder.kind === "world_object"
-          ? (() => {
-              const objectId = resolveWorldObjectId({
-                objectId: mutation.holder.objectId,
-                spawnedWorldObjectIds,
-              });
-              return objectId ? ({ kind: "world_object", objectId } as const) : null;
-            })()
-          : normalizeHolderRef(mutation.holder);
-
-      const holderIsValid =
-        holder != null
-        && canUseSceneHolder(holder, projectedLocationId)
-        && (
-          holder.kind === "player"
-          || holder.kind === "scene"
-          || (holder.kind === "world_object" && projectedWorldObjects.has(holder.objectId))
-          || (
-            holder.kind === "temporary_actor"
-            && (
-              projectedTemporaryActors.get(holder.actorId)?.currentLocationId === projectedLocationId
-            )
-          )
-          || (
-            holder.kind === "npc"
-            && (
-              input.snapshot.presentNpcs.some((npc) => npc.id === holder.npcId)
-              || projectedNpcLocationIds.get(holder.npcId) === projectedLocationId
-            )
-          )
-        );
-      if (!holderIsValid || !holder) {
+      const holder = resolveSpawnItemHolderForEvaluation({
+        holder: mutation.holder,
+        spawnedWorldObjectIds,
+        projectedWorldObjects,
+        projectedTemporaryActors,
+        projectedNpcLocationIds,
+        presentNpcs: input.snapshot.presentNpcs,
+        projectedLocationId,
+      });
+      if (!holder) {
         stateCommitLog.push({
           kind: "mutation",
           mutationType: mutation.type,
@@ -5453,6 +5703,23 @@ async function applyResolvedMutations(input: {
         throw new Error("Character instance not found.");
       }
 
+      const holder = resolveSpawnItemHolderForCommit({
+        holder: mutation.holder,
+        spawnedWorldObjectIds,
+      });
+      if (!holder) {
+        throw new Error("Environmental item spawn referenced an unresolved holder.");
+      }
+      if (holder.kind === "world_object") {
+        const object = await input.tx.worldObject.findUnique({
+          where: { id: holder.objectId },
+          select: { id: true },
+        });
+        if (!object) {
+          throw new Error("Environmental item spawn referenced a missing world object.");
+        }
+      }
+
       const itemName = normalizeItemName(mutation.itemName);
       const description = normalizedDescription(mutation.description);
       const reusableTemplate = await findReusableEnvironmentalItemTemplate({
@@ -5488,7 +5755,7 @@ async function applyResolvedMutations(input: {
         const created = await input.tx.itemInstance.create({
           data: {
             id: instanceId,
-            characterInstanceId: characterInstance.id,
+            ...itemHolderData(holder, characterInstance.id),
             templateId,
             isIdentified: true,
             charges: null,
@@ -5529,16 +5796,10 @@ async function applyResolvedMutations(input: {
         throw new Error("Character instance not found.");
       }
 
-      const holder =
-        mutation.holder.kind === "world_object"
-          ? (() => {
-              const objectId = resolveWorldObjectId({
-                objectId: mutation.holder.objectId,
-                spawnedWorldObjectIds,
-              });
-              return objectId ? ({ kind: "world_object", objectId } as const) : null;
-            })()
-          : normalizeHolderRef(mutation.holder);
+      const holder = resolveSpawnItemHolderForCommit({
+        holder: mutation.holder,
+        spawnedWorldObjectIds,
+      });
       if (!holder) {
         throw new Error("Fiat item spawn referenced an unresolved holder.");
       }
@@ -7485,6 +7746,36 @@ function deterministicNarrationFallback(input: {
       (entry.reasonCode === "local_interaction_recorded" || entry.reasonCode === "npc_interaction_recorded")
       && entry.kind === "mutation"
     ) {
+      const socialOutcome = typeof entry.metadata?.socialOutcome === "string"
+        ? entry.metadata.socialOutcome
+        : null;
+      const topicPhrase = typeof entry.metadata?.topic === "string" && entry.metadata.topic.trim()
+        ? ` regarding ${entry.metadata.topic.trim().toLowerCase()}`
+        : "";
+      if (socialOutcome && SOFT_SOCIAL_OUTCOMES.has(socialOutcome)) {
+        switch (socialOutcome) {
+          case "acknowledges":
+            return `The exchange${topicPhrase} lands, but no commitment is made.`;
+          case "hesitates":
+            return `The answer${topicPhrase} remains unsettled.`;
+          case "withholds":
+            return `The full answer${topicPhrase} does not come.`;
+          case "asks_question":
+            return `The response${topicPhrase} turns back on you.`;
+          case "redirects":
+            return topicPhrase
+              ? `The exchange${topicPhrase} shifts away from the original ask.`
+              : "The exchange shifts away from the original ask.";
+          case "resists":
+            return topicPhrase ? `Pushback${topicPhrase} is clear.` : "Pushback is clear.";
+          case "withdraws":
+            return topicPhrase
+              ? `The exchange${topicPhrase} pulls away rather than resolving.`
+              : "The exchange pulls away rather than resolving.";
+          default:
+            break;
+        }
+      }
       const interactionSummary = entry.summary.trim().replace(/\.$/, "");
       if (!interactionSummary) {
         return "The exchange lands without a clear change.";

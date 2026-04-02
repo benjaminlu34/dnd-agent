@@ -1187,6 +1187,7 @@ test("grounded downtime mutations apply even when the router authorizes no expli
           itemName: "Horseshoe Set",
           description: "Freshly worked shoes cooling beside the anvil.",
           quantity: 1,
+          holder: { kind: "scene", locationId: "loc_gate", focusKey: "forge" },
           reason: "Routine smithing produces a finished order.",
         },
         {
@@ -1418,6 +1419,7 @@ test("environmental item spawn handles can be referenced later in the same turn"
           itemName: "Loose Crate Lid",
           description: "A rough plank lid lying beside a split shipping crate.",
           quantity: 1,
+          holder: { kind: "player" },
           reason: "The player grabs improvised cover.",
         },
         {
@@ -1437,6 +1439,88 @@ test("environmental item spawn handles can be referenced later in the same turn"
 
   assert.equal(evaluated.stateCommitLog[0]?.reasonCode, "environmental_item_spawned");
   assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "inventory_adjusted");
+});
+
+test("scene-held environmental items stay out of player inventory and record holder metadata", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Look over the bath area"],
+      mutations: [
+        {
+          type: "spawn_environmental_item",
+          spawnKey: "basin",
+          itemName: "Wash Basin",
+          description: "A copper basin set beside the hearth.",
+          quantity: 1,
+          holder: { kind: "scene", locationId: "loc_gate", focusKey: "bath_area" },
+          reason: "The wash setup is plainly laid out nearby.",
+        },
+        {
+          type: "adjust_inventory",
+          itemId: "spawn:basin",
+          quantity: 1,
+          action: "remove",
+          reason: "Try to pocket the basin without actually picking it up first.",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["investigate"]),
+  });
+
+  assert.equal(evaluated.stateCommitLog[0]?.reasonCode, "environmental_item_spawned");
+  assert.deepEqual(evaluated.stateCommitLog[0]?.metadata?.holder, {
+    kind: "scene",
+    locationId: "loc_gate",
+    focusKey: "bath_area",
+  });
+  assert.equal(evaluated.stateCommitLog[0]?.summary, "Wash Basin becomes part of the scene.");
+  assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "insufficient_inventory");
+});
+
+test("environmental items can spawn directly into temporary actor custody", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Pass over a cloth"],
+      mutations: [
+        {
+          type: "spawn_environmental_item",
+          spawnKey: "wash_cloth",
+          itemName: "Wash Cloth",
+          description: "A folded linen cloth lifted from the wash stand.",
+          quantity: 1,
+          holder: { kind: "temporary_actor", actorId: "temp_dockhand" },
+          reason: "The dockhand already has the cloth in hand.",
+        },
+        {
+          type: "transfer_assets",
+          source: { kind: "temporary_actor", actorId: "temp_dockhand" },
+          destination: { kind: "player" },
+          templateTransfers: [{ templateId: "spawn:wash_cloth", quantity: 1 }],
+          reason: "Take the cloth back from the dockhand.",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+  });
+
+  assert.equal(evaluated.stateCommitLog[0]?.reasonCode, "environmental_item_spawned");
+  assert.deepEqual(evaluated.stateCommitLog[0]?.metadata?.holder, {
+    kind: "temporary_actor",
+    actorId: "temp_dockhand",
+  });
+  assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "assets_transferred");
 });
 
 test("spawn_fiat_item can ground a bespoke traded item directly into player custody", () => {
@@ -2043,6 +2127,96 @@ test("engine rejects record_local_interaction used for a solo errand with invali
   assert.equal(evaluated.stateCommitLog[0]?.reasonCode, "invalid_semantics");
 });
 
+test("engine rejects npc interaction summaries that imply movement without actor presence support", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["See what the guard does"],
+      mutations: [
+        {
+          type: "record_npc_interaction",
+          npcId: "npc_guard",
+          interactionSummary: "The guard approaches and answers in a low voice.",
+          socialOutcome: "shares_fact",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+    playerAction: "I ask the guard what he knows.",
+  });
+
+  assert.equal(evaluated.stateCommitLog[0]?.reasonCode, "invalid_semantics");
+});
+
+test("engine rejects player-relocation language in interaction summaries without player movement support", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Keep talking"],
+      mutations: [
+        {
+          type: "record_npc_interaction",
+          npcId: "npc_guard",
+          interactionSummary: "You step closer and keep the guard talking.",
+          socialOutcome: "hesitates",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+    playerAction: "I keep talking to the guard.",
+  });
+
+  assert.equal(evaluated.stateCommitLog[0]?.reasonCode, "invalid_semantics");
+});
+
+test("set_player_scene_focus does not justify NPC staging language in interaction summaries", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Head to the doorway"],
+      mutations: [
+        {
+          type: "set_player_scene_focus",
+          focusKey: "doorway",
+          label: "Doorway",
+          reason: "You shift toward the doorway.",
+        },
+        {
+          type: "record_npc_interaction",
+          npcId: "npc_guard",
+          interactionSummary: "The guard stands by the doorway and keeps watch on you.",
+          socialOutcome: "resists",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+    playerAction: "I shift toward the doorway and keep talking to the guard.",
+  });
+
+  assert.deepEqual(
+    evaluated.stateCommitLog.map((entry) => [entry.mutationType, entry.status, entry.reasonCode]),
+    [
+      ["set_player_scene_focus", "applied", "scene_focus_updated"],
+      ["record_npc_interaction", "rejected", "invalid_semantics"],
+    ],
+  );
+});
+
 test("engine rejects set_scene_actor_presence used as player movement proxy with invalid_semantics", () => {
   const evaluated = engineTestUtils.evaluateResolvedCommand({
     snapshot: createSnapshot(),
@@ -2388,6 +2562,7 @@ test("spawned environmental items can be transferred to a temporary actor in the
         itemName: "Wash Cloth",
         description: "A folded linen wash cloth from the basin stand.",
         quantity: 1,
+        holder: { kind: "player" },
         reason: "Take a clean cloth from the wash stand.",
       },
       {
@@ -2616,4 +2791,30 @@ test("deterministic narration fallback preserves socially negative interaction o
 
   assert.match(narration, /declines the bath/i);
   assert.doesNotMatch(narration, /accept/i);
+});
+
+test("deterministic narration fallback ignores raw closure language for soft social outcomes", () => {
+  const narration = engineTestUtils.deterministicNarrationFallback({
+    playerAction: "I wait for Tarn's answer.",
+    stateCommitLog: [
+      {
+        kind: "mutation",
+        mutationType: "record_npc_interaction",
+        status: "applied",
+        reasonCode: "npc_interaction_recorded",
+        summary: "Tarn agrees to stay and tells you to remain with her.",
+        metadata: {
+          npcId: "npc_tarn",
+          topic: "shelter",
+          socialOutcome: "acknowledges",
+          phase: "immediate",
+        },
+      },
+    ],
+    checkResult: null,
+  });
+
+  assert.match(narration, /no commitment is made/i);
+  assert.doesNotMatch(narration, /agrees to stay/i);
+  assert.doesNotMatch(narration, /remain with her/i);
 });

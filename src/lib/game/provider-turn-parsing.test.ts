@@ -603,6 +603,26 @@ test("parseFinalActionToolCall rejects invalid socialOutcome values", () => {
   assert.equal(parsed.success, false);
 });
 
+test("parseFinalActionToolCall rejects environmental item spawns missing holder", () => {
+  const parsed = aiProviderTestUtils.parseFinalActionToolCall({
+    type: "resolve_mechanics",
+    timeMode: "exploration",
+    suggestedActions: ["Grab the basin"],
+    mutations: [
+      {
+        type: "spawn_environmental_item",
+        spawnKey: "wash_basin",
+        itemName: "Wash Basin",
+        description: "A copper basin by the bath.",
+        quantity: 1,
+        reason: "The basin is close at hand.",
+      },
+    ],
+  });
+
+  assert.equal(parsed.success, false);
+});
+
 test("buildTurnSystemPrompt hard-locks observe mode away from fast-forward output", () => {
   const prompt = aiProviderTestUtils.buildTurnSystemPrompt("observe");
 
@@ -651,6 +671,8 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   assert.match(prompt, /Every record_local_interaction and record_npc_interaction mutation must include socialOutcome/);
   assert.match(prompt, /Choose the most specific valid socialOutcome available/);
   assert.match(prompt, /acknowledges is the only low-intensity fallback outcome/i);
+  assert.match(prompt, /interactionSummary must stay unresolved and must not close a decision, agreement, invitation, or emotional resolution/i);
+  assert.match(prompt, /Do not describe physical movement, arrivals, departures, returns, repositioning, or new blocking in interactionSummary/i);
   assert.match(prompt, /Never use record_local_interaction with npc: refs or named sceneActors/);
   assert.match(prompt, /Never invent temp: ids/i);
   assert.match(prompt, /When speaking to a named on-screen NPC, use record_npc_interaction for ordinary dialogue/);
@@ -667,6 +689,7 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   assert.match(prompt, /Do not leave the item in player custody while narrating that someone else now has it/i);
   assert.match(prompt, /asks what to call them, who they are, or another identity-seeking follow-up, request npc_detail for that actor/i);
   assert.match(prompt, /Use spawn_environmental_item before adjust_inventory/);
+  assert.match(prompt, /spawn_environmental_item requires an explicit valid holder/i);
   assert.match(prompt, /Respect context\.authoritativeState\.worldObjects mechanical state such as isLocked and requiredKeyTemplateId/i);
   assert.match(prompt, /Use set_scene_actor_presence whenever someone leaves the current scene/);
   assert.match(prompt, /comes back later in the turn, represent that mechanically with set_scene_actor_presence/);
@@ -1062,6 +1085,7 @@ test("buildResolvedTurnNarrationPrompt treats socialOutcome metadata as immutabl
 
   assert.match(prompt.system, /socialOutcome is immutable truth/i);
   assert.match(prompt.system, /Do not soften declines into acceptance/i);
+  assert.match(prompt.system, /Do not render acknowledges, hesitates, withholds, asks_question, redirects, resists, or withdraws as acceptance, invitation, agreement, or emotionally closed dialogue/i);
   assert.match(prompt.user, /socialOutcome/);
   assert.match(prompt.user, /declines/);
   assert.match(prompt.system, /Do not narrate completed item custody changes, consumption, gifting, feeding, storage, or item use by another holder unless state_commit_log includes the applied asset mutation/i);
