@@ -108,6 +108,8 @@ type PrismaCommodityStackRecord = Prisma.CharacterCommodityStackGetPayload<{
 
 type PrismaWorldObjectRecord = Prisma.WorldObjectGetPayload<Record<string, never>>;
 
+type SnapshotDbClient = Prisma.TransactionClient | typeof prisma;
+
 function parseWorldTemplate(value: unknown): GeneratedWorldModule {
   return generatedWorldModuleSchema.parse(value);
 }
@@ -3907,11 +3909,12 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
   };
 }
 
-export async function getTurnSnapshot(
+async function getTurnSnapshotFromClient(
+  db: SnapshotDbClient,
   campaignId: string,
   sessionId: string,
 ): Promise<CampaignSnapshot | null> {
-  const campaign = await prisma.campaign.findUnique({
+  const campaign = await db.campaign.findUnique({
     where: { id: campaignId },
     include: {
       module: true,
@@ -3958,7 +3961,7 @@ export async function getTurnSnapshot(
   }
 
   const [campaignItemInstances, campaignCommodityStacks, campaignWorldObjectRecords] = await Promise.all([
-    prisma.itemInstance.findMany({
+    db.itemInstance.findMany({
       where: {
         template: {
           campaignId,
@@ -3967,7 +3970,7 @@ export async function getTurnSnapshot(
       orderBy: { createdAt: "asc" },
       include: { template: true },
     }),
-    prisma.characterCommodityStack.findMany({
+    db.characterCommodityStack.findMany({
       where: {
         commodity: {
           campaignId,
@@ -3976,7 +3979,7 @@ export async function getTurnSnapshot(
       orderBy: { createdAt: "asc" },
       include: { commodity: true },
     }),
-    prisma.worldObject.findMany({
+    db.worldObject.findMany({
       where: { campaignId },
       orderBy: { createdAt: "asc" },
     }),
@@ -3985,34 +3988,34 @@ export async function getTurnSnapshot(
   const state = parseCampaignRuntimeStateJson(campaign.stateJson);
   const session = campaign.sessions[0];
 
-  const currentLocationRecord = await prisma.locationNode.findFirst({
+  const currentLocationRecord = await db.locationNode.findFirst({
     where: {
       campaignId,
       id: state.currentLocationId,
     },
   });
-  const adjacentEdges = await prisma.locationEdge.findMany({
+  const adjacentEdges = await db.locationEdge.findMany({
     where: {
       campaignId,
       OR: [{ sourceId: state.currentLocationId }, { targetId: state.currentLocationId }],
     },
     orderBy: { createdAt: "asc" },
   });
-  const presentNpcRecords = await prisma.nPC.findMany({
+  const presentNpcRecords = await db.nPC.findMany({
     where: {
       campaignId,
       currentLocationId: state.currentLocationId,
     },
     orderBy: { name: "asc" },
   });
-  const offscreenNpcRecords = await prisma.nPC.findMany({
+  const offscreenNpcRecords = await db.nPC.findMany({
     where: {
       campaignId,
       currentLocationId: null,
     },
     orderBy: { name: "asc" },
   });
-  const temporaryActorRecords = await prisma.temporaryActor.findMany({
+  const temporaryActorRecords = await db.temporaryActor.findMany({
     where: {
       campaignId,
       promotedNpcId: null,
@@ -4024,7 +4027,7 @@ export async function getTurnSnapshot(
     orderBy: [{ lastSeenAtTurn: "desc" }, { lastSeenAtTime: "desc" }, { id: "asc" }],
     take: 50,
   });
-  const discoveredInfoRecords = await prisma.information.findMany({
+  const discoveredInfoRecords = await db.information.findMany({
     where: {
       campaignId,
       isDiscovered: true,
@@ -4046,14 +4049,14 @@ export async function getTurnSnapshot(
     }
   }
 
-  const locationKnowledge = await prisma.locationKnowledge.findMany({
+  const locationKnowledge = await db.locationKnowledge.findMany({
     where: {
       campaignId,
       locationId: state.currentLocationId,
     },
   });
   const factionKnowledge = baseKnownFactionIds.size
-    ? await prisma.factionKnowledge.findMany({
+    ? await db.factionKnowledge.findMany({
         where: {
           campaignId,
           factionId: {
@@ -4063,7 +4066,7 @@ export async function getTurnSnapshot(
       })
     : [];
   const npcKnowledge = presentNpcRecords.length
-    ? await prisma.npcKnowledge.findMany({
+    ? await db.npcKnowledge.findMany({
         where: {
           campaignId,
           npcId: {
@@ -4087,7 +4090,7 @@ export async function getTurnSnapshot(
   });
 
   const firstHopLinks = discoveredIds.size
-    ? await prisma.informationLink.findMany({
+    ? await db.informationLink.findMany({
         where: {
           campaignId,
           sourceId: {
@@ -4099,7 +4102,7 @@ export async function getTurnSnapshot(
     : [];
   const firstHopIds = Array.from(new Set(firstHopLinks.map((link) => link.targetId)));
   const secondHopLinks = firstHopIds.length
-    ? await prisma.informationLink.findMany({
+    ? await db.informationLink.findMany({
         where: {
           campaignId,
           sourceId: {
@@ -4117,7 +4120,7 @@ export async function getTurnSnapshot(
     ...secondHopLinks.map((link) => link.targetId),
   ]));
   const relevantInformationRecords = relevantInformationIds.length
-    ? await prisma.information.findMany({
+    ? await db.information.findMany({
         where: {
           campaignId,
           id: {
@@ -4150,7 +4153,7 @@ export async function getTurnSnapshot(
   ]));
 
   const locationRecords = relevantLocationIds.length
-    ? await prisma.locationNode.findMany({
+    ? await db.locationNode.findMany({
         where: {
           campaignId,
           id: {
@@ -4160,7 +4163,7 @@ export async function getTurnSnapshot(
       })
     : [];
   const factionRecords = relevantFactionIds.length
-    ? await prisma.faction.findMany({
+    ? await db.faction.findMany({
         where: {
           campaignId,
           id: {
@@ -4171,7 +4174,7 @@ export async function getTurnSnapshot(
       })
     : [];
   const sourceNpcRecords = relevantNpcIds.length
-    ? await prisma.nPC.findMany({
+    ? await db.nPC.findMany({
         where: {
           campaignId,
           id: {
@@ -4235,7 +4238,7 @@ export async function getTurnSnapshot(
   }
 
   const knownFactionRecords = knownFactionIds.size
-    ? await prisma.faction.findMany({
+    ? await db.faction.findMany({
         where: {
           campaignId,
           id: {
@@ -4246,7 +4249,7 @@ export async function getTurnSnapshot(
       })
     : [];
   const factionRelations = knownFactionIds.size
-    ? await prisma.factionRelation.findMany({
+    ? await db.factionRelation.findMany({
         where: {
           campaignId,
           factionAId: {
@@ -4259,7 +4262,7 @@ export async function getTurnSnapshot(
         orderBy: { createdAt: "asc" },
       })
     : [];
-  const pendingWorldEvents = await prisma.worldEvent.findMany({
+  const pendingWorldEvents = await db.worldEvent.findMany({
     where: {
       campaignId,
       locationId: state.currentLocationId,
@@ -4270,7 +4273,7 @@ export async function getTurnSnapshot(
     take: 30,
   });
   const pendingFactionMoves = knownFactionIds.size
-    ? await prisma.factionMove.findMany({
+    ? await db.factionMove.findMany({
         where: {
           campaignId,
           factionId: {
@@ -4403,6 +4406,21 @@ export async function getTurnSnapshot(
     canRetryLatestTurn,
     latestRetryableTurnId,
   };
+}
+
+export async function getTurnSnapshot(
+  campaignId: string,
+  sessionId: string,
+): Promise<CampaignSnapshot | null> {
+  return getTurnSnapshotFromClient(prisma, campaignId, sessionId);
+}
+
+export async function getTurnSnapshotInTransaction(
+  tx: Prisma.TransactionClient,
+  campaignId: string,
+  sessionId: string,
+): Promise<CampaignSnapshot | null> {
+  return getTurnSnapshotFromClient(tx, campaignId, sessionId);
 }
 
 export async function getMissedTurnDigests(

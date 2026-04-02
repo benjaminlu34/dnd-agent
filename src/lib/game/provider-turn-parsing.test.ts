@@ -668,6 +668,9 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   assert.match(prompt, /For npcId, citedNpcId, and targetNpcId fields, use the bare NPC id without the npc: prefix/);
   assert.match(prompt, /Use record_local_interaction for current-scene unnamed locals instead of adjust_relationship/);
   assert.match(prompt, /Use record_npc_interaction for ordinary same-scene dialogue with a grounded named NPC/);
+  assert.match(prompt, /Fetched npc_detail for a named NPC is sufficient grounding for identity, memory, and bare npc ids, but it is not physical presence/i);
+  assert.match(prompt, /Use record_npc_interaction only for named NPCs who are immediate scene actors now or are explicitly brought into the scene this turn/i);
+  assert.match(prompt, /nearby-but-offscreen/i);
   assert.match(prompt, /Every record_local_interaction and record_npc_interaction mutation must include socialOutcome/);
   assert.match(prompt, /Choose the most specific valid socialOutcome available/);
   assert.match(prompt, /acknowledges is the only low-intensity fallback outcome/i);
@@ -704,6 +707,7 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   assert.match(prompt, /Use adjust_inventory for gaining, losing, consuming, or handing over grounded inventory items/);
   assert.match(prompt, /Self-directed downtime work may use adjust_inventory, spawn_environmental_item, and spawn_scene_aspect/);
   assert.match(prompt, /Use spawn_scene_aspect for smoke, damage, noise/);
+  assert.ok(!/Fetched npc_detail for a named NPC is sufficient grounding for record_npc_interaction, adjust_relationship, and checkIntent npc ids even if that NPC is not currently listed in sceneActors/i.test(prompt));
 });
 
 test("buildTurnRouterSystemPrompt distinguishes self-talk from on-screen social commitment", () => {
@@ -714,7 +718,9 @@ test("buildTurnRouterSystemPrompt distinguishes self-talk from on-screen social 
   assert.match(prompt, /Use clarification only for hard blockers/);
   assert.match(prompt, /Do not invent new ids or spawn handles/);
   assert.match(prompt, /router_context\.knownNearbyNpcs lists authoritative named NPCs in the current location/i);
+  assert.match(prompt, /not immediate scene actors at this focus/i);
   assert.match(prompt, /If the player explicitly names or clearly searches for someone listed in knownNearbyNpcs, resolve them as known_npc/i);
+  assert.match(prompt, /Treat recentNarrativeProse as style continuity only, not evidence of who is present/i);
   assert.match(prompt, /routes strictly means macro-travel leaving the current location node/);
   assert.match(prompt, /back to the forge, into the market, over to the bench/);
   assert.match(prompt, /emit attention\.impliedDestinationFocus/);
@@ -910,6 +916,178 @@ test("buildResolvedTurnNarrationPrompt includes prompt context and fetched facts
   assert.match(prompt.system, /Do not use elapsed time as a prompt to generate journey or travel description/i);
   assert.match(prompt.user, /authoritativeState/);
   assert.match(prompt.user, /recentGroundedHistory/);
+});
+
+test("buildResolvedTurnSuggestedActionsPrompt treats candidate suggestions as weak hints", () => {
+  const prompt = aiProviderTestUtils.buildResolvedTurnSuggestedActionsPrompt({
+    playerAction: "I carry the cloth into Thorn and Oak and finish the delivery.",
+    promptContext: {
+      currentLocation: {
+        id: "loc_market",
+        name: "Caravan Market",
+        type: "district",
+        summary: "Trade stalls and narrow storefronts.",
+        state: "active",
+      },
+      adjacentRoutes: [],
+      sceneActors: [
+        {
+          actorRef: "npc:npc_elias",
+          kind: "npc",
+          displayLabel: "Elias Thorn",
+          role: "merchant",
+          detailFetchHint: null,
+          lastSummary: "Standing near the counter with his ledger open.",
+        },
+      ],
+      recentNarrativeProse: [],
+      recentLocalEvents: [],
+      recentTurnLedger: [],
+      discoveredInformation: [],
+      activePressures: [],
+      recentWorldShifts: [],
+      activeThreads: [],
+      inventory: [],
+      worldObjects: [],
+      sceneFocus: {
+        key: "thorn_oak_shop",
+        label: "Thorn and Oak (Elias's Shop)",
+      },
+      sceneAspects: {
+        sale_completed: {
+          label: "Sale Completed",
+          state: "Daleland weave broadcloth delivered, payment received, agreement fulfilled",
+          duration: "scene",
+          focusKey: "thorn_oak_shop",
+        },
+      },
+      localTexture: null,
+      globalTime: 480,
+      timeOfDay: "afternoon",
+      dayCount: 1,
+      currency: TEST_RICH_CURRENCY,
+    },
+    fetchedFacts: [],
+    stateCommitLog: [
+      {
+        kind: "mutation",
+        mutationType: "adjust_currency",
+        status: "applied",
+        reasonCode: "currency_adjusted",
+        summary: "You gain 8 gp, 5 sp.",
+        metadata: {
+          delta: { gp: 8, sp: 5 },
+        },
+      },
+      {
+        kind: "mutation",
+        mutationType: "spawn_scene_aspect",
+        status: "applied",
+        reasonCode: "scene_aspect_spawned",
+        summary: "sale_completed shifts to delivered and fulfilled.",
+        metadata: {
+          aspectKey: "sale_completed",
+          state: "Daleland weave broadcloth delivered, payment received, agreement fulfilled",
+        },
+      },
+    ],
+    checkResult: null,
+    candidateSuggestedActions: [
+      "Ask Elias Thorn for directions to his shop",
+      "Finalize the sale and collect remaining payment",
+      "Browse Elias's shop for other trade goods",
+    ],
+  });
+
+  assert.match(prompt.system, /candidate_suggested_actions are weak hints only/i);
+  assert.match(prompt.system, /Never suggest re-finding, re-locating, or asking directions/i);
+  assert.match(prompt.system, /Never suggest finalizing, collecting, or closing a payment or deal that the committed log already resolved/i);
+  assert.match(prompt.user, /candidate_suggested_actions/);
+  assert.match(prompt.user, /Browse Elias's shop for other trade goods/);
+});
+
+test("buildResolvedTurnSuggestedActionsPrompt includes committed context and consequences", () => {
+  const prompt = aiProviderTestUtils.buildResolvedTurnSuggestedActionsPrompt({
+    playerAction: "I ask the dockhand what changed overnight.",
+    promptContext: {
+      currentLocation: {
+        id: "loc_docks",
+        name: "Blackwater Docks",
+        type: "harbor",
+        summary: "Rain-dark piers and tarred rope.",
+        state: "tense",
+      },
+      adjacentRoutes: [],
+      sceneActors: [
+        {
+          actorRef: "temp:temp_dockhand",
+          kind: "temporary_actor",
+          displayLabel: "dockhand",
+          role: "dockhand",
+          detailFetchHint: null,
+          lastSummary: "He kept glancing toward the sealed pier.",
+        },
+      ],
+      recentNarrativeProse: [],
+      recentLocalEvents: [],
+      recentTurnLedger: [],
+      discoveredInformation: [],
+      activePressures: [],
+      recentWorldShifts: [],
+      activeThreads: [],
+      inventory: [],
+      worldObjects: [],
+      sceneFocus: null,
+      sceneAspects: {},
+      localTexture: null,
+      globalTime: 270,
+      timeOfDay: "pre-dawn",
+      dayCount: 3,
+      currency: TEST_CURRENCY,
+    },
+    fetchedFacts: [
+      {
+        type: "fetch_information_detail",
+        result: {
+          id: "info_pier",
+          title: "Pier Nine Closure",
+          summary: "Pier Nine was sealed before dawn.",
+          content: "Guild runners closed the pier after a late-night disturbance.",
+          truthfulness: "verified",
+          accessibility: "public",
+          locationId: "loc_docks",
+          locationName: "Blackwater Docks",
+          factionId: "fac_harbor",
+          factionName: "Harbor Guild",
+          sourceNpcId: null,
+          sourceNpcName: null,
+          isDiscovered: true,
+          expiresAtTime: null,
+        },
+      },
+    ],
+    stateCommitLog: [
+      {
+        kind: "mutation",
+        mutationType: "record_npc_interaction",
+        status: "applied",
+        reasonCode: "npc_interaction_recorded",
+        summary: "The dockhand acknowledges the question but keeps one eye on the sealed pier.",
+        metadata: {
+          npcId: "npc_dockhand",
+          socialOutcome: "acknowledges",
+        },
+      },
+    ],
+    checkResult: null,
+    candidateSuggestedActions: ["Press for specifics"],
+  });
+
+  assert.match(prompt.user, /Blackwater Docks/);
+  assert.match(prompt.user, /Pier Nine Closure/);
+  assert.match(prompt.user, /state_commit_log/);
+  assert.match(prompt.system, /Prefer nearby, scene-local follow-through/i);
+  assert.match(prompt.system, /Return zero to four short concrete action strings/i);
 });
 
 test("buildResolvedTurnNarrationPrompt teaches montage framing for fast-forward turns", () => {

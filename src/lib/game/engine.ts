@@ -26,6 +26,7 @@ import {
   getPromptContext,
   getTurnRouterContext,
   getTurnSnapshot,
+  getTurnSnapshotInTransaction,
   toPlayerCampaignSnapshot,
 } from "@/lib/game/repository";
 import { canonicalizeNpcIdAgainstCandidates } from "@/lib/game/npc-identity";
@@ -57,6 +58,7 @@ import type {
   ResolveMechanicsResponse,
   RouterDecision,
   RetryRequiredResponse,
+  SpatialPromptContext,
   StateConflictResponse,
   StateCommitLog,
   StateCommitLogEntry,
@@ -84,7 +86,11 @@ import {
   formatCurrencyCompact,
 } from "@/lib/game/currency";
 import { normalizeItemName } from "@/lib/game/item-utils";
-import { sceneActorIdentityClearlyMatches, sceneActorMatchesFocus } from "@/lib/game/scene-identity";
+import {
+  sceneActorIdentityClearlyMatches,
+  sceneActorMatchesFocus,
+  sceneFocusesShareVenue,
+} from "@/lib/game/scene-identity";
 import { env } from "@/lib/env";
 
 type TurnStream = {
@@ -150,6 +156,61 @@ function dedupeStrings(values: string[]) {
 
 function normalizeWhitespace(value: string) {
   return value.trim().replace(/\s+/g, " ");
+}
+
+async function getCommittedPromptContext(input: {
+  committedSnapshot: CampaignSnapshot | null;
+  routerDecision: RouterDecision;
+  fallbackPromptContext: SpatialPromptContext;
+}) {
+  if (!input.committedSnapshot) {
+    return input.fallbackPromptContext;
+  }
+
+  return getPromptContext(
+    input.committedSnapshot,
+    promptContextProfileForRouter(input.routerDecision),
+    input.routerDecision,
+  );
+}
+
+async function resolveCommittedSuggestedActions(input: {
+  campaignId: string;
+  sessionId: string;
+  requestId: string;
+  playerAction: string;
+  promptContext: SpatialPromptContext;
+  fetchedFacts: TurnFetchToolResult[];
+  stateCommitLog: StateCommitLog;
+  checkResult: CheckResult | null;
+  candidateSuggestedActions: string[];
+  signal?: AbortSignal;
+}) {
+  try {
+    return await dmClient.suggestResolvedTurnActions({
+      playerAction: input.playerAction,
+      promptContext: input.promptContext,
+      fetchedFacts: input.fetchedFacts,
+      stateCommitLog: input.stateCommitLog,
+      checkResult: input.checkResult,
+      candidateSuggestedActions: dedupeStrings(input.candidateSuggestedActions),
+      signal: input.signal,
+    });
+  } catch (error) {
+    logBackendDiagnostic("turn.suggested_actions_generation_failed", {
+      campaignId: input.campaignId,
+      sessionId: input.sessionId,
+      requestId: input.requestId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return [];
+  }
+}
+
+function candidateSuggestedActionsForCommittedCommand(command: ValidatedTurnCommand) {
+  return command.type === "resolve_mechanics"
+    ? dedupeStrings(command.suggestedActions)
+    : [];
 }
 
 function tempActorRef(actorId: string) {
@@ -1823,18 +1884,138 @@ function actorSummaryForFocusEvaluation(input: {
   return null;
 }
 
-function targetWasLeftBehindByFocusShift(input: {
+function actorMatchesSceneFocus(input: {
   snapshot: CampaignSnapshot;
   projectedTemporaryActors: Map<string, ProjectedTemporaryActor>;
+  actorRef: string;
+  sceneFocus: CampaignRuntimeState["sceneFocus"];
+}) {
+  if (!input.sceneFocus) {
+    return true;
+  }
+
+  const actor = actorSummaryForFocusEvaluation(input);
+  if (!actor) {
+    return false;
+  }
+
+  return sceneActorMatchesFocus({
+    actor,
+    sceneFocus: input.sceneFocus,
+  });
+}
+
+function explicitlyPresentActorRemainsAvailable(input: {
+  explicitCurrentSceneActorFocusByRef: Map<string, CampaignRuntimeState["sceneFocus"] | null>;
+  actorRef: string;
+  projectedSceneFocus: CampaignRuntimeState["sceneFocus"];
+}) {
+  if (!input.explicitCurrentSceneActorFocusByRef.has(input.actorRef)) {
+    return false;
+  }
+
+  if (!input.projectedSceneFocus) {
+    return true;
+  }
+
+  const explicitSceneFocus = input.explicitCurrentSceneActorFocusByRef.get(input.actorRef) ?? null;
+  if (explicitSceneFocus == null) {
+    return true;
+  }
+
+  return sceneFocusesShareVenue(explicitSceneFocus, input.projectedSceneFocus);
+}
+
+function namedNpcIsPresentInCurrentScene(input: {
+  snapshot: CampaignSnapshot;
+  projectedTemporaryActors: Map<string, ProjectedTemporaryActor>;
+  npcId: string;
+  previousSceneFocus: CampaignRuntimeState["sceneFocus"];
   projectedSceneFocus: CampaignRuntimeState["sceneFocus"];
   focusChangedThisTurn: boolean;
   currentFocusActorRefs: Set<string>;
+  explicitCurrentSceneActorFocusByRef: Map<string, CampaignRuntimeState["sceneFocus"] | null>;
+}) {
+  const actorRef = npcActorRef(input.npcId);
+  if (input.currentFocusActorRefs.has(actorRef)) {
+    return true;
+  }
+
+  if (explicitlyPresentActorRemainsAvailable({
+    explicitCurrentSceneActorFocusByRef: input.explicitCurrentSceneActorFocusByRef,
+    actorRef,
+    projectedSceneFocus: input.projectedSceneFocus,
+  })) {
+    return true;
+  }
+
+  const npc = input.snapshot.presentNpcs.find((entry) => entry.id === input.npcId);
+  if (!npc) {
+    return false;
+  }
+
+  if (!input.projectedSceneFocus) {
+    return true;
+  }
+
+  if (
+    input.focusChangedThisTurn
+    && actorMatchesSceneFocus({
+      snapshot: input.snapshot,
+      projectedTemporaryActors: input.projectedTemporaryActors,
+      actorRef,
+      sceneFocus: input.previousSceneFocus,
+    })
+    && sceneFocusesShareVenue(input.previousSceneFocus, input.projectedSceneFocus)
+  ) {
+    return true;
+  }
+
+  return sceneActorMatchesFocus({
+    actor: {
+      displayLabel: npc.name,
+      role: npc.role,
+      focusKey: null,
+      lastSummary: npc.summary,
+    },
+    sceneFocus: input.projectedSceneFocus,
+  });
+}
+
+function targetWasLeftBehindByFocusShift(input: {
+  snapshot: CampaignSnapshot;
+  projectedTemporaryActors: Map<string, ProjectedTemporaryActor>;
+  previousSceneFocus: CampaignRuntimeState["sceneFocus"];
+  projectedSceneFocus: CampaignRuntimeState["sceneFocus"];
+  focusChangedThisTurn: boolean;
+  currentFocusActorRefs: Set<string>;
+  explicitCurrentSceneActorFocusByRef: Map<string, CampaignRuntimeState["sceneFocus"] | null>;
   actorRef: string;
 }) {
   if (!input.focusChangedThisTurn || !input.projectedSceneFocus) {
     return false;
   }
   if (input.currentFocusActorRefs.has(input.actorRef)) {
+    return false;
+  }
+
+  if (explicitlyPresentActorRemainsAvailable({
+    explicitCurrentSceneActorFocusByRef: input.explicitCurrentSceneActorFocusByRef,
+    actorRef: input.actorRef,
+    projectedSceneFocus: input.projectedSceneFocus,
+  })) {
+    return false;
+  }
+
+  if (
+    actorMatchesSceneFocus({
+      snapshot: input.snapshot,
+      projectedTemporaryActors: input.projectedTemporaryActors,
+      actorRef: input.actorRef,
+      sceneFocus: input.previousSceneFocus,
+    })
+    && sceneFocusesShareVenue(input.previousSceneFocus, input.projectedSceneFocus)
+  ) {
     return false;
   }
 
@@ -2056,6 +2237,7 @@ function evaluateResolvedCommand(input: {
   let projectedCurrencyCp = input.snapshot.character.currencyCp;
   let projectedLocationId = input.snapshot.state.currentLocationId;
   let projectedSceneFocus = input.snapshot.state.sceneFocus ?? null;
+  let previousSceneFocusBeforeLatestChange = input.snapshot.state.sceneFocus ?? null;
   let focusChangedThisTurn = false;
   let projectedHealth = input.snapshot.character.health;
   const projectedSceneAspects = structuredClone(input.snapshot.state.sceneAspects ?? {});
@@ -2064,6 +2246,7 @@ function evaluateResolvedCommand(input: {
     ?? input.snapshot.character.inventory.map((item) => item.templateId),
   );
   const currentFocusActorRefs = new Set<string>();
+  const explicitCurrentSceneActorFocusByRef = new Map<string, CampaignRuntimeState["sceneFocus"] | null>();
   let hasAppliedMove = false;
   const groundedInformation = groundedInformationIdsForDiscovery({
     snapshot: input.snapshot,
@@ -2210,6 +2393,7 @@ function evaluateResolvedCommand(input: {
         });
         continue;
       }
+      previousSceneFocusBeforeLatestChange = projectedSceneFocus;
       projectedSceneFocus = { key: focusKey, label };
       focusChangedThisTurn = true;
       currentFocusActorRefs.clear();
@@ -2436,7 +2620,9 @@ function evaluateResolvedCommand(input: {
       }
 
       spawnedTemporaryActorIds.set(mutation.spawnKey, resolvedActorId);
-      currentFocusActorRefs.add(tempActorRef(resolvedActorId));
+      const actorRef = tempActorRef(resolvedActorId);
+      currentFocusActorRefs.add(actorRef);
+      explicitCurrentSceneActorFocusByRef.set(actorRef, projectedSceneFocus);
       const entry = {
         kind: "mutation" as const,
         mutationType: mutation.type,
@@ -2642,9 +2828,11 @@ function evaluateResolvedCommand(input: {
       if (targetWasLeftBehindByFocusShift({
         snapshot: input.snapshot,
         projectedTemporaryActors,
+        previousSceneFocus: previousSceneFocusBeforeLatestChange,
         projectedSceneFocus,
         focusChangedThisTurn,
         currentFocusActorRefs,
+        explicitCurrentSceneActorFocusByRef,
         actorRef: tempActorRef(actor.id),
       })) {
         stateCommitLog.push({
@@ -2788,9 +2976,11 @@ function evaluateResolvedCommand(input: {
       if (targetWasLeftBehindByFocusShift({
         snapshot: input.snapshot,
         projectedTemporaryActors,
+        previousSceneFocus: previousSceneFocusBeforeLatestChange,
         projectedSceneFocus,
         focusChangedThisTurn,
         currentFocusActorRefs,
+        explicitCurrentSceneActorFocusByRef,
         actorRef: npcActorRef(mutation.npcId),
       })) {
         stateCommitLog.push({
@@ -2799,6 +2989,26 @@ function evaluateResolvedCommand(input: {
           status: "rejected",
           reasonCode: "invalid_semantics",
           summary: "That NPC was left behind when you changed focus; you cannot keep talking to them here without bringing them into the new focus.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (!namedNpcIsPresentInCurrentScene({
+        snapshot: input.snapshot,
+        projectedTemporaryActors,
+        npcId: mutation.npcId,
+        previousSceneFocus: previousSceneFocusBeforeLatestChange,
+        projectedSceneFocus,
+        focusChangedThisTurn,
+        currentFocusActorRefs,
+        explicitCurrentSceneActorFocusByRef,
+      })) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "That NPC is known nearby, but not present in this immediate scene.",
           metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
         });
         continue;
@@ -2961,10 +3171,13 @@ function evaluateResolvedCommand(input: {
         }
 
         actor.currentLocationId = mutation.newLocationId;
+        const actorRef = tempActorRef(actor.id);
         if (mutation.newLocationId === projectedLocationId) {
-          currentFocusActorRefs.add(tempActorRef(actor.id));
+          currentFocusActorRefs.add(actorRef);
+          explicitCurrentSceneActorFocusByRef.set(actorRef, projectedSceneFocus);
         } else {
-          currentFocusActorRefs.delete(tempActorRef(actor.id));
+          currentFocusActorRefs.delete(actorRef);
+          explicitCurrentSceneActorFocusByRef.delete(actorRef);
         }
         const entry = {
           kind: "mutation" as const,
@@ -3011,10 +3224,13 @@ function evaluateResolvedCommand(input: {
       }
 
       projectedNpcLocationIds.set(target.actorId, mutation.newLocationId);
+      const actorRef = npcActorRef(target.actorId);
       if (mutation.newLocationId === projectedLocationId) {
-        currentFocusActorRefs.add(npcActorRef(target.actorId));
+        currentFocusActorRefs.add(actorRef);
+        explicitCurrentSceneActorFocusByRef.set(actorRef, projectedSceneFocus);
       } else {
-        currentFocusActorRefs.delete(npcActorRef(target.actorId));
+        currentFocusActorRefs.delete(actorRef);
+        explicitCurrentSceneActorFocusByRef.delete(actorRef);
       }
       const entry = {
         kind: "mutation" as const,
@@ -3947,9 +4163,11 @@ function evaluateResolvedCommand(input: {
       if (targetWasLeftBehindByFocusShift({
         snapshot: input.snapshot,
         projectedTemporaryActors,
+        previousSceneFocus: previousSceneFocusBeforeLatestChange,
         projectedSceneFocus,
         focusChangedThisTurn,
         currentFocusActorRefs,
+        explicitCurrentSceneActorFocusByRef,
         actorRef: npcActorRef(mutation.npcId),
       })) {
         stateCommitLog.push({
@@ -4382,9 +4600,11 @@ function evaluateResolvedCommand(input: {
       if (targetWasLeftBehindByFocusShift({
         snapshot: input.snapshot,
         projectedTemporaryActors,
+        previousSceneFocus: previousSceneFocusBeforeLatestChange,
         projectedSceneFocus,
         focusChangedThisTurn,
         currentFocusActorRefs,
+        explicitCurrentSceneActorFocusByRef,
         actorRef: npcActorRef(mutation.npcId),
       })) {
         stateCommitLog.push({
@@ -6794,7 +7014,7 @@ async function commitResolvedTurn(input: {
   fetchedFacts: TurnFetchToolResult[];
   routerDecision: RouterDecision;
   groundedItemIds: string[];
-}): Promise<{ resultPayload: TurnResultPayload; memoryEntryId: string | null }> {
+}): Promise<{ resultPayload: TurnResultPayload; memoryEntryId: string | null; committedSnapshot: CampaignSnapshot }> {
   const {
     snapshot,
     sessionId,
@@ -6811,6 +7031,7 @@ async function commitResolvedTurn(input: {
   const rollback = emptyRollback(snapshot);
   let resultPayload: TurnResultPayload | null = null;
   let memoryEntryId: string | null = null;
+  let committedSnapshot: CampaignSnapshot | null = null;
   const evaluated = evaluateResolvedCommand({
     snapshot,
     command,
@@ -7049,18 +7270,24 @@ async function commitResolvedTurn(input: {
         resultJson: toPrismaJsonValue(toTurnResultPayloadJson(resultPayload)),
       },
     });
+
+    committedSnapshot = await getTurnSnapshotInTransaction(tx, snapshot.campaignId, sessionId);
+    if (!committedSnapshot) {
+      throw new Error("Committed snapshot was unavailable inside the turn transaction.");
+    }
   }, {
     maxWait: 5000,
     timeout: 20000,
   });
 
-  if (!resultPayload) {
-    throw new Error("Resolved turn commit did not produce a result payload.");
+  if (!resultPayload || !committedSnapshot) {
+    throw new Error("Resolved turn commit did not produce a committed result snapshot.");
   }
 
   return {
     resultPayload,
     memoryEntryId,
+    committedSnapshot,
   };
 }
 
@@ -7074,7 +7301,7 @@ async function commitFastForwardTurn(input: {
   turnMode: TurnMode;
   command: ValidatedExecuteFastForwardCommand;
   fetchedFacts: TurnFetchToolResult[];
-}): Promise<{ resultPayload: TurnResultPayload; memoryEntryId: string | null }> {
+}): Promise<{ resultPayload: TurnResultPayload; memoryEntryId: string | null; committedSnapshot: CampaignSnapshot }> {
   const {
     snapshot,
     sessionId,
@@ -7090,6 +7317,7 @@ async function commitFastForwardTurn(input: {
   const rollback = emptyRollback(snapshot);
   let resultPayload: TurnResultPayload | null = null;
   let memoryEntryId: string | null = null;
+  let committedSnapshot: CampaignSnapshot | null = null;
 
   await prisma.$transaction(async (tx) => {
     const characterInstance = await tx.characterInstance.findUnique({
@@ -7511,15 +7739,21 @@ async function commitFastForwardTurn(input: {
         resultJson: toPrismaJsonValue(toTurnResultPayloadJson(resultPayload)),
       },
     });
+
+    committedSnapshot = await getTurnSnapshotInTransaction(tx, snapshot.campaignId, sessionId);
+    if (!committedSnapshot) {
+      throw new Error("Committed snapshot was unavailable inside the fast-forward transaction.");
+    }
   });
 
-  if (!resultPayload) {
-    throw new Error("Fast-forward turn commit completed without a result payload.");
+  if (!resultPayload || !committedSnapshot) {
+    throw new Error("Fast-forward turn commit completed without a committed result snapshot.");
   }
 
   return {
     resultPayload,
     memoryEntryId,
+    committedSnapshot,
   };
 }
 
@@ -7885,6 +8119,7 @@ export const engineTestUtils = {
   toPromotedTemporaryActorName,
   toPromotedTemporaryActorRole,
   sanitizePromotedNpcHydrationDraft,
+  candidateSuggestedActionsForCommittedCommand,
   requestHashForSubmission,
   promptContextProfileForRouter,
   routerDecisionForTurnMode,
@@ -8678,16 +8913,34 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       });
     });
 
+    const narrationPromptContext = await getCommittedPromptContext({
+      committedSnapshot: committed.committedSnapshot,
+      routerDecision,
+      fallbackPromptContext: promptContext,
+    });
+    const resolvedSuggestedActions = await resolveCommittedSuggestedActions({
+      campaignId: input.campaignId,
+      sessionId: input.sessionId,
+      requestId: input.requestId,
+      playerAction,
+      promptContext: narrationPromptContext,
+      fetchedFacts: resolution.fetchedFacts,
+      stateCommitLog: committed.resultPayload.stateCommitLog ?? [],
+      checkResult: committed.resultPayload.checkResult ?? null,
+      candidateSuggestedActions: candidateSuggestedActionsForCommittedCommand(committedCommand),
+      signal: abortController.signal,
+    });
+
     let narration: string;
     try {
       narration = await dmClient.narrateResolvedTurn({
         playerAction,
-        promptContext,
+        promptContext: narrationPromptContext,
         fetchedFacts: resolution.fetchedFacts,
         stateCommitLog: committed.resultPayload.stateCommitLog ?? [],
         narrationBounds: committed.resultPayload.narrationBounds ?? null,
         checkResult: committed.resultPayload.checkResult ?? null,
-        suggestedActions: dedupeStrings(committedCommand.suggestedActions),
+        suggestedActions: resolvedSuggestedActions,
         narrationHint: committedCommand.narrationHint ?? null,
         signal: abortController.signal,
       });
@@ -8711,7 +8964,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       sessionId: input.sessionId,
       turnId: turn.id,
       narration,
-      suggestedActions: dedupeStrings(committedCommand.suggestedActions),
+      suggestedActions: resolvedSuggestedActions,
       fetchedFacts: resolution.fetchedFacts,
       checkResult: committed.resultPayload.checkResult ?? null,
       whatChanged: committed.resultPayload.whatChanged,
@@ -8724,7 +8977,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       type: "resolved" as const,
       turnId: turn.id,
       narration,
-      suggestedActions: dedupeStrings(committedCommand.suggestedActions),
+      suggestedActions: resolvedSuggestedActions,
       warnings: committedCommand.warnings,
       checkResult: committedCommand.checkResult,
       result: committed.resultPayload,
@@ -9140,11 +9393,27 @@ export async function resolvePendingCheck(input: ResolvePendingCheckRequest & {
       groundedItemIds: bundle.groundedItemIds,
     });
 
-    const promptContext = await getPromptContext(
-      snapshot,
-      promptContextProfileForRouter(bundle.routerDecision),
-      bundle.routerDecision,
-    );
+    const promptContext = await getCommittedPromptContext({
+      committedSnapshot: committed.committedSnapshot,
+      routerDecision: bundle.routerDecision,
+      fallbackPromptContext: await getPromptContext(
+        snapshot,
+        promptContextProfileForRouter(bundle.routerDecision),
+        bundle.routerDecision,
+      ),
+    });
+    const resolvedSuggestedActions = await resolveCommittedSuggestedActions({
+      campaignId: input.campaignId,
+      sessionId: input.sessionId,
+      requestId: input.requestId,
+      playerAction: bundle.playerAction,
+      promptContext,
+      fetchedFacts: bundle.fetchedFacts,
+      stateCommitLog: committed.resultPayload.stateCommitLog ?? [],
+      checkResult: committed.resultPayload.checkResult ?? null,
+      candidateSuggestedActions: candidateSuggestedActionsForCommittedCommand(committedCommand),
+      signal: abortController.signal,
+    });
 
     let narration: string;
     try {
@@ -9155,7 +9424,7 @@ export async function resolvePendingCheck(input: ResolvePendingCheckRequest & {
         stateCommitLog: committed.resultPayload.stateCommitLog ?? [],
         narrationBounds: committed.resultPayload.narrationBounds ?? null,
         checkResult: committed.resultPayload.checkResult ?? null,
-        suggestedActions: dedupeStrings(committedCommand.suggestedActions),
+        suggestedActions: resolvedSuggestedActions,
       });
     } catch (error) {
       narration = deterministicNarrationFallback({
@@ -9177,7 +9446,7 @@ export async function resolvePendingCheck(input: ResolvePendingCheckRequest & {
       sessionId: input.sessionId,
       turnId: pendingTurn.id,
       narration,
-      suggestedActions: dedupeStrings(committedCommand.suggestedActions),
+      suggestedActions: resolvedSuggestedActions,
       fetchedFacts: bundle.fetchedFacts,
       checkResult: committed.resultPayload.checkResult ?? null,
       whatChanged: committed.resultPayload.whatChanged,
@@ -9190,7 +9459,7 @@ export async function resolvePendingCheck(input: ResolvePendingCheckRequest & {
       type: "resolved" as const,
       turnId: pendingTurn.id,
       narration,
-      suggestedActions: dedupeStrings(committedCommand.suggestedActions),
+      suggestedActions: resolvedSuggestedActions,
       warnings: committedCommand.warnings,
       checkResult: committedCommand.checkResult,
       result: committed.resultPayload,

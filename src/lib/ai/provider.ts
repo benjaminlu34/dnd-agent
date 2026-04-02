@@ -184,6 +184,16 @@ type ResolvedTurnNarrationInput = {
   signal?: AbortSignal;
 };
 
+type ResolvedTurnSuggestedActionsInput = {
+  playerAction: string;
+  promptContext: SpatialPromptContext;
+  fetchedFacts: TurnFetchToolResult[];
+  stateCommitLog: StateCommitLog;
+  checkResult?: CheckResult | null;
+  candidateSuggestedActions: string[];
+  signal?: AbortSignal;
+};
+
 type DailyWorldScheduleInput = {
   campaign: {
     id: string;
@@ -2631,6 +2641,16 @@ const resolvedTurnNarrationTool = createStructuredTool(
   resolvedTurnNarrationSchema,
 );
 
+const resolvedTurnSuggestedActionsSchema = z.object({
+  suggestedActions: z.array(z.string().trim().min(1)).max(4).default([]),
+});
+
+const resolvedTurnSuggestedActionsTool = createStructuredTool(
+  "suggest_resolved_turn_actions",
+  "Generate up to four grounded next-action suggestions using only committed outcomes and current authoritative state.",
+  resolvedTurnSuggestedActionsSchema,
+);
+
 const ROUTER_MUST_CHECK_DEPRIORITY: RouterDecision["attention"]["mustCheck"] = [
   "recentTurnLedger",
   "routes",
@@ -3078,7 +3098,7 @@ function formatRouterKnownNpcLine(npc: NonNullable<TurnRouterContext["knownNearb
   const summary = compactPromptText(npc.summary, 100);
   const tags = (npc.tags ?? []).length ? ` tags:${(npc.tags ?? []).join("/")}` : "";
   const detailHint = npc.requiresDetailFetch ? " detail-fetch(name/identity available)" : "";
-  return `${label}${role ? ` (${role})` : ""} [${npc.id}, known-npc${detailHint}${tags}]${summary ? ` - ${summary}` : ""}`;
+  return `${label}${role ? ` (${role})` : ""} [${npc.id}, known-npc, nearby-not-present-at-this-focus${detailHint}${tags}]${summary ? ` - ${summary}` : ""}`;
 }
 
 function formatRouterContextForModel(context: TurnRouterContext) {
@@ -3359,7 +3379,10 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "interactionSummary is the single grounded detail field and should state the concrete result when relevant.",
         "If socialOutcome is acknowledges, hesitates, withholds, asks_question, redirects, resists, or withdraws, interactionSummary must stay unresolved and must not close a decision, agreement, invitation, or emotional resolution.",
         "Do not describe physical movement, arrivals, departures, returns, repositioning, or new blocking in interactionSummary. Use set_scene_actor_presence, set_player_scene_focus, or move_player to manifest physical progression.",
-        "Fetched npc_detail for a named NPC is sufficient grounding for record_npc_interaction, adjust_relationship, and checkIntent npc ids even if that NPC is not currently listed in sceneActors. Do not spawn a duplicate temporary actor just to stand in for a fetched named NPC.",
+        "Fetched npc_detail for a named NPC is sufficient grounding for identity, memory, and bare npc ids, but it is not physical presence.",
+        "Use record_npc_interaction only for named NPCs who are immediate scene actors now or are explicitly brought into the scene this turn.",
+        "If a named NPC is only in knownNearbyNpcs or fetched_facts, treat them as nearby-but-offscreen: you may search for them, move toward them, call for them, or fetch details about them, but do not commit direct same-scene dialogue until they are present in sceneActors or moved in with explicit scene mutations.",
+        "Do not spawn a duplicate temporary actor just to stand in for a fetched named NPC.",
         "Living creatures such as mounts, familiars, pets, and animal companions are actors, not world objects. Do not use spawn_world_object for a horse, dog, owl, raven, or similar living companion.",
         "Never use record_local_interaction with npc: refs or named sceneActors. It is only for unnamed temporary locals referenced as temp:..., spawn:..., or raw temporary-actor ids.",
         "Never invent temp: ids. temp: refs are only for temporary actors already grounded in sceneActors; if the person is new, spawn_temporary_actor first and then reference spawn:<key>.",
@@ -3407,6 +3430,7 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "If attention_packet.mustCheck lists inventory, do not remove or consume an item unless it is grounded in context.authoritativeState.inventory or fetched_facts.",
         "If attention_packet.mustCheck lists sceneActors, do not target a named actor through record_local_interaction.",
         "If attention_packet.resolvedReferents includes a known_npc or fetched_facts includes npc_detail for a named person the player is seeking, keep the turn anchored to that NPC instead of spawning a generic local stand-in.",
+        "A known_npc or fetched named NPC can anchor search, contact, and movement decisions, but not direct record_npc_interaction unless that NPC is present in sceneActors or explicitly brought into the scene this turn.",
         "If attention_packet.mustCheck lists sceneAspects or routes, verify those surfaces before depending on them in mutations.",
         "Only scene actors, world objects, inventory, routes, and scene aspects already grounded in context are valid direct interaction targets.",
         "recentTurnLedger contains grounded prior outcomes only. It is memory, not target authority.",
@@ -3473,7 +3497,10 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Do not describe physical movement, arrivals, departures, returns, repositioning, or new blocking in interactionSummary. Use set_scene_actor_presence, set_player_scene_focus, or move_player to manifest physical progression.",
         "Use sceneActors.actorRef values exactly only for actorRef fields such as set_scene_actor_presence and set_follow_state.",
         "For npcId, citedNpcId, and targetNpcId fields, use the bare NPC id without the npc: prefix.",
-        "Fetched npc_detail for a named NPC is sufficient grounding for record_npc_interaction, adjust_relationship, and checkIntent npc ids even if that NPC is not currently listed in sceneActors. Do not spawn a duplicate temporary actor just to stand in for a fetched named NPC.",
+        "Fetched npc_detail for a named NPC is sufficient grounding for identity, memory, and bare npc ids, but it is not physical presence.",
+        "Use record_npc_interaction only for named NPCs who are immediate scene actors now or are explicitly brought into the scene this turn.",
+        "If a named NPC is only in knownNearbyNpcs or fetched_facts, treat them as nearby-but-offscreen: you may search for them, move toward them, call for them, or fetch details about them, but do not commit direct same-scene dialogue until they are present in sceneActors or moved in with explicit scene mutations.",
+        "Do not spawn a duplicate temporary actor just to stand in for a fetched named NPC.",
         "Living creatures such as mounts, familiars, pets, and animal companions are actors, not world objects. Do not use spawn_world_object for a horse, dog, owl, raven, or similar living companion.",
         "Never use record_local_interaction with npc: refs or named sceneActors. It is only for unnamed temporary locals referenced as temp:..., spawn:..., or raw temporary-actor ids.",
         "Never invent temp: ids. temp: refs are only for temporary actors already grounded in sceneActors; if the person is new, spawn_temporary_actor first and then reference spawn:<key>.",
@@ -3526,6 +3553,7 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "If attention_packet.mustCheck lists inventory, do not remove or consume an item unless it is grounded in context.authoritativeState.inventory or fetched_facts.",
         "If attention_packet.mustCheck lists sceneActors, do not target a named actor through record_local_interaction.",
         "If attention_packet.resolvedReferents includes a known_npc or fetched_facts includes npc_detail for a named person the player is seeking, keep the turn anchored to that NPC instead of spawning a generic local stand-in.",
+        "A known_npc or fetched named NPC can anchor search, contact, and movement decisions, but not direct record_npc_interaction unless that NPC is present in sceneActors or explicitly brought into the scene this turn.",
         "If attention_packet.mustCheck lists sceneAspects or routes, verify those surfaces before depending on them in mutations.",
         "Only scene actors, world objects, inventory, routes, and scene aspects already grounded in context are valid direct interaction targets.",
         "recentTurnLedger contains grounded prior outcomes only. It is memory, not target authority.",
@@ -4012,6 +4040,47 @@ function buildResolvedTurnNarrationPrompt(input: ResolvedTurnNarrationInput) {
     formatPromptBlock("state_commit_log", sanitizedCommitLog),
     formatPromptBlock("check_result", input.checkResult ?? null),
     formatPromptBlock("suggested_actions", input.suggestedActions),
+  ].join("\n\n");
+
+  return { system, user };
+}
+
+function buildResolvedTurnSuggestedActionsPrompt(input: ResolvedTurnSuggestedActionsInput) {
+  const sanitizedCommitLog = buildSanitizedNarrationCommitLog(input.stateCommitLog);
+  const system = [
+    "**Role**",
+    "You generate immediate next-action suggestions after a resolved turn in a living world.",
+    "",
+    "**Core Job**",
+    "Use the committed outcomes and current authoritative context to suggest what the player could reasonably do next.",
+    "Return zero to four short concrete action strings. If nothing clearly grounded stands out, return an empty array.",
+    "",
+    "**Truth Constraints**",
+    "Treat state_commit_log and context as authoritative. fetched_facts may add grounded detail, but may not override committed outcomes.",
+    "candidate_suggested_actions are weak hints only. Ignore any candidate that is stale, redundant, contradicted by the committed state, or no longer immediately available.",
+    "Never suggest re-finding, re-locating, or asking directions to a place already established in the current sceneFocus or currentLocation.",
+    "Never suggest interacting with a person who is not a current grounded scene actor unless the suggestion is explicitly about finding or reaching them from the current state.",
+    "Never suggest finalizing, collecting, or closing a payment or deal that the committed log already resolved.",
+    "Never suggest repeating the exact action the player just completed unless the committed state clearly leaves it unfinished.",
+    "Prefer nearby, scene-local follow-through. When in doubt, choose the action that fits the current room, actor, object, pressure, or unresolved consequence.",
+    "",
+    "**Style Rules**",
+    "Each suggestion must be a short imperative or action fragment, not a question and not meta commentary.",
+    "Prefer concrete next moves like Inspect the ledger, Ask about the missing crate, or Step into the back room.",
+    "Avoid vague filler like Keep going, Continue, Do more, or See what happens.",
+    "If the turn ended in a clear refusal, miss, or blocked attempt, suggest a grounded alternative approach or a nearby follow-up instead of pretending success.",
+    "",
+    "**Output Instructions**",
+    "Return exactly one structured payload using the provided tool.",
+  ].join("\n");
+
+  const user = [
+    formatPromptBlock("player_action", input.playerAction),
+    formatPromptBlock("context", formatSpatialPromptContext(input.promptContext)),
+    formatPromptBlock("fetched_facts", input.fetchedFacts),
+    formatPromptBlock("state_commit_log", sanitizedCommitLog),
+    formatPromptBlock("check_result", input.checkResult ?? null),
+    formatPromptBlock("candidate_suggested_actions", input.candidateSuggestedActions),
   ].join("\n\n");
 
   return { system, user };
@@ -6950,6 +7019,63 @@ class DungeonMasterClient {
     }
   }
 
+  async suggestResolvedTurnActions(input: ResolvedTurnSuggestedActionsInput): Promise<string[]> {
+    try {
+      let correctionNotes: string | null = null;
+
+      for (let attempt = 1; attempt <= MAX_TURN_ATTEMPTS; attempt += 1) {
+        const prompt = buildResolvedTurnSuggestedActionsPrompt(input);
+        const system = [prompt.system, correctionNotes].filter((line): line is string => Boolean(line)).join("\n");
+        const user = prompt.user;
+
+        logNarrationDebug("resolved_turn_suggestions.request", {
+          attempt,
+          correctionNotes,
+          system,
+          user,
+        });
+
+        const response = await runCompletion({
+          system,
+          user,
+          tools: [resolvedTurnSuggestedActionsTool],
+          maxTokens: 300,
+          signal: input.signal,
+        });
+
+        logNarrationDebug("resolved_turn_suggestions.raw_input", {
+          attempt,
+          toolName: response?.name ?? null,
+          finishReason: response?.finishReason ?? null,
+          likelyTruncated: response?.likelyTruncated ?? false,
+          inputPreview: toPreview(response?.input),
+        });
+
+        const parsed = resolvedTurnSuggestedActionsSchema.safeParse(response?.input);
+        if (!parsed.success) {
+          correctionNotes = [
+            "Your previous reply did not match the suggested-actions schema.",
+            response?.likelyTruncated
+              ? "Return a much shorter complete replacement payload."
+              : `Return a complete replacement payload. Validation issues: ${zodIssuesToText(parsed.error.issues)}`,
+          ].join("\n");
+          continue;
+        }
+
+        return Array.from(
+          new Set(parsed.data.suggestedActions.map((entry) => entry.trim()).filter(Boolean)),
+        ).slice(0, 4);
+      }
+
+      throw new Error("Resolved-turn suggestion generation did not return a valid payload after retries.");
+    } catch (error) {
+      logNarrationDebug("resolved_turn_suggestions.error", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      throw new Error(error instanceof Error ? error.message : "Resolved-turn suggestion generation failed.");
+    }
+  }
+
   async summarizeSession(lines: string[]) {
     if (!lines.length) {
       return "No memorable events were recorded this session.";
@@ -6967,6 +7093,7 @@ export const aiProviderTestUtils = {
   buildTurnUserPrompt,
   buildResolvedNarrationConstraints,
   buildResolvedTurnNarrationPrompt,
+  buildResolvedTurnSuggestedActionsPrompt,
   buildRouterConstraintsBlock,
   buildAttentionPacketBlock,
   buildCustomEntryIntentCorrectionNotes,

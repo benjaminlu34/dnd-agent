@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { sceneActorMatchesFocus } from "./scene-identity";
+import { sceneActorMatchesFocus, sceneFocusesShareVenue } from "./scene-identity";
 
 test("sceneActorMatchesFocus treats bakery focus as matching a nearby baker", () => {
   const matches = sceneActorMatchesFocus({
@@ -35,4 +35,34 @@ test("sceneActorMatchesFocus treats armory focus as matching an armored guard ne
   });
 
   assert.equal(matches, true);
+});
+
+test("sceneFocusesShareVenue keeps a named shop and its interior linked", () => {
+  const sharesVenue = sceneFocusesShareVenue(
+    {
+      key: "thorn_oak_shop",
+      label: "Thorn and Oak (Elias's Shop)",
+    },
+    {
+      key: "shop_interior",
+      label: "Shop Interior",
+    },
+  );
+
+  assert.equal(sharesVenue, true);
+});
+
+test("sceneFocusesShareVenue does not collapse unrelated focuses together", () => {
+  const sharesVenue = sceneFocusesShareVenue(
+    {
+      key: "gate_arch",
+      label: "Gate Arch",
+    },
+    {
+      key: "back_room",
+      label: "Back Room",
+    },
+  );
+
+  assert.equal(sharesVenue, false);
 });

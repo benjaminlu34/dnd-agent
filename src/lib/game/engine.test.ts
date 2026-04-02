@@ -2043,6 +2043,138 @@ test("same-turn focus changes reject named-actor targeting from the prior focus"
   );
 });
 
+test("same-turn focus changes keep named actors available within the same venue", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: {
+      ...createSnapshot(),
+      state: {
+        ...createSnapshot().state,
+        sceneFocus: {
+          key: "thorn_oak_shop",
+          label: "Thorn and Oak (Elias's Shop)",
+        },
+      },
+      presentNpcs: [
+        {
+          id: "npc_guard",
+          name: "Elias Thorn",
+          role: "customer",
+          summary: "Waiting inside Thorn and Oak for the arranged delivery.",
+          description: "Ledger tucked beneath one arm.",
+          socialLayer: "anchor",
+          isNarrativelyHydrated: true,
+          factionId: null,
+          factionName: null,
+          currentLocationId: "loc_gate",
+          approval: 0,
+          approvalBand: "neutral",
+          isCompanion: false,
+          state: "active",
+          threatLevel: 0,
+        },
+      ],
+    },
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Complete the sale"],
+      mutations: [
+        {
+          type: "set_player_scene_focus",
+          focusKey: "shop_interior",
+          label: "Shop Interior",
+          reason: "You step into the interior of the shop.",
+        },
+        {
+          type: "record_npc_interaction",
+          npcId: "npc_guard",
+          interactionSummary: "You present the delivery and open the conversation.",
+          socialOutcome: "acknowledges",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse", "economy_light"]),
+    playerAction: "I head into the shop interior and speak to Elias about the delivery.",
+  });
+
+  assert.deepEqual(
+    evaluated.stateCommitLog.map((entry) => [entry.mutationType, entry.status, entry.reasonCode]),
+    [
+      ["set_player_scene_focus", "applied", "scene_focus_updated"],
+      ["record_npc_interaction", "applied", "npc_interaction_recorded"],
+    ],
+  );
+});
+
+test("same-turn focus changes do not pull unrelated named actors into the new venue focus", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: {
+      ...createSnapshot(),
+      state: {
+        ...createSnapshot().state,
+        sceneFocus: {
+          key: "thorn_oak_shop",
+          label: "Thorn and Oak (Elias's Shop)",
+        },
+      },
+      presentNpcs: [
+        {
+          id: "npc_guard",
+          name: "Gate Guard",
+          role: "guard",
+          summary: "Watching the street outside the neighboring warehouses.",
+          description: "Rain beads on the guard's cloak.",
+          socialLayer: "anchor",
+          isNarrativelyHydrated: true,
+          factionId: "fac_watch",
+          factionName: "Watch",
+          currentLocationId: "loc_gate",
+          approval: 0,
+          approvalBand: "neutral",
+          isCompanion: false,
+          state: "active",
+          threatLevel: 2,
+        },
+      ],
+    },
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Look around the room"],
+      mutations: [
+        {
+          type: "set_player_scene_focus",
+          focusKey: "shop_interior",
+          label: "Shop Interior",
+          reason: "You step deeper into the shop.",
+        },
+        {
+          type: "record_npc_interaction",
+          npcId: "npc_guard",
+          interactionSummary: "You ask the guard about the latest delivery.",
+          socialOutcome: "asks_question",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+    playerAction: "I head into the shop interior and ask the guard about the delivery.",
+  });
+
+  assert.deepEqual(
+    evaluated.stateCommitLog.map((entry) => [entry.mutationType, entry.status, entry.reasonCode]),
+    [
+      ["set_player_scene_focus", "applied", "scene_focus_updated"],
+      ["record_npc_interaction", "rejected", "invalid_semantics"],
+    ],
+  );
+});
+
 test("same-turn focus changes reject record_npc_interaction targeting a named actor from the prior focus", () => {
   const evaluated = engineTestUtils.evaluateResolvedCommand({
     snapshot: createSnapshot(),
@@ -2079,6 +2211,343 @@ test("same-turn focus changes reject record_npc_interaction targeting a named ac
       ["record_npc_interaction", "rejected", "invalid_semantics"],
     ],
   );
+});
+
+test("record_npc_interaction rejects a known npc who is not present in the immediate scene", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: {
+      ...createSnapshot(),
+      state: {
+        ...createSnapshot().state,
+        sceneFocus: {
+          key: "shop_interior",
+          label: "Shop Interior",
+        },
+      },
+      presentNpcs: [
+        {
+          id: "npc_guard",
+          name: "Elias Thorn",
+          role: "merchant",
+          summary: "A cloth merchant somewhere else in the district.",
+          description: "Ledger tucked under one arm.",
+          socialLayer: "anchor",
+          isNarrativelyHydrated: true,
+          factionId: null,
+          factionName: null,
+          currentLocationId: "loc_gate",
+          approval: 0,
+          approvalBand: "neutral",
+          isCompanion: false,
+          state: "active",
+          threatLevel: 0,
+        },
+      ],
+    },
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Look around the shop"],
+      mutations: [
+        {
+          type: "record_npc_interaction",
+          npcId: "npc_guard",
+          interactionSummary: "You ask Elias about future orders.",
+          socialOutcome: "asks_question",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 10,
+    },
+    fetchedFacts: [
+      {
+        type: "fetch_npc_detail",
+        result: {
+          id: "npc_guard",
+          name: "Elias Thorn",
+          role: "merchant",
+          summary: "Discusses trade terms in the market square.",
+          description: "He is still out in the district.",
+          socialLayer: "promoted_local",
+          isNarrativelyHydrated: true,
+          factionId: null,
+          factionName: null,
+          currentLocationId: "loc_gate",
+          approval: 0,
+          approvalBand: "neutral",
+          isCompanion: false,
+          state: "active",
+          threatLevel: 0,
+          inventory: [],
+          knownInformation: [],
+          relationshipHistory: [],
+          temporaryActorId: null,
+        },
+      },
+    ],
+    routerDecision: createRouterDecision(["converse"]),
+    playerAction: "I ask Elias if he wants to place another order.",
+  });
+
+  assert.deepEqual(
+    evaluated.stateCommitLog.map((entry) => [entry.mutationType, entry.status, entry.reasonCode]),
+    [["record_npc_interaction", "rejected", "invalid_target"]],
+  );
+});
+
+test("record_npc_interaction applies when a known npc is explicitly brought into the scene first", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: {
+      ...createSnapshot(),
+      presentNpcs: [],
+      knownNpcLocationIds: {
+        npc_guard: null,
+      },
+    },
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Keep talking"],
+      mutations: [
+        {
+          type: "set_scene_actor_presence",
+          actorRef: "npc:npc_guard",
+          newLocationId: "loc_gate",
+          reason: "Elias steps into the shop to meet you.",
+        },
+        {
+          type: "record_npc_interaction",
+          npcId: "npc_guard",
+          interactionSummary: "You ask Elias about future orders once he arrives.",
+          socialOutcome: "shares_fact",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 10,
+    },
+    fetchedFacts: [
+      {
+        type: "fetch_npc_detail",
+        result: {
+          id: "npc_guard",
+          name: "Elias Thorn",
+          role: "merchant",
+          summary: "Known customer currently elsewhere in the city.",
+          description: "He can be fetched into the scene when explicitly called over.",
+          socialLayer: "promoted_local",
+          isNarrativelyHydrated: true,
+          factionId: null,
+          factionName: null,
+          currentLocationId: null,
+          approval: 0,
+          approvalBand: "neutral",
+          isCompanion: false,
+          state: "active",
+          threatLevel: 0,
+          inventory: [],
+          knownInformation: [],
+          relationshipHistory: [],
+          temporaryActorId: null,
+        },
+      },
+    ],
+    routerDecision: createRouterDecision(["converse"]),
+    playerAction: "I call Elias over and ask about future orders when he arrives.",
+  });
+
+  assert.deepEqual(
+    evaluated.stateCommitLog.map((entry) => [entry.mutationType, entry.status, entry.reasonCode]),
+    [
+      ["set_scene_actor_presence", "applied", "scene_actor_presence_updated"],
+      ["record_npc_interaction", "applied", "npc_interaction_recorded"],
+    ],
+  );
+});
+
+test("record_npc_interaction stays valid after explicit arrival and a same-venue focus change", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: {
+      ...createSnapshot(),
+      state: {
+        ...createSnapshot().state,
+        sceneFocus: {
+          key: "thorn_oak_shop",
+          label: "Thorn and Oak (Elias's Shop)",
+        },
+      },
+      presentNpcs: [],
+      knownNpcLocationIds: {
+        npc_guard: null,
+      },
+    },
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Keep talking"],
+      mutations: [
+        {
+          type: "set_scene_actor_presence",
+          actorRef: "npc:npc_guard",
+          newLocationId: "loc_gate",
+          reason: "Elias steps into Thorn and Oak to meet you.",
+        },
+        {
+          type: "set_player_scene_focus",
+          focusKey: "shop_interior",
+          label: "Shop Interior",
+          reason: "You step deeper into the shop together.",
+        },
+        {
+          type: "record_npc_interaction",
+          npcId: "npc_guard",
+          interactionSummary: "You ask Elias about future orders once you are both inside.",
+          socialOutcome: "shares_fact",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 10,
+    },
+    fetchedFacts: [
+      {
+        type: "fetch_npc_detail",
+        result: {
+          id: "npc_guard",
+          name: "Elias Thorn",
+          role: "merchant",
+          summary: "Known customer currently elsewhere in the city.",
+          description: "He can be fetched into the scene when explicitly called over.",
+          socialLayer: "promoted_local",
+          isNarrativelyHydrated: true,
+          factionId: null,
+          factionName: null,
+          currentLocationId: null,
+          approval: 0,
+          approvalBand: "neutral",
+          isCompanion: false,
+          state: "active",
+          threatLevel: 0,
+          inventory: [],
+          knownInformation: [],
+          relationshipHistory: [],
+          temporaryActorId: null,
+        },
+      },
+    ],
+    routerDecision: createRouterDecision(["converse"]),
+    playerAction: "I call Elias over, step into the shop interior, and ask about future orders.",
+  });
+
+  assert.deepEqual(
+    evaluated.stateCommitLog.map((entry) => [entry.mutationType, entry.status, entry.reasonCode]),
+    [
+      ["set_scene_actor_presence", "applied", "scene_actor_presence_updated"],
+      ["set_player_scene_focus", "applied", "scene_focus_updated"],
+      ["record_npc_interaction", "applied", "npc_interaction_recorded"],
+    ],
+  );
+});
+
+test("record_npc_interaction stays valid after explicit arrival from an unfocused scene", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: {
+      ...createSnapshot(),
+      presentNpcs: [],
+      knownNpcLocationIds: {
+        npc_guard: null,
+      },
+    },
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Keep talking"],
+      mutations: [
+        {
+          type: "set_scene_actor_presence",
+          actorRef: "npc:npc_guard",
+          newLocationId: "loc_gate",
+          reason: "Elias steps over when you call him.",
+        },
+        {
+          type: "set_player_scene_focus",
+          focusKey: "shop_interior",
+          label: "Shop Interior",
+          reason: "You step into the shop interior with him.",
+        },
+        {
+          type: "record_npc_interaction",
+          npcId: "npc_guard",
+          interactionSummary: "You ask Elias about future orders once you are both inside.",
+          socialOutcome: "shares_fact",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 10,
+    },
+    fetchedFacts: [
+      {
+        type: "fetch_npc_detail",
+        result: {
+          id: "npc_guard",
+          name: "Elias Thorn",
+          role: "merchant",
+          summary: "Known customer currently elsewhere in the city.",
+          description: "He can be fetched into the scene when explicitly called over.",
+          socialLayer: "promoted_local",
+          isNarrativelyHydrated: true,
+          factionId: null,
+          factionName: null,
+          currentLocationId: null,
+          approval: 0,
+          approvalBand: "neutral",
+          isCompanion: false,
+          state: "active",
+          threatLevel: 0,
+          inventory: [],
+          knownInformation: [],
+          relationshipHistory: [],
+          temporaryActorId: null,
+        },
+      },
+    ],
+    routerDecision: createRouterDecision(["converse"]),
+    playerAction: "I call Elias over, head into the shop interior, and ask about future orders.",
+  });
+
+  assert.deepEqual(
+    evaluated.stateCommitLog.map((entry) => [entry.mutationType, entry.status, entry.reasonCode]),
+    [
+      ["set_scene_actor_presence", "applied", "scene_actor_presence_updated"],
+      ["set_player_scene_focus", "applied", "scene_focus_updated"],
+      ["record_npc_interaction", "applied", "npc_interaction_recorded"],
+    ],
+  );
+});
+
+test("candidateSuggestedActionsForCommittedCommand keeps mechanics suggestions and drops fast-forward suggestions", () => {
+  const mechanicsActions = engineTestUtils.candidateSuggestedActionsForCommittedCommand({
+    type: "resolve_mechanics",
+    timeMode: "exploration",
+    suggestedActions: ["Browse the shelves", "Browse the shelves", "Ask Elias about the ledger"],
+    mutations: [],
+    warnings: [],
+    timeElapsed: 5,
+  });
+  const fastForwardActions = engineTestUtils.candidateSuggestedActionsForCommittedCommand({
+    type: "execute_fast_forward",
+    requestedDurationMinutes: 1440,
+    routineSummary: "You work the stall through the day.",
+    recurringActivities: ["Sell cloth"],
+    intendedOutcomes: ["Earn coin"],
+    warnings: [],
+    memorySummary: "You keep the stall open all day.",
+    timeElapsed: 1440,
+  });
+
+  assert.deepEqual(mechanicsActions, [
+    "Browse the shelves",
+    "Ask Elias about the ledger",
+  ]);
+  assert.deepEqual(fastForwardActions, []);
 });
 
 test("engine rejects record_local_interaction used for a solo errand with invalid_semantics", () => {

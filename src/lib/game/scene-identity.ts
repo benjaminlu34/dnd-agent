@@ -68,6 +68,44 @@ const focusStopWords = new Set([
   "entrance",
 ]);
 
+const genericSubfocusTokens = new Set([
+  "area",
+  "back",
+  "counter",
+  "door",
+  "doorway",
+  "entry",
+  "entryway",
+  "exterior",
+  "floor",
+  "foyer",
+  "front",
+  "hall",
+  "hallway",
+  "inside",
+  "interior",
+  "outside",
+  "room",
+]);
+
+const venueClassTokens = new Set([
+  "armory",
+  "bakery",
+  "bath",
+  "forge",
+  "inn",
+  "market",
+  "shop",
+  "stall",
+  "stable",
+  "store",
+  "tavern",
+  "temple",
+  "warehouse",
+  "workshop",
+  "yard",
+]);
+
 function canonicalRoleTokens(value: string) {
   const tokens = normalizeSceneIdentityText(value)
     .split(" ")
@@ -106,6 +144,16 @@ function focusTokens(value: string) {
   return normalizeSceneIdentityText(value)
     .split(" ")
     .filter((token) => token.length >= 3 && !focusStopWords.has(token));
+}
+
+function venueContinuityTokens(value: string) {
+  return Array.from(
+    new Set(
+      normalizeSceneIdentityText(value)
+        .split(" ")
+        .filter((token) => token.length >= 3),
+    ),
+  );
 }
 
 function sharedPrefixLength(left: string, right: string) {
@@ -216,6 +264,50 @@ export function sceneFocusTokens(sceneFocus: { key: string; label: string } | nu
 
   return Array.from(
     new Set(focusTokens(`${sceneFocus.key} ${sceneFocus.label}`)),
+  );
+}
+
+export function sceneFocusesShareVenue(
+  left: { key: string; label: string } | null | undefined,
+  right: { key: string; label: string } | null | undefined,
+) {
+  if (!left || !right) {
+    return false;
+  }
+
+  if (left.key === right.key) {
+    return true;
+  }
+
+  const leftTokens = venueContinuityTokens(`${left.key} ${left.label}`);
+  const rightTokens = venueContinuityTokens(`${right.key} ${right.label}`);
+  const rightSet = new Set(rightTokens);
+  const sharedTokens = leftTokens.filter((token) => rightSet.has(token));
+  const sharedDistinctTokens = sharedTokens.filter(
+    (token) => !genericSubfocusTokens.has(token) && !venueClassTokens.has(token),
+  );
+
+  if (sharedDistinctTokens.length > 0) {
+    return true;
+  }
+
+  const leftVenueClasses = leftTokens.filter((token) => venueClassTokens.has(token));
+  const rightVenueClasses = rightTokens.filter((token) => venueClassTokens.has(token));
+  const sharedVenueClass = leftVenueClasses.some((token) => rightVenueClasses.includes(token));
+  if (!sharedVenueClass) {
+    return false;
+  }
+
+  const leftSpecificTokens = leftTokens.filter(
+    (token) => !genericSubfocusTokens.has(token) && !venueClassTokens.has(token),
+  );
+  const rightSpecificTokens = rightTokens.filter(
+    (token) => !genericSubfocusTokens.has(token) && !venueClassTokens.has(token),
+  );
+
+  return (
+    (leftSpecificTokens.length > 0 && rightSpecificTokens.length === 0)
+    || (rightSpecificTokens.length > 0 && leftSpecificTokens.length === 0)
   );
 }
 
