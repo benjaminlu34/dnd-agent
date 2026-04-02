@@ -73,6 +73,21 @@ function requestedDurationMinutes(command: ResolveMechanicsResponse) {
 
 const FAST_FORWARD_MAX_MINUTES = 7 * 1440;
 
+function shouldUseShortLocalDowntimeDuration(command: ResolveMechanicsResponse) {
+  if (command.timeMode !== "downtime") {
+    return false;
+  }
+
+  return command.mutations.some((mutation) =>
+    mutation.type === "set_player_scene_focus"
+    || mutation.type === "record_local_interaction"
+    || mutation.type === "record_npc_interaction"
+    || mutation.type === "spawn_temporary_actor"
+    || mutation.type === "set_scene_actor_presence"
+    || mutation.type === "set_follow_state",
+  );
+}
+
 function deriveTimeElapsed(command: ResolveMechanicsResponse, snapshot: CampaignSnapshot) {
   const explicitDuration = requestedDurationMinutes(command);
   if (explicitDuration != null) {
@@ -102,10 +117,14 @@ function deriveTimeElapsed(command: ResolveMechanicsResponse, snapshot: Campaign
     return 0;
   }
 
+  const durationMode =
+    shouldUseShortLocalDowntimeDuration(command)
+      ? "exploration"
+      : command.timeMode;
   const magnitude = command.durationMagnitude ?? "standard";
-  const minutes = DURATION_MAGNITUDE_MINUTES[command.timeMode]?.[magnitude];
+  const minutes = DURATION_MAGNITUDE_MINUTES[durationMode]?.[magnitude];
   if (!minutes) {
-    throw new Error(`Unknown duration magnitude ${magnitude} for ${command.timeMode}.`);
+    throw new Error(`Unknown duration magnitude ${magnitude} for ${durationMode}.`);
   }
 
   return minutes;

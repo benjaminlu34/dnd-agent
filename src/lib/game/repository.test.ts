@@ -437,6 +437,44 @@ test("filterSceneActorsForFocus keeps only focus-matching actors during micro-sc
   );
 });
 
+test("filterSceneActorsForFocus carries current-focus actors into same-venue destination prompts", () => {
+  const filtered = repositoryTestUtils.filterSceneActorsForFocus(
+    [
+      {
+        actorRef: "npc:elias",
+        kind: "npc",
+        displayLabel: "Elias Thorn",
+        role: "merchant",
+        focusKey: "thorn_oak_shop",
+        detailFetchHint: null,
+        lastSummary: "He waits inside Thorn and Oak with the ledger open.",
+      },
+      {
+        actorRef: "temp:porter",
+        kind: "temporary_actor",
+        displayLabel: "porter",
+        role: "porter",
+        focusKey: "market_square",
+        detailFetchHint: null,
+        lastSummary: "He lingers outside with a handcart.",
+      },
+    ],
+    {
+      key: "shop_interior",
+      label: "Shop Interior",
+    },
+    {
+      key: "thorn_oak_shop",
+      label: "Thorn and Oak (Elias's Shop)",
+    },
+  );
+
+  assert.deepEqual(
+    filtered.map((actor) => actor.actorRef),
+    ["npc:elias"],
+  );
+});
+
 test("filterSceneAspectsForFocus keeps matching and macro-level aspects", () => {
   const filtered = repositoryTestUtils.filterSceneAspectsForFocus(
     {

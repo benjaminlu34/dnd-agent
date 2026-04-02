@@ -34,6 +34,7 @@ const rawCampaignRuntimeStateSchema = z.object({
     key: z.string().trim().min(1),
     label: z.string().trim().min(1),
   }).nullish().default(null),
+  sceneActorFocuses: z.record(z.string(), z.string().trim().min(1).nullable()).optional().default({}),
   sceneAspects: z.record(z.string(), sceneAspectSchema).optional().default({}),
   sceneObjectStates: z.record(z.string(), z.string()).optional().default({}),
   customTitle: z.string().trim().min(1).nullable().optional(),
@@ -61,6 +62,7 @@ const campaignRuntimeStateSchema: z.ZodType<CampaignRuntimeState> = rawCampaignR
     lastActionSummary: value.lastActionSummary,
     characterState: value.characterState ?? { conditions: [], activeCompanions: [] },
     sceneFocus: value.sceneFocus ?? null,
+    sceneActorFocuses: value.sceneActorFocuses ?? {},
     sceneAspects: normalizedAspects,
     customTitle: value.customTitle ?? null,
   } satisfies CampaignRuntimeState;

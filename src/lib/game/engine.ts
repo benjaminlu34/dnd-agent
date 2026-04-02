@@ -1853,6 +1853,7 @@ function groundedInformationIdsForDiscovery(input: {
 function actorSummaryForFocusEvaluation(input: {
   snapshot: CampaignSnapshot;
   projectedTemporaryActors: Map<string, ProjectedTemporaryActor>;
+  projectedSceneActorFocuses: Map<string, string | null>;
   actorRef: string;
 }) {
   if (input.actorRef.startsWith("temp:")) {
@@ -1863,7 +1864,7 @@ function actorSummaryForFocusEvaluation(input: {
     return {
       displayLabel: actor.label,
       role: actor.label,
-      focusKey: null,
+      focusKey: input.projectedSceneActorFocuses.get(input.actorRef) ?? null,
       lastSummary: actor.lastSummary,
     };
   }
@@ -1876,7 +1877,7 @@ function actorSummaryForFocusEvaluation(input: {
     return {
       displayLabel: npc.name,
       role: npc.role,
-      focusKey: null,
+      focusKey: input.projectedSceneActorFocuses.get(input.actorRef) ?? null,
       lastSummary: npc.summary,
     };
   }
@@ -1887,6 +1888,7 @@ function actorSummaryForFocusEvaluation(input: {
 function actorMatchesSceneFocus(input: {
   snapshot: CampaignSnapshot;
   projectedTemporaryActors: Map<string, ProjectedTemporaryActor>;
+  projectedSceneActorFocuses: Map<string, string | null>;
   actorRef: string;
   sceneFocus: CampaignRuntimeState["sceneFocus"];
 }) {
@@ -1926,9 +1928,65 @@ function explicitlyPresentActorRemainsAvailable(input: {
   return sceneFocusesShareVenue(explicitSceneFocus, input.projectedSceneFocus);
 }
 
+function actorRefsVisibleAtFocus(input: {
+  snapshot: CampaignSnapshot;
+  projectedTemporaryActors: Map<string, ProjectedTemporaryActor>;
+  projectedSceneActorFocuses: Map<string, string | null>;
+  projectedNpcLocationIds: Map<string, string | null>;
+  projectedLocationId: string;
+  sceneFocus: CampaignRuntimeState["sceneFocus"];
+  currentFocusActorRefs: Set<string>;
+}) {
+  const visibleActorRefs = new Set<string>();
+  const candidateActorRefs = new Set<string>(input.currentFocusActorRefs);
+
+  for (const npc of input.snapshot.presentNpcs) {
+    const locationId = input.projectedNpcLocationIds.get(npc.id) ?? npc.currentLocationId;
+    if (locationId === input.projectedLocationId) {
+      candidateActorRefs.add(npcActorRef(npc.id));
+    }
+  }
+
+  for (const [npcId, locationId] of input.projectedNpcLocationIds.entries()) {
+    if (locationId === input.projectedLocationId) {
+      candidateActorRefs.add(npcActorRef(npcId));
+    }
+  }
+
+  for (const actor of input.projectedTemporaryActors.values()) {
+    if (actor.promotedNpcId == null && actor.currentLocationId === input.projectedLocationId) {
+      candidateActorRefs.add(tempActorRef(actor.id));
+    }
+  }
+
+  for (const actorRef of input.projectedSceneActorFocuses.keys()) {
+    candidateActorRefs.add(actorRef);
+  }
+
+  for (const actorRef of candidateActorRefs) {
+    if (input.currentFocusActorRefs.has(actorRef)) {
+      visibleActorRefs.add(actorRef);
+      continue;
+    }
+
+    if (actorMatchesSceneFocus({
+      snapshot: input.snapshot,
+      projectedTemporaryActors: input.projectedTemporaryActors,
+      projectedSceneActorFocuses: input.projectedSceneActorFocuses,
+      actorRef,
+      sceneFocus: input.sceneFocus,
+    })) {
+      visibleActorRefs.add(actorRef);
+    }
+  }
+
+  return visibleActorRefs;
+}
+
 function namedNpcIsPresentInCurrentScene(input: {
   snapshot: CampaignSnapshot;
   projectedTemporaryActors: Map<string, ProjectedTemporaryActor>;
+  projectedSceneActorFocuses: Map<string, string | null>;
   npcId: string;
   previousSceneFocus: CampaignRuntimeState["sceneFocus"];
   projectedSceneFocus: CampaignRuntimeState["sceneFocus"];
@@ -1963,6 +2021,7 @@ function namedNpcIsPresentInCurrentScene(input: {
     && actorMatchesSceneFocus({
       snapshot: input.snapshot,
       projectedTemporaryActors: input.projectedTemporaryActors,
+      projectedSceneActorFocuses: input.projectedSceneActorFocuses,
       actorRef,
       sceneFocus: input.previousSceneFocus,
     })
@@ -1975,7 +2034,7 @@ function namedNpcIsPresentInCurrentScene(input: {
     actor: {
       displayLabel: npc.name,
       role: npc.role,
-      focusKey: null,
+      focusKey: input.projectedSceneActorFocuses.get(actorRef) ?? null,
       lastSummary: npc.summary,
     },
     sceneFocus: input.projectedSceneFocus,
@@ -1985,6 +2044,7 @@ function namedNpcIsPresentInCurrentScene(input: {
 function targetWasLeftBehindByFocusShift(input: {
   snapshot: CampaignSnapshot;
   projectedTemporaryActors: Map<string, ProjectedTemporaryActor>;
+  projectedSceneActorFocuses: Map<string, string | null>;
   previousSceneFocus: CampaignRuntimeState["sceneFocus"];
   projectedSceneFocus: CampaignRuntimeState["sceneFocus"];
   focusChangedThisTurn: boolean;
@@ -2011,6 +2071,7 @@ function targetWasLeftBehindByFocusShift(input: {
     actorMatchesSceneFocus({
       snapshot: input.snapshot,
       projectedTemporaryActors: input.projectedTemporaryActors,
+      projectedSceneActorFocuses: input.projectedSceneActorFocuses,
       actorRef: input.actorRef,
       sceneFocus: input.previousSceneFocus,
     })
@@ -2022,6 +2083,7 @@ function targetWasLeftBehindByFocusShift(input: {
   const actor = actorSummaryForFocusEvaluation({
     snapshot: input.snapshot,
     projectedTemporaryActors: input.projectedTemporaryActors,
+    projectedSceneActorFocuses: input.projectedSceneActorFocuses,
     actorRef: input.actorRef,
   });
   if (!actor) {
@@ -2245,6 +2307,9 @@ function evaluateResolvedCommand(input: {
     input.groundedItemIds
     ?? input.snapshot.character.inventory.map((item) => item.templateId),
   );
+  const projectedSceneActorFocuses = new Map<string, string | null>(
+    Object.entries(input.snapshot.state.sceneActorFocuses ?? {}),
+  );
   const currentFocusActorRefs = new Set<string>();
   const explicitCurrentSceneActorFocusByRef = new Map<string, CampaignRuntimeState["sceneFocus"] | null>();
   let hasAppliedMove = false;
@@ -2345,6 +2410,7 @@ function evaluateResolvedCommand(input: {
       }
       projectedLocationId = mutation.targetLocationId;
       projectedSceneFocus = null;
+      projectedSceneActorFocuses.clear();
       hasAppliedMove = true;
       for (const [aspectKey, aspect] of Object.entries(projectedSceneAspects)) {
         if (aspect.duration === "scene") {
@@ -2393,9 +2459,28 @@ function evaluateResolvedCommand(input: {
         });
         continue;
       }
+      const priorSceneFocus = projectedSceneFocus;
+      const priorVisibleActorRefs = actorRefsVisibleAtFocus({
+        snapshot: input.snapshot,
+        projectedTemporaryActors,
+        projectedSceneActorFocuses,
+        projectedNpcLocationIds,
+        projectedLocationId,
+        sceneFocus: priorSceneFocus,
+        currentFocusActorRefs,
+      });
       previousSceneFocusBeforeLatestChange = projectedSceneFocus;
       projectedSceneFocus = { key: focusKey, label };
       focusChangedThisTurn = true;
+      if (sceneFocusesShareVenue(priorSceneFocus, projectedSceneFocus)) {
+        for (const actorRef of priorVisibleActorRefs) {
+          projectedSceneActorFocuses.set(actorRef, projectedSceneFocus.key);
+        }
+      } else {
+        for (const actorRef of priorVisibleActorRefs) {
+          projectedSceneActorFocuses.delete(actorRef);
+        }
+      }
       currentFocusActorRefs.clear();
       const appliedMutation = { ...mutation, focusKey, label, phase } as MechanicsMutation;
       const entry = {
@@ -2623,6 +2708,7 @@ function evaluateResolvedCommand(input: {
       const actorRef = tempActorRef(resolvedActorId);
       currentFocusActorRefs.add(actorRef);
       explicitCurrentSceneActorFocusByRef.set(actorRef, projectedSceneFocus);
+      projectedSceneActorFocuses.set(actorRef, projectedSceneFocus?.key ?? null);
       const entry = {
         kind: "mutation" as const,
         mutationType: mutation.type,
@@ -2828,6 +2914,7 @@ function evaluateResolvedCommand(input: {
       if (targetWasLeftBehindByFocusShift({
         snapshot: input.snapshot,
         projectedTemporaryActors,
+        projectedSceneActorFocuses,
         previousSceneFocus: previousSceneFocusBeforeLatestChange,
         projectedSceneFocus,
         focusChangedThisTurn,
@@ -2976,6 +3063,7 @@ function evaluateResolvedCommand(input: {
       if (targetWasLeftBehindByFocusShift({
         snapshot: input.snapshot,
         projectedTemporaryActors,
+        projectedSceneActorFocuses,
         previousSceneFocus: previousSceneFocusBeforeLatestChange,
         projectedSceneFocus,
         focusChangedThisTurn,
@@ -2996,6 +3084,7 @@ function evaluateResolvedCommand(input: {
       if (!namedNpcIsPresentInCurrentScene({
         snapshot: input.snapshot,
         projectedTemporaryActors,
+        projectedSceneActorFocuses,
         npcId: mutation.npcId,
         previousSceneFocus: previousSceneFocusBeforeLatestChange,
         projectedSceneFocus,
@@ -3175,9 +3264,11 @@ function evaluateResolvedCommand(input: {
         if (mutation.newLocationId === projectedLocationId) {
           currentFocusActorRefs.add(actorRef);
           explicitCurrentSceneActorFocusByRef.set(actorRef, projectedSceneFocus);
+          projectedSceneActorFocuses.set(actorRef, projectedSceneFocus?.key ?? null);
         } else {
           currentFocusActorRefs.delete(actorRef);
           explicitCurrentSceneActorFocusByRef.delete(actorRef);
+          projectedSceneActorFocuses.delete(actorRef);
         }
         const entry = {
           kind: "mutation" as const,
@@ -3228,9 +3319,11 @@ function evaluateResolvedCommand(input: {
       if (mutation.newLocationId === projectedLocationId) {
         currentFocusActorRefs.add(actorRef);
         explicitCurrentSceneActorFocusByRef.set(actorRef, projectedSceneFocus);
+        projectedSceneActorFocuses.set(actorRef, projectedSceneFocus?.key ?? null);
       } else {
         currentFocusActorRefs.delete(actorRef);
         explicitCurrentSceneActorFocusByRef.delete(actorRef);
+        projectedSceneActorFocuses.delete(actorRef);
       }
       const entry = {
         kind: "mutation" as const,
@@ -4163,6 +4256,7 @@ function evaluateResolvedCommand(input: {
       if (targetWasLeftBehindByFocusShift({
         snapshot: input.snapshot,
         projectedTemporaryActors,
+        projectedSceneActorFocuses,
         previousSceneFocus: previousSceneFocusBeforeLatestChange,
         projectedSceneFocus,
         focusChangedThisTurn,
@@ -4600,6 +4694,7 @@ function evaluateResolvedCommand(input: {
       if (targetWasLeftBehindByFocusShift({
         snapshot: input.snapshot,
         projectedTemporaryActors,
+        projectedSceneActorFocuses,
         previousSceneFocus: previousSceneFocusBeforeLatestChange,
         projectedSceneFocus,
         focusChangedThisTurn,
@@ -4708,6 +4803,7 @@ function evaluateResolvedCommand(input: {
         ?? stateCommitLog.find((entry) => entry.status !== "noop")?.summary
         ?? "The situation changes.",
       sceneFocus: projectedSceneFocus,
+      sceneActorFocuses: Object.fromEntries(projectedSceneActorFocuses),
       sceneAspects: projectedSceneAspects,
       characterState: {
         conditions: Array.from(projectedConditions),
@@ -8087,7 +8183,7 @@ async function persistResolvedTurnNarration(input: {
   why: string[];
   memoryEntryId: string | null;
 }) {
-  await prisma.message.create({
+  const message = await prisma.message.create({
     data: {
       sessionId: input.sessionId,
       role: "assistant",
@@ -8103,6 +8199,21 @@ async function persistResolvedTurnNarration(input: {
     },
   });
 
+  const turn = await prisma.turn.findUnique({
+    where: { id: input.turnId },
+    select: { resultJson: true },
+  });
+
+  const updatedResult = appendMessageToTurnRollback(turn?.resultJson, message.id);
+  if (updatedResult) {
+    await prisma.turn.update({
+      where: { id: input.turnId },
+      data: {
+        resultJson: toPrismaJsonValue(toTurnResultPayloadJson(updatedResult)),
+      },
+    });
+  }
+
   if (input.memoryEntryId) {
     await prisma.memoryEntry.update({
       where: { id: input.memoryEntryId },
@@ -8111,6 +8222,48 @@ async function persistResolvedTurnNarration(input: {
       },
     });
   }
+}
+
+function appendMessageToTurnRollback(
+  resultJson: Prisma.JsonValue | null | undefined,
+  messageId: string,
+): TurnResultPayload | null {
+  const parsedResult = parseTurnResultPayloadJson(resultJson);
+  if (!parsedResult?.rollback) {
+    return null;
+  }
+
+  return {
+    ...parsedResult,
+    rollback: {
+      ...parsedResult.rollback,
+      createdMessageIds: [...parsedResult.rollback.createdMessageIds, messageId],
+    },
+  };
+}
+
+async function legacyNarrationMessageIdsForUndo(input: {
+  tx: Prisma.TransactionClient;
+  sessionId: string;
+  turnId: string;
+  turnCreatedAt: Date;
+  rollbackMessageIds: string[];
+}) {
+  const message = await input.tx.message.findFirst({
+    where: {
+      sessionId: input.sessionId,
+      role: "assistant",
+      kind: "narration",
+      id: { notIn: input.rollbackMessageIds },
+      createdAt: {
+        gte: input.turnCreatedAt,
+      },
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { id: true },
+  });
+
+  return message ? [message.id] : [];
 }
 
 export { TIME_MODE_BOUNDS };
@@ -8126,6 +8279,8 @@ export const engineTestUtils = {
   determineMemoryKind,
   deterministicNarrationFallback,
   evaluateResolvedCommand,
+  appendMessageToTurnRollback,
+  legacyNarrationMessageIdsForUndo,
 };
 
 async function buildStateConflictPayload(input: {
@@ -9517,11 +9672,23 @@ export async function retryLastTurn(turnId: string) {
   }
 
   await prisma.$transaction(async (tx) => {
-    if (rollback.createdMessageIds.length) {
+    const legacyNarrationMessageIds = await legacyNarrationMessageIdsForUndo({
+      tx,
+      sessionId: turn.sessionId,
+      turnId: turn.id,
+      turnCreatedAt: turn.createdAt,
+      rollbackMessageIds: rollback.createdMessageIds,
+    });
+    const messageIdsToDelete = Array.from(new Set([
+      ...rollback.createdMessageIds,
+      ...legacyNarrationMessageIds,
+    ]));
+
+    if (messageIdsToDelete.length) {
       await tx.message.deleteMany({
         where: {
           id: {
-            in: rollback.createdMessageIds,
+            in: messageIdsToDelete,
           },
         },
       });

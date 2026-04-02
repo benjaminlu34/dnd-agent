@@ -697,6 +697,7 @@ export type CampaignRuntimeState = {
     key: string;
     label: string;
   } | null;
+  sceneActorFocuses: Record<string, string | null>;
   sceneAspects: Record<
     string,
     {

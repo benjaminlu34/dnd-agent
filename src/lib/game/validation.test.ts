@@ -27,6 +27,7 @@ function createSnapshot(): CampaignSnapshot {
       pendingTurnId: null,
       lastActionSummary: null,
       sceneFocus: null,
+      sceneActorFocuses: {},
       sceneAspects: {},
       characterState: {
         conditions: [],
@@ -397,6 +398,36 @@ test("validateTurnCommand promotes investigative manifestations to conditional s
   assert.equal(validated.pendingCheck?.reason, "Search the crowd for the cloaked figure");
   assert.equal(validated.mutations[1]?.phase, "conditional");
   assert.equal(validated.mutations[2]?.phase, "conditional");
+});
+
+test("validateTurnCommand uses short exploration timing for local downtime repositioning", () => {
+  const validated = validateTurnCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "downtime",
+      suggestedActions: ["Ask about the bread"],
+      mutations: [
+        {
+          type: "spawn_temporary_actor",
+          spawnKey: "baker",
+          role: "baker",
+          summary: "A baker tends fresh loaves under the awning.",
+          apparentDisposition: "busy",
+          reason: "You head over to the bakery stall.",
+        },
+        {
+          type: "set_player_scene_focus",
+          focusKey: "baker_stall",
+          label: "Baker's Stall",
+          reason: "You step over to the bakery counter.",
+        },
+      ],
+    },
+  });
+
+  assert.equal(validated.type, "resolve_mechanics");
+  assert.equal(validated.timeElapsed, 20);
 });
 
 test("validateTurnCommand can use fetched npc detail to derive pending combat check dc", () => {

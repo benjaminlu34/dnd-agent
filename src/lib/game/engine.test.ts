@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { engineTestUtils } from "./engine";
+import { toTurnResultPayloadJson } from "./json-contracts";
 import type {
   CampaignSnapshot,
   ResolveMechanicsResponse,
@@ -27,6 +28,7 @@ function createSnapshot(): CampaignSnapshot {
       pendingTurnId: null,
       lastActionSummary: null,
       sceneFocus: null,
+      sceneActorFocuses: {},
       sceneAspects: {},
       characterState: {
         conditions: [],
@@ -282,6 +284,73 @@ test("promoted npc hydration preserves named-local references already grounded i
     sanitized.summary,
     "Elias Thorn waits at Vesper Darksbane's stall for the noon caravan.",
   );
+});
+
+test("appendMessageToTurnRollback records post-commit narration for undo", () => {
+  const updated = engineTestUtils.appendMessageToTurnRollback(
+    toTurnResultPayloadJson({
+      stateVersionAfter: 2,
+      changeCodes: [],
+      reasonCodes: [],
+      whatChanged: ["You completed the sale."],
+      why: [],
+      warnings: [],
+      narrationBounds: null,
+      checkResult: null,
+      clarification: null,
+      error: null,
+      rollback: {
+        previousState: createSnapshot().state,
+        previousSessionTurnCount: 1,
+        createdMessageIds: ["msg_action"],
+        createdMemoryIds: [],
+        createdMemoryLinkIds: [],
+        discoveredInformation: [],
+        simulationInverses: [],
+        processedEventIds: [],
+        cancelledMoveIds: [],
+        createdWorldEventIds: [],
+        createdFactionMoveIds: [],
+        createdScheduleJobIds: [],
+        createdTemporaryActorIds: [],
+        createdCommodityStackIds: [],
+        createdWorldObjectIds: [],
+      },
+    }),
+    "msg_narration",
+  );
+
+  assert.ok(updated?.rollback);
+  assert.deepEqual(updated?.rollback.createdMessageIds, ["msg_action", "msg_narration"]);
+});
+
+test("legacyNarrationMessageIdsForUndo selects the latest missing assistant narration", async () => {
+  const calls: Array<{ where: unknown; orderBy: unknown }> = [];
+  const ids = await engineTestUtils.legacyNarrationMessageIdsForUndo({
+    tx: {
+      message: {
+        findFirst: async (args: { where: unknown; orderBy: unknown }) => {
+          calls.push(args);
+          return { id: "msg_narration" };
+        },
+      },
+    } as never,
+    sessionId: "sess_1",
+    turnId: "turn_1",
+    turnCreatedAt: new Date("2026-04-02T10:00:00.000Z"),
+    rollbackMessageIds: ["msg_action"],
+  });
+
+  assert.deepEqual(ids, ["msg_narration"]);
+  assert.deepEqual(calls[0]?.where, {
+    sessionId: "sess_1",
+    role: "assistant",
+    kind: "narration",
+    id: { notIn: ["msg_action"] },
+    createdAt: {
+      gte: new Date("2026-04-02T10:00:00.000Z"),
+    },
+  });
 });
 
 test("request hash includes session and version so request identity matches the full submission", () => {
@@ -2107,6 +2176,7 @@ test("same-turn focus changes keep named actors available within the same venue"
       ["record_npc_interaction", "applied", "npc_interaction_recorded"],
     ],
   );
+  assert.equal(evaluated.nextState.sceneActorFocuses["npc:npc_guard"], "shop_interior");
 });
 
 test("same-turn focus changes do not pull unrelated named actors into the new venue focus", () => {
@@ -2445,6 +2515,7 @@ test("record_npc_interaction stays valid after explicit arrival and a same-venue
       ["record_npc_interaction", "applied", "npc_interaction_recorded"],
     ],
   );
+  assert.equal(evaluated.nextState.sceneActorFocuses["npc:npc_guard"], "shop_interior");
 });
 
 test("record_npc_interaction stays valid after explicit arrival from an unfocused scene", () => {

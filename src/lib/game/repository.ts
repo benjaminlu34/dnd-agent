@@ -9,6 +9,7 @@ import {
   sceneActorIdentityClearlyMatches,
   sceneActorMatchesFocus,
   sceneAspectMatchesFocus,
+  sceneFocusesShareVenue,
 } from "@/lib/game/scene-identity";
 import {
   resolvedLaunchEntrySchema,
@@ -1215,11 +1216,27 @@ function toRouterSceneAspectSummaries(state: CampaignRuntimeState) {
 function filterSceneActorsForFocus(
   sceneActors: SceneActorSummary[],
   sceneFocus: CampaignRuntimeState["sceneFocus"],
+  currentSceneFocus?: CampaignRuntimeState["sceneFocus"],
 ) {
   if (!sceneFocus) {
     return sceneActors;
   }
-  return sceneActors.filter((actor) => sceneActorMatchesFocus({ actor, sceneFocus }));
+
+  const directMatches = sceneActors.filter((actor) => sceneActorMatchesFocus({ actor, sceneFocus }));
+  if (
+    !currentSceneFocus
+    || currentSceneFocus.key === sceneFocus.key
+    || !sceneFocusesShareVenue(currentSceneFocus, sceneFocus)
+  ) {
+    return directMatches;
+  }
+
+  const carriedForward = sceneActors.filter((actor) =>
+    !directMatches.includes(actor)
+    && sceneActorMatchesFocus({ actor, sceneFocus: currentSceneFocus }),
+  );
+
+  return [...directMatches, ...carriedForward];
 }
 
 function filterSceneAspectsForFocus(
@@ -2631,6 +2648,7 @@ function toSceneActorSummaries(input: {
   presentNpcs: NpcSummary[];
   temporaryActors: TemporaryActorSummary[];
   currentLocationId: string;
+  sceneActorFocuses?: Record<string, string | null>;
 }): SceneActorSummary[] {
   return [
     ...input.presentNpcs.map<SceneActorSummary>((npc) => ({
@@ -2639,7 +2657,7 @@ function toSceneActorSummaries(input: {
       displayLabel: npc.name,
       role: npc.role,
       tags: npc.isCompanion ? Array.from(new Set([...(npc.tags ?? []), "companion"])) : [...(npc.tags ?? [])],
-      focusKey: null,
+      focusKey: input.sceneActorFocuses?.[`npc:${npc.id}`] ?? null,
       detailFetchHint:
         npc.socialLayer === "promoted_local" && !npc.isNarrativelyHydrated
           ? {
@@ -2657,7 +2675,7 @@ function toSceneActorSummaries(input: {
         displayLabel: actor.label,
         role: actor.label,
         tags: actor.inventory.length > 0 ? ["holds_inventory"] : [],
-        focusKey: null,
+        focusKey: input.sceneActorFocuses?.[`temp:${actor.id}`] ?? null,
         inventory: actor.inventory,
         detailFetchHint: null,
         lastSummary: actor.lastSummary,
@@ -4590,6 +4608,7 @@ export async function getTurnRouterContext(snapshot: CampaignSnapshot): Promise<
       presentNpcs: snapshot.presentNpcs,
       temporaryActors: snapshot.temporaryActors,
       currentLocationId: snapshot.currentLocation.id,
+      sceneActorFocuses: snapshot.state.sceneActorFocuses,
     }),
     sceneFocus,
   ).slice(0, sceneFocus ? 4 : 8);
@@ -4651,8 +4670,10 @@ export async function getPromptContext(
       presentNpcs: snapshot.presentNpcs,
       temporaryActors: snapshot.temporaryActors,
       currentLocationId: snapshot.currentLocation.id,
+      sceneActorFocuses: snapshot.state.sceneActorFocuses,
     }),
     promptSceneFocus,
+    snapshot.state.sceneFocus ?? null,
   );
   const campaignItemTemplates = await prisma.itemTemplate.findMany({
     where: { campaignId: snapshot.campaignId },

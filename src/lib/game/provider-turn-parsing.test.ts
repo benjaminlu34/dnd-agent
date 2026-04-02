@@ -697,6 +697,8 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   assert.match(prompt, /Use set_scene_actor_presence whenever someone leaves the current scene/);
   assert.match(prompt, /comes back later in the turn, represent that mechanically with set_scene_actor_presence/);
   assert.match(prompt, /Use set_player_scene_focus for self-directed movement within the current location/);
+  assert.match(prompt, /same venue or social space/i);
+  assert.match(prompt, /actorRef npc:<npcId>/i);
   assert.match(prompt, /label must describe a spatial sub-location or zone/);
   assert.match(prompt, /never a portable object like Coin Purse or Sword/);
   assert.match(prompt, /Never use it to simulate the player arriving somewhere/);
@@ -718,6 +720,7 @@ test("buildTurnRouterSystemPrompt distinguishes self-talk from on-screen social 
   assert.match(prompt, /Use clarification only for hard blockers/);
   assert.match(prompt, /Do not invent new ids or spawn handles/);
   assert.match(prompt, /router_context\.knownNearbyNpcs lists authoritative named NPCs in the current location/i);
+  assert.match(prompt, /Fetched npc_detail grounds identity and memory for a named NPC, but it does not make them physically present in sceneActors/i);
   assert.match(prompt, /not immediate scene actors at this focus/i);
   assert.match(prompt, /If the player explicitly names or clearly searches for someone listed in knownNearbyNpcs, resolve them as known_npc/i);
   assert.match(prompt, /Treat recentNarrativeProse as style continuity only, not evidence of who is present/i);
@@ -913,6 +916,7 @@ test("buildResolvedTurnNarrationPrompt includes prompt context and fetched facts
   assert.match(prompt.system, /\*\*Style Examples\*\*/);
   assert.match(prompt.system, /Example 1 - Routine local interaction:/);
   assert.match(prompt.system, /recentNarrativeProse is continuity only, not authority/i);
+  assert.match(prompt.system, /Do not visually place, quote, or otherwise present a named NPC as being in the room unless they are listed in context\.authoritativeState\.sceneActors/i);
   assert.match(prompt.system, /Do not use elapsed time as a prompt to generate journey or travel description/i);
   assert.match(prompt.user, /authoritativeState/);
   assert.match(prompt.user, /recentGroundedHistory/);
