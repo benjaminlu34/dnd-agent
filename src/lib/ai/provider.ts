@@ -803,12 +803,30 @@ type StructuredTool = {
 type StageValidation = {
   category: "schema" | "coherence" | "playability" | "immersion";
   issues: string[];
+  correctionNotes?: string[];
 };
 
 const MAX_WORLD_STAGE_ATTEMPTS = 3;
 const MAX_TURN_ATTEMPTS = 3;
 const MAX_ROUTER_ATTEMPTS = 2;
 const WORLD_SPINE_LOCATION_BATCH_SIZE = 3;
+const WORLD_BIBLE_MIN_EXPLANATION_THREADS = 0;
+const WORLD_SPINE_LOCATION_CHOICES = [9, 12, 15, 18] as const;
+const WORLD_SPINE_LOCATION_CHOICES_TEXT = WORLD_SPINE_LOCATION_CHOICES.join(", ");
+const WORLD_SPINE_MAX_RELATIONS = 28;
+const WORLD_GEN_MAX_INFORMATION_NODES = 22;
+const WORLD_GEN_MAX_INFORMATION_LINKS = 28;
+const WORLD_GEN_TARGET_COMMODITIES = 8;
+const WORLD_GEN_MAX_MARKET_PRICES = 10;
+
+type WorldBibleContextScope =
+  | "world_spine"
+  | "regional_life"
+  | "social_cast"
+  | "knowledge_web"
+  | "knowledge_threads"
+  | "economy_material_life"
+  | "entry_contexts";
 const REGIONAL_LIFE_BATCH_SIZE = 3;
 const SOCIAL_CAST_BATCH_SIZE = 3;
 
@@ -881,67 +899,6 @@ function firstNameOf(name: string) {
   return name.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
 }
 
-type WorldPromptProfile = {
-  explanationStyle: "folkloric" | "speculative" | "grounded";
-  minimumExplanationThreads: number;
-};
-
-function inferWorldPromptProfile(prompt: string): WorldPromptProfile {
-  const normalized = prompt.toLowerCase();
-  const folkloricSignals = [
-    "myth",
-    "legend",
-    "folklore",
-    "god",
-    "gods",
-    "divine",
-    "curse",
-    "sacred",
-    "spirit",
-    "spirits",
-    "ritual",
-    "cult",
-    "oracle",
-    "prophecy",
-  ];
-  const speculativeSignals = [
-    "machine",
-    "engine",
-    "artifact",
-    "experiment",
-    "theory",
-    "scientific",
-    "science",
-    "technology",
-    "device",
-    "system",
-    "simulation",
-    "containment",
-    "laboratory",
-  ];
-  const folkloreScore = folkloricSignals.filter((signal) => normalized.includes(signal)).length;
-  const speculativeScore = speculativeSignals.filter((signal) => normalized.includes(signal)).length;
-  const wantsDenseCompetingExplanations =
-    /\bevery culture\b/.test(normalized) ||
-    /\bdifferent myths?\b/.test(normalized) ||
-    /\bcompeting beliefs?\b/.test(normalized) ||
-    /\bcontradictory\b/.test(normalized) ||
-    /\bpartially true\b/.test(normalized);
-
-  let explanationStyle: WorldPromptProfile["explanationStyle"] = "grounded";
-
-  if (folkloreScore >= speculativeScore + 1) {
-    explanationStyle = "folkloric";
-  } else if (speculativeScore >= folkloreScore + 1) {
-    explanationStyle = "speculative";
-  }
-
-  return {
-    explanationStyle,
-    minimumExplanationThreads: wantsDenseCompetingExplanations ? 4 : 2,
-  };
-}
-
 function findDuplicateStrings(values: string[]) {
   const counts = new Map<string, number>();
 
@@ -968,18 +925,44 @@ function chunkArray<T>(items: T[], size: number) {
 
 function summarizeWorldBibleForPrompt(
   worldBible: z.infer<typeof generatedWorldBibleSchema>,
-  profile: WorldPromptProfile,
+  scope: WorldBibleContextScope,
 ) {
+  const burdenLimit =
+    scope === "world_spine" || scope === "knowledge_web"
+      ? worldBible.widespreadBurdens.length
+      : scope === "social_cast" || scope === "entry_contexts"
+        ? Math.min(4, worldBible.widespreadBurdens.length)
+        : 3;
+  const scarLimit =
+    scope === "knowledge_web" || scope === "knowledge_threads"
+      ? Math.min(2, worldBible.presentScars.length)
+      : scope === "world_spine"
+        ? Math.min(2, worldBible.presentScars.length)
+        : scope === "entry_contexts"
+        ? Math.min(1, worldBible.presentScars.length)
+        : 0;
+  const detailLimit =
+    scope === "world_spine"
+      ? worldBible.sharedRealities.length
+      : scope === "entry_contexts"
+        ? 5
+        : 4;
+  const explanationLimit =
+    scope === "knowledge_web" || scope === "knowledge_threads"
+      ? worldBible.explanationThreads.length
+      : scope === "entry_contexts"
+        ? Math.min(2, worldBible.explanationThreads.length)
+        : 0;
+
   return {
     title: worldBible.title,
     premise: worldBible.premise,
-    tone: worldBible.tone,
     setting: worldBible.setting,
-    worldOverview: worldBible.worldOverview,
-    explanationStyle: profile.explanationStyle,
-    systemicPressures: worldBible.systemicPressures.slice(0, 6),
-    historicalFractures: worldBible.historicalFractures.slice(0, 6),
-    competingExplanations: worldBible.explanationThreads.map((thread) => ({
+    groundLevelReality: worldBible.groundLevelReality,
+    widespreadBurdens: worldBible.widespreadBurdens.slice(0, burdenLimit),
+    presentScars: worldBible.presentScars.slice(0, scarLimit),
+    sharedRealities: worldBible.sharedRealities.slice(0, detailLimit),
+    competingExplanations: worldBible.explanationThreads.slice(0, explanationLimit).map((thread) => ({
       key: thread.key,
       phenomenon: thread.phenomenon,
       prevailingTheories: thread.prevailingTheories,
@@ -987,11 +970,26 @@ function summarizeWorldBibleForPrompt(
     })),
     everydayLife: {
       survival: worldBible.everydayLife.survival,
-      institutions: worldBible.everydayLife.institutions.slice(0, 5),
-      fears: worldBible.everydayLife.fears.slice(0, 4),
-      wants: worldBible.everydayLife.wants.slice(0, 4),
-      trade: worldBible.everydayLife.trade.slice(0, 5),
-      gossip: worldBible.everydayLife.gossip.slice(0, 4),
+      institutions:
+        scope === "world_spine" || scope === "entry_contexts"
+          ? worldBible.everydayLife.institutions
+          : worldBible.everydayLife.institutions.slice(0, 4),
+      fears:
+        scope === "world_spine" || scope === "entry_contexts"
+          ? worldBible.everydayLife.fears
+          : worldBible.everydayLife.fears.slice(0, 3),
+      wants:
+        scope === "world_spine" || scope === "entry_contexts"
+          ? worldBible.everydayLife.wants
+          : worldBible.everydayLife.wants.slice(0, 3),
+      trade:
+        scope === "world_spine" || scope === "economy_material_life"
+          ? worldBible.everydayLife.trade
+          : worldBible.everydayLife.trade.slice(0, 4),
+      gossip:
+        scope === "world_spine" || scope === "entry_contexts" || scope === "social_cast"
+          ? worldBible.everydayLife.gossip
+          : worldBible.everydayLife.gossip.slice(0, 3),
     },
   };
 }
@@ -1420,7 +1418,7 @@ function summarizeSocialGravityRefs(
 }
 
 const WORLD_GEN_PRINCIPLES = [
-  "You are a simulation-first worldbuilder designing a reusable solo RPG setting.",
+  "You are describing a lived-in place from the inside out for a solo player to navigate.",
   "Prioritize concrete survival, work, trade, territory, debt, weather, and social obligations over abstract lore.",
   "Prefer political, economic, environmental, and territorial pressure over cosmic destiny.",
   "When the setting includes unusual infrastructure, ecology, or magic, define the upkeep, intake, repair burden, and failure modes only insofar as they shape daily life.",
@@ -1428,7 +1426,7 @@ const WORLD_GEN_PRINCIPLES = [
   "Tie grand history, myth, and doctrine to present-day tolls, shortages, debts, hazards, monopolies, or chokepoints the player can actually touch.",
   "Give factions dependencies, internal strain, and vulnerabilities so no group feels perfectly unified or theatrically pure.",
   "Leave procedural gaps for play: mysteries should reveal the next clue, leverage point, or practical advantage, not a total authorial answer.",
-  "Be concise. Every sentence should imply at least one playable cost, risk, opportunity, contact, or obstacle.",
+  "Be concise but not bloodless. Favor vivid, specific detail as long as each sentence still implies a playable cost, risk, opportunity, contact, or obstacle.",
   "Preserve the prompt's distinctive nouns, imagery, and social texture instead of replacing them with generic genre substitutes.",
   "Reuse exact nouns or noun phrases from the prompt whenever possible instead of renaming the setting into a new generic brand.",
 ];
@@ -1480,29 +1478,159 @@ function buildWorldGenerationBasePrompt(input: {
     .join("\n\n");
 }
 
+async function critiqueWorldBibleWithModel(input: {
+  prompt: string;
+  worldBible: z.infer<typeof generatedWorldBibleSchema>;
+}): Promise<StageValidation> {
+  const fallbackWorldBibleCritique = (): StageValidation => {
+    const issues: string[] = [];
+    const correctionNotes: string[] = [];
+
+    const detailedBurdens = input.worldBible.widespreadBurdens.filter(
+      (entry) => entry.trim().split(/\s+/).filter(Boolean).length >= 6,
+    ).length;
+    if (detailedBurdens < 4) {
+      issues.push("Too many widespreadBurdens are still terse abstractions instead of world-spanning lived burdens.");
+      correctionNotes.push(
+        "Rewrite widespreadBurdens as concrete burdens tied to routes, offices, materials, climates, laws, or infrastructures that multiple regions actually feel.",
+      );
+    }
+
+    const socialDetails = input.worldBible.sharedRealities.filter(
+      (entry) => entry.trim().split(/\s+/).filter(Boolean).length >= 4,
+    ).length;
+    if (socialDetails < 2) {
+      issues.push("sharedRealities needs more cross-regional social or infrastructural texture.");
+      correctionNotes.push(
+        "Add more sharedRealities that show repeated public habits, worn systems, trade rituals, maintenance burdens, queues, or visible infrastructure people encounter across the world.",
+      );
+    }
+
+    const groundedGossip = input.worldBible.everydayLife.gossip.filter(
+      (entry) => entry.trim().split(/\s+/).filter(Boolean).length >= 6,
+    ).length;
+    if (groundedGossip < 2) {
+      issues.push("Gossip is too abstract to feel like resident talk.");
+      correctionNotes.push(
+        "Rewrite gossip so residents talk about a specific person, place, office, shipment, shrine, patrol, or embarrassment.",
+      );
+    }
+
+    const hasSpecificInstitutionName = input.worldBible.everydayLife.institutions.some(
+      (entry) => entry.trim().split(/\s+/).filter(Boolean).length >= 3,
+    );
+    if (!hasSpecificInstitutionName) {
+      issues.push("Institution naming is too generic to anchor the place socially.");
+      correctionNotes.push(
+        "Make at least one everydayLife institution a specific local organization, office, rite, or public system rather than a broad generic title.",
+      );
+    }
+
+    return {
+      category: "immersion",
+      issues,
+      correctionNotes,
+    };
+  };
+
+  const critiqueModel = env.openRouterPlannerModel.trim() || env.openRouterModel;
+  if (!critiqueModel) {
+    return fallbackWorldBibleCritique();
+  }
+
+  try {
+    const response = await runCompletion({
+      model: critiqueModel,
+      temperature: 0.1,
+      maxTokens: 1000,
+      system: [
+        "You are a strict structured critique pass for generated world-bible payloads.",
+        "Do not evaluate by overall vibe. Extract concrete signs of abstraction or generic sourcebook language.",
+        "Look for abstract nouns standing in for lived burdens, generic titles standing in for local institutions or powers, and explanation threads that feel mechanically manufactured rather than genuinely contested.",
+        "If the payload is already specific and grounded, return accept with empty arrays.",
+      ].join("\n"),
+      user: [
+        formatPromptBlock("original_prompt", input.prompt),
+        formatPromptBlock("world_bible", input.worldBible),
+        formatFinalInstruction([
+          "Extract abstract terms from widespreadBurdens or presentScars when they read like analytic labels rather than lived conditions.",
+          "Extract generic capitalized titles from presentScars or everydayLife.institutions when they read like placeholder powers rather than specific local institutions.",
+          "Flag explanationThreads only when they feel slot-filled or mechanically templated instead of arising from the world's own tensions, or when they seem invented solely to satisfy the schema.",
+          "Return revise only for clear material problems, and include targeted correctionNotes.",
+        ]),
+      ].join("\n\n"),
+      tools: [worldBibleCritiqueTool],
+    });
+
+    const parsed = worldBibleCritiqueSchema.safeParse(response?.input);
+    if (!parsed.success) {
+      return fallbackWorldBibleCritique();
+    }
+
+    if (parsed.data.verdict === "accept") {
+      return {
+        category: "immersion",
+        issues: [],
+      };
+    }
+
+    const extractedIssues = [
+      ...parsed.data.abstractTerms.map(
+        (entry) => `${entry.field} uses abstract term '${entry.term}'.`,
+      ),
+      ...parsed.data.genericTitles.map(
+        (entry) => `${entry.field} uses generic title '${entry.title}'.`,
+      ),
+      ...parsed.data.fieldIssues.map(
+        (entry) => `${entry.field}: ${entry.issue} (${entry.offendingText})`,
+      ),
+    ];
+
+    return {
+      category: "immersion",
+      issues: extractedIssues,
+      correctionNotes: parsed.data.correctionNotes,
+    };
+  } catch (error) {
+    logOpenRouterResponse("world_bible.critique_error", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+
+    return fallbackWorldBibleCritique();
+  }
+}
+
 function buildWorldBibleOutputBudget(minimumExplanationThreads: number) {
   return {
     title: "2 to 5 words",
     premise: "1 to 2 short sentences",
-    tone: "2 to 5 words",
-    setting: "3 to 8 words",
-    worldOverview: "3 to 4 short sentences max",
-    systemicPressures: "at least 5 short phrases; add more only if each adds a distinct pressure",
-    historicalFractures: "at least 5 short phrases; add more only if each adds a distinct fracture",
-    immersionAnchors: "at least 6 short sensory anchors; avoid filler",
+    tone: "2 to 4 words used only as a UI-facing shorthand; avoid genre labels",
+    setting: "3 to 10 words of geographic, material, or civilizational shorthand",
+    groundLevelReality:
+      "3 to 5 short sentences proving the world's scale from below through routes, labor, infrastructure, trade, weather, or ritual as residents and travelers experience them",
+    widespreadBurdens:
+      "7 to 10 short sentences; each should name a burden, chokepoint, or dependency that spans multiple regions, routes, cultures, or institutions and show who pays the cost now",
+    presentScars:
+      "7 to 10 short sentences; each should name an old rupture and the visible present scar it left behind across more than one place, route, or culture",
+    sharedRealities:
+      "6 to 8 short anchors; recurring social, infrastructural, monetary, ritual, or material realities people encounter across different regions or communities",
     explanationThreads: {
-      count: `at least ${minimumExplanationThreads}; add more only if the setting genuinely needs them`,
+      count:
+        minimumExplanationThreads > 0
+          ? `at least ${minimumExplanationThreads}; add more only if the setting genuinely needs them`
+          : "0 or more; include them only when the setting genuinely contains phenomena people do not agree about",
       phenomenon: "2 to 6 words",
-      prevailingTheories: "2 short sentences or clauses per thread",
+      prevailingTheories: "2 to 3 short clauses per thread",
       actionableSecret: "1 to 2 short sentences",
     },
     everydayLife: {
       survival: "1 to 2 short sentences",
-      institutions: "at least 4 items, each 2 to 5 words",
-      fears: "at least 3 items, each 2 to 5 words",
-      wants: "at least 3 items, each 2 to 5 words",
-      trade: "at least 3 items, each 2 to 5 words",
-      gossip: "at least 3 items, each 4 to 10 words",
+      institutions:
+        "at least 4 specific local organizations, offices, rituals, or public systems; 2 to 8 words each",
+      fears: "at least 3 concrete routine dangers or anxieties; 2 to 6 words each",
+      wants: "at least 3 concrete wants, comforts, or leverage points; 2 to 6 words each",
+      trade: "at least 3 concrete goods, services, or chokepoints people depend on; 2 to 8 words each",
+      gossip: "at least 3 short sentences; each should name or imply a person, place, or institution",
     },
   };
 }
@@ -1769,7 +1897,7 @@ async function runStructuredStage<T>({
   attempts: OpenWorldGenerationArtifacts["attempts"];
   validationReports: OpenWorldGenerationArtifacts["validationReports"];
   stageSummaries: OpenWorldGenerationArtifacts["stageSummaries"];
-  validate?: (parsed: T) => StageValidation[];
+  validate?: (parsed: T) => StageValidation[] | Promise<StageValidation[]>;
   summarize?: (parsed: T) => string;
   normalizeInput?: (input: unknown) => unknown;
 }): Promise<T> {
@@ -1815,7 +1943,7 @@ async function runStructuredStage<T>({
         "If the stage uses keys, keep every key under 40 characters.",
         ...(stage === "world_bible"
           ? [
-              "For world_bible, meet the schema minimums, keep list items short, and keep prose fields within the stated output budget.",
+              "For world_bible, meet the schema minimums, keep fields concise and specific, and stay within the stated output budget.",
             ]
           : []),
         ...(stage === "knowledge_web"
@@ -1885,7 +2013,7 @@ async function runStructuredStage<T>({
       continue;
     }
 
-    const validations = validate ? validate(parsed.data) : [];
+    const validations = validate ? await validate(parsed.data) : [];
     let failedValidation: StageValidation | null = null;
 
     for (const validation of validations) {
@@ -1917,9 +2045,9 @@ async function runStructuredStage<T>({
         );
       }
 
-      correctionNotes = [
-        formatCorrectionNotes(stage, failedValidation.category, failedValidation.issues),
-      ].join("\n");
+      correctionNotes = failedValidation.correctionNotes?.length
+        ? failedValidation.correctionNotes.join("\n")
+        : formatCorrectionNotes(stage, failedValidation.category, failedValidation.issues);
       continue;
     }
 
@@ -2016,17 +2144,79 @@ const characterTool = {
 
 const worldBibleTool = createStructuredTool(
   "generate_world_bible",
-  "Generate the world bible for a living, open-world solo campaign module.",
+  "Define the wide but lived-in reality for an open-world solo campaign setting.",
   generatedWorldBibleSchema,
 );
+
+const worldBibleCritiqueFieldSchema = z.enum([
+  "groundLevelReality",
+  "widespreadBurdens",
+  "presentScars",
+  "sharedRealities",
+  "explanationThreads",
+  "everydayLife.institutions",
+  "everydayLife.gossip",
+]);
+
+const worldBibleCritiqueSchema = z.object({
+  verdict: z.enum(["accept", "revise"]),
+  abstractTerms: z
+    .array(
+      z.object({
+        field: worldBibleCritiqueFieldSchema,
+        term: z.string().trim().min(1),
+      }),
+    )
+    .max(12),
+  genericTitles: z
+    .array(
+      z.object({
+        field: worldBibleCritiqueFieldSchema,
+        title: z.string().trim().min(1),
+      }),
+    )
+    .max(12),
+  fieldIssues: z
+    .array(
+      z.object({
+        field: worldBibleCritiqueFieldSchema,
+        issue: z.string().trim().min(1),
+        offendingText: z.string().trim().min(1),
+      }),
+    )
+    .max(8),
+  correctionNotes: z.array(z.string().trim().min(1)).max(6),
+});
 
 const worldSpineFactionsSchema = z.object({
   factions: generatedWorldSpineSchema.shape.factions,
 });
 
 const worldSpineLocationPlanSchema = z.object({
-  locationCount: z.union([z.literal(9), z.literal(12), z.literal(15)]),
+  locationCount: z.union([z.literal(9), z.literal(12), z.literal(15), z.literal(18)]),
 });
+
+function normalizeWorldSpineLocationPlanInput(input: unknown) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return input;
+  }
+
+  const candidate = input as Record<string, unknown>;
+  const rawLocationCount = candidate.locationCount;
+  if (typeof rawLocationCount !== "string") {
+    return input;
+  }
+
+  const trimmed = rawLocationCount.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return input;
+  }
+
+  return {
+    ...candidate,
+    locationCount: Number(trimmed),
+  };
+}
 
 const worldSpineLocationsSchema = z.object({
   locations: generatedWorldSpineSchema.shape.locations,
@@ -2053,7 +2243,7 @@ const worldSpineFactionsTool = createStructuredTool(
 
 const worldSpineLocationPlanTool = createStructuredTool(
   "generate_world_spine_location_plan",
-  "Choose how many world spine locations to generate. Must be 9, 12, or 15.",
+  `Choose how many world spine locations to generate. Must be one of ${WORLD_SPINE_LOCATION_CHOICES_TEXT}.`,
   worldSpineLocationPlanSchema,
 );
 
@@ -2079,6 +2269,12 @@ const worldSpineRelationsTool = createStructuredTool(
   "generate_world_spine_relations",
   "Generate faction relations for the world spine using known faction keys.",
   worldSpineRelationsOnlySchema,
+);
+
+const worldBibleCritiqueTool = createStructuredTool(
+  "critique_world_bible",
+  "Critique whether a generated world bible feels like a lived-in place instead of a generic campaign setting.",
+  worldBibleCritiqueSchema,
 );
 
 const regionalLifeTool = createStructuredTool(
@@ -4577,7 +4773,6 @@ class DungeonMasterClient {
       const attempts: OpenWorldGenerationArtifacts["attempts"] = [];
       const validationReports: OpenWorldGenerationArtifacts["validationReports"] = [];
       const stageSummaries: OpenWorldGenerationArtifacts["stageSummaries"] = {};
-      const worldPromptProfile = inferWorldPromptProfile(input.prompt);
       const notifyProgress = (update: WorldGenerationProgressUpdate) => {
         logWorldGenerationProgress(update);
         input.onProgress?.(update);
@@ -4591,23 +4786,28 @@ class DungeonMasterClient {
       const worldBible = await runStructuredStage({
         stage: "world_bible",
         system: buildWorldGenSystemPrompt([
-          "Generate a foundational world bible for an open-world solo campaign module.",
-          `Cover the required pressures, fractures, anchors, and explanation threads, but add more only when each addition introduces genuinely new texture, conflict, or contradiction.`,
-          "Systemic pressures must affect mundane survival, travel, work, shelter, communication, maintenance, law, debt, or access.",
+          "Define the physical, economic, and social reality of an entire world that a solo player can eventually travel across.",
+          "Do not write a textbook overview. Prove the world's scale through the shared infrastructures, trade routes, burdens, climate pressures, ritual systems, and visible scars that connect distant regions.",
+          `Cover the required burdens, scars, shared realities, and competing explanations, but add more only when each addition introduces genuinely new texture, conflict, contradiction, or scale.`,
+          "widespreadBurdens must affect mundane survival, travel, work, shelter, communication, maintenance, law, debt, or access across multiple regions, routes, cultures, or institutions.",
+          "Express widespreadBurdens from the ground up: name the chokepoint, who controls or suffers it, and what the practical consequence is now.",
           "If the prompt implies unusual habitats, vehicles, climate, industry, or magic, show what keeps them running and what residents fear will fail first.",
-          "Historical fractures should be political, technological, territorial, or resource-driven.",
-          "Historical fractures should cash out into current shortages, tolls, feuds, damaged infrastructure, legal burdens, or dangerous routes people deal with today.",
-          "Use the explanationThreads field for competing explanations, beliefs, doctrines, rumors, theories, or myths as appropriate to the prompt.",
-          worldPromptProfile.explanationStyle === "folkloric"
-            ? "Let explanationThreads lean folkloric or religious when the prompt clearly invites that, but keep each one tied to lived institutions, places, or risks."
-            : worldPromptProfile.explanationStyle === "speculative"
-              ? "If the setting leans speculative or technological, let explanationThreads hold rival theories, doctrines, or official explanations instead of forcing folklore."
-              : "If the setting leans practical or political, let explanationThreads hold rival beliefs, rumors, doctrines, or institutional explanations instead of forcing mythic lore.",
+          "presentScars should be political, technological, territorial, or resource-driven ruptures that still leave visible scars in the present.",
+          "Express presentScars as old breaks that still leave shortages, tolls, feuds, damaged infrastructure, legal burdens, dangerous routes, or haunted habits people deal with today across more than one place.",
+          "Use sharedRealities for recurring social, sensory, and infrastructural details people notice in different parts of the world; at least two should describe public habits, worn systems, shared monetary or ritual patterns, or visible civic scars rather than pure atmosphere.",
+          "Use explanationThreads for competing explanations, beliefs, doctrines, rumors, theories, or myths as appropriate to the prompt.",
+          "Let explanationThreads adopt the prompt's own vocabulary, institutions, and technological register; do not force folkloric, mythic, or speculative scaffolding that the prompt did not ask for.",
+          "When a phenomenon genuinely attracts multiple explanations, let them feel in tension with one another rather than like a tidy explanatory template.",
+          "If the setting is primarily mundane political, economic, territorial, or survival pressure without unresolved contested phenomena, explanationThreads may be empty.",
           "Each explanationThreads entry should name a phenomenon, show several prevailing theories, and point to an actionable secret.",
           "An actionable secret should open a next investigation step, bargaining edge, route, cache, ledger, witness, or practical advantage instead of fully solving the setting's deepest mystery.",
           "Everyday life must explain how ordinary people get food, water, safety, and social protection.",
-          "Keep list fields terse, but allow worldOverview, survival, and actionableSecret enough room to feel evocative within the stated output budget.",
+          "Gossip should sound like something residents might actually repeat about a person, place, office, shipment, shrine, patrol, or public embarrassment.",
+          "groundLevelReality should describe how the world feels from below while still making its size legible through repeated systems, distances, and dependencies.",
+          "Keep list fields terse, but allow groundLevelReality, survival, and actionableSecret enough room to feel evocative within the stated output budget.",
           "Avoid decorative filler; spend prose budget on usable atmosphere and concrete pressure.",
+          "setting may be brief geographic or material shorthand if it helps orient downstream stages.",
+          "tone is optional UI-facing shorthand and should never be a generic genre label like grimdark fantasy, cyberpunk dystopia, or epic adventure.",
           "Do not genericize the setting title, premise nouns, or signature images from the prompt.",
           "If the prompt does not name the world explicitly, derive an understated title from prompt language rather than inventing melodramatic branding.",
         ]),
@@ -4620,13 +4820,14 @@ class DungeonMasterClient {
             }),
             formatPromptBlock(
               "output_budget",
-              buildWorldBibleOutputBudget(worldPromptProfile.minimumExplanationThreads),
+              buildWorldBibleOutputBudget(WORLD_BIBLE_MIN_EXPLANATION_THREADS),
             ),
             formatFinalInstruction([
-              "Return the world bible only.",
-              `Meet the schema minimums for systemicPressures, historicalFractures, immersionAnchors, explanationThreads, institutions, fears, wants, trade, and gossip.`,
-              "Add more items only when they introduce genuinely new texture, pressure, or contradiction.",
-              "Keep list items as short phrases, but let worldOverview, survival, and actionableSecret use brief evocative prose within the output budget.",
+              "Return the whole-world lived reality payload only.",
+              `Meet the schema minimums for widespreadBurdens, presentScars, sharedRealities, institutions, fears, wants, trade, and gossip.`,
+              "ExplanationThreads may be empty when the setting does not center on unresolved contested phenomena.",
+              "Add more items only when they introduce genuinely new texture, pressure, contradiction, or local specificity.",
+              "Keep list fields concise and specific, but let groundLevelReality, survival, gossip, widespreadBurdens, presentScars, and actionableSecret use brief evocative prose within the output budget.",
               "Do not generate locations, NPCs, commodities, or entry points yet.",
             ]),
           ].join("\n\n"),
@@ -4635,16 +4836,20 @@ class DungeonMasterClient {
         attempts,
         validationReports,
         stageSummaries,
-        validate: (parsed) => [
+        validate: async (parsed) => [
           {
             category: "immersion",
             issues: validateWorldBible(parsed, {
-              minimumExplanationThreads: worldPromptProfile.minimumExplanationThreads,
+              minimumExplanationThreads: WORLD_BIBLE_MIN_EXPLANATION_THREADS,
             }).issues,
           },
+          await critiqueWorldBibleWithModel({
+            prompt: input.prompt,
+            worldBible: parsed,
+          }),
         ],
         summarize: (parsed) =>
-          `${parsed.title}: ${parsed.systemicPressures.length} systemic pressures, ${parsed.explanationThreads.length} explanation threads.`,
+          `${parsed.title}: ${parsed.widespreadBurdens.length} widespread burdens, ${parsed.explanationThreads.length} explanation threads.`,
       });
       notifyProgress({
         stage: "world_bible",
@@ -4652,7 +4857,13 @@ class DungeonMasterClient {
         message: stageSummaries.world_bible,
       });
 
-      const worldPromptContext = summarizeWorldBibleForPrompt(worldBible, worldPromptProfile);
+      const worldSpineWorldContext = summarizeWorldBibleForPrompt(worldBible, "world_spine");
+      const regionalLifeWorldContext = summarizeWorldBibleForPrompt(worldBible, "regional_life");
+      const socialCastWorldContext = summarizeWorldBibleForPrompt(worldBible, "social_cast");
+      const knowledgeWebWorldContext = summarizeWorldBibleForPrompt(worldBible, "knowledge_web");
+      const knowledgeThreadsWorldContext = summarizeWorldBibleForPrompt(worldBible, "knowledge_threads");
+      const economyWorldContext = summarizeWorldBibleForPrompt(worldBible, "economy_material_life");
+      const entryWorldContext = summarizeWorldBibleForPrompt(worldBible, "entry_contexts");
 
       notifyProgress({
         stage: "world_spine",
@@ -4669,8 +4880,8 @@ class DungeonMasterClient {
           "Favor territorial, commercial, legal, religious, labor, corporate, civic, military, or salvage conflicts over destiny framing.",
           "Use concise lowercase underscore keys because the engine will assign canonical ids later.",
           "Every generated key must be 40 characters or fewer.",
-          "Keep the world compact: 5 to 12 factions.",
-          "At least half the factions should be civic, labor, commercial, military, or religious institutions that ordinary residents regularly deal with.",
+          "Use as many factions as the setting genuinely needs within the allowed schema bounds rather than forcing minimal coverage.",
+          "A strong mix of factions should be civic, labor, commercial, military, or religious institutions that ordinary residents regularly deal with.",
           "Reuse and sharpen the prompt's specific nouns instead of replacing them with generic organizations.",
         ]),
         buildUser: (correctionNotes) =>
@@ -4680,7 +4891,7 @@ class DungeonMasterClient {
               previousDraft: input.previousDraft,
               correctionNotes,
             }),
-            formatPromptBlock("world_context", worldPromptContext),
+            formatPromptBlock("world_context", worldSpineWorldContext),
             formatFinalInstruction("Generate only factions for this world spine."),
           ].join("\n\n"),
         schema: worldSpineFactionsSchema,
@@ -4703,9 +4914,9 @@ class DungeonMasterClient {
         stage: "world_spine",
         system: buildWorldGenSystemPrompt([
           "Choose how many total locations the world spine should have.",
-          "Return only a locationCount value of 9, 12, or 15.",
-          "Pick the smallest count that still gives the setting enough room for distinct work sites, civic hubs, chokepoints, and hazards.",
-          "Favor compactness unless the prompt clearly needs more distinct places.",
+          `Return only a locationCount value of ${WORLD_SPINE_LOCATION_CHOICES_TEXT}.`,
+          "Choose the count that gives the setting enough room for distinct work sites, civic hubs, chokepoints, hazards, and memorable traversal texture.",
+          "Prefer 12, 15, or 18 when the prompt supports multiple districts, frontiers, industrial systems, sacred sites, or competing power centers rather than collapsing them together.",
         ]),
         buildUser: (correctionNotes) =>
           [
@@ -4714,7 +4925,7 @@ class DungeonMasterClient {
               previousDraft: input.previousDraft,
               correctionNotes,
             }),
-            formatPromptBlock("world_context", worldPromptContext),
+            formatPromptBlock("world_context", worldSpineWorldContext),
             formatPromptBlock(
               "locked_factions",
               summarizeFactionRefs(
@@ -4727,13 +4938,14 @@ class DungeonMasterClient {
                 })),
               ),
             ),
-            formatFinalInstruction("Return only locationCount: 9, 12, or 15."),
+            formatFinalInstruction(`Return only locationCount: ${WORLD_SPINE_LOCATION_CHOICES_TEXT}.`),
           ].join("\n\n"),
         schema: worldSpineLocationPlanSchema,
         tool: worldSpineLocationPlanTool,
         attempts,
         validationReports,
         stageSummaries,
+        normalizeInput: normalizeWorldSpineLocationPlanInput,
         summarize: (parsed) => `${parsed.locationCount} planned world spine locations.`,
       });
 
@@ -4783,7 +4995,7 @@ class DungeonMasterClient {
             "The rest should lean toward dangerous routes, sacred sites, remote hazards, vaults, monster territory, extraction zones, or other special-purpose places people approach for a reason rather than daily routine.",
             "Do not make every location a work site, civic hub, chokepoint, or settlement.",
             "Preserve the prompt's specific imagery and avoid generic city, ruin, or temple reskins.",
-            "Keep descriptions short so the full structured payload fits in one response.",
+            "Keep descriptions concise enough for structured output, but leave room for a distinctive sensory or systemic detail when it makes the location more memorable.",
           ]),
           buildUser: (correctionNotes) =>
             [
@@ -4792,7 +5004,7 @@ class DungeonMasterClient {
                 previousDraft: input.previousDraft,
                 correctionNotes,
               }),
-              formatPromptBlock("world_context", worldPromptContext),
+              formatPromptBlock("world_context", worldSpineWorldContext),
               formatPromptBlock(
                 "locked_factions",
                 summarizeFactionRefs(
@@ -4914,7 +5126,7 @@ class DungeonMasterClient {
           "Indirect reachability is enough: locations can connect through intermediate routes, and hidden or remote places do not need direct links to every major hub.",
           "Every edge must include a physical travel constraint, danger, patrol, toll, weather issue, supply bottleneck, maintenance problem, or territorial pressure.",
           "Use only the provided location keys.",
-          "Use concise lowercase underscore keys and keep the network compact enough for a small open world.",
+          "Use concise lowercase underscore keys and keep the network legible enough for a playable open world.",
           "Always use very short edge keys such as route_1, route_2, route_3; do not build keys from full location names.",
           "Every generated key must be 40 characters or fewer. Abbreviate if necessary.",
           "Keep edge descriptions to one tight sentence each.",
@@ -4927,7 +5139,7 @@ class DungeonMasterClient {
               previousDraft: input.previousDraft,
               correctionNotes,
             }),
-            formatPromptBlock("world_context", worldPromptContext),
+            formatPromptBlock("world_context", worldSpineWorldContext),
             formatPromptBlock(
               "locked_locations",
               summarizeLocationRefs(
@@ -5013,9 +5225,9 @@ class DungeonMasterClient {
         summarize: (parsed) => `${parsed.edges.length} travel routes.`,
       });
 
-      const maxWorldSpineRelations = 24;
+      const maxWorldSpineRelations = WORLD_SPINE_MAX_RELATIONS;
       const targetWorldSpineRelations = Math.min(
-        20,
+        24,
         Math.max(10, worldSpineFactions.factions.length * 2),
       );
 
@@ -5039,7 +5251,7 @@ class DungeonMasterClient {
               previousDraft: input.previousDraft,
               correctionNotes,
             }),
-            formatPromptBlock("world_context", worldPromptContext),
+            formatPromptBlock("world_context", worldSpineWorldContext),
             formatPromptBlock(
               "locked_factions",
               summarizeFactionRefs(
@@ -5053,7 +5265,7 @@ class DungeonMasterClient {
               ),
             ),
             formatFinalInstruction(
-              `Generate only the most important faction relations using the provided faction keys. Aim for roughly ${targetWorldSpineRelations} if the setting supports it, but prefer fewer over padding and do not generate a full pair-by-pair matrix.`,
+              `Generate only the most important faction relations using the provided faction keys. Aim for roughly ${targetWorldSpineRelations} if the setting supports it, but prioritize distinct and consequential relations over hitting a number exactly, and do not generate a full pair-by-pair matrix.`,
             ),
           ].join("\n\n"),
         schema: worldSpineRelationsOnlySchema,
@@ -5176,7 +5388,7 @@ class DungeonMasterClient {
                 previousDraft: input.previousDraft,
                 correctionNotes,
               }),
-              formatPromptBlock("world_context", worldPromptContext),
+              formatPromptBlock("world_context", regionalLifeWorldContext),
               formatPromptBlock(
                 "locked_locations_batch",
                 summarizeLocationRefs(locationBatch, { includeKey: false }),
@@ -5298,7 +5510,7 @@ class DungeonMasterClient {
                 previousDraft: input.previousDraft,
                 correctionNotes,
               }),
-              formatPromptBlock("world_context", worldPromptContext),
+              formatPromptBlock("world_context", socialCastWorldContext),
               formatPromptBlock(
                 "locked_locations_batch",
                 summarizeLocationRefs(locationBatch, { includeKey: false }),
@@ -5474,7 +5686,10 @@ class DungeonMasterClient {
         currentLocationId: npc.currentLocationId,
         factionId: npc.factionId,
       }));
-      const targetInformationNodeCount = Math.min(lockedLocations.length + 3, 18);
+      const targetInformationNodeCount = Math.min(
+        lockedLocations.length + 4,
+        WORLD_GEN_MAX_INFORMATION_NODES,
+      );
       const initiallyAnchoredFactionIds = new Set<string>([
         ...worldSpine.locations
           .map((location) =>
@@ -5506,8 +5721,8 @@ class DungeonMasterClient {
           "Keep every field concise: title, summary, content, actionLead, and discoverHow should all be short phrases or one tight sentence at most.",
           "Return at least one actionable information node for each locked location.",
           "Some locations may surface public leads while others rely on guarded leads; choose what fits the place instead of forcing the same access level everywhere.",
-          "Keep the network compact: cover every location, build a genuinely connected web, and stay under 18 information nodes and 24 information links.",
-          "Prefer one information node per location unless an extra node adds clear value.",
+          `Keep the network legible: cover every location, build a genuinely connected web, and stay within schema limits of ${WORLD_GEN_MAX_INFORMATION_NODES} information nodes and ${WORLD_GEN_MAX_INFORMATION_LINKS} information links.`,
+          "Prefer one information node per location unless an extra node adds real investigative or social texture.",
           "If any factions are listed as currently unanchored, use information nodes to give them a visible public role, dispute, permit system, repair burden, ritual presence, market function, or territorial pressure in the world.",
         ]),
         buildUser: (correctionNotes) =>
@@ -5517,7 +5732,7 @@ class DungeonMasterClient {
               previousDraft: input.previousDraft,
               correctionNotes,
             }),
-            formatPromptBlock("world_context", worldPromptContext),
+            formatPromptBlock("world_context", knowledgeWebWorldContext),
             formatPromptBlock(
               "locked_locations",
               summarizeLocationRefs(lockedLocations, { includeKey: false }),
@@ -5539,17 +5754,17 @@ class DungeonMasterClient {
             ...(correctionNotes
               ? [
                   formatPromptBlock("retry_budget", [
-                    "Return the minimum viable payload.",
+                    "Return the cleanest payload that fixes the cited issues without flattening the world's distinctive details.",
                     "Use exactly one information node per location unless a cited correction requires more.",
                     "Keep title, summary, content, actionLead, and discoverHow extremely short.",
-                    `Keep information links sparse and no higher than ${Math.min(lockedLocations.length + 2, 16)} total.`,
+                    `Keep information links sparse and no higher than ${Math.min(lockedLocations.length + 4, 20)} total.`,
                   ]),
                 ]
               : []),
             formatFinalInstruction([
               "Use only the provided ids for locations, factions, and NPCs.",
               "Use unique keys for information nodes and information links.",
-              `Give every location at least one actionable information node. Keep the total compact and no higher than ${targetInformationNodeCount} information nodes or 24 information links.`,
+              `Give every location at least one actionable information node. Keep the total compact and no higher than ${targetInformationNodeCount} information nodes or ${WORLD_GEN_MAX_INFORMATION_LINKS} information links.`,
               ...(unanchoredFactionsForKnowledge.length > 0
                 ? [
                     "At least one information node must use each currently_unanchored_factions factionId so every faction leaves a visible mark on the world.",
@@ -5711,8 +5926,8 @@ class DungeonMasterClient {
           "Keep it compact. Return only the major worldview clusters and the most actionable near-term pressures; do not pad.",
         ]),
         buildUser: (correctionNotes) => {
-          const { competingExplanations: _competingExplanations, ...knowledgeThreadsWorldContext } =
-            worldPromptContext;
+          const { competingExplanations: _competingExplanations, ...knowledgeThreadsPromptContext } =
+            knowledgeThreadsWorldContext;
 
           return [
             buildWorldGenerationBasePrompt({
@@ -5720,7 +5935,7 @@ class DungeonMasterClient {
               previousDraft: input.previousDraft,
               correctionNotes,
             }),
-            formatPromptBlock("world_context", knowledgeThreadsWorldContext),
+            formatPromptBlock("world_context", knowledgeThreadsPromptContext),
             formatPromptBlock(
               "locked_locations",
               summarizeLocationRefs(lockedLocations, { includeKey: false }),
@@ -5891,8 +6106,11 @@ class DungeonMasterClient {
         status: "running",
         message: getWorldGenerationStageRunningMessage("economy_material_life"),
       });
-      const targetCommodityCount = 6;
-      const targetMarketPriceCount = Math.min(8, lockedLocations.length);
+      const targetCommodityCount = Math.min(
+        WORLD_GEN_TARGET_COMMODITIES,
+        Math.max(6, Math.ceil(lockedLocations.length / 2)),
+      );
+      const targetMarketPriceCount = Math.min(WORLD_GEN_MAX_MARKET_PRICES, lockedLocations.length);
       const economyMaterialLifeInput = await runStructuredStage({
         stage: "economy_material_life",
         system: buildWorldGenSystemPrompt([
@@ -5913,7 +6131,7 @@ class DungeonMasterClient {
               previousDraft: input.previousDraft,
               correctionNotes,
             }),
-            formatPromptBlock("world_context", worldPromptContext),
+            formatPromptBlock("world_context", economyWorldContext),
             formatPromptBlock(
               "locked_locations",
               summarizeLocationRefs(lockedLocations, { includeKey: false }),
@@ -6081,7 +6299,7 @@ class DungeonMasterClient {
               previousDraft: input.previousDraft,
               correctionNotes,
             }),
-            formatPromptBlock("world_context", worldPromptContext),
+            formatPromptBlock("world_context", entryWorldContext),
             formatPromptBlock(
               "locked_locations",
               summarizeLocationRefs(lockedLocations, { includeKey: false }),
@@ -6364,8 +6582,8 @@ class DungeonMasterClient {
         input.artifacts
             ? {
               worldBible: {
-                worldOverview: input.artifacts.worldBible.worldOverview,
-                immersionAnchors: input.artifacts.worldBible.immersionAnchors,
+                groundLevelReality: input.artifacts.worldBible.groundLevelReality,
+                sharedRealities: input.artifacts.worldBible.sharedRealities,
                 competingExplanations: input.artifacts.worldBible.explanationThreads,
               },
               regionalLife: input.artifacts.regionalLife.locations.filter(
@@ -7268,4 +7486,5 @@ export const aiProviderTestUtils = {
   fallbackRouterDecision,
   parseFinalActionToolCall,
   selectPromptContextProfile,
+  summarizeWorldBibleForPrompt,
 };

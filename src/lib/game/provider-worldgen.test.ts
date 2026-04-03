@@ -171,3 +171,81 @@ test("buildCustomEntryIntentCorrectionNotes preserves prior correction notes and
   assert.match(correctionNotes, /Personal craft project first/);
   assert.match(correctionNotes, /Do not hinge the opening on a named NPC contact/);
 });
+
+test("summarizeWorldBibleForPrompt tiers world bible context by stage distance", () => {
+  const worldBible = {
+    title: "Beneath the Rain",
+    premise: "The rain never stops.",
+    tone: "Melancholic",
+    setting: "A drowned world",
+    groundLevelReality: "Arrival means wet rope, ration lines, and a harbor that never quite stops arguing with itself.",
+    widespreadBurdens: [
+      "Burden one.",
+      "Burden two.",
+      "Burden three.",
+      "Burden four.",
+      "Burden five.",
+      "Burden six.",
+      "Burden seven.",
+    ],
+    presentScars: [
+      "Scar one.",
+      "Scar two.",
+      "Scar three.",
+      "Scar four.",
+      "Scar five.",
+      "Scar six.",
+      "Scar seven.",
+    ],
+    sharedRealities: [
+      "Detail one.",
+      "Detail two.",
+      "Detail three.",
+      "Detail four.",
+      "Detail five.",
+      "Detail six.",
+    ],
+    explanationThreads: [
+      {
+        key: "exp_1",
+        phenomenon: "Phenomenon one",
+        prevailingTheories: ["Theory A", "Theory B"],
+        actionableSecret: "Secret one",
+      },
+      {
+        key: "exp_2",
+        phenomenon: "Phenomenon two",
+        prevailingTheories: ["Theory C", "Theory D"],
+        actionableSecret: "Secret two",
+      },
+      {
+        key: "exp_3",
+        phenomenon: "Phenomenon three",
+        prevailingTheories: ["Theory E", "Theory F"],
+        actionableSecret: "Secret three",
+      },
+    ],
+    everydayLife: {
+      survival: "Survival detail.",
+      institutions: ["Inst 1", "Inst 2", "Inst 3", "Inst 4", "Inst 5"],
+      fears: ["Fear 1", "Fear 2", "Fear 3", "Fear 4"],
+      wants: ["Want 1", "Want 2", "Want 3", "Want 4"],
+      trade: ["Trade 1", "Trade 2", "Trade 3", "Trade 4", "Trade 5"],
+      gossip: ["Gossip 1", "Gossip 2", "Gossip 3", "Gossip 4"],
+    },
+  };
+
+  const worldSpineContext = aiProviderTestUtils.summarizeWorldBibleForPrompt(worldBible, "world_spine");
+  const socialContext = aiProviderTestUtils.summarizeWorldBibleForPrompt(worldBible, "social_cast");
+
+  assert.equal(worldSpineContext.widespreadBurdens.length, 7);
+  assert.equal(worldSpineContext.presentScars.length, 2);
+  assert.equal(worldSpineContext.sharedRealities.length, 6);
+  assert.equal(worldSpineContext.competingExplanations.length, 0);
+
+  assert.equal(socialContext.widespreadBurdens.length, 4);
+  assert.equal(socialContext.presentScars.length, 0);
+  assert.equal(socialContext.sharedRealities.length, 4);
+  assert.equal(socialContext.competingExplanations.length, 0);
+  assert.equal(socialContext.everydayLife.gossip.length, 4);
+});

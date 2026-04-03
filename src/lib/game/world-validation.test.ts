@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { GeneratedKnowledgeEconomy, GeneratedWorldModule } from "./types";
+import type { GeneratedKnowledgeEconomy, GeneratedWorldBible, GeneratedWorldModule } from "./types";
 import {
   validateEntryContexts,
   validateFactionFootprints,
@@ -296,6 +296,87 @@ function createWorld(): GeneratedWorldModule {
   };
 }
 
+function createValidWorldBible(): GeneratedWorldBible {
+  return {
+    title: "Beneath the Rain",
+    premise: "The rain never stops, and every working pier hides a new dependency.",
+    tone: "Melancholic and pressured",
+    setting: "A drowned trade frontier",
+    groundLevelReality:
+      "People survive on floating settlements, inland levy roads, and far-traveled port chains held together by pumps, bells, ferries, and old debts. A traveler crossing the world learns quickly that every region pays for the same collapsing systems in a different currency. The rain, the tariffs, and the salvaged machines tie distant coasts together more tightly than any king does. Even the holiest routes smell of rust, wet rope, ration paper, and old quarrels.",
+    widespreadBurdens: [
+      "The Harbor Court rations dry berths each dawn, and late barges pay triple fees or sleep in storm water.",
+      "Bell Reef pilots control the safest channels, so villages without pilot scrip lose cargo to rocks, tolls, and delay.",
+      "Lamp oil imports arrive under guard, and whole neighborhoods spend nights in rationed dark when a convoy misses tide.",
+      "Every salvage crew owes a cut to the Tide Unions, so independent divers work with sabotaged winches or false charges.",
+      "Signal towers quarantine suspicious sails for days, and perishable cargo rots before the clerks finish their inspections.",
+      "Across the inland floodplains, bridge wardens collect emergency plank levies, and grain caravans choose between washed roads or private ferries with armed escorts.",
+      "Shrine ports on the outer islands demand tithe fuel for every beacon fire, so distant fishing towns trade winter stores just to keep their reefs visible.",
+    ],
+    presentScars: [
+      "The Deluge drowned the old causeways, and every rebuilt dock still rests on scavenged piles that groan in hard weather.",
+      "The Vault Wars emptied three harbor districts, and their sealed warehouses still anchor feuds over keys, salvage rights, and missing ledgers.",
+      "The Leviathan Treaties ended open naval war, but every customs jetty still keeps treaty guns pointed at the wrong islands.",
+      "The Harbor Schism split the signal clergy, and rival bell towers still issue contradictory storm calls during blackwater squalls.",
+      "The Lantern Famine killed winter trade for a generation, and families still hide private wick stores behind shrine walls and false floors.",
+      "The Salt March burned the inland reed cities, and cracked levy stones still force caravans to zigzag through disputed toll ground.",
+      "The Emperor's Drowning left half-finished storm canals across the southern coast, and every monsoon season turns them back into grave trenches and smuggler roads.",
+    ],
+    sharedRealities: [
+      "Tar-black rain capes hanging over public queues",
+      "Signal bells arguing across the shoals at dusk",
+      "The cracked municipal desalinator everyone walks past and nobody trusts",
+      "Hull chalk tally marks layered beside ration notices",
+      "Dock shrines wrapped in greasy lamp cloth",
+      "Winch crews shouting over rusted pulley teeth",
+    ],
+    explanationThreads: [
+      {
+        key: "myth_1",
+        phenomenon: "The unending rain",
+        prevailingTheories: [
+          "Signal clergy teach that the rain is a warning left for oath-breakers.",
+          "Dockworkers say the clouds follow broken harbor promises more than prayer.",
+          "A banned chart-room theory claims the storms answer old machinery below the shoals.",
+        ],
+        actionableSecret: "A retired bell-keeper knows which drowned relay station still changes the storm wall when its gears are fed current.",
+      },
+      {
+        key: "myth_2",
+        phenomenon: "The speaking shoals",
+        prevailingTheories: [
+          "Harbor courts call the voices wave echo and contraband superstition.",
+          "Pilot families insist the shoals repeat the names of ships that broke treaty waters.",
+          "Smugglers whisper that the voices are trapped crew memories leaking from sealed vault vents.",
+        ],
+        actionableSecret: "A customs diver recovered a speaking brass tube that matches markings on a forbidden shoal map kept in the archive loft.",
+      },
+      {
+        key: "myth_3",
+        phenomenon: "Blackwater lantern failures",
+        prevailingTheories: [
+          "Quartermasters blame spoiled oil and wet wick stock.",
+          "Shrine keepers say rival bells foul the light when storm rites are skipped.",
+          "A disgraced lampwright claims someone has been swapping condenser parts across the harbor.",
+        ],
+        actionableSecret: "Invoices from three lamp houses point to the same repair broker, who quietly stores stripped condenser cages under the flood stairs.",
+      },
+    ],
+    everydayLife: {
+      survival: "People queue before dawn for dry berth slips, filtered water, and whatever lamp oil has not already been promised upward.",
+      institutions: ["Harbor Court", "Tide Unions", "Signal Clergy", "Lamp House Wardens"],
+      fears: ["Hull breach", "Quota seizures", "False quarantine"],
+      wants: ["Dry storage", "Pilot favors", "Reliable lamp oil"],
+      trade: ["Kelp cloth", "Whale oil", "Pilot scrip", "Salvage permits"],
+      gossip: [
+        "Two dock workers swear the Quartermaster's scales came up light again on the east quay grain unload.",
+        "People say Sister Vale rang the storm bell early because a treaty cutter was hiding contraband under prayer cloth.",
+        "A pilot's boy claims someone has been repainting old vault markers near the shoal ladders after midnight.",
+      ],
+    },
+  };
+}
+
 test("world module coherence accepts a connected valid graph", () => {
   const report = validateWorldModuleCoherence(createWorld());
   assert.equal(report.ok, true);
@@ -370,109 +451,26 @@ test("world module playability rejects over-concentrated NPC placement", () => {
   assert.match(report.issues.join("\n"), /40%/);
 });
 
-test("world bible validation rejects too few competing explanation threads by default", () => {
-  const report = validateWorldBible({
-    title: "Beneath the Rain",
-    premise: "The rain never stops.",
-    tone: "Melancholic",
-    setting: "A drowned world",
-    worldOverview: "People survive on floating settlements.",
-    systemicPressures: [
-      "Rain is constant",
-      "The sea hides ruins",
-      "Salt rot eats iron",
-      "Storms erase charts",
-      "Boats are the only roads",
-    ],
-    historicalFractures: [
-      "The Deluge",
-      "The Vault Wars",
-      "The Leviathan Treaties",
-      "The Harbor Schism",
-      "The Lantern Famine",
-    ],
-    immersionAnchors: ["Tar", "Kelp wine", "Signal bells", "Dry masks", "Hull chalk", "Salt tea"],
-    explanationThreads: [
-      {
-        key: "myth_1",
-        phenomenon: "The unending rain.",
-        prevailingTheories: ["It is divine grief.", "It is punishment for old hubris."],
-        actionableSecret: "The rain carries a memory-bearing resonance tied to old vault machinery.",
-      },
-    ],
-    everydayLife: {
-      survival: "People barter for dry space and filtered water.",
-      institutions: ["Harbor courts", "Signal towers", "Tide unions", "Lamp guilds"],
-      fears: ["Hull breach", "Deep-song madness", "Ration riots"],
-      wants: ["Dry shelter", "Old world salvage", "Lamp oil"],
-      trade: ["Kelp cloth", "Whale oil", "Signal powder"],
-      gossip: [
-        "A vault door opened in the shoals",
-        "The rain spoke a name last week",
-        "Someone is faking signal bells",
-      ],
-    },
-  });
+test("world bible validation allows zero explanation threads by default", () => {
+  const worldBible = createValidWorldBible();
+  worldBible.explanationThreads = [];
+  const report = validateWorldBible(worldBible);
 
-  assert.equal(report.ok, false);
-  assert.match(report.issues.join("\n"), /at least 2 competing explanation threads/);
+  assert.equal(report.ok, true);
+  assert.deepEqual(report.issues, []);
 });
 
-test("world bible validation can require denser competing explanations for myth-heavy prompts", () => {
+test("world bible validation can still require explanation threads when explicitly requested", () => {
   const report = validateWorldBible(
     {
-      title: "Beneath the Rain",
-      premise: "The rain never stops.",
-      tone: "Melancholic",
-      setting: "A drowned world",
-      worldOverview: "People survive on floating settlements.",
-      systemicPressures: [
-        "Rain is constant",
-        "The sea hides ruins",
-        "Salt rot eats iron",
-        "Signal fires fail in storms",
-        "Boats are the only roads",
-      ],
-      historicalFractures: [
-        "The Deluge",
-        "The Vault Wars",
-        "The Leviathan Treaties",
-        "The Harbor Schism",
-        "The Lantern Famine",
-      ],
-      immersionAnchors: ["Tar", "Kelp wine", "Signal bells", "Dry masks", "Rust prayer", "Hull charms"],
-      explanationThreads: [
-        {
-          key: "myth_1",
-          phenomenon: "The unending rain.",
-          prevailingTheories: ["It is divine grief.", "It is sacred punishment."],
-          actionableSecret: "The rain carries a memory-bearing resonance tied to old vault machinery.",
-        },
-        {
-          key: "myth_2",
-          phenomenon: "The unending rain.",
-          prevailingTheories: ["A buried machine is failing.", "Ancient regulators still drive the storms."],
-          actionableSecret: "Ancient vault engines still shape the weather from below the flooded coast.",
-        },
-      ],
-      everydayLife: {
-        survival: "People barter for dry space and filtered water.",
-        institutions: ["Harbor courts", "Signal towers", "Tide unions", "Lamp guilds"],
-        fears: ["Hull breach", "Deep-song madness", "Ration riots"],
-        wants: ["Dry shelter", "Old world salvage", "Lamp oil"],
-        trade: ["Kelp cloth", "Whale oil", "Signal powder"],
-        gossip: [
-          "A vault door opened in the shoals",
-          "The rain spoke a name last week",
-          "Someone is faking signal bells",
-        ],
-      },
+      ...createValidWorldBible(),
+      explanationThreads: [],
     },
-    { minimumExplanationThreads: 4 },
+    { minimumExplanationThreads: 2 },
   );
 
   assert.equal(report.ok, false);
-  assert.match(report.issues.join("\n"), /at least 4 competing explanation threads/);
+  assert.match(report.issues.join("\n"), /at least 2 competing explanation threads/);
 });
 
 test("world spine validation rejects disconnected geography", () => {

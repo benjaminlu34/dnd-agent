@@ -313,6 +313,8 @@ export function AdventureApp({
     [snapshot],
   );
   const locationLeads = snapshot?.locationLeads ?? [];
+  const isRouteTraversable = (route: NonNullable<PlayerCampaignSnapshot["adjacentRoutes"]>[number]) =>
+    route.currentStatus === "open" && !route.accessRequirementText?.trim();
   const chapterTitle = snapshot?.currentLocation?.name
     ?? (activeJourney ? `On the Road to ${activeJourney.destinationLocationName}` : "Between Places");
   const chapterSummary = snapshot?.currentLocation?.summary
@@ -1261,7 +1263,7 @@ export function AdventureApp({
                           <div className="mt-3 space-y-3">
                             {primaryRoutes.length ? (
                               primaryRoutes.map((route) => {
-                                const routeIsOpen = route.currentStatus === "open";
+                                const routeIsOpen = isRouteTraversable(route);
                                 const actionLabel = routeIsOpen ? "Set Out" : "Address Obstruction";
                                 return (
                                   <div key={route.id} className="rounded-3xl border border-zinc-800 bg-zinc-950/70 p-4">
@@ -1322,7 +1324,7 @@ export function AdventureApp({
                           <div className="mt-3 space-y-3">
                             {localPointOfInterestRoutes.length ? (
                               localPointOfInterestRoutes.map((route) => {
-                                const routeIsOpen = route.currentStatus === "open";
+                                const routeIsOpen = isRouteTraversable(route);
                                 return (
                                   <div key={route.id} className="rounded-3xl border border-zinc-800 bg-zinc-950/70 p-4">
                                     <h3 className="font-serif text-lg font-semibold text-zinc-100">

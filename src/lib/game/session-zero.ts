@@ -519,17 +519,53 @@ const explanationThreadSchema = z.object({
   actionableSecret: z.string().trim().min(1),
 });
 
-export const generatedWorldBibleSchema = z
+function normalizeGeneratedWorldBibleInput(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return value;
+  }
+
+  const draft = { ...(value as Record<string, unknown>) };
+
+  if (draft.groundLevelReality == null && typeof draft.worldOverview === "string") {
+    draft.groundLevelReality = draft.worldOverview;
+  }
+  if (!Array.isArray(draft.widespreadBurdens)) {
+    if (Array.isArray(draft.currentBurdens)) {
+      draft.widespreadBurdens = draft.currentBurdens;
+    } else if (Array.isArray(draft.systemicPressures)) {
+      draft.widespreadBurdens = draft.systemicPressures;
+    }
+  }
+  if (!Array.isArray(draft.presentScars) && Array.isArray(draft.historicalFractures)) {
+    draft.presentScars = draft.historicalFractures;
+  }
+  if (!Array.isArray(draft.sharedRealities)) {
+    if (Array.isArray(draft.dailyDetails)) {
+      draft.sharedRealities = draft.dailyDetails;
+    } else if (Array.isArray(draft.immersionAnchors)) {
+      draft.sharedRealities = draft.immersionAnchors;
+    }
+  }
+
+  return draft;
+}
+
+const WORLD_SPINE_MAX_LOCATIONS = 18;
+const WORLD_SPINE_MAX_EDGES = 42;
+const WORLD_SPINE_MAX_FACTIONS = 14;
+const WORLD_SPINE_MAX_RELATIONS = 28;
+
+const generatedWorldBibleSchemaBase = z
   .object({
     title: z.string().trim().min(1),
     premise: z.string().trim().min(1),
     tone: z.string().trim().min(1),
     setting: z.string().trim().min(1),
-    worldOverview: z.string().trim().min(1),
-    systemicPressures: z.array(z.string().trim().min(1)).min(5),
-    historicalFractures: z.array(z.string().trim().min(1)).min(5),
-    immersionAnchors: z.array(z.string().trim().min(1)).min(6),
-    explanationThreads: z.array(explanationThreadSchema).min(2),
+    groundLevelReality: z.string().trim().min(1),
+    widespreadBurdens: z.array(z.string().trim().min(1)).min(7),
+    presentScars: z.array(z.string().trim().min(1)).min(7),
+    sharedRealities: z.array(z.string().trim().min(1)).min(6),
+    explanationThreads: z.array(explanationThreadSchema).default([]),
     everydayLife: z.object({
       survival: z.string().trim().min(1),
       institutions: z.array(z.string().trim().min(1)).min(4),
@@ -547,6 +583,11 @@ export const generatedWorldBibleSchema = z
       "Explanation thread keys must be unique.",
     );
   });
+
+export const generatedWorldBibleSchema = z.preprocess(
+  normalizeGeneratedWorldBibleInput,
+  generatedWorldBibleSchemaBase,
+);
 
 const worldSpineKeySchema = z
   .string()
@@ -599,10 +640,10 @@ const worldSpineRelationSchema = z.object({
 
 export const generatedWorldSpineSchema = z
   .object({
-    locations: z.array(worldSpineLocationSchema).min(8).max(15),
-    edges: z.array(worldSpineEdgeSchema).min(7).max(36),
-    factions: z.array(worldSpineFactionSchema).min(5).max(12),
-    factionRelations: z.array(worldSpineRelationSchema).min(1).max(24),
+    locations: z.array(worldSpineLocationSchema).min(8).max(WORLD_SPINE_MAX_LOCATIONS),
+    edges: z.array(worldSpineEdgeSchema).min(7).max(WORLD_SPINE_MAX_EDGES),
+    factions: z.array(worldSpineFactionSchema).min(5).max(WORLD_SPINE_MAX_FACTIONS),
+    factionRelations: z.array(worldSpineRelationSchema).min(1).max(WORLD_SPINE_MAX_RELATIONS),
   })
   .superRefine((draft, ctx) => {
     const factionKeys = new Set(draft.factions.map((faction) => faction.key));

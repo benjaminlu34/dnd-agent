@@ -3026,6 +3026,31 @@ test("blocked routes reject start_journey deterministically", () => {
   assert.equal(evaluated.nextState.currentLocationId, "loc_gate");
 });
 
+test("routes with access requirements reject start_journey deterministically", () => {
+  const snapshot = {
+    ...createSnapshot(),
+    adjacentRoutes: [
+      {
+        ...createSnapshot().adjacentRoutes[0],
+        currentStatus: "open",
+        accessRequirementText: "The gate only opens with a stamped transit writ.",
+      },
+    ],
+  } as CampaignSnapshot;
+
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot,
+    command: createValidatedCommand("success", [
+      { type: "start_journey", edgeId: "edge_gate_market", destinationLocationId: "loc_market" },
+    ]),
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["investigate"]),
+  });
+
+  assert.equal(evaluated.stateCommitLog[1]?.reasonCode, "route_blocked");
+  assert.equal(evaluated.nextState.currentLocationId, "loc_gate");
+});
+
 test("set_follow_state persists companion refs into next runtime state", () => {
   const evaluated = engineTestUtils.evaluateResolvedCommand({
     snapshot: createSnapshot(),

@@ -136,7 +136,7 @@ export function validateWorldBible(
   options: WorldBibleValidationOptions = {},
 ): ValidationReport {
   const issues: string[] = [];
-  const minimumExplanationThreads = options.minimumExplanationThreads ?? 2;
+  const minimumExplanationThreads = options.minimumExplanationThreads ?? 0;
 
   if (bible.explanationThreads.length < minimumExplanationThreads) {
     issues.push(
@@ -148,16 +148,16 @@ export function validateWorldBible(
     issues.push("World bible must describe at least four institutions that shape everyday life.");
   }
 
-  if (bible.systemicPressures.length < 5) {
-    issues.push("World bible must define at least five systemic pressures.");
+  if (bible.widespreadBurdens.length < 7) {
+    issues.push("World bible must define at least seven widespread burdens.");
   }
 
-  if (bible.historicalFractures.length < 5) {
-    issues.push("World bible should include at least five historical fractures.");
+  if (bible.presentScars.length < 7) {
+    issues.push("World bible should include at least seven present scars.");
   }
 
-  if (bible.immersionAnchors.length < 6) {
-    issues.push("World bible should include at least six immersion anchors.");
+  if (bible.sharedRealities.length < 6) {
+    issues.push("World bible should include at least six shared realities.");
   }
 
   if (bible.everydayLife.trade.length < 3 || bible.everydayLife.gossip.length < 3) {

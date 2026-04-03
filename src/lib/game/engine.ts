@@ -2588,7 +2588,7 @@ function allowsGroundedDowntimeMutation(
 }
 
 function isTraversableRoute(route: CampaignSnapshot["adjacentRoutes"][number]) {
-  return route.currentStatus === "open";
+  return route.currentStatus === "open" && !route.accessRequirementText?.trim();
 }
 
 function isArchivedInventoryProperties(value: Prisma.JsonValue | null) {

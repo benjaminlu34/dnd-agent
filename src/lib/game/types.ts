@@ -464,10 +464,10 @@ export type GeneratedWorldBible = {
   premise: string;
   tone: string;
   setting: string;
-  worldOverview: string;
-  systemicPressures: string[];
-  historicalFractures: string[];
-  immersionAnchors: string[];
+  groundLevelReality: string;
+  widespreadBurdens: string[];
+  presentScars: string[];
+  sharedRealities: string[];
   explanationThreads: GeneratedExplanationThread[];
   everydayLife: {
     survival: string;
@@ -1246,10 +1246,8 @@ export type RouterAuthorizedVector =
 
 export type RequiredPrerequisite =
   | {
-      type: "move_player";
-      targetLocationId: string;
-      relocationReason: RelocationReason;
-      phase?: MutationPhase;
+      type: "market_prices";
+      locationId: string;
     }
   | {
       type: "npc_detail";

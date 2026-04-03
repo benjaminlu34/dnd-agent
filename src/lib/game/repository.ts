@@ -5061,13 +5061,15 @@ function assignDiscoveryAliases(input: Array<{
   });
 }
 
-async function buildDiscoveryProjection(snapshot: CampaignSnapshot) {
-  const discoveredInformationIds = snapshot.discoveredInformation.map((information) => information.id);
+function deriveDiscoveryScope(input: {
+  snapshot: CampaignSnapshot;
+  activeJourneyDestinationParentLocationId?: string | null;
+}) {
   const focusLocationIds = new Set<string>();
   const sameRegionParentIds = new Set<string>();
   const directParentIds = new Set<string>();
 
-  for (const location of [snapshot.currentLocation].filter((value): value is LocationSummary => value != null)) {
+  for (const location of [input.snapshot.currentLocation].filter((value): value is LocationSummary => value != null)) {
     focusLocationIds.add(location.id);
     if (location.parentLocationId) {
       focusLocationIds.add(location.parentLocationId);
@@ -5078,11 +5080,39 @@ async function buildDiscoveryProjection(snapshot: CampaignSnapshot) {
     directParentIds.add(location.id);
   }
 
-  if (snapshot.activeJourney) {
-    focusLocationIds.add(snapshot.activeJourney.originLocationId);
-    focusLocationIds.add(snapshot.activeJourney.destinationLocationId);
-    directParentIds.add(snapshot.activeJourney.destinationLocationId);
+  if (input.snapshot.activeJourney) {
+    focusLocationIds.add(input.snapshot.activeJourney.originLocationId);
+    focusLocationIds.add(input.snapshot.activeJourney.destinationLocationId);
+    directParentIds.add(input.snapshot.activeJourney.destinationLocationId);
+    if (input.activeJourneyDestinationParentLocationId) {
+      focusLocationIds.add(input.activeJourneyDestinationParentLocationId);
+      sameRegionParentIds.add(input.activeJourneyDestinationParentLocationId);
+    }
   }
+
+  return {
+    focusLocationIds,
+    sameRegionParentIds,
+    directParentIds,
+  };
+}
+
+async function buildDiscoveryProjection(snapshot: CampaignSnapshot) {
+  const discoveredInformationIds = snapshot.discoveredInformation.map((information) => information.id);
+  const activeJourneyDestinationParentLocationId = snapshot.activeJourney
+    ? (await prisma.locationNode.findUnique({
+        where: { id: snapshot.activeJourney.destinationLocationId },
+        select: { parentLocationId: true },
+      }))?.parentLocationId ?? null
+    : null;
+  const {
+    focusLocationIds,
+    sameRegionParentIds,
+    directParentIds,
+  } = deriveDiscoveryScope({
+    snapshot,
+    activeJourneyDestinationParentLocationId,
+  });
 
   if (focusLocationIds.size === 0 && directParentIds.size === 0 && sameRegionParentIds.size === 0) {
     return {
@@ -5514,6 +5544,7 @@ export async function getPromptContext(
 }
 
 export const repositoryTestUtils = {
+  deriveDiscoveryScope,
   prunePromptContextForRouter,
   toRouterKnownNpcSummaries,
   toPromptAssetInventory,

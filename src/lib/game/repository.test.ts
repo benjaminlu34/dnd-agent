@@ -241,6 +241,79 @@ test("toRouterInventorySummary aggregates quantity and omits removed inventory e
   ]);
 });
 
+test("deriveDiscoveryScope includes the destination parent region while traveling", () => {
+  const scope = repositoryTestUtils.deriveDiscoveryScope({
+    snapshot: {
+      campaignId: "camp_1",
+      sessionId: "sess_1",
+      stateVersion: 1,
+      promptRequestId: null,
+      title: "Test",
+      tone: "Grounded",
+      currentLocationId: null,
+      currentLocation: null,
+      adjacentRoutes: [],
+      locationLeads: [],
+      activeJourney: {
+        id: "journey_1",
+        edgeId: "edge_1",
+        originLocationId: "loc_gate",
+        originLocationName: "Gate",
+        destinationLocationId: "loc_watchtower",
+        destinationLocationName: "Watchtower",
+        elapsedMinutes: 4,
+        totalDurationMinutes: 10,
+        remainingMinutes: 6,
+      },
+      state: {
+        currentLocationId: null,
+        activeJourneyId: "journey_1",
+        globalTime: 0,
+        pendingTurnId: null,
+        lastActionSummary: null,
+        characterState: {
+          conditions: [],
+          activeCompanions: [],
+        },
+        sceneFocus: null,
+        sceneActorFocuses: {},
+        sceneAspects: {},
+      },
+      character: {
+        id: "inst_1",
+        templateId: "char_1",
+        health: 12,
+        currencyCp: 0,
+        commodityStacks: [],
+        inventory: [],
+      } satisfies CharacterInstance,
+      presentNpcs: [],
+      actors: [],
+      temporaryActors: [],
+      sceneActors: [],
+      discoveredInformation: [],
+      activePressures: [],
+      activeThreads: [],
+      recentWorldShifts: [],
+      recentTurns: [],
+      recentMemories: [],
+      factions: [],
+      worldObjects: [],
+      assetItems: [],
+      assetCommodityStacks: [],
+      missedTurnDigests: [],
+      warnings: [],
+    } as unknown as Parameters<typeof repositoryTestUtils.deriveDiscoveryScope>[0]["snapshot"],
+    activeJourneyDestinationParentLocationId: "loc_market",
+  });
+
+  assert.equal(scope.focusLocationIds.has("loc_gate"), true);
+  assert.equal(scope.focusLocationIds.has("loc_watchtower"), true);
+  assert.equal(scope.focusLocationIds.has("loc_market"), true);
+  assert.equal(scope.sameRegionParentIds.has("loc_market"), true);
+  assert.equal(scope.directParentIds.has("loc_watchtower"), true);
+});
+
 test("toPromptAssetInventory exposes grounded held items and commodity stacks without zero-fill noise", () => {
   const inventory = repositoryTestUtils.toPromptAssetInventory({
     items: [

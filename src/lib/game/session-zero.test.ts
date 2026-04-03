@@ -5,6 +5,7 @@ import {
   campaignOpeningDraftRequestSchema,
   customResolvedLaunchEntryDraftSchema,
   generatedCampaignOpeningSchema,
+  generatedWorldBibleSchema,
   generatedWorldModuleSchema,
   normalizeCustomResolvedLaunchEntryDraft,
   validateResolvedLaunchEntryAgainstWorld,
@@ -291,6 +292,82 @@ function createWorld(): GeneratedWorldModule {
     ],
   };
 }
+
+test("generatedWorldBibleSchema accepts legacy field names and normalizes them", () => {
+  const parsed = generatedWorldBibleSchema.parse({
+    title: "Beneath the Rain",
+    premise: "The rain never stops.",
+    tone: "Melancholic",
+    setting: "A drowned world",
+    worldOverview: "People survive on floating settlements.",
+    systemicPressures: [
+      "Harbor courts ration dry berths.",
+      "Signal towers quarantine late sails.",
+      "Lamp oil arrives under guard.",
+      "Pilot tolls squeeze inland villages.",
+      "Salvage rights fuel dock feuds.",
+      "Bridge wardens seize plank levies.",
+      "Shrine ports demand tithe fuel.",
+    ],
+    historicalFractures: [
+      "The Deluge still warps every rebuilt quay.",
+      "The Vault Wars left sealed warehouses and blood debts.",
+      "The Harbor Schism still splits storm warnings.",
+      "The Lantern Famine still shapes private hoarding.",
+      "Treaty gunlines still choke open water routes.",
+      "The Salt March still scars levy roads.",
+      "The Emperor's Drowning still floods storm canals.",
+    ],
+    immersionAnchors: [
+      "Tar-black rain capes",
+      "Bell arguments at dusk",
+      "The cracked desalinator by the queue",
+      "Hull chalk on public walls",
+      "Greasy lamp cloth shrines",
+      "Winch crews over rusted teeth",
+    ],
+    explanationThreads: [
+      {
+        key: "rain_1",
+        phenomenon: "The unending rain",
+        prevailingTheories: ["It is divine grief.", "It is old machinery."],
+        actionableSecret: "A drowned relay station can still change the storm wall.",
+      },
+      {
+        key: "shoal_1",
+        phenomenon: "The speaking shoals",
+        prevailingTheories: ["They repeat the dead.", "They vent trapped currents."],
+        actionableSecret: "A customs diver found a brass tube that answers back.",
+      },
+    ],
+    everydayLife: {
+      survival: "People barter for dry space and filtered water.",
+      institutions: ["Harbor Court", "Signal Towers", "Tide Unions", "Lamp Guilds"],
+      fears: ["Hull breach", "Deep-song madness", "Ration riots"],
+      wants: ["Dry shelter", "Old salvage", "Lamp oil"],
+      trade: ["Kelp cloth", "Whale oil", "Signal powder"],
+      gossip: [
+        "A vault door opened in the shoals.",
+        "The rain spoke a name last week.",
+        "Someone is faking signal bells.",
+      ],
+    },
+  });
+
+  assert.equal(parsed.groundLevelReality, "People survive on floating settlements.");
+  assert.deepEqual(parsed.widespreadBurdens.slice(0, 2), [
+    "Harbor courts ration dry berths.",
+    "Signal towers quarantine late sails.",
+  ]);
+  assert.deepEqual(parsed.presentScars.slice(0, 2), [
+    "The Deluge still warps every rebuilt quay.",
+    "The Vault Wars left sealed warehouses and blood debts.",
+  ]);
+  assert.deepEqual(parsed.sharedRealities.slice(0, 2), [
+    "Tar-black rain capes",
+    "Bell arguments at dusk",
+  ]);
+});
 
 test("generatedWorldModuleSchema rejects market prices with unknown factionId", () => {
   const world = createWorld();
