@@ -303,6 +303,29 @@ export function AdventureApp({
     return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
   }, [latestNarrationPayload]);
   const latestRetryableTurnId = snapshot?.latestRetryableTurnId ?? null;
+  const activeJourney = snapshot?.activeJourney ?? null;
+  const primaryRoutes = useMemo(
+    () => snapshot?.adjacentRoutes.filter((route) => !route.targetIsMinor) ?? [],
+    [snapshot],
+  );
+  const localPointOfInterestRoutes = useMemo(
+    () => snapshot?.adjacentRoutes.filter((route) => route.targetIsMinor) ?? [],
+    [snapshot],
+  );
+  const locationLeads = snapshot?.locationLeads ?? [];
+  const chapterTitle = snapshot?.currentLocation?.name
+    ?? (activeJourney ? `On the Road to ${activeJourney.destinationLocationName}` : "Between Places");
+  const chapterSummary = snapshot?.currentLocation?.summary
+    ?? (
+      activeJourney
+        ? `Traveling from ${activeJourney.originLocationName} to ${activeJourney.destinationLocationName}. ${activeJourney.remainingMinutes} minutes remain on the journey.`
+        : "The party is in transit and waiting for the next decisive move."
+    );
+  const chapterMeta = snapshot?.currentLocation
+    ? `${snapshot.currentLocation.type} · ${snapshot.currentLocation.state} · ${snapshot.tone}`
+    : activeJourney
+      ? `Journey · ${activeJourney.remainingMinutes} minutes remaining · ${snapshot?.tone ?? ""}`.replace(/ · $/, "")
+      : snapshot?.tone ?? "";
 
   async function refreshCurrentSnapshot(targetCampaignId: string, preserveAction = false) {
     const response = await fetch(`/api/campaigns/${targetCampaignId}`);
@@ -410,6 +433,7 @@ export function AdventureApp({
       let nextActions: string[] = [];
       let nextMissedTurnDigests: TurnDigest[] = [];
       let streamErrorMessage: string | null = null;
+      let preserveDraftOnRefresh = false;
 
       await consumeNdjson(response, (event) => {
         if (event.type === "warning") {
@@ -444,6 +468,12 @@ export function AdventureApp({
             event.result.error?.message
             ?? "That request already ended in a retryable failure state. Submit the action again to create a fresh attempt.",
           );
+        } else if (event.type === "stale_prompt_context") {
+          streamErrorMessage = "stale_prompt_context";
+          nextSnapshot = event.latestSnapshot;
+          nextActions = extractSuggestedActions(event.latestSnapshot);
+          preserveDraftOnRefresh = true;
+          setTurnError("The world view refreshed before that action could resolve. Your draft is still here, and you can retry immediately.");
         }
       });
 
@@ -452,7 +482,9 @@ export function AdventureApp({
         setMissedTurnDigests(nextMissedTurnDigests);
         setSuggestedActions(nextActions.length ? nextActions : extractSuggestedActions(nextSnapshot));
         setPendingCheck(null);
-        setAction("");
+        if (!preserveDraftOnRefresh) {
+          setAction("");
+        }
         setStreamedNarration("");
       } else if (!streamErrorMessage) {
         setWarnings(nextWarnings);
@@ -488,6 +520,7 @@ export function AdventureApp({
         sessionId,
         requestId: crypto.randomUUID(),
         expectedStateVersion: snapshot?.stateVersion ?? 0,
+        promptRequestId: snapshot?.promptRequestId ?? null,
         action: nextAction.trim(),
         ...(intent ? { intent } : {}),
         ...(mode ? { mode } : {}),
@@ -511,6 +544,7 @@ export function AdventureApp({
       let nextMissedTurnDigests: TurnDigest[] = [];
       let receivedClarification = false;
       let streamErrorMessage: string | null = null;
+      let preserveDraftOnRefresh = false;
       await consumeNdjson(response, (event) => {
         if (event.type === "warning") {
           nextWarnings.push(event.message);
@@ -561,6 +595,12 @@ export function AdventureApp({
             event.message
             ?? "The client state version was ahead of the campaign. Review the current state and choose a fresh action.",
           );
+        } else if (event.type === "stale_prompt_context") {
+          streamErrorMessage = "stale_prompt_context";
+          nextSnapshot = event.latestSnapshot;
+          nextActions = extractSuggestedActions(event.latestSnapshot);
+          preserveDraftOnRefresh = true;
+          setTurnError("The world view refreshed before that action could resolve. Your draft is still here, and you can retry immediately.");
         }
       });
 
@@ -587,7 +627,9 @@ export function AdventureApp({
       if (nextSnapshot) {
         setSnapshot(nextSnapshot);
         setMissedTurnDigests(nextMissedTurnDigests);
-        setAction("");
+        if (!preserveDraftOnRefresh) {
+          setAction("");
+        }
         setStreamedNarration("");
       } else if (receivedClarification) {
         setAction("");
@@ -861,14 +903,16 @@ export function AdventureApp({
                     <div className="min-w-0">
                       <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Current Chapter</p>
                       <h1 className="mt-3 font-serif text-4xl font-semibold tracking-tight text-zinc-100 md:text-5xl">
-                        {snapshot.currentLocation.name}
+                        {chapterTitle}
                       </h1>
                       <p className="mt-3 font-serif text-lg text-zinc-300">{snapshot.title}</p>
-                      <p className="mt-4 text-sm leading-relaxed text-zinc-300">{snapshot.currentLocation.summary}</p>
+                      <p className="mt-4 text-sm leading-relaxed text-zinc-300">{chapterSummary}</p>
                       <p className="mt-4 text-sm leading-relaxed text-zinc-400">{snapshot.premise}</p>
-                      <p className="mt-5 text-xs uppercase tracking-[0.18em] text-zinc-500">
-                        {snapshot.currentLocation.type} · {snapshot.currentLocation.state} · {snapshot.tone}
-                      </p>
+                      {chapterMeta ? (
+                        <p className="mt-5 text-xs uppercase tracking-[0.18em] text-zinc-500">
+                          {chapterMeta}
+                        </p>
+                      ) : null}
                     </div>
 
                     {worldTime ? (
@@ -1168,47 +1212,200 @@ export function AdventureApp({
             {snapshot ? (
               <>
                 <section className="rounded-[1.5rem] border border-zinc-800 bg-zinc-900/70 p-5">
-                  <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Routes</p>
-                  <div className="mt-4 space-y-3">
-                    {snapshot.adjacentRoutes.map((route) => {
-                      const routeIsOpen = route.currentStatus === "open";
-                      return (
-                        <div key={route.id} className="rounded-3xl border border-zinc-800 bg-zinc-950/70 p-4">
-                          <h3 className="font-serif text-lg font-semibold text-zinc-100">
-                            {route.targetLocationName}
-                          </h3>
-                          <p className="mt-2 text-sm leading-relaxed text-zinc-400">
-                            {route.travelTimeMinutes} min · danger {route.dangerLevel} · {route.currentStatus}
-                          </p>
-                          {route.description ? (
-                            <p className="mt-2 text-sm leading-relaxed text-zinc-500">{route.description}</p>
-                          ) : null}
+                  <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">
+                    {activeJourney ? "Journey" : "Routes and Leads"}
+                  </p>
+                  <div className="mt-4 space-y-5">
+                    {activeJourney ? (
+                      <div className="rounded-3xl border border-amber-500/30 bg-amber-500/10 p-4">
+                        <h3 className="font-serif text-lg font-semibold text-zinc-100">
+                          {activeJourney.originLocationName} to {activeJourney.destinationLocationName}
+                        </h3>
+                        <p className="mt-2 text-sm leading-relaxed text-zinc-300">
+                          {activeJourney.elapsedMinutes} of {activeJourney.totalDurationMinutes} minutes completed.
+                        </p>
+                        <p className="mt-1 text-sm leading-relaxed text-zinc-400">
+                          {activeJourney.remainingMinutes} minutes remain before arrival.
+                        </p>
+                        <div className="mt-4 flex flex-wrap gap-3">
                           <button
                             type="button"
-                            className="button-press mt-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm font-semibold text-amber-50 transition hover:border-amber-400/60 hover:bg-amber-400/15 disabled:cursor-not-allowed disabled:opacity-60"
+                            className="button-press rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm font-semibold text-amber-50 transition hover:border-amber-400/60 hover:bg-amber-400/15 disabled:cursor-not-allowed disabled:opacity-60"
                             onClick={() => {
                               setLocationsDrawerOpen(false);
-                              void submitTurnWithIntent(
-                                `I set out for ${route.targetLocationName}.`,
-                                undefined,
-                                {
-                                  type: "travel_route",
-                                  routeEdgeId: route.id,
-                                  targetLocationId: route.targetLocationId,
-                                },
-                              );
+                              setAction(`I continue toward ${activeJourney.destinationLocationName}.`);
                             }}
-                            disabled={submitting || !routeIsOpen}
+                            disabled={submitting}
                           >
-                            {routeIsOpen
-                              ? "Set Out"
-                              : route.currentStatus === "blocked"
-                                ? "Blocked"
-                                : "Unavailable"}
+                            Continue Journey
+                          </button>
+                          <button
+                            type="button"
+                            className="button-press rounded-2xl border border-zinc-700 bg-zinc-950/70 px-4 py-2 text-sm font-semibold text-zinc-100 transition hover:border-zinc-500 hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-60"
+                            onClick={() => {
+                              setLocationsDrawerOpen(false);
+                              setAction(`I turn back toward ${activeJourney.originLocationName}.`);
+                            }}
+                            disabled={submitting}
+                          >
+                            Turn Back
                           </button>
                         </div>
-                      );
-                    })}
+                      </div>
+                    ) : null}
+
+                    {!activeJourney ? (
+                      <>
+                        <div>
+                          <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Routes</p>
+                          <div className="mt-3 space-y-3">
+                            {primaryRoutes.length ? (
+                              primaryRoutes.map((route) => {
+                                const routeIsOpen = route.currentStatus === "open";
+                                const actionLabel = routeIsOpen ? "Set Out" : "Address Obstruction";
+                                return (
+                                  <div key={route.id} className="rounded-3xl border border-zinc-800 bg-zinc-950/70 p-4">
+                                    <h3 className="font-serif text-lg font-semibold text-zinc-100">
+                                      {route.targetLocationName}
+                                    </h3>
+                                    <p className="mt-2 text-sm leading-relaxed text-zinc-400">
+                                      {route.travelTimeMinutes} min · danger {route.dangerLevel} · {route.currentStatus}
+                                    </p>
+                                    {route.accessRequirementText ? (
+                                      <p className="mt-2 text-sm leading-relaxed text-amber-200/80">
+                                        {route.accessRequirementText}
+                                      </p>
+                                    ) : null}
+                                    {route.description ? (
+                                      <p className="mt-2 text-sm leading-relaxed text-zinc-500">{route.description}</p>
+                                    ) : null}
+                                    <button
+                                      type="button"
+                                      className="button-press mt-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm font-semibold text-amber-50 transition hover:border-amber-400/60 hover:bg-amber-400/15 disabled:cursor-not-allowed disabled:opacity-60"
+                                      onClick={() => {
+                                        setLocationsDrawerOpen(false);
+                                        if (routeIsOpen) {
+                                          void submitTurnWithIntent(
+                                            `I set out for ${route.targetLocationName}.`,
+                                            undefined,
+                                            {
+                                              type: "travel_route",
+                                              edgeId: route.id,
+                                              targetLocationId: route.targetLocationId,
+                                            },
+                                          );
+                                          return;
+                                        }
+                                        setAction(
+                                          route.accessRequirementText
+                                            ? `I deal with what blocks the route to ${route.targetLocationName}: ${route.accessRequirementText}.`
+                                            : `I figure out what is blocking the route to ${route.targetLocationName}.`,
+                                        );
+                                      }}
+                                      disabled={submitting}
+                                    >
+                                      {actionLabel}
+                                    </button>
+                                  </div>
+                                );
+                              })
+                            ) : (
+                              <p className="text-sm text-zinc-500">No major routes are currently actionable here.</p>
+                            )}
+                          </div>
+                        </div>
+
+                        <div>
+                          <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">
+                            Local Points of Interest
+                          </p>
+                          <div className="mt-3 space-y-3">
+                            {localPointOfInterestRoutes.length ? (
+                              localPointOfInterestRoutes.map((route) => {
+                                const routeIsOpen = route.currentStatus === "open";
+                                return (
+                                  <div key={route.id} className="rounded-3xl border border-zinc-800 bg-zinc-950/70 p-4">
+                                    <h3 className="font-serif text-lg font-semibold text-zinc-100">
+                                      {route.targetLocationName}
+                                    </h3>
+                                    <p className="mt-2 text-sm leading-relaxed text-zinc-400">
+                                      {route.travelTimeMinutes} min · danger {route.dangerLevel} · {route.currentStatus}
+                                    </p>
+                                    {route.accessRequirementText ? (
+                                      <p className="mt-2 text-sm leading-relaxed text-amber-200/80">
+                                        {route.accessRequirementText}
+                                      </p>
+                                    ) : null}
+                                    {route.description ? (
+                                      <p className="mt-2 text-sm leading-relaxed text-zinc-500">{route.description}</p>
+                                    ) : null}
+                                    <button
+                                      type="button"
+                                      className="button-press mt-4 rounded-2xl border border-zinc-700 bg-zinc-950/70 px-4 py-2 text-sm font-semibold text-zinc-100 transition hover:border-zinc-500 hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-60"
+                                      onClick={() => {
+                                        setLocationsDrawerOpen(false);
+                                        if (routeIsOpen) {
+                                          void submitTurnWithIntent(
+                                            `I head for ${route.targetLocationName}.`,
+                                            undefined,
+                                            {
+                                              type: "travel_route",
+                                              edgeId: route.id,
+                                              targetLocationId: route.targetLocationId,
+                                            },
+                                          );
+                                          return;
+                                        }
+                                        setAction(
+                                          route.accessRequirementText
+                                            ? `I deal with what blocks the way to ${route.targetLocationName}: ${route.accessRequirementText}.`
+                                            : `I investigate the obstacle keeping us from ${route.targetLocationName}.`,
+                                        );
+                                      }}
+                                      disabled={submitting}
+                                    >
+                                      {routeIsOpen ? "Go There" : "Investigate Blockage"}
+                                    </button>
+                                  </div>
+                                );
+                              })
+                            ) : (
+                              <p className="text-sm text-zinc-500">No local points of interest are surfaced yet.</p>
+                            )}
+                          </div>
+                        </div>
+                      </>
+                    ) : null}
+
+                    <div>
+                      <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Leads</p>
+                      <div className="mt-3 space-y-3">
+                        {locationLeads.length ? (
+                          locationLeads.map((lead) => (
+                            <div key={lead.locationId} className="rounded-3xl border border-zinc-800 bg-zinc-950/70 p-4">
+                              <h3 className="font-serif text-lg font-semibold text-zinc-100">{lead.name}</h3>
+                              <p className="mt-1 text-xs uppercase tracking-[0.16em] text-zinc-500">
+                                {lead.type} · {lead.discoveryState}
+                              </p>
+                              <p className="mt-2 text-sm leading-relaxed text-zinc-400">{lead.summary}</p>
+                              <button
+                                type="button"
+                                className="button-press mt-4 rounded-2xl border border-zinc-700 bg-zinc-950/70 px-4 py-2 text-sm font-semibold text-zinc-100 transition hover:border-zinc-500 hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-60"
+                                onClick={() => {
+                                  setLocationsDrawerOpen(false);
+                                  setAction(`I follow the lead about ${lead.name}.`);
+                                }}
+                                disabled={submitting}
+                              >
+                                Follow Lead
+                              </button>
+                            </div>
+                          ))
+                        ) : (
+                          <p className="text-sm text-zinc-500">No extra leads are currently visible.</p>
+                        )}
+                      </div>
+                    </div>
                   </div>
                 </section>
 

@@ -1,8 +1,18 @@
 import { NextResponse } from "next/server";
-import { getMissedTurnDigests, getTurnSnapshot, toPlayerCampaignSnapshot } from "@/lib/game/repository";
+import {
+  getMissedTurnDigests,
+  getTurnSnapshot,
+  issueSnapshotPromptContext,
+  toPlayerCampaignSnapshot,
+} from "@/lib/game/repository";
 import { triageTurn } from "@/lib/game/engine";
 import { createNdjsonStream } from "@/lib/http/ndjson";
-import { InvalidExpectedStateVersionError, StateConflictError, TurnLockedError } from "@/lib/game/errors";
+import {
+  InvalidExpectedStateVersionError,
+  StalePromptContextError,
+  StateConflictError,
+  TurnLockedError,
+} from "@/lib/game/errors";
 import type { TurnSubmissionRequest } from "@/lib/game/types";
 
 export const runtime = "nodejs";
@@ -36,7 +46,7 @@ export async function POST(request: Request) {
     intent !== undefined
     && (
       intent.type !== "travel_route"
-      || !intent.routeEdgeId?.trim()
+      || !intent.edgeId?.trim()
       || !intent.targetLocationId?.trim()
     )
   ) {
@@ -49,6 +59,17 @@ export async function POST(request: Request) {
   if (mode !== undefined && mode !== "observe") {
     return NextResponse.json(
       { error: "mode must be omitted or set to 'observe'." },
+      { status: 400 },
+    );
+  }
+
+  if (
+    body.promptRequestId !== undefined
+    && body.promptRequestId !== null
+    && typeof body.promptRequestId !== "string"
+  ) {
+    return NextResponse.json(
+      { error: "promptRequestId must be omitted, null, or a string." },
       { status: 400 },
     );
   }
@@ -75,6 +96,7 @@ export async function POST(request: Request) {
           requestId,
           expectedStateVersion,
           action,
+          promptRequestId: body.promptRequestId ?? null,
           intent,
           mode,
           stream: {
@@ -86,9 +108,11 @@ export async function POST(request: Request) {
         });
 
         if (result.type === "state_conflict") {
+          const latestSnapshot = await getTurnSnapshot(campaignId, sessionId);
+          const hydratedSnapshot = latestSnapshot ? await issueSnapshotPromptContext(latestSnapshot) : null;
           send({
             type: "state_conflict",
-            latestSnapshot: result.payload.latestSnapshot,
+            latestSnapshot: hydratedSnapshot ? toPlayerCampaignSnapshot(hydratedSnapshot) : result.payload.latestSnapshot,
             latestStateVersion: result.payload.latestStateVersion,
             missedTurnDigests: result.payload.missedTurnDigests,
           });
@@ -137,9 +161,10 @@ export async function POST(request: Request) {
         try {
           const snapshot = await getTurnSnapshot(campaignId, sessionId);
           if (snapshot) {
+            const hydratedSnapshot = await issueSnapshotPromptContext(snapshot);
             send({
               type: "state",
-              snapshot: toPlayerCampaignSnapshot(snapshot),
+              snapshot: toPlayerCampaignSnapshot(hydratedSnapshot),
             });
           } else {
             send({
@@ -163,22 +188,42 @@ export async function POST(request: Request) {
         }
         if (error instanceof StateConflictError) {
           const snapshot = await getTurnSnapshot(campaignId, sessionId);
+          const hydratedSnapshot = snapshot ? await issueSnapshotPromptContext(snapshot) : null;
           send({
             type: "state_conflict",
-            latestSnapshot: snapshot ? toPlayerCampaignSnapshot(snapshot) : null,
-            latestStateVersion: snapshot?.stateVersion ?? expectedStateVersion,
-            missedTurnDigests: snapshot ? await getMissedTurnDigests(campaignId, expectedStateVersion) : [],
+            latestSnapshot: hydratedSnapshot ? toPlayerCampaignSnapshot(hydratedSnapshot) : null,
+            latestStateVersion: hydratedSnapshot?.stateVersion ?? expectedStateVersion,
+            missedTurnDigests: hydratedSnapshot ? await getMissedTurnDigests(campaignId, expectedStateVersion) : [],
           });
           return;
         }
         if (error instanceof InvalidExpectedStateVersionError) {
           const snapshot = await getTurnSnapshot(campaignId, sessionId);
+          const hydratedSnapshot = snapshot ? await issueSnapshotPromptContext(snapshot) : null;
           send({
             type: "invalid_expected_state_version",
-            latestSnapshot: snapshot ? toPlayerCampaignSnapshot(snapshot) : null,
+            latestSnapshot: hydratedSnapshot ? toPlayerCampaignSnapshot(hydratedSnapshot) : null,
             latestStateVersion: error.latestStateVersion,
             message: error.message,
           });
+          return;
+        }
+        if (error instanceof StalePromptContextError) {
+          const snapshot = await getTurnSnapshot(campaignId, sessionId);
+          const hydratedSnapshot = snapshot ? await issueSnapshotPromptContext(snapshot) : null;
+          if (!hydratedSnapshot) {
+            send({
+              type: "error",
+              message: "stale_prompt_context",
+            });
+            return;
+          }
+            send({
+              type: "stale_prompt_context",
+              error: "stale_prompt_context",
+              latestSnapshot: toPlayerCampaignSnapshot(hydratedSnapshot),
+              message: "stale_prompt_context",
+            });
           return;
         }
 

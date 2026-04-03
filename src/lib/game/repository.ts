@@ -5,6 +5,7 @@ import { toPromptCurrencySummary } from "@/lib/game/currency";
 import { toCampaignCharacter, toCharacterStats } from "@/lib/game/characters";
 import { parseTurnResultPayloadJson, parseCampaignRuntimeStateJson, approvalBandForValue, toCampaignRuntimeStateJson, toFactionResourcesJson } from "@/lib/game/json-contracts";
 import { createAdHocCampaignInventoryItem } from "@/lib/game/items";
+import { buildInformationRevealRows } from "@/lib/game/world-persistence-translation";
 import {
   sceneActorIdentityClearlyMatches,
   sceneActorMatchesFocus,
@@ -34,6 +35,7 @@ import type {
   CharacterTemplateDraft,
   CharacterTemplateSummary,
   CrossLocationLead,
+  ActiveJourneySummary,
   FactionIntel,
   FactionRelationSummary,
   FactionMoveSummary,
@@ -45,6 +47,7 @@ import type {
   InformationSummary,
   LocalTextureSummary,
   LocationSummary,
+  LocationLeadSummary,
   MarketPriceDetail,
   MemoryRecord,
   MemoryEntityLinkRecord,
@@ -62,12 +65,14 @@ import type {
   RouteSummary,
   SceneActorSummary,
   PromptContextProfile,
+  PromptDiscoveryHook,
   RouterDecision,
   RouterKnownNpcSummary,
   RouterWorldObjectSummary,
   SpatialPromptContext,
   StoryMessage,
   TemporaryActorSummary,
+  PromptLatentDiscoveryTarget,
   ItemInstance,
   TurnRouterContext,
   TurnDigest,
@@ -112,6 +117,13 @@ type PrismaWorldObjectRecord = Prisma.WorldObjectGetPayload<Record<string, never
 type PrismaActorRecord = Prisma.ActorGetPayload<{
   include: {
     profileNpc: true;
+  };
+}>;
+type PrismaActiveJourneyRecord = Prisma.ActiveJourneyGetPayload<{
+  include: {
+    edge: true;
+    originLocation: true;
+    destinationLocation: true;
   };
 }>;
 
@@ -267,6 +279,21 @@ function normalizeActorSurfaceText(value: string) {
     .replace(/[^a-z0-9\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function nextDiscoveryState(
+  current: "ambient" | "rumored" | "revealed" | "promoted",
+): "rumored" | "revealed" | "promoted" {
+  switch (current) {
+    case "ambient":
+      return "rumored";
+    case "rumored":
+      return "revealed";
+    case "revealed":
+      return "promoted";
+    case "promoted":
+      return "promoted";
+  }
 }
 
 function similarityTokens(value: string) {
@@ -1160,6 +1187,7 @@ function visibleWorldObjectsForPrompt(input: {
   promptSceneFocus: CampaignRuntimeState["sceneFocus"];
   routerDecision?: RouterDecision;
 }) {
+  const currentLocationId = input.snapshot.currentLocation?.id ?? null;
   const directRefs = new Set(
     (input.routerDecision?.attention.resolvedReferents ?? [])
       .filter((entry) => entry.targetKind === "world_object")
@@ -1183,7 +1211,7 @@ function visibleWorldObjectsForPrompt(input: {
       visibleIds.add(object.id);
       continue;
     }
-    if (object.sceneLocationId !== input.snapshot.currentLocation.id) {
+    if (!currentLocationId || object.sceneLocationId !== currentLocationId) {
       continue;
     }
     if (!object.concealmentIsHidden) {
@@ -1907,6 +1935,7 @@ async function createCampaignInTx(
 ) {
   const state: CampaignRuntimeState = {
     currentLocationId: input.instancedEntryPoint.startLocationId,
+    activeJourneyId: null,
     globalTime: 480,
     pendingTurnId: null,
     lastActionSummary: input.opening.activeThreat ?? input.opening.scene.summary,
@@ -1998,6 +2027,9 @@ async function createCampaignInTx(
         campaignId: campaign.id,
         name: location.name,
         type: location.type,
+        locationKind: location.locationKind,
+        parentLocationId: location.parentLocationId,
+        discoveryState: location.discoveryState,
         summary: location.summary,
         description: location.description,
         localTextureJson: input.locationTextures.has(location.id)
@@ -2020,6 +2052,8 @@ async function createCampaignInTx(
         travelTimeMinutes: edge.travelTimeMinutes,
         dangerLevel: edge.dangerLevel,
         currentStatus: edge.currentStatus,
+        visibility: edge.visibility,
+        accessRequirementText: edge.accessRequirementText,
         description: edge.description,
       })),
     });
@@ -2195,6 +2229,23 @@ async function createCampaignInTx(
       })),
     });
 
+    const revealRows = buildInformationRevealRows({
+      campaignId: campaign.id,
+      information: input.instancedWorld.information,
+    });
+
+    if (revealRows.informationRevealsEdge.length) {
+      await tx.informationRevealsEdge.createMany({
+        data: revealRows.informationRevealsEdge,
+      });
+    }
+
+    if (revealRows.informationRevealsLocation.length) {
+      await tx.informationRevealsLocation.createMany({
+        data: revealRows.informationRevealsLocation,
+      });
+    }
+
     const knowledgeRows = buildKnowledgeRows({
       campaignId: campaign.id,
       information: input.instancedWorld.information,
@@ -2215,6 +2266,37 @@ async function createCampaignInTx(
     if (knowledgeRows.npcKnowledge.length) {
       await tx.npcKnowledge.createMany({
         data: knowledgeRows.npcKnowledge,
+      });
+    }
+
+    const initiallyDiscoveredInformation = input.instancedWorld.information.filter((information) =>
+      input.instancedEntryPoint.initialInformationIds.includes(information.id),
+    );
+    const initiallyKnownRouteIds = Array.from(
+      new Set(initiallyDiscoveredInformation.flatMap((information) => information.revealsEdgeIds ?? [])),
+    );
+    if (initiallyKnownRouteIds.length) {
+      await tx.campaignKnownRoute.createMany({
+        data: initiallyKnownRouteIds.map((edgeId) => ({
+          campaignId: campaign.id,
+          edgeId,
+        })),
+      });
+    }
+
+    const initiallyRevealedLocationIds = Array.from(
+      new Set(initiallyDiscoveredInformation.flatMap((information) => information.revealsLocationIds ?? [])),
+    );
+    for (const locationId of initiallyRevealedLocationIds) {
+      const location = input.instancedWorld.locations.find((entry) => entry.id === locationId);
+      if (!location) {
+        continue;
+      }
+      await tx.locationNode.update({
+        where: { id: locationId },
+        data: {
+          discoveryState: nextDiscoveryState(location.discoveryState ?? "ambient"),
+        },
       });
     }
   }
@@ -2511,13 +2593,20 @@ export async function listCampaigns(): Promise<CampaignListItem[]> {
      return [];
    }
 
-   const locationRecords = await prisma.locationNode.findMany({
-     where: {
-       OR: campaigns.map((campaign) => ({
-         campaignId: campaign.id,
-         id: parseCampaignRuntimeStateJson(campaign.stateJson).currentLocationId,
-       })),
-     },
+  const locationRecords = await prisma.locationNode.findMany({
+    where: {
+      OR: campaigns
+        .map((campaign) => {
+          const currentLocationId = parseCampaignRuntimeStateJson(campaign.stateJson).currentLocationId;
+          return currentLocationId
+            ? {
+                campaignId: campaign.id,
+                id: currentLocationId,
+              }
+            : null;
+        })
+        .filter((entry): entry is { campaignId: string; id: string } => entry != null),
+    },
      select: {
        campaignId: true,
        name: true,
@@ -2602,6 +2691,9 @@ function toLocationSummary(
     id: location.id,
     name: location.name,
     type: location.type,
+    locationKind: location.locationKind as LocationSummary["locationKind"],
+    parentLocationId: location.parentLocationId,
+    discoveryState: location.discoveryState as LocationSummary["discoveryState"],
     summary: location.summary,
     description: location.description,
     localTexture: toLocalTextureSummary(location.localTextureJson),
@@ -2610,6 +2702,91 @@ function toLocationSummary(
     controllingFactionName: controller?.name ?? null,
     tags: [...location.tags],
   };
+}
+
+function toActiveJourneySummary(journey: PrismaActiveJourneyRecord): ActiveJourneySummary {
+  return {
+    id: journey.id,
+    edgeId: journey.edgeId,
+    originLocationId: journey.originLocationId,
+    originLocationName: journey.originLocation.name,
+    destinationLocationId: journey.destinationLocationId,
+    destinationLocationName: journey.destinationLocation.name,
+    elapsedMinutes: journey.elapsedMinutes,
+    totalDurationMinutes: journey.totalDurationMinutes,
+    remainingMinutes: Math.max(0, journey.totalDurationMinutes - journey.elapsedMinutes),
+  };
+}
+
+function targetIsMinorLocation(location: Prisma.LocationNodeGetPayload<Record<string, never>> | undefined) {
+  return location?.locationKind === "minor" && location.discoveryState !== "promoted";
+}
+
+function toRouteSummary(input: {
+  edge: Prisma.LocationEdgeGetPayload<Record<string, never>>;
+  currentLocationId: string;
+  target: Prisma.LocationNodeGetPayload<Record<string, never>> | undefined;
+  isKnown: boolean;
+}): RouteSummary {
+  return {
+    id: input.edge.id,
+    targetLocationId: input.target?.id ?? (input.edge.sourceId === input.currentLocationId ? input.edge.targetId : input.edge.sourceId),
+    targetLocationName: input.target?.name
+      ?? (input.edge.sourceId === input.currentLocationId ? input.edge.targetId : input.edge.sourceId),
+    targetLocationKind: (input.target?.locationKind ?? "spine") as RouteSummary["targetLocationKind"],
+    targetLocationDiscoveryState: (input.target?.discoveryState ?? "revealed") as RouteSummary["targetLocationDiscoveryState"],
+    travelTimeMinutes: input.edge.travelTimeMinutes,
+    dangerLevel: input.edge.dangerLevel,
+    currentStatus: input.edge.currentStatus,
+    isKnown: input.isKnown,
+    targetIsMinor: targetIsMinorLocation(input.target),
+    visibility: input.edge.visibility as RouteSummary["visibility"],
+    accessRequirementText: input.edge.accessRequirementText,
+    description: input.edge.description,
+  };
+}
+
+function buildLocationLeads(input: {
+  anchorLocation: Prisma.LocationNodeGetPayload<Record<string, never>> | null;
+  locations: Prisma.LocationNodeGetPayload<Record<string, never>>[];
+  actionableRouteTargetIds: Set<string>;
+}) {
+  if (!input.anchorLocation) {
+    return [] as LocationLeadSummary[];
+  }
+
+  const anchor = input.anchorLocation;
+  const sameParentId = anchor.locationKind === "minor" ? anchor.parentLocationId : anchor.id;
+
+  return input.locations
+    .filter((location) => {
+      if (location.id === anchor.id) {
+        return false;
+      }
+      if (location.discoveryState === "ambient") {
+        return false;
+      }
+      if (input.actionableRouteTargetIds.has(location.id)) {
+        return false;
+      }
+      if (location.parentLocationId === anchor.id) {
+        return true;
+      }
+      if (sameParentId && location.parentLocationId === sameParentId) {
+        return true;
+      }
+      return false;
+    })
+    .map<LocationLeadSummary>((location) => ({
+      locationId: location.id,
+      name: location.name,
+      type: location.type,
+      locationKind: location.locationKind as LocationLeadSummary["locationKind"],
+      discoveryState: location.discoveryState as LocationLeadSummary["discoveryState"],
+      parentLocationId: location.parentLocationId,
+      summary: location.summary,
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name));
 }
 
 function toFactionSummary(
@@ -3903,6 +4080,14 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
         orderBy: { scheduledAtTime: "asc" },
         take: 30,
       },
+      knownRoutes: true,
+      activeJourney: {
+        include: {
+          edge: true,
+          originLocation: true,
+          destinationLocation: true,
+        },
+      },
       turns: {
         where: { status: "resolved" },
         orderBy: { createdAt: "desc" },
@@ -3942,28 +4127,44 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
 
   const state = parseCampaignRuntimeStateJson(campaign.stateJson);
   const session = campaign.sessions[0];
-  const currentLocationRecord = campaign.locationNodes.find((location) => location.id === state.currentLocationId);
-  if (!currentLocationRecord) {
+  const currentLocationRecord = state.currentLocationId
+    ? campaign.locationNodes.find((location) => location.id === state.currentLocationId) ?? null
+    : null;
+  const anchorLocationRecord =
+    currentLocationRecord
+    ?? (campaign.activeJourney
+      ? campaign.locationNodes.find((location) => location.id === campaign.activeJourney!.destinationLocationId) ?? null
+      : null);
+  if (!anchorLocationRecord) {
     return null;
   }
 
-  const currentLocation = toLocationSummary(currentLocationRecord, campaign.factions);
-  const adjacentRoutes = campaign.locationEdges
-    .filter((edge) => edge.sourceId === currentLocation.id || edge.targetId === currentLocation.id)
-    .map<RouteSummary>((edge) => {
-      const targetId = edge.sourceId === currentLocation.id ? edge.targetId : edge.sourceId;
-      const target = campaign.locationNodes.find((location) => location.id === targetId);
-
-      return {
-        id: edge.id,
-        targetLocationId: targetId,
-        targetLocationName: target?.name ?? targetId,
-        travelTimeMinutes: edge.travelTimeMinutes,
-        dangerLevel: edge.dangerLevel,
-        currentStatus: edge.currentStatus,
-        description: edge.description,
-      };
-    });
+  const currentLocation = currentLocationRecord
+    ? toLocationSummary(currentLocationRecord, campaign.factions)
+    : null;
+  const knownRouteIds = new Set(campaign.knownRoutes.map((route) => route.edgeId));
+  const adjacentRoutes = currentLocationRecord
+    ? campaign.locationEdges
+        .filter((edge) =>
+          (edge.sourceId === currentLocationRecord.id || edge.targetId === currentLocationRecord.id)
+          && (edge.visibility === "public" || knownRouteIds.has(edge.id)))
+        .map<RouteSummary>((edge) => {
+          const targetId = edge.sourceId === currentLocationRecord.id ? edge.targetId : edge.sourceId;
+          const target = campaign.locationNodes.find((location) => location.id === targetId);
+          return toRouteSummary({
+            edge,
+            currentLocationId: currentLocationRecord.id,
+            target,
+            isKnown: knownRouteIds.has(edge.id),
+          });
+        })
+    : [];
+  const locationLeads = buildLocationLeads({
+    anchorLocation: anchorLocationRecord,
+    locations: campaign.locationNodes,
+    actionableRouteTargetIds: new Set(adjacentRoutes.map((route) => route.targetLocationId)),
+  });
+  const activeJourney = campaign.activeJourney ? toActiveJourneySummary(campaign.activeJourney) : null;
 
   const assetItems = campaignItemInstances.map(toItemInstanceRecord);
   const assetCommodityStacks = campaignCommodityStacks.map(toCommodityStackRecord);
@@ -3973,15 +4174,15 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     assetItems,
     assetCommodityStacks,
     factions: campaign.factions,
-    currentLocationId: currentLocation.id,
+    currentLocationId: currentLocationRecord?.id ?? "__journey__",
   });
   const presentNpcs = actorViews.presentNpcs;
   const discoveredIds = new Set(
     campaign.information.filter((information) => information.isDiscovered).map((information) => information.id),
   );
   const knownFactionIds = new Set<string>();
-  if (currentLocation.controllingFactionId) {
-    knownFactionIds.add(currentLocation.controllingFactionId);
+  if (anchorLocationRecord.controllingFactionId) {
+    knownFactionIds.add(anchorLocationRecord.controllingFactionId);
   }
   for (const npc of presentNpcs) {
     if (npc.factionId) {
@@ -3989,7 +4190,7 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     }
   }
   const visibleKnowledgeIds = buildRelevantKnowledgeIds({
-    currentLocationId: currentLocation.id,
+    currentLocationId: anchorLocationRecord.id,
     presentNpcIds: presentNpcs.map((npc) => npc.id),
     knownFactionIds: Array.from(knownFactionIds),
     locationKnowledge: campaign.locationKnowledge,
@@ -4055,21 +4256,21 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
   const activePressures = buildActivePressures({
     factions: campaign.factions,
     knownFactionIds,
-    currentLocation,
+    currentLocation: toLocationSummary(anchorLocationRecord, campaign.factions),
   });
   const activeThreads = buildActiveThreads({
     memories: campaign.memories,
     worldEvents: campaign.worldEvents,
     factionMoves: campaign.factionMoves,
-    currentLocationId: currentLocation.id,
+    currentLocationId: anchorLocationRecord.id,
     knownFactionIds,
   });
   const memories: MemoryRecord[] = pickRetrievedMemories({
     memories: campaign.memories,
-    currentLocationId: currentLocation.id,
+    currentLocationId: anchorLocationRecord.id,
     presentNpcIds: presentNpcs.map((npc) => npc.id),
     knownFactionIds: Array.from(knownFactionIds),
-    currentRouteIds: adjacentRoutes.map((route) => route.id),
+    currentRouteIds: activeJourney ? [activeJourney.edgeId] : adjacentRoutes.map((route) => route.id),
     discoveredInformationIds: Array.from(discoveredIds),
     activePressures,
     activeThreads,
@@ -4113,6 +4314,7 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     tone: campaign.module.tone,
     setting: campaign.module.setting,
     state,
+    promptRequestId: null,
     assetItems,
     assetCommodityStacks,
     worldObjects,
@@ -4122,6 +4324,8 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     },
     currentLocation,
     adjacentRoutes,
+    locationLeads,
+    activeJourney,
     presentNpcs,
     actors,
     knownNpcLocationIds,
@@ -4185,6 +4389,14 @@ async function getTurnSnapshotFromClient(
         orderBy: { createdAt: "desc" },
         take: 8,
       },
+      knownRoutes: true,
+      activeJourney: {
+        include: {
+          edge: true,
+          originLocation: true,
+          destinationLocation: true,
+        },
+      },
     },
   });
 
@@ -4220,32 +4432,38 @@ async function getTurnSnapshotFromClient(
   const state = parseCampaignRuntimeStateJson(campaign.stateJson);
   const session = campaign.sessions[0];
 
-  const currentLocationRecord = await db.locationNode.findFirst({
-    where: {
-      campaignId,
-      id: state.currentLocationId,
-    },
-  });
-  const adjacentEdges = await db.locationEdge.findMany({
-    where: {
-      campaignId,
-      OR: [{ sourceId: state.currentLocationId }, { targetId: state.currentLocationId }],
-    },
-    orderBy: { createdAt: "asc" },
-  });
-  const presentNpcRecords = await db.nPC.findMany({
-    where: {
-      campaignId,
-      currentLocationId: state.currentLocationId,
-    },
-    orderBy: { name: "asc" },
-  });
+  const currentLocationRecord = state.currentLocationId
+    ? await db.locationNode.findFirst({
+        where: {
+          campaignId,
+          id: state.currentLocationId,
+        },
+      })
+    : null;
+  const adjacentEdges = currentLocationRecord
+    ? await db.locationEdge.findMany({
+        where: {
+          campaignId,
+          OR: [{ sourceId: currentLocationRecord.id }, { targetId: currentLocationRecord.id }],
+        },
+        orderBy: { createdAt: "asc" },
+      })
+    : [];
+  const presentNpcRecords = currentLocationRecord
+    ? await db.nPC.findMany({
+        where: {
+          campaignId,
+          currentLocationId: currentLocationRecord.id,
+        },
+        orderBy: { name: "asc" },
+      })
+    : [];
   const actorRecords = await db.actor.findMany({
     where: {
       campaignId,
       OR: [
         { profileNpcId: { not: null } },
-        { currentLocationId: state.currentLocationId },
+        ...(currentLocationRecord ? [{ currentLocationId: currentLocationRecord.id }] : []),
         { currentLocationId: null },
       ],
     },
@@ -4263,17 +4481,18 @@ async function getTurnSnapshotFromClient(
     orderBy: { title: "asc" },
   });
 
-  if (!currentLocationRecord) {
+  const anchorLocationRecord = currentLocationRecord ?? campaign.activeJourney?.destinationLocation ?? null;
+  if (!anchorLocationRecord) {
     return null;
   }
 
   const presentNpcIds = actorRecords
     .filter((actor): actor is PrismaActorRecord & { profileNpcId: string } =>
-      actor.profileNpcId != null && actor.currentLocationId === state.currentLocationId)
+      actor.profileNpcId != null && actor.currentLocationId === currentLocationRecord?.id)
     .map((actor) => actor.profileNpcId);
   const baseKnownFactionIds = new Set<string>();
-  if (currentLocationRecord.controllingFactionId) {
-    baseKnownFactionIds.add(currentLocationRecord.controllingFactionId);
+  if (anchorLocationRecord.controllingFactionId) {
+    baseKnownFactionIds.add(anchorLocationRecord.controllingFactionId);
   }
   for (const npc of presentNpcRecords.filter((entry) => presentNpcIds.includes(entry.id))) {
     if (npc.factionId) {
@@ -4284,7 +4503,7 @@ async function getTurnSnapshotFromClient(
   const locationKnowledge = await db.locationKnowledge.findMany({
     where: {
       campaignId,
-      locationId: state.currentLocationId,
+      locationId: anchorLocationRecord.id,
     },
   });
   const factionKnowledge = baseKnownFactionIds.size
@@ -4313,7 +4532,7 @@ async function getTurnSnapshotFromClient(
 
   const discoveredIds = new Set(discoveredInfoRecords.map((information) => information.id));
   const visibleKnowledgeIds = buildRelevantKnowledgeIds({
-    currentLocationId: state.currentLocationId,
+    currentLocationId: anchorLocationRecord.id,
     presentNpcIds,
     knownFactionIds: Array.from(baseKnownFactionIds),
     locationKnowledge,
@@ -4366,13 +4585,27 @@ async function getTurnSnapshotFromClient(
   const adjacentLocationIds = Array.from(
     new Set(
       adjacentEdges.map((edge) =>
-        edge.sourceId === state.currentLocationId ? edge.targetId : edge.sourceId,
+        edge.sourceId === currentLocationRecord?.id ? edge.targetId : edge.sourceId,
       ),
     ),
   );
+  const sameRegionParentId = anchorLocationRecord.locationKind === "minor"
+    ? anchorLocationRecord.parentLocationId
+    : anchorLocationRecord.id;
+  const sameRegionLocationIds = await db.locationNode.findMany({
+    where: {
+      campaignId,
+      OR: [
+        { parentLocationId: anchorLocationRecord.id },
+        ...(sameRegionParentId ? [{ parentLocationId: sameRegionParentId }] : []),
+      ],
+    },
+    select: { id: true },
+  });
   const relevantLocationIds = Array.from(new Set([
-    state.currentLocationId,
+    anchorLocationRecord.id,
     ...adjacentLocationIds,
+    ...sameRegionLocationIds.map((location) => location.id),
     ...relevantInformationRecords.flatMap((information) => (information.locationId ? [information.locationId] : [])),
   ]));
   const relevantFactionIds = Array.from(new Set([
@@ -4417,21 +4650,30 @@ async function getTurnSnapshotFromClient(
       })
     : [];
 
-  const currentLocation = toLocationSummary(currentLocationRecord, factionRecords);
-  const adjacentRoutes = adjacentEdges.map<RouteSummary>((edge) => {
-    const targetId = edge.sourceId === currentLocation.id ? edge.targetId : edge.sourceId;
-    const target = locationRecords.find((location) => location.id === targetId);
-
-    return {
-      id: edge.id,
-      targetLocationId: targetId,
-      targetLocationName: target?.name ?? targetId,
-      travelTimeMinutes: edge.travelTimeMinutes,
-      dangerLevel: edge.dangerLevel,
-      currentStatus: edge.currentStatus,
-      description: edge.description,
-    };
+  const currentLocation = currentLocationRecord
+    ? toLocationSummary(currentLocationRecord, factionRecords)
+    : null;
+  const knownRouteIds = new Set(campaign.knownRoutes.map((route) => route.edgeId));
+  const adjacentRoutes = currentLocationRecord
+    ? adjacentEdges
+        .filter((edge) => edge.visibility === "public" || knownRouteIds.has(edge.id))
+        .map<RouteSummary>((edge) => {
+          const targetId = edge.sourceId === currentLocationRecord.id ? edge.targetId : edge.sourceId;
+          const target = locationRecords.find((location) => location.id === targetId);
+          return toRouteSummary({
+            edge,
+            currentLocationId: currentLocationRecord.id,
+            target,
+            isKnown: knownRouteIds.has(edge.id),
+          });
+        })
+    : [];
+  const locationLeads = buildLocationLeads({
+    anchorLocation: anchorLocationRecord,
+    locations: locationRecords,
+    actionableRouteTargetIds: new Set(adjacentRoutes.map((route) => route.targetLocationId)),
   });
+  const activeJourney = campaign.activeJourney ? toActiveJourneySummary(campaign.activeJourney) : null;
 
   const localInformation = relevantInformationRecords
     .filter(
@@ -4493,7 +4735,7 @@ async function getTurnSnapshotFromClient(
   const pendingWorldEvents = await db.worldEvent.findMany({
     where: {
       campaignId,
-      locationId: state.currentLocationId,
+      locationId: anchorLocationRecord.id,
       isProcessed: false,
       isCancelled: false,
     },
@@ -4529,7 +4771,7 @@ async function getTurnSnapshotFromClient(
     assetItems,
     assetCommodityStacks,
     factions: normalizedFactionRecords,
-    currentLocationId: currentLocation.id,
+    currentLocationId: currentLocationRecord?.id ?? "__journey__",
   });
   const presentNpcs = actorViews.presentNpcs;
   const knownNpcLocationIds = actorViews.knownNpcLocationIds;
@@ -4551,21 +4793,21 @@ async function getTurnSnapshotFromClient(
   const activePressures = buildActivePressures({
     factions: normalizedFactionRecords,
     knownFactionIds,
-    currentLocation,
+    currentLocation: toLocationSummary(anchorLocationRecord, normalizedFactionRecords),
   });
   const activeThreads = buildActiveThreads({
     memories: campaign.memories,
     worldEvents: pendingWorldEvents,
     factionMoves: pendingFactionMoves,
-    currentLocationId: currentLocation.id,
+    currentLocationId: anchorLocationRecord.id,
     knownFactionIds,
   });
   const memories: MemoryRecord[] = pickRetrievedMemories({
     memories: campaign.memories,
-    currentLocationId: currentLocation.id,
+    currentLocationId: anchorLocationRecord.id,
     presentNpcIds: presentNpcs.map((npc) => npc.id),
     knownFactionIds: Array.from(knownFactionIds),
-    currentRouteIds: adjacentRoutes.map((route) => route.id),
+    currentRouteIds: activeJourney ? [activeJourney.edgeId] : adjacentRoutes.map((route) => route.id),
     discoveredInformationIds: Array.from(discoveredIds),
     activePressures,
     activeThreads,
@@ -4606,6 +4848,7 @@ async function getTurnSnapshotFromClient(
     tone: campaign.module.tone,
     setting: campaign.module.setting,
     state,
+    promptRequestId: null,
     assetItems,
     assetCommodityStacks,
     worldObjects,
@@ -4615,6 +4858,8 @@ async function getTurnSnapshotFromClient(
     },
     currentLocation,
     adjacentRoutes,
+    locationLeads,
+    activeJourney,
     presentNpcs,
     actors,
     knownNpcLocationIds,
@@ -4680,9 +4925,12 @@ export function toPlayerCampaignSnapshot(snapshot: CampaignSnapshot): PlayerCamp
     tone: snapshot.tone,
     setting: snapshot.setting,
     state: snapshot.state,
+    promptRequestId: snapshot.promptRequestId,
     character: snapshot.character,
     currentLocation: snapshot.currentLocation,
     adjacentRoutes: snapshot.adjacentRoutes,
+    locationLeads: snapshot.locationLeads,
+    activeJourney: snapshot.activeJourney,
     presentNpcs: snapshot.presentNpcs,
     actors: snapshot.actors,
     knownFactions: snapshot.knownFactions,
@@ -4758,8 +5006,252 @@ function buildRecentTurnLedger(snapshot: CampaignSnapshot) {
     .filter((entry): entry is string => Boolean(entry));
 }
 
+function slugifyAliasPart(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40) || "unknown";
+}
+
+function shortStableAliasFragment(id: string) {
+  let hash = 0;
+  for (const char of id) {
+    hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  }
+  return hash.toString(36).padStart(4, "0").slice(-4);
+}
+
+type CachedDiscoveryAlias = {
+  alias: string;
+  kind: "route" | "location";
+  targetId: string;
+  label: string;
+  reason?: string;
+};
+
+function assignDiscoveryAliases(input: Array<{
+  kind: "route" | "location";
+  label: string;
+  targetId: string;
+  reason?: string;
+}>): CachedDiscoveryAlias[] {
+  const counts = new Map<string, number>();
+
+  return input.map((entry) => {
+    const baseAlias = `${entry.kind}-${slugifyAliasPart(entry.label)}-${shortStableAliasFragment(entry.targetId)}`;
+    const currentCount = counts.get(baseAlias) ?? 0;
+    counts.set(baseAlias, currentCount + 1);
+    return {
+      alias: currentCount === 0 ? baseAlias : `${baseAlias}-${currentCount + 1}`,
+      kind: entry.kind,
+      targetId: entry.targetId,
+      label: entry.label,
+      reason: entry.reason,
+    };
+  });
+}
+
+async function buildDiscoveryProjection(snapshot: CampaignSnapshot) {
+  const discoveredInformationIds = snapshot.discoveredInformation.map((information) => information.id);
+  const focusLocationIds = new Set<string>();
+  const sameRegionParentIds = new Set<string>();
+  const directParentIds = new Set<string>();
+
+  for (const location of [snapshot.currentLocation].filter((value): value is LocationSummary => value != null)) {
+    focusLocationIds.add(location.id);
+    if (location.parentLocationId) {
+      focusLocationIds.add(location.parentLocationId);
+      sameRegionParentIds.add(location.parentLocationId);
+    } else {
+      sameRegionParentIds.add(location.id);
+    }
+    directParentIds.add(location.id);
+  }
+
+  if (snapshot.activeJourney) {
+    focusLocationIds.add(snapshot.activeJourney.originLocationId);
+    focusLocationIds.add(snapshot.activeJourney.destinationLocationId);
+    directParentIds.add(snapshot.activeJourney.destinationLocationId);
+  }
+
+  if (focusLocationIds.size === 0 && directParentIds.size === 0 && sameRegionParentIds.size === 0) {
+    return {
+      discoveryHooks: [] as CachedDiscoveryAlias[],
+      latentTargets: [] as CachedDiscoveryAlias[],
+    };
+  }
+
+  const [candidateEdges, candidateLocations, revealedEdges, revealedLocations, knownRoutes] = await Promise.all([
+    prisma.locationEdge.findMany({
+      where: {
+        campaignId: snapshot.campaignId,
+        visibility: "hidden",
+        id: {
+          notIn: snapshot.adjacentRoutes.map((route) => route.id),
+        },
+        OR: Array.from(focusLocationIds).map((locationId) => ({
+          OR: [{ sourceId: locationId }, { targetId: locationId }],
+        })),
+      },
+      include: {
+        source: true,
+        target: true,
+      },
+      orderBy: { createdAt: "asc" },
+    }),
+    prisma.locationNode.findMany({
+      where: {
+        campaignId: snapshot.campaignId,
+        discoveryState: "ambient",
+        OR: [
+          ...Array.from(directParentIds).map((locationId) => ({ parentLocationId: locationId })),
+          ...Array.from(sameRegionParentIds).map((parentLocationId) => ({ parentLocationId })),
+        ],
+      },
+      orderBy: { name: "asc" },
+    }),
+    discoveredInformationIds.length
+      ? prisma.informationRevealsEdge.findMany({
+          where: {
+            informationId: { in: discoveredInformationIds },
+          },
+          include: {
+            information: {
+              select: {
+                title: true,
+              },
+            },
+          },
+        })
+      : Promise.resolve([]),
+    discoveredInformationIds.length
+      ? prisma.informationRevealsLocation.findMany({
+          where: {
+            informationId: { in: discoveredInformationIds },
+          },
+          include: {
+            information: {
+              select: {
+                title: true,
+              },
+            },
+          },
+        })
+      : Promise.resolve([]),
+    prisma.campaignKnownRoute.findMany({
+      where: { campaignId: snapshot.campaignId },
+      select: { edgeId: true },
+    }),
+  ]);
+
+  const knownRouteIds = new Set(knownRoutes.map((route) => route.edgeId));
+  const candidateEdgesById = new Map(
+    candidateEdges
+      .filter((edge) => !knownRouteIds.has(edge.id))
+      .map((edge) => [edge.id, edge]),
+  );
+  const candidateLocationsById = new Map(candidateLocations.map((location) => [location.id, location]));
+
+  const discoveryHooks = assignDiscoveryAliases([
+    ...revealedEdges
+      .map((reveal) => {
+        const edge = candidateEdgesById.get(reveal.edgeId);
+        if (!edge) {
+          return null;
+        }
+        const routeTarget =
+          edge.sourceId === snapshot.currentLocation?.id
+            ? edge.target
+            : edge.targetId === snapshot.currentLocation?.id
+              ? edge.source
+              : edge.target;
+        return {
+          kind: "route" as const,
+          label: routeTarget.name,
+          targetId: edge.id,
+          reason: `Grounded by ${reveal.information.title}.`,
+        };
+      })
+      .filter((value): value is { kind: "route"; label: string; targetId: string; reason: string } => value != null),
+    ...revealedLocations
+      .map((reveal) => {
+        const location = candidateLocationsById.get(reveal.locationId);
+        if (!location) {
+          return null;
+        }
+        return {
+          kind: "location" as const,
+          label: location.name,
+          targetId: location.id,
+          reason: `Grounded by ${reveal.information.title}.`,
+        };
+      })
+      .filter((value): value is { kind: "location"; label: string; targetId: string; reason: string } => value != null),
+  ]);
+
+  const discoveryHookTargetIds = new Set(discoveryHooks.map((entry) => entry.targetId));
+  const latentTargets = assignDiscoveryAliases([
+    ...Array.from(candidateEdgesById.values())
+      .filter((edge) => !discoveryHookTargetIds.has(edge.id))
+      .map((edge) => ({
+        kind: "route" as const,
+        label:
+          edge.sourceId === snapshot.currentLocation?.id
+            ? edge.target.name
+            : edge.targetId === snapshot.currentLocation?.id
+              ? edge.source.name
+              : edge.target.name,
+        targetId: edge.id,
+      })),
+    ...Array.from(candidateLocationsById.values())
+      .filter((location) => !discoveryHookTargetIds.has(location.id))
+      .map((location) => ({
+        kind: "location" as const,
+        label: location.name,
+        targetId: location.id,
+      })),
+  ]);
+
+  return {
+    discoveryHooks,
+    latentTargets,
+  };
+}
+
+export async function issueSnapshotPromptContext(snapshot: CampaignSnapshot): Promise<CampaignSnapshot> {
+  const promptRequestId = randomUUID();
+  const { discoveryHooks, latentTargets } = await buildDiscoveryProjection(snapshot);
+
+  await prisma.campaignPromptCache.upsert({
+    where: {
+      campaignId: snapshot.campaignId,
+    },
+    create: {
+      campaignId: snapshot.campaignId,
+      promptRequestId,
+      discoveryHooksJson: discoveryHooks as unknown as Prisma.InputJsonValue,
+      latentTargetsJson: latentTargets as unknown as Prisma.InputJsonValue,
+    },
+    update: {
+      promptRequestId,
+      discoveryHooksJson: discoveryHooks as unknown as Prisma.InputJsonValue,
+      latentTargetsJson: latentTargets as unknown as Prisma.InputJsonValue,
+    },
+  });
+
+  return {
+    ...snapshot,
+    promptRequestId,
+  };
+}
+
 async function loadRecentLocalEvents(snapshot: CampaignSnapshot) {
   const recentLocalEvents: RecentLocalEventSummary[] = [];
+  if (!snapshot.currentLocation) {
+    return recentLocalEvents;
+  }
   const now = snapshot.state.globalTime;
   const worldEventRecords = await prisma.worldEvent.findMany({
     where: {
@@ -4790,6 +5282,7 @@ async function loadRecentLocalEvents(snapshot: CampaignSnapshot) {
 }
 
 export async function getTurnRouterContext(snapshot: CampaignSnapshot): Promise<TurnRouterContext> {
+  const currentSceneLocationId = snapshot.currentLocation?.id ?? "";
   const sceneFocus = snapshot.state.sceneFocus ?? null;
   const visibleWorldObjects = visibleWorldObjectsForPrompt({
     snapshot,
@@ -4816,21 +5309,25 @@ export async function getTurnRouterContext(snapshot: CampaignSnapshot): Promise<
     toSceneActorSummaries({
       presentNpcs: snapshot.presentNpcs,
       actors: snapshot.actors ?? snapshot.temporaryActors,
-      currentLocationId: snapshot.currentLocation.id,
+      currentLocationId: currentSceneLocationId,
       sceneActorFocuses: snapshot.state.sceneActorFocuses,
     }),
     sceneFocus,
   ).slice(0, sceneFocus ? 4 : 8);
   return {
-    currentLocation: {
-      id: snapshot.currentLocation.id,
-      name: snapshot.currentLocation.name,
-      type: snapshot.currentLocation.type,
-      summary: snapshot.currentLocation.summary,
-      state: snapshot.currentLocation.state,
-    },
+    currentLocation: snapshot.currentLocation
+      ? {
+          id: snapshot.currentLocation.id,
+          name: snapshot.currentLocation.name,
+          type: snapshot.currentLocation.type,
+          summary: snapshot.currentLocation.summary,
+          state: snapshot.currentLocation.state,
+        }
+      : null,
     sceneFocus,
     adjacentRoutes: snapshot.adjacentRoutes,
+    locationLeads: snapshot.locationLeads,
+    activeJourney: snapshot.activeJourney,
     sceneActors: focusedSceneActors,
     recentLocalEvents: await loadRecentLocalEvents(snapshot),
     recentTurnLedger: buildRecentTurnLedger(snapshot),
@@ -4868,7 +5365,20 @@ export async function getPromptContext(
   snapshot: CampaignSnapshot,
   profile: PromptContextProfile = "full",
   routerDecision?: RouterDecision,
+  promptRequestId?: string | null,
 ): Promise<SpatialPromptContext> {
+  const currentSceneLocationId = snapshot.currentLocation?.id ?? "";
+  const resolvedPromptRequestId = promptRequestId ?? snapshot.promptRequestId ?? randomUUID();
+  const existingPromptCache = promptRequestId
+    ? await prisma.campaignPromptCache.findUnique({
+        where: {
+          campaignId: snapshot.campaignId,
+        },
+        select: {
+          promptRequestId: true,
+        },
+      })
+    : null;
   const routerContext = await getTurnRouterContext(snapshot);
   const promptSceneFocus = effectivePromptSceneFocus({
     sceneFocus: snapshot.state.sceneFocus ?? null,
@@ -4878,7 +5388,7 @@ export async function getPromptContext(
     toSceneActorSummaries({
       presentNpcs: snapshot.presentNpcs,
       actors: snapshot.actors ?? snapshot.temporaryActors,
-      currentLocationId: snapshot.currentLocation.id,
+      currentLocationId: currentSceneLocationId,
       sceneActorFocuses: snapshot.state.sceneActorFocuses,
     }),
     promptSceneFocus,
@@ -4894,6 +5404,7 @@ export async function getPromptContext(
     },
   });
   const isLocal = profile === "local";
+  const discoveryProjection = await buildDiscoveryProjection(snapshot);
   const visibleWorldObjects = visibleWorldObjectsForPrompt({
     snapshot,
     promptSceneFocus,
@@ -4921,6 +5432,8 @@ export async function getPromptContext(
     currentLocation: routerContext.currentLocation,
     sceneFocus: snapshot.state.sceneFocus ?? null,
     adjacentRoutes: isLocal ? [] : routerContext.adjacentRoutes,
+    locationLeads: isLocal ? [] : routerContext.locationLeads,
+    activeJourney: routerContext.activeJourney,
     sceneActors: focusedSceneActors,
     recentLocalEvents: routerContext.recentLocalEvents,
     recentNarrativeProse: buildRecentNarrativeProse(snapshot),
@@ -4944,11 +5457,46 @@ export async function getPromptContext(
       structuredClone(snapshot.state.sceneAspects ?? {}),
       promptSceneFocus,
     ),
-    localTexture: snapshot.currentLocation.localTexture,
+    localTexture: snapshot.currentLocation?.localTexture ?? null,
     globalTime: snapshot.state.globalTime,
     timeOfDay: timeOfDay(snapshot.state.globalTime),
     dayCount: Math.floor(snapshot.state.globalTime / 1440) + 1,
+    discoveryHooks: isLocal
+      ? []
+      : discoveryProjection.discoveryHooks.map<PromptDiscoveryHook>((hook) => ({
+          hookAlias: hook.alias,
+          kind: hook.kind,
+          label: hook.label,
+          reason: hook.reason ?? "Grounded by discovered information.",
+        })),
+    latentTargets: isLocal
+      ? []
+      : discoveryProjection.latentTargets.map<PromptLatentDiscoveryTarget>((target) => ({
+          targetAlias: target.alias,
+          kind: target.kind,
+          label: target.label,
+        })),
+    promptRequestId: resolvedPromptRequestId,
   };
+
+  if (!promptRequestId || existingPromptCache?.promptRequestId === promptRequestId) {
+    await prisma.campaignPromptCache.upsert({
+      where: {
+        campaignId: snapshot.campaignId,
+      },
+      create: {
+        campaignId: snapshot.campaignId,
+        promptRequestId: resolvedPromptRequestId,
+        discoveryHooksJson: discoveryProjection.discoveryHooks as unknown as Prisma.InputJsonValue,
+        latentTargetsJson: discoveryProjection.latentTargets as unknown as Prisma.InputJsonValue,
+      },
+      update: {
+        promptRequestId: resolvedPromptRequestId,
+        discoveryHooksJson: discoveryProjection.discoveryHooks as unknown as Prisma.InputJsonValue,
+        latentTargetsJson: discoveryProjection.latentTargets as unknown as Prisma.InputJsonValue,
+      },
+    });
+  }
 
   return prunePromptContextForRouter({
     promptContext,

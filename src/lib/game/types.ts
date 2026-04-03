@@ -22,6 +22,14 @@ export type RestType = "light" | "full";
 export type ApprovalBand = "hostile" | "cold" | "neutral" | "warm" | "trusted";
 export type DurationMagnitude = "instant" | "brief" | "standard" | "extended" | "long";
 export type SceneAspectDuration = "scene" | "permanent";
+export type LocationKind = "spine" | "minor";
+export type LocationDiscoveryState = "ambient" | "rumored" | "revealed" | "promoted";
+export type RouteVisibility = "public" | "hidden";
+export type RelocationReason =
+  | "teleportation"
+  | "magical_portal"
+  | "trap_relocation"
+  | "forced_transport";
 export const SOCIAL_OUTCOMES = [
   "accepts",
   "declines",
@@ -114,6 +122,14 @@ export type TurnCausalityCodeName =
   | "PLAYER_SCENE_INTERACTION"
   | "PLAYER_INVESTIGATION"
   | "PLAYER_OBSERVATION"
+    | "JOURNEY_STARTED"
+    | "JOURNEY_ARRIVED"
+    | "JOURNEY_ABORTED"
+    | "JOURNEY_REVERSED"
+    | "AUTHORED_DISCOVERY_REQUESTED"
+    | "FALLBACK_DISCOVERY_REQUESTED"
+    | "AUTHORED_DISCOVERY_REVEALED"
+    | "FALLBACK_DISCOVERY_REVEALED"
   | "MODEL_DISCOVERY_INTENT"
   | "RELATIONSHIP_SHIFT"
   | "SIMULATION_TICK"
@@ -305,6 +321,9 @@ export type GeneratedLocationNode = {
   id: string;
   name: string;
   type: string;
+  locationKind?: LocationKind;
+  parentLocationId?: string | null;
+  discoveryState?: LocationDiscoveryState;
   summary: string;
   description: string;
   state: string;
@@ -319,6 +338,8 @@ export type GeneratedLocationEdge = {
   travelTimeMinutes: number;
   dangerLevel: number;
   currentStatus: string;
+  visibility?: RouteVisibility;
+  accessRequirementText?: string | null;
   description: string | null;
 };
 
@@ -364,6 +385,8 @@ export type GeneratedInformation = {
   locationId: string | null;
   factionId: string | null;
   sourceNpcId: string | null;
+  revealsEdgeIds?: string[];
+  revealsLocationIds?: string[];
 };
 
 export type GeneratedInformationLink = {
@@ -692,7 +715,8 @@ export type PreparedCampaignLaunch = {
 };
 
 export type CampaignRuntimeState = {
-  currentLocationId: string;
+  currentLocationId: string | null;
+  activeJourneyId?: string | null;
   globalTime: number;
   pendingTurnId: string | null;
   lastActionSummary: string | null;
@@ -727,6 +751,9 @@ export type LocationSummary = {
   id: string;
   name: string;
   type: string;
+  locationKind?: LocationKind;
+  parentLocationId?: string | null;
+  discoveryState?: LocationDiscoveryState;
   summary: string;
   description: string | null;
   localTexture: LocalTextureSummary | null;
@@ -740,10 +767,51 @@ export type RouteSummary = {
   id: string;
   targetLocationId: string;
   targetLocationName: string;
+  targetLocationKind?: LocationKind;
+  targetLocationDiscoveryState?: LocationDiscoveryState;
   travelTimeMinutes: number;
   dangerLevel: number;
   currentStatus: string;
+  isKnown?: boolean;
+  targetIsMinor?: boolean;
+  visibility?: RouteVisibility;
+  accessRequirementText?: string | null;
   description: string | null;
+};
+
+export type LocationLeadSummary = {
+  locationId: string;
+  name: string;
+  type: string;
+  locationKind: LocationKind;
+  discoveryState: LocationDiscoveryState;
+  parentLocationId: string | null;
+  summary: string;
+};
+
+export type ActiveJourneySummary = {
+  id: string;
+  edgeId: string;
+  originLocationId: string;
+  originLocationName: string;
+  destinationLocationId: string;
+  destinationLocationName: string;
+  elapsedMinutes: number;
+  totalDurationMinutes: number;
+  remainingMinutes: number;
+};
+
+export type PromptDiscoveryHook = {
+  hookAlias: string;
+  kind: "route" | "location";
+  label: string;
+  reason: string;
+};
+
+export type PromptLatentDiscoveryTarget = {
+  targetAlias: string;
+  kind: "route" | "location";
+  label: string;
 };
 
 export type FactionSummary = {
@@ -1012,12 +1080,15 @@ export type CampaignSnapshot = {
   tone: string;
   setting: string;
   state: CampaignRuntimeState;
+  promptRequestId?: string | null;
   character: CampaignCharacter;
   assetItems: ItemInstance[];
   assetCommodityStacks: CharacterCommodityStack[];
   worldObjects: WorldObjectSummary[];
-  currentLocation: LocationSummary;
+  currentLocation: LocationSummary | null;
   adjacentRoutes: RouteSummary[];
+  locationLeads?: LocationLeadSummary[];
+  activeJourney?: ActiveJourneySummary | null;
   presentNpcs: NpcSummary[];
   actors?: ActorSummary[];
   knownNpcLocationIds: Record<string, string | null>;
@@ -1083,9 +1154,11 @@ export type PromptCurrencySummary = {
 };
 
 export type SpatialPromptContext = {
-  currentLocation: Pick<LocationSummary, "id" | "name" | "type" | "summary" | "state">;
+  currentLocation: Pick<LocationSummary, "id" | "name" | "type" | "summary" | "state"> | null;
   sceneFocus: CampaignRuntimeState["sceneFocus"];
   adjacentRoutes: RouteSummary[];
+  locationLeads?: LocationLeadSummary[];
+  activeJourney?: ActiveJourneySummary | null;
   sceneActors: SceneActorSummary[];
   recentLocalEvents: RecentLocalEventSummary[];
   recentNarrativeProse?: string[];
@@ -1102,6 +1175,9 @@ export type SpatialPromptContext = {
   globalTime: number;
   timeOfDay: string;
   dayCount: number;
+  discoveryHooks?: PromptDiscoveryHook[];
+  latentTargets?: PromptLatentDiscoveryTarget[];
+  promptRequestId?: string | null;
 };
 
 export type RouterInventorySummary = {
@@ -1144,6 +1220,8 @@ export type TurnRouterContext = Pick<
   | "currentLocation"
   | "sceneFocus"
   | "adjacentRoutes"
+  | "locationLeads"
+  | "activeJourney"
   | "sceneActors"
   | "recentLocalEvents"
   | "recentTurnLedger"
@@ -1352,10 +1430,11 @@ export type TurnSubmissionRequest = {
   sessionId: string;
   requestId: string;
   expectedStateVersion: number;
+  promptRequestId?: string | null;
   action: string;
   intent?: {
     type: "travel_route";
-    routeEdgeId: string;
+    edgeId: string;
     targetLocationId: string;
   };
   mode?: "observe";
@@ -1374,6 +1453,11 @@ export type RetryRequiredResponse = {
   turnId: string;
   previousStatus: string;
   result: TurnResultPayload;
+};
+
+export type StalePromptContextResponse = {
+  error: "stale_prompt_context";
+  latestSnapshot: PlayerCampaignSnapshot;
 };
 
 export type ResolvePendingCheckRequest = {
@@ -1484,9 +1568,38 @@ export type MechanicsMutation =
       phase?: MutationPhase;
     }
   | {
+      type: "start_journey";
+      edgeId: string;
+      destinationLocationId: string;
+      phase?: MutationPhase;
+    }
+  | {
       type: "move_player";
-      routeEdgeId: string;
       targetLocationId: string;
+      routeEdgeId?: string;
+      relocationReason: RelocationReason;
+      phase?: MutationPhase;
+    }
+  | {
+      type: "arrive_at_destination";
+      authoredTimeElapsedMinutes: number;
+      phase?: MutationPhase;
+    }
+  | {
+      type: "turn_back_travel";
+      authoredTimeElapsedMinutes: number;
+      phase?: MutationPhase;
+    }
+  | {
+      type: "resolve_discovery_hook";
+      hookAlias: string;
+      reason: string;
+      phase?: MutationPhase;
+    }
+  | {
+      type: "force_reveal_discovery";
+      targetAlias: string;
+      reason: string;
       phase?: MutationPhase;
     }
   | {

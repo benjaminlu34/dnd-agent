@@ -23,7 +23,8 @@ const sceneAspectSchema = z.object({
 });
 
 const rawCampaignRuntimeStateSchema = z.object({
-  currentLocationId: z.string().trim().min(1),
+  currentLocationId: z.string().trim().min(1).nullable(),
+  activeJourneyId: z.string().trim().min(1).nullable().optional(),
   globalTime: z.number().int().min(0),
   pendingTurnId: z.string().trim().min(1).nullable(),
   lastActionSummary: z.string().trim().min(1).nullable(),
@@ -57,7 +58,8 @@ const campaignRuntimeStateSchema: z.ZodType<CampaignRuntimeState> = rawCampaignR
       );
 
   return {
-    currentLocationId: value.currentLocationId,
+    currentLocationId: value.currentLocationId ?? null,
+    activeJourneyId: value.activeJourneyId ?? null,
     globalTime: value.globalTime,
     pendingTurnId: value.pendingTurnId,
     lastActionSummary: value.lastActionSummary,
@@ -117,6 +119,14 @@ const turnCausalityCodeNameValues = [
   "RELATIONSHIP_SHIFT",
   "SIMULATION_TICK",
   "HORIZON_CAP",
+    "JOURNEY_STARTED",
+    "JOURNEY_ARRIVED",
+    "JOURNEY_ABORTED",
+    "JOURNEY_REVERSED",
+    "AUTHORED_DISCOVERY_REQUESTED",
+    "FALLBACK_DISCOVERY_REQUESTED",
+    "AUTHORED_DISCOVERY_REVEALED",
+    "FALLBACK_DISCOVERY_REVEALED",
   "SCHEDULE_BUFFER_ROLLED",
   "INVALIDATED_EVENT",
 ] as const satisfies readonly TurnCausalityCodeName[];
@@ -162,7 +172,12 @@ const stateCommitLogEntrySchema: z.ZodType<StateCommitLogEntry> = z.object({
   mutationType: z
     .enum([
       "advance_time",
+      "start_journey",
       "move_player",
+      "arrive_at_destination",
+      "turn_back_travel",
+      "resolve_discovery_hook",
+      "force_reveal_discovery",
       "adjust_currency",
       "record_actor_interaction",
       "record_local_interaction",

@@ -11,6 +11,7 @@ import {
 } from "@/lib/game/json-contracts";
 import {
   InvalidExpectedStateVersionError,
+  StalePromptContextError,
   StateConflictError,
   TurnAbandonedError,
   TurnLockedError,
@@ -56,6 +57,7 @@ import type {
   RequestClarificationToolCall,
   RelationshipHistory,
   ResolveMechanicsResponse,
+  RelocationReason,
   RouterDecision,
   RetryRequiredResponse,
   SpatialPromptContext,
@@ -107,12 +109,19 @@ type ValidatedTurnActionCommand = Exclude<ValidatedTurnCommand, RequestClarifica
 const TURN_LOCK_TTL_MS = 120_000;
 const TURN_INTERNAL_DEADLINE_MS = 115_000;
 const INCIDENTAL_CURRENCY_CP_MAX = 50 * COPPER_PER_GOLD;
+const ALLOWED_RELOCATION_REASONS = new Set<RelocationReason>([
+  "teleportation",
+  "magical_portal",
+  "trap_relocation",
+  "forced_transport",
+]);
 
 const activeTurnControllers = new Map<string, AbortController>();
 const activeCommitTurnKeys = new Set<string>();
 
 type PendingCheckToolBundle = {
   type: "pending_check";
+  promptRequestId?: string | null;
   command: ValidatedResolvedMechanicsCommand & {
     pendingCheck: PendingCheck;
     checkResult?: undefined;
@@ -132,6 +141,7 @@ function requestHashForSubmission(input: {
   campaignId: string;
   sessionId: string;
   expectedStateVersion: number;
+  promptRequestId?: string | null;
   playerAction: string;
   intent?: TurnSubmissionRequest["intent"];
   turnMode: TurnMode;
@@ -142,6 +152,7 @@ function requestHashForSubmission(input: {
         campaignId: input.campaignId,
         sessionId: input.sessionId,
         expectedStateVersion: input.expectedStateVersion,
+        promptRequestId: input.promptRequestId ?? null,
         action: input.playerAction.trim(),
         intent: input.intent ?? null,
         turnMode: input.turnMode,
@@ -885,6 +896,152 @@ async function syncActorStateMirror(input: {
     }
   }
   return actor;
+}
+
+function nextLocationDiscoveryState(current: "ambient" | "rumored" | "revealed" | "promoted") {
+  switch (current) {
+    case "ambient":
+      return "rumored" as const;
+    case "rumored":
+      return "revealed" as const;
+    case "revealed":
+      return "promoted" as const;
+    case "promoted":
+      return "promoted" as const;
+  }
+}
+
+function journeyOvershootTolerance(remainingMinutes: number) {
+  return Math.max(30, Math.ceil(remainingMinutes * 0.15));
+}
+
+function nearerJourneyEndpoint(input: {
+  originLocationId: string;
+  destinationLocationId: string;
+  elapsedMinutes: number;
+  totalDurationMinutes: number;
+}) {
+  const remaining = Math.max(0, input.totalDurationMinutes - input.elapsedMinutes);
+  return input.elapsedMinutes <= remaining ? input.originLocationId : input.destinationLocationId;
+}
+
+type CachedDiscoveryAlias = {
+  alias: string;
+  kind: "route" | "location";
+  targetId: string;
+  label: string;
+  reason?: string;
+};
+
+function parseCachedDiscoveryAliases(value: Prisma.JsonValue | null): CachedDiscoveryAlias[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return [];
+    }
+
+    const candidate = entry as Record<string, unknown>;
+    if (
+      typeof candidate.alias !== "string"
+      || (candidate.kind !== "route" && candidate.kind !== "location")
+      || typeof candidate.targetId !== "string"
+      || typeof candidate.label !== "string"
+    ) {
+      return [];
+    }
+
+    return [{
+      alias: candidate.alias,
+      kind: candidate.kind,
+      targetId: candidate.targetId,
+      label: candidate.label,
+      reason: typeof candidate.reason === "string" ? candidate.reason : undefined,
+    }];
+  });
+}
+
+async function restoreParticipantLocations(input: {
+  tx: Prisma.TransactionClient;
+  rollback: TurnRollbackData;
+  actorIds?: string[];
+  npcIds?: string[];
+  temporaryActorIds?: string[];
+  worldObjectIds?: string[];
+  locationId: string | null;
+}) {
+  const actorIds = Array.from(new Set(input.actorIds ?? []));
+  const npcIds = Array.from(new Set(input.npcIds ?? []));
+  const temporaryActorIds = Array.from(new Set(input.temporaryActorIds ?? []));
+  const worldObjectIds = Array.from(new Set(input.worldObjectIds ?? []));
+
+  if (actorIds.length) {
+    const actors = await input.tx.actor.findMany({
+      where: { id: { in: actorIds } },
+      select: { id: true, currentLocationId: true },
+    });
+    for (const actor of actors) {
+      recordInverse(input.rollback, "actor", actor.id, "currentLocationId", actor.currentLocationId);
+    }
+    await input.tx.actor.updateMany({
+      where: { id: { in: actorIds } },
+      data: { currentLocationId: input.locationId },
+    });
+  }
+
+  if (npcIds.length) {
+    const npcs = await input.tx.nPC.findMany({
+      where: { id: { in: npcIds } },
+      select: { id: true, currentLocationId: true },
+    });
+    for (const npc of npcs) {
+      recordInverse(input.rollback, "nPC", npc.id, "currentLocationId", npc.currentLocationId);
+    }
+    await input.tx.nPC.updateMany({
+      where: { id: { in: npcIds } },
+      data: { currentLocationId: input.locationId },
+    });
+  }
+
+  if (temporaryActorIds.length) {
+    const temporaryActors = await input.tx.temporaryActor.findMany({
+      where: { id: { in: temporaryActorIds } },
+      select: { id: true, currentLocationId: true },
+    });
+    for (const temporaryActor of temporaryActors) {
+      recordInverse(
+        input.rollback,
+        "temporaryActor",
+        temporaryActor.id,
+        "currentLocationId",
+        temporaryActor.currentLocationId,
+      );
+    }
+    await input.tx.temporaryActor.updateMany({
+      where: { id: { in: temporaryActorIds } },
+      data: { currentLocationId: input.locationId },
+    });
+  }
+
+  if (worldObjectIds.length) {
+    const worldObjects = await input.tx.worldObject.findMany({
+      where: { id: { in: worldObjectIds } },
+      select: { id: true, sceneLocationId: true, sceneFocusKey: true },
+    });
+    for (const object of worldObjects) {
+      recordInverse(input.rollback, "worldObject", object.id, "sceneLocationId", object.sceneLocationId);
+      recordInverse(input.rollback, "worldObject", object.id, "sceneFocusKey", object.sceneFocusKey);
+    }
+    await input.tx.worldObject.updateMany({
+      where: { id: { in: worldObjectIds } },
+      data: {
+        sceneLocationId: input.locationId,
+        sceneFocusKey: null,
+      },
+    });
+  }
 }
 
 async function syncActorInventoryMirror(input: {
@@ -1680,8 +1837,8 @@ function resolveInventoryItemIdForEvaluation(input: {
 
 function actorLocationCouldBeTargetedThisTurn(input: {
   actorCurrentLocationId: string | null;
-  previousLocationId: string;
-  nextLocationId: string;
+  previousLocationId: string | null;
+  nextLocationId: string | null;
 }) {
   if (!input.actorCurrentLocationId) {
     return false;
@@ -1866,7 +2023,7 @@ function holderRefForWorldObject(input: {
   };
 }
 
-function canUseSceneHolder(holder: AssetHolderRef, currentLocationId: string) {
+function canUseSceneHolder(holder: AssetHolderRef, currentLocationId: string | null) {
   return holder.kind !== "scene" || holder.locationId === currentLocationId;
 }
 
@@ -1949,6 +2106,15 @@ function normalizeActorRef(actorRef: string) {
   return actorRef.trim() || actorRef;
 }
 
+function isExplicitlyPartyBoundWorldObject(object: WorldObjectSummary) {
+  const properties = object.properties;
+  if (!properties || typeof properties !== "object" || Array.isArray(properties)) {
+    return false;
+  }
+
+  return properties.partyBound === true || properties.belongsToParty === true || properties.followsParty === true;
+}
+
 function interactionSummaryMatchesAnyPattern(summary: string, patterns: readonly RegExp[]) {
   return patterns.some((pattern) => pattern.test(summary));
 }
@@ -2002,7 +2168,7 @@ function resolveSpawnItemHolderForEvaluation(input: {
   projectedTemporaryActors: Map<string, ProjectedTemporaryActor>;
   projectedNpcLocationIds: Map<string, string | null>;
   presentNpcs: CampaignSnapshot["presentNpcs"];
-  projectedLocationId: string;
+  projectedLocationId: string | null;
 }) {
   const holder =
     input.holder.kind === "world_object"
@@ -2213,7 +2379,7 @@ function actorRefsVisibleAtFocus(input: {
   projectedSceneActorFocuses: Map<string, string | null>;
   projectedNpcActorIds: Map<string, string>;
   projectedNpcLocationIds: Map<string, string | null>;
-  projectedLocationId: string;
+  projectedLocationId: string | null;
   sceneFocus: CampaignRuntimeState["sceneFocus"];
   currentFocusActorRefs: Set<string>;
 }) {
@@ -2614,6 +2780,11 @@ function evaluateResolvedCommand(input: {
   const discoveredInformationIds = new Set<string>();
   let projectedCurrencyCp = input.snapshot.character.currencyCp;
   let projectedLocationId = input.snapshot.state.currentLocationId;
+  let projectedActiveJourney = input.snapshot.activeJourney
+    ? {
+        ...input.snapshot.activeJourney,
+      }
+    : null;
   let projectedSceneFocus = input.snapshot.state.sceneFocus ?? null;
   let previousSceneFocusBeforeLatestChange = input.snapshot.state.sceneFocus ?? null;
   let focusChangedThisTurn = false;
@@ -2685,6 +2856,17 @@ function evaluateResolvedCommand(input: {
     }
 
     if (mutation.type === "advance_time") {
+      if (projectedActiveJourney && typeof mutation.durationMinutes === "number") {
+        const nextElapsed = Math.min(
+          projectedActiveJourney.totalDurationMinutes,
+          projectedActiveJourney.elapsedMinutes + mutation.durationMinutes,
+        );
+        projectedActiveJourney = {
+          ...projectedActiveJourney,
+          elapsedMinutes: nextElapsed,
+          remainingMinutes: Math.max(0, projectedActiveJourney.totalDurationMinutes - nextElapsed),
+        };
+      }
       const appliedMutation = { ...mutation, phase } as MechanicsMutation;
       const entry = {
         kind: "mutation" as const,
@@ -2702,15 +2884,15 @@ function evaluateResolvedCommand(input: {
       continue;
     }
 
-    if (mutation.type === "move_player") {
-      const route = input.snapshot.adjacentRoutes.find((entry) => entry.id === mutation.routeEdgeId);
-      if (!route || route.targetLocationId !== mutation.targetLocationId) {
+    if (mutation.type === "start_journey") {
+      const route = input.snapshot.adjacentRoutes.find((entry) => entry.id === mutation.edgeId);
+      if (!route || route.targetLocationId !== mutation.destinationLocationId) {
         stateCommitLog.push({
           kind: "mutation",
           mutationType: mutation.type,
           status: "rejected",
           reasonCode: "invalid_target",
-          summary: "The requested travel route could not be applied.",
+          summary: "The requested journey route could not be applied.",
           metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
         });
         continue;
@@ -2722,11 +2904,64 @@ function evaluateResolvedCommand(input: {
           status: "rejected",
           reasonCode: "route_blocked",
           summary: `The route to ${route.targetLocationName} is currently blocked.`,
-          metadata: {
-            ...mutation,
-            phase,
-            currentStatus: route.currentStatus,
-          } as unknown as Record<string, unknown>,
+          metadata: { ...mutation, phase, currentStatus: route.currentStatus } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (hasAppliedMove || projectedActiveJourney || !projectedLocationId) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "conflicting_mutation",
+          summary: "Only one travel transition can apply in a single turn.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      projectedLocationId = null;
+      projectedActiveJourney = {
+        id: input.snapshot.state.activeJourneyId ?? "pending_active_journey",
+        edgeId: mutation.edgeId,
+        originLocationId: input.snapshot.currentLocation?.id ?? mutation.destinationLocationId,
+        originLocationName: input.snapshot.currentLocation?.name ?? "Unknown location",
+        destinationLocationId: mutation.destinationLocationId,
+        destinationLocationName: route.targetLocationName,
+        elapsedMinutes: 0,
+        totalDurationMinutes: route.travelTimeMinutes,
+        remainingMinutes: route.travelTimeMinutes,
+      };
+      projectedSceneFocus = null;
+      projectedSceneActorFocuses.clear();
+      hasAppliedMove = true;
+      for (const [aspectKey, aspect] of Object.entries(projectedSceneAspects)) {
+        if (aspect.duration === "scene") {
+          delete projectedSceneAspects[aspectKey];
+        }
+      }
+      const appliedMutation = { ...mutation, phase } as MechanicsMutation;
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "journey_started",
+        summary: `You set out for ${route.targetLocationName}.`,
+        metadata: { ...appliedMutation } as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({ mutation: appliedMutation, entry });
+      continue;
+    }
+
+    if (mutation.type === "move_player") {
+      if (!ALLOWED_RELOCATION_REASONS.has(mutation.relocationReason)) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "That relocation reason is not permitted.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
         });
         continue;
       }
@@ -2742,6 +2977,7 @@ function evaluateResolvedCommand(input: {
         continue;
       }
       projectedLocationId = mutation.targetLocationId;
+      projectedActiveJourney = null;
       projectedSceneFocus = null;
       projectedSceneActorFocuses.clear();
       hasAppliedMove = true;
@@ -2755,8 +2991,133 @@ function evaluateResolvedCommand(input: {
         kind: "mutation" as const,
         mutationType: mutation.type,
         status: "applied" as const,
-        reasonCode: "moved_player",
-        summary: `You travel to ${route.targetLocationName}.`,
+        reasonCode: "player_relocated",
+        summary: "You are abruptly relocated.",
+        metadata: { ...appliedMutation } as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({ mutation: appliedMutation, entry });
+      continue;
+    }
+
+    if (mutation.type === "arrive_at_destination") {
+      if (!projectedActiveJourney) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "There is no active journey to finish.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      const tolerance = journeyOvershootTolerance(projectedActiveJourney.remainingMinutes);
+      if (mutation.authoredTimeElapsedMinutes > projectedActiveJourney.remainingMinutes + tolerance) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_time",
+          summary: "That arrival timing overshoots the remaining travel too much.",
+          metadata: { ...mutation, phase, tolerance } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      projectedLocationId = projectedActiveJourney.destinationLocationId;
+      projectedActiveJourney = null;
+      hasAppliedMove = true;
+      const appliedMutation = { ...mutation, phase } as MechanicsMutation;
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "journey_arrival_declared",
+        summary: "You reach your destination.",
+        metadata: { ...appliedMutation } as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({ mutation: appliedMutation, entry });
+      continue;
+    }
+
+    if (mutation.type === "turn_back_travel") {
+      if (!projectedActiveJourney) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "There is no active journey to reverse.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      const tolerance = journeyOvershootTolerance(projectedActiveJourney.remainingMinutes);
+      if (mutation.authoredTimeElapsedMinutes > projectedActiveJourney.remainingMinutes + tolerance) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_time",
+          summary: "That turn-back timing overshoots the remaining forward travel too much.",
+          metadata: { ...mutation, phase, tolerance } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      const effectiveForward = Math.min(
+        mutation.authoredTimeElapsedMinutes,
+        projectedActiveJourney.remainingMinutes,
+      );
+      if (effectiveForward === 0) {
+        projectedLocationId = projectedActiveJourney.originLocationId;
+        projectedActiveJourney = null;
+      } else {
+        const overflow = Math.max(0, mutation.authoredTimeElapsedMinutes - projectedActiveJourney.remainingMinutes);
+        const returnElapsed =
+          Math.max(0, projectedActiveJourney.remainingMinutes - effectiveForward) + overflow;
+        projectedLocationId = null;
+        projectedActiveJourney = {
+          ...projectedActiveJourney,
+          originLocationId: projectedActiveJourney.destinationLocationId,
+          originLocationName: projectedActiveJourney.destinationLocationName,
+          destinationLocationId: projectedActiveJourney.originLocationId,
+          destinationLocationName: projectedActiveJourney.originLocationName,
+          elapsedMinutes: Math.min(projectedActiveJourney.totalDurationMinutes, returnElapsed),
+          remainingMinutes: Math.max(
+            0,
+            projectedActiveJourney.totalDurationMinutes
+            - Math.min(projectedActiveJourney.totalDurationMinutes, returnElapsed),
+          ),
+        };
+      }
+      hasAppliedMove = true;
+      const appliedMutation = { ...mutation, phase } as MechanicsMutation;
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: effectiveForward === 0 ? "journey_aborted" : "journey_reversed",
+        summary: effectiveForward === 0
+          ? "You call off the journey and return to where you started."
+          : "You turn back along the road.",
+        metadata: { ...appliedMutation } as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({ mutation: appliedMutation, entry });
+      continue;
+    }
+
+    if (mutation.type === "resolve_discovery_hook" || mutation.type === "force_reveal_discovery") {
+      const appliedMutation = { ...mutation, phase } as MechanicsMutation;
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: mutation.type === "resolve_discovery_hook" ? "authored_discovery_requested" : "fallback_discovery_requested",
+        summary: mutation.type === "resolve_discovery_hook"
+          ? "You follow a grounded lead."
+          : "You pursue an improvised discovery angle.",
         metadata: { ...appliedMutation } as unknown as Record<string, unknown>,
       };
       stateCommitLog.push(entry);
@@ -5016,6 +5377,17 @@ function evaluateResolvedCommand(input: {
     }
 
     if (mutation.type === "set_follow_state") {
+      if (projectedActiveJourney) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "Follower changes cannot be applied while the party is traveling.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
       if (!hasVector(input.routerDecision, "converse")) {
         stateCommitLog.push({
           kind: "mutation",
@@ -5449,6 +5821,7 @@ function evaluateResolvedCommand(input: {
     nextState: {
       ...input.snapshot.state,
       currentLocationId: projectedLocationId,
+      activeJourneyId: projectedActiveJourney?.id ?? null,
       globalTime: input.snapshot.state.globalTime + input.command.timeElapsed,
       pendingTurnId: null,
       lastActionSummary:
@@ -5921,6 +6294,7 @@ async function applyResolvedMutations(input: {
   snapshot: CampaignSnapshot;
   appliedMutations: AppliedMutationRecord[];
   fetchedFacts: TurnFetchToolResult[];
+  promptRequestId?: string | null;
   rollback: TurnRollbackData;
   nextTurnCount: number;
   nextState: CampaignRuntimeState;
@@ -5937,6 +6311,18 @@ async function applyResolvedMutations(input: {
   const spawnedItemInstanceIds = new Map(input.spawnedItemInstanceIds);
   const spawnedWorldObjectIds = new Map(input.spawnedWorldObjectIds);
   let currentLocationId = input.snapshot.state.currentLocationId;
+  let activeJourney = await input.tx.activeJourney.findUnique({
+    where: { campaignId: input.snapshot.campaignId },
+    include: {
+      edge: true,
+      originLocation: true,
+      destinationLocation: true,
+      journeyActors: true,
+      journeyNpcs: true,
+      journeyTemporaryActors: true,
+      journeyWorldObjects: true,
+    },
+  });
   const characterInstance = await input.tx.characterInstance.findUnique({
     where: { campaignId: input.snapshot.campaignId },
     select: { id: true, currencyCp: true, health: true },
@@ -5946,8 +6332,393 @@ async function applyResolvedMutations(input: {
   }
 
   for (const { mutation, entry } of input.appliedMutations) {
+    if (mutation.type === "advance_time") {
+      if (activeJourney && typeof mutation.durationMinutes === "number") {
+        activeJourney = await input.tx.activeJourney.update({
+          where: { id: activeJourney.id },
+          data: {
+            elapsedMinutes: Math.min(
+              activeJourney.totalDurationMinutes,
+              activeJourney.elapsedMinutes + mutation.durationMinutes,
+            ),
+          },
+          include: {
+            edge: true,
+            originLocation: true,
+            destinationLocation: true,
+            journeyActors: true,
+            journeyNpcs: true,
+            journeyTemporaryActors: true,
+            journeyWorldObjects: true,
+          },
+        });
+        input.nextState.activeJourneyId = activeJourney.id;
+      }
+      continue;
+    }
+
+    if (mutation.type === "start_journey") {
+      const route = input.snapshot.adjacentRoutes.find((candidate) => candidate.id === mutation.edgeId);
+      if (!route || !input.snapshot.currentLocation) {
+        continue;
+      }
+
+      const normalizedFollowerRefs = Array.from(new Set(
+        input.nextState.characterState.activeCompanions.map((actorRef) => normalizeActorRef(actorRef)),
+      ));
+      const followerActorIds = normalizedFollowerRefs
+        .filter((actorRef) => actorRef.startsWith("actor:") || actorRef.startsWith("temp:"))
+        .map((actorRef) =>
+          actorRef.startsWith("actor:")
+            ? actorRef.slice("actor:".length)
+            : actorRef.slice("temp:".length));
+      const followerNpcIds = normalizedFollowerRefs
+        .filter((actorRef) => actorRef.startsWith("npc:"))
+        .map((actorRef) => actorRef.slice("npc:".length));
+      const followerActorWhere: Prisma.ActorWhereInput[] = [];
+      if (followerActorIds.length) {
+        followerActorWhere.push({ id: { in: followerActorIds } });
+      }
+      if (followerNpcIds.length) {
+        followerActorWhere.push({ profileNpcId: { in: followerNpcIds } });
+      }
+      const followerActors = followerActorWhere.length
+        ? await input.tx.actor.findMany({
+            where: {
+              OR: followerActorWhere,
+            },
+            select: { id: true, profileNpcId: true },
+          })
+        : [];
+      const freeStandingWorldObjectIds = input.snapshot.worldObjects
+        .filter((object) =>
+          object.sceneLocationId === input.snapshot.currentLocation?.id
+          && !object.parentWorldObjectId
+          && !object.characterInstanceId
+          && !object.actorId
+          && !object.npcId
+          && !object.temporaryActorId
+          && (object.vehicleIsHitched || isExplicitlyPartyBoundWorldObject(object)))
+        .map((object) => object.id);
+
+      const createdJourney = await input.tx.activeJourney.create({
+        data: {
+          campaignId: input.snapshot.campaignId,
+          edgeId: mutation.edgeId,
+          originLocationId: input.snapshot.currentLocation.id,
+          destinationLocationId: mutation.destinationLocationId,
+          elapsedMinutes: 0,
+          totalDurationMinutes: route.travelTimeMinutes,
+        },
+        include: {
+          edge: true,
+          originLocation: true,
+          destinationLocation: true,
+          journeyActors: true,
+          journeyNpcs: true,
+          journeyTemporaryActors: true,
+          journeyWorldObjects: true,
+        },
+      });
+      recordCreated(input.rollback, "activeJourney", createdJourney.id);
+      input.nextState.activeJourneyId = createdJourney.id;
+      activeJourney = createdJourney;
+      currentLocationId = null;
+      input.nextState.currentLocationId = null;
+
+      if (followerActors.length) {
+        await input.tx.journeyActor.createMany({
+          data: followerActors.map((actor) => ({
+            journeyId: createdJourney.id,
+            actorId: actor.id,
+          })),
+        });
+        const journeyNpcRows = followerActors
+          .filter((actor) => actor.profileNpcId != null)
+          .map((actor) => ({
+            journeyId: createdJourney.id,
+            npcId: actor.profileNpcId!,
+          }));
+        if (journeyNpcRows.length) {
+          await input.tx.journeyNpc.createMany({
+            data: journeyNpcRows,
+          });
+        }
+        const journeyTemporaryActorRows = followerActors
+          .filter((actor) => actor.profileNpcId == null)
+          .map((actor) => ({
+            journeyId: createdJourney.id,
+            temporaryActorId: actor.id,
+          }));
+        if (journeyTemporaryActorRows.length) {
+          await input.tx.journeyTemporaryActor.createMany({
+            data: journeyTemporaryActorRows,
+          });
+        }
+      }
+
+      if (freeStandingWorldObjectIds.length) {
+        await input.tx.journeyWorldObject.createMany({
+          data: freeStandingWorldObjectIds.map((worldObjectId) => ({
+            journeyId: createdJourney.id,
+            worldObjectId,
+          })),
+        });
+        await restoreParticipantLocations({
+          tx: input.tx,
+          rollback: input.rollback,
+          worldObjectIds: freeStandingWorldObjectIds,
+          locationId: null,
+        });
+      }
+
+      for (const actor of followerActors) {
+        await syncActorLocationMirror({
+          tx: input.tx,
+          rollback: input.rollback,
+          actorId: actor.id,
+          newLocationId: null,
+        });
+      }
+
+      stateCommitLog.push({
+        ...entry,
+        reasonCode: "journey_started",
+        metadata: {
+          ...entry.metadata,
+          journeyId: createdJourney.id,
+        },
+      });
+      continue;
+    }
+
     if (mutation.type === "move_player") {
+      if (!ALLOWED_RELOCATION_REASONS.has(mutation.relocationReason)) {
+        throw new Error("Relocation reason is not permitted.");
+      }
+      const targetLocation = await input.tx.locationNode.findFirst({
+        where: {
+          id: mutation.targetLocationId,
+          campaignId: input.snapshot.campaignId,
+        },
+        select: { id: true },
+      });
+      if (!targetLocation) {
+        throw new Error("Relocation target location no longer exists.");
+      }
+      if (activeJourney) {
+        const snapLocationId = nearerJourneyEndpoint({
+          originLocationId: activeJourney.originLocationId,
+          destinationLocationId: activeJourney.destinationLocationId,
+          elapsedMinutes: activeJourney.elapsedMinutes,
+          totalDurationMinutes: activeJourney.totalDurationMinutes,
+        });
+        await restoreParticipantLocations({
+          tx: input.tx,
+          rollback: input.rollback,
+          actorIds: activeJourney.journeyActors.map((row) => row.actorId),
+          npcIds: activeJourney.journeyNpcs.map((row) => row.npcId),
+          temporaryActorIds: activeJourney.journeyTemporaryActors.map((row) => row.temporaryActorId),
+          locationId: mutation.targetLocationId,
+        });
+        await restoreParticipantLocations({
+          tx: input.tx,
+          rollback: input.rollback,
+          worldObjectIds: activeJourney.journeyWorldObjects.map((row) => row.worldObjectId),
+          locationId: snapLocationId,
+        });
+        await input.tx.journeyActor.deleteMany({ where: { journeyId: activeJourney.id } });
+        await input.tx.journeyNpc.deleteMany({ where: { journeyId: activeJourney.id } });
+        await input.tx.journeyTemporaryActor.deleteMany({ where: { journeyId: activeJourney.id } });
+        await input.tx.journeyWorldObject.deleteMany({ where: { journeyId: activeJourney.id } });
+        await input.tx.activeJourney.delete({ where: { id: activeJourney.id } });
+        activeJourney = null;
+        input.nextState.activeJourneyId = null;
+      }
       currentLocationId = mutation.targetLocationId;
+      input.nextState.currentLocationId = mutation.targetLocationId;
+      continue;
+    }
+
+    if (mutation.type === "arrive_at_destination") {
+      if (!activeJourney) {
+        continue;
+      }
+      const remainingMinutes = Math.max(0, activeJourney.totalDurationMinutes - activeJourney.elapsedMinutes);
+      const tolerance = journeyOvershootTolerance(remainingMinutes);
+      if (mutation.authoredTimeElapsedMinutes > remainingMinutes + tolerance) {
+        throw new Error("Arrival overshot the remaining journey time beyond tolerance.");
+      }
+
+      await restoreParticipantLocations({
+        tx: input.tx,
+        rollback: input.rollback,
+        actorIds: activeJourney.journeyActors.map((row) => row.actorId),
+        npcIds: activeJourney.journeyNpcs.map((row) => row.npcId),
+        temporaryActorIds: activeJourney.journeyTemporaryActors.map((row) => row.temporaryActorId),
+        worldObjectIds: activeJourney.journeyWorldObjects.map((row) => row.worldObjectId),
+        locationId: activeJourney.destinationLocationId,
+      });
+      await input.tx.journeyActor.deleteMany({ where: { journeyId: activeJourney.id } });
+      await input.tx.journeyNpc.deleteMany({ where: { journeyId: activeJourney.id } });
+      await input.tx.journeyTemporaryActor.deleteMany({ where: { journeyId: activeJourney.id } });
+      await input.tx.journeyWorldObject.deleteMany({ where: { journeyId: activeJourney.id } });
+      await input.tx.activeJourney.delete({ where: { id: activeJourney.id } });
+      currentLocationId = activeJourney.destinationLocationId;
+      input.nextState.currentLocationId = activeJourney.destinationLocationId;
+      input.nextState.activeJourneyId = null;
+      activeJourney = null;
+      stateCommitLog.push({
+        ...entry,
+        reasonCode: "journey_arrived",
+        metadata: {
+          ...entry.metadata,
+          committedAdvanceMinutes: remainingMinutes,
+        },
+      });
+      continue;
+    }
+
+    if (mutation.type === "turn_back_travel") {
+      if (!activeJourney) {
+        continue;
+      }
+      const remainingForwardMinutes = Math.max(0, activeJourney.totalDurationMinutes - activeJourney.elapsedMinutes);
+      const tolerance = journeyOvershootTolerance(remainingForwardMinutes);
+      if (mutation.authoredTimeElapsedMinutes > remainingForwardMinutes + tolerance) {
+        throw new Error("Turn-back overshot the remaining journey time beyond tolerance.");
+      }
+
+      const clampedForward = Math.min(mutation.authoredTimeElapsedMinutes, remainingForwardMinutes);
+      if (clampedForward === 0) {
+        await restoreParticipantLocations({
+          tx: input.tx,
+          rollback: input.rollback,
+          actorIds: activeJourney.journeyActors.map((row) => row.actorId),
+          npcIds: activeJourney.journeyNpcs.map((row) => row.npcId),
+          temporaryActorIds: activeJourney.journeyTemporaryActors.map((row) => row.temporaryActorId),
+          worldObjectIds: activeJourney.journeyWorldObjects.map((row) => row.worldObjectId),
+          locationId: activeJourney.originLocationId,
+        });
+        await input.tx.journeyActor.deleteMany({ where: { journeyId: activeJourney.id } });
+        await input.tx.journeyNpc.deleteMany({ where: { journeyId: activeJourney.id } });
+        await input.tx.journeyTemporaryActor.deleteMany({ where: { journeyId: activeJourney.id } });
+        await input.tx.journeyWorldObject.deleteMany({ where: { journeyId: activeJourney.id } });
+        await input.tx.activeJourney.delete({ where: { id: activeJourney.id } });
+        currentLocationId = activeJourney.originLocationId;
+        input.nextState.currentLocationId = activeJourney.originLocationId;
+        input.nextState.activeJourneyId = null;
+        activeJourney = null;
+        stateCommitLog.push({
+          ...entry,
+          reasonCode: "journey_aborted",
+        });
+        continue;
+      }
+
+      const overflow = Math.max(0, mutation.authoredTimeElapsedMinutes - remainingForwardMinutes);
+      const returnElapsed = Math.min(
+        activeJourney.totalDurationMinutes,
+        Math.max(0, remainingForwardMinutes - clampedForward) + overflow,
+      );
+      activeJourney = await input.tx.activeJourney.update({
+        where: { id: activeJourney.id },
+        data: {
+          originLocationId: activeJourney.destinationLocationId,
+          destinationLocationId: activeJourney.originLocationId,
+          elapsedMinutes: returnElapsed,
+        },
+        include: {
+          edge: true,
+          originLocation: true,
+          destinationLocation: true,
+          journeyActors: true,
+          journeyNpcs: true,
+          journeyTemporaryActors: true,
+          journeyWorldObjects: true,
+        },
+      });
+      input.nextState.currentLocationId = null;
+      input.nextState.activeJourneyId = activeJourney.id;
+      currentLocationId = null;
+      stateCommitLog.push({
+        ...entry,
+        reasonCode: "journey_reversed",
+        metadata: {
+          ...entry.metadata,
+          returnElapsedMinutes: returnElapsed,
+        },
+      });
+      continue;
+    }
+
+    if (mutation.type === "resolve_discovery_hook" || mutation.type === "force_reveal_discovery") {
+      const promptCache = await input.tx.campaignPromptCache.findUnique({
+        where: { campaignId: input.snapshot.campaignId },
+      });
+      if (!promptCache || !input.promptRequestId || promptCache.promptRequestId !== input.promptRequestId) {
+        throw new StalePromptContextError();
+      }
+
+      const discoveryHooks = parseCachedDiscoveryAliases(promptCache.discoveryHooksJson);
+      const latentTargets = parseCachedDiscoveryAliases(promptCache.latentTargetsJson);
+      const aliasMap = new Map<string, CachedDiscoveryAlias>();
+      for (const alias of mutation.type === "resolve_discovery_hook"
+        ? discoveryHooks
+        : [...discoveryHooks, ...latentTargets]) {
+        aliasMap.set(alias.alias, alias);
+      }
+      const requestedAlias =
+        mutation.type === "resolve_discovery_hook" ? mutation.hookAlias : mutation.targetAlias;
+      const target = aliasMap.get(requestedAlias);
+      if (!target) {
+        throw new StalePromptContextError();
+      }
+
+      if (target.kind === "route") {
+        await input.tx.campaignKnownRoute.upsert({
+          where: {
+            campaignId_edgeId: {
+              campaignId: input.snapshot.campaignId,
+              edgeId: target.targetId,
+            },
+          },
+          create: {
+            campaignId: input.snapshot.campaignId,
+            edgeId: target.targetId,
+          },
+          update: {},
+        });
+      } else {
+        const location = await input.tx.locationNode.findUnique({
+          where: { id: target.targetId },
+          select: { id: true, discoveryState: true },
+        });
+        if (location) {
+          recordInverse(input.rollback, "locationNode", location.id, "discoveryState", location.discoveryState);
+          await input.tx.locationNode.update({
+            where: { id: location.id },
+            data: {
+              discoveryState: nextLocationDiscoveryState(
+                location.discoveryState as "ambient" | "rumored" | "revealed" | "promoted",
+              ),
+            },
+          });
+        }
+      }
+
+      stateCommitLog.push({
+        ...entry,
+        reasonCode: mutation.type === "resolve_discovery_hook"
+          ? "authored_discovery_revealed"
+          : "fallback_discovery_revealed",
+        metadata: {
+          ...entry.metadata,
+          alias: requestedAlias,
+          targetId: target.targetId,
+          targetKind: target.kind,
+        },
+      });
       continue;
     }
 
@@ -6339,7 +7110,11 @@ async function applyResolvedMutations(input: {
             lastSummary: nextSummary,
           },
           role,
-          locationName: location?.name ?? input.snapshot.currentLocation.name,
+          locationName:
+            location?.name
+            ?? input.snapshot.currentLocation?.name
+            ?? input.snapshot.activeJourney?.destinationLocationName
+            ?? "the road",
         });
         const promotedNpcId = `npc_${randomUUID()}`;
         await input.tx.nPC.create({
@@ -7297,7 +8072,11 @@ async function ensureDailyScheduleGenerated(input: {
       premise: input.snapshot.premise,
       tone: input.snapshot.tone,
       setting: input.snapshot.setting,
-      currentLocationId: input.snapshot.state.currentLocationId,
+      currentLocationId:
+        input.snapshot.state.currentLocationId
+        ?? input.snapshot.activeJourney?.destinationLocationId
+        ?? locations[0]?.id
+        ?? "",
       dayStartTime: input.dayStartTime,
       locations: locations.map((location) => ({
         id: location.id,
@@ -7519,7 +8298,14 @@ function determineMemoryKind(input: {
   ) {
     return "trade" as const;
   }
-  if (input.stateCommitLog.some((entry) => entry.status === "applied" && entry.mutationType === "move_player")) {
+  if (input.stateCommitLog.some((entry) =>
+    entry.status === "applied"
+    && (
+      entry.mutationType === "move_player"
+      || entry.mutationType === "start_journey"
+      || entry.mutationType === "arrive_at_destination"
+      || entry.mutationType === "turn_back_travel"
+    ))) {
     return "travel" as const;
   }
   if (input.stateCommitLog.some((entry) => entry.status === "applied" && entry.mutationType === "discover_information")) {
@@ -7557,7 +8343,10 @@ function buildSystemFallbackMemorySummary(input: {
   memoryKind: ReturnType<typeof determineMemoryKind>;
   stateCommitLog: StateCommitLog;
 }) {
-  const locationName = input.snapshot.currentLocation.name;
+  const locationName =
+    input.snapshot.currentLocation?.name
+    ?? input.snapshot.activeJourney?.destinationLocationName
+    ?? "the road";
   const firstApplied =
     input.stateCommitLog.find((entry) => entry.status === "applied" && entry.kind !== "check")
     ?? input.stateCommitLog.find((entry) => entry.status === "applied");
@@ -7604,7 +8393,7 @@ function collectMemoryEntityLinks(input: {
     }
   };
 
-  pushKey("location", input.snapshot.currentLocation.id);
+  pushKey("location", input.snapshot.currentLocation?.id ?? input.snapshot.activeJourney?.destinationLocationId);
 
   for (const entry of input.stateCommitLog) {
     if (!entry.metadata) {
@@ -7616,7 +8405,7 @@ function collectMemoryEntityLinks(input: {
         : null;
     if (entry.mutationType === "move_player") {
       pushKey("location", typeof entry.metadata.targetLocationId === "string" ? entry.metadata.targetLocationId : null);
-      pushKey("route", typeof entry.metadata.routeEdgeId === "string" ? entry.metadata.routeEdgeId : null);
+      pushKey("route", typeof entry.metadata.relocationReason === "string" ? entry.metadata.relocationReason : null);
     }
     if (
       entry.mutationType === "adjust_relationship"
@@ -8019,6 +8808,7 @@ async function commitResolvedTurn(input: {
   turnId: string;
   requestId: string;
   expectedStateVersion: number;
+  promptRequestId?: string | null;
   playerAction: string;
   turnMode: TurnMode;
   command: ValidatedResolvedMechanicsCommand;
@@ -8058,6 +8848,7 @@ async function commitResolvedTurn(input: {
       snapshot,
       appliedMutations: evaluated.appliedMutations,
       fetchedFacts,
+      promptRequestId: input.promptRequestId,
       rollback,
       nextTurnCount,
       nextState: evaluated.nextState,
@@ -8391,24 +9182,27 @@ async function commitFastForwardTurn(input: {
     let interruptAtTime: number | null = null;
 
     if (provisionalMinutes > 0) {
-      const localWorldEvent = await tx.worldEvent.findFirst({
-        where: {
-          campaignId: snapshot.campaignId,
-          locationId: snapshot.currentLocation.id,
-          isProcessed: false,
-          isCancelled: false,
-          triggerTime: {
-            gt: startTime,
-            lte: provisionalEndTime,
-          },
-        },
-        orderBy: [{ triggerTime: "asc" }, { createdAt: "asc" }],
-        select: {
-          id: true,
-          triggerTime: true,
-          description: true,
-        },
-      });
+      const currentLocationId = snapshot.currentLocation?.id ?? null;
+      const localWorldEvent = currentLocationId
+        ? await tx.worldEvent.findFirst({
+            where: {
+              campaignId: snapshot.campaignId,
+              locationId: currentLocationId,
+              isProcessed: false,
+              isCancelled: false,
+              triggerTime: {
+                gt: startTime,
+                lte: provisionalEndTime,
+              },
+            },
+            orderBy: [{ triggerTime: "asc" }, { createdAt: "asc" }],
+            select: {
+              id: true,
+              triggerTime: true,
+              description: true,
+            },
+          })
+        : null;
 
       const factionMoveCandidates = await tx.factionMove.findMany({
         where: {
@@ -8429,9 +9223,11 @@ async function commitFastForwardTurn(input: {
         },
       });
 
-      const localFactionMove = factionMoveCandidates.find((move) =>
-        simulationPayloadTouchesLocation(move.payload as Prisma.JsonValue, snapshot.currentLocation.id),
-      ) ?? null;
+      const localFactionMove = currentLocationId
+        ? factionMoveCandidates.find((move) =>
+            simulationPayloadTouchesLocation(move.payload as Prisma.JsonValue, currentLocationId),
+          ) ?? null
+        : null;
 
       if (
         localWorldEvent
@@ -9432,6 +10228,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
     sessionId: input.sessionId,
     requestId: input.requestId,
     expectedStateVersion: input.expectedStateVersion,
+    promptRequestId: input.promptRequestId ?? null,
     turnMode,
     intentType: intent?.type ?? null,
     playerActionPreview: playerAction.slice(0, 240),
@@ -9440,6 +10237,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
     campaignId: input.campaignId,
     sessionId: input.sessionId,
     expectedStateVersion: input.expectedStateVersion,
+    promptRequestId: input.promptRequestId ?? null,
     playerAction,
     intent,
     turnMode,
@@ -9661,7 +10459,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       requestId: input.requestId,
       turnId: turn.id,
       stateVersion: snapshot.stateVersion,
-      locationId: snapshot.currentLocation.id,
+      locationId: snapshot.currentLocation?.id ?? null,
       presentNpcCount: snapshot.presentNpcs.length,
       activePressureCount: snapshot.activePressures.length,
       activeThreadCount: snapshot.activeThreads.length,
@@ -9733,6 +10531,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
       snapshot,
       promptContextProfileForRouter(routerDecision),
       routerDecision,
+      input.promptRequestId,
     );
     const narrationOverride =
       intent?.type === "travel_route"
@@ -9756,7 +10555,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
     const resolution: TurnResolution =
       intent?.type === "travel_route"
         ? await (async () => {
-            const route = snapshot.adjacentRoutes.find((entry) => entry.id === intent.routeEdgeId);
+            const route = snapshot.adjacentRoutes.find((entry) => entry.id === intent.edgeId);
             if (!route) {
               throw new Error("Travel intent route is not adjacent to the player's current location.");
             }
@@ -9771,13 +10570,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
                   suggestedActions: [],
                   warnings: [`The route to ${route.targetLocationName} is currently blocked.`],
                   memorySummary: `You attempt to set out for ${route.targetLocationName}, but the route is blocked.`,
-                  mutations: [
-                    {
-                      type: "move_player",
-                      routeEdgeId: route.id,
-                      targetLocationId: route.targetLocationId,
-                    },
-                  ],
+                  mutations: [],
                 },
                 fetchedFacts: [],
               } satisfies TurnResolution;
@@ -9791,13 +10584,9 @@ export async function triageTurn(input: TurnSubmissionRequest & {
                 memorySummary: `You travel to ${route.targetLocationName}.`,
                 mutations: [
                   {
-                    type: "move_player",
-                    routeEdgeId: route.id,
-                    targetLocationId: route.targetLocationId,
-                  },
-                  {
-                    type: "advance_time",
-                    durationMinutes: route.travelTimeMinutes,
+                    type: "start_journey",
+                    edgeId: route.id,
+                    destinationLocationId: route.targetLocationId,
                   },
                 ],
               },
@@ -9864,6 +10653,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
     if (validated.pendingCheck) {
       const pendingBundle: PendingCheckToolBundle = {
         type: "pending_check",
+        promptRequestId: input.promptRequestId ?? null,
         command: {
           ...validated,
           pendingCheck: validated.pendingCheck,
@@ -9954,6 +10744,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
             turnId: turn.id,
             requestId: input.requestId,
             expectedStateVersion: input.expectedStateVersion,
+            promptRequestId: input.promptRequestId,
             playerAction,
             turnMode,
             command: committedCommand,
@@ -10457,6 +11248,7 @@ export async function resolvePendingCheck(input: ResolvePendingCheckRequest & {
       turnId: pendingTurn.id,
       requestId: input.requestId,
       expectedStateVersion: snapshot.stateVersion,
+      promptRequestId: bundle.promptRequestId ?? null,
       playerAction: bundle.playerAction,
       turnMode: bundle.turnMode,
       command: committedCommand,
