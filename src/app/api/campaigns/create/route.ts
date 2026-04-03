@@ -23,6 +23,16 @@ export async function POST(request: Request) {
     const result = await createCampaignFromModuleForUser(payload.data);
 
     if ("error" in result) {
+      if (result.error === "module_requires_descent") {
+        return NextResponse.json(
+          {
+            error: "World-scale modules require region materialization before launch. This feature is pending.",
+            code: "MODULE_REQUIRES_DESCENT",
+          },
+          { status: 409 },
+        );
+      }
+
       return NextResponse.json(
         {
           error:

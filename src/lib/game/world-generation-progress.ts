@@ -30,7 +30,6 @@ export const WORLD_GENERATION_PROGRESS_STAGES: WorldGenerationStageName[] = [
   "knowledge_web",
   "knowledge_threads",
   "economy_material_life",
-  "entry_contexts",
   "final_world",
 ];
 

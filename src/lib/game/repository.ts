@@ -19,6 +19,7 @@ import {
   openWorldGenerationArtifactsSchema,
 } from "@/lib/game/session-zero";
 import { instanceWorldForCampaign } from "@/lib/game/world-instancing";
+import { buildWorldGenerationScalePlan } from "@/lib/game/world-scale";
 import { env } from "@/lib/env";
 import type {
   AdventureModuleDetail,
@@ -66,6 +67,7 @@ import type {
   SceneActorSummary,
   PromptContextProfile,
   PromptDiscoveryHook,
+  LaunchBlockReason,
   RouterDecision,
   RouterKnownNpcSummary,
   RouterWorldObjectSummary,
@@ -76,6 +78,7 @@ import type {
   ItemInstance,
   TurnRouterContext,
   TurnDigest,
+  WorldScaleTier,
   WorldObjectSummary,
   WorldShiftSummary,
 } from "@/lib/game/types";
@@ -141,6 +144,31 @@ function parseOpenWorldGenerationArtifacts(value: unknown): OpenWorldGenerationA
   return openWorldGenerationArtifactsSchema.parse(value);
 }
 
+function moduleScaleMetadata(artifacts: OpenWorldGenerationArtifacts | null): {
+  scaleTier: WorldScaleTier;
+  launchableDirectly: boolean;
+  launchBlockReason: LaunchBlockReason;
+} {
+  const scaleTier = artifacts?.scaleTier ?? "regional";
+  const scalePlan = artifacts?.scalePlan ?? buildWorldGenerationScalePlan(scaleTier);
+
+  return {
+    scaleTier,
+    launchableDirectly: scalePlan.launchableDirectly,
+    launchBlockReason: scalePlan.launchBlockReason,
+  };
+}
+
+function unscopedResolvedLaunchEntry(entryPoint: ResolvedLaunchEntry): ResolvedLaunchEntry {
+  return {
+    ...entryPoint,
+    startLocationId: stripScopedEntityId(entryPoint.startLocationId),
+    presentNpcIds: entryPoint.presentNpcIds.map((id) => stripScopedEntityId(id)),
+    initialInformationIds: entryPoint.initialInformationIds.map((id) => stripScopedEntityId(id)),
+    localContactNpcId: entryPoint.localContactNpcId ? stripScopedEntityId(entryPoint.localContactNpcId) : null,
+  };
+}
+
 function stripLocationGenerationMetadata(world: GeneratedWorldModule): GeneratedWorldModule {
   return {
     ...world,
@@ -195,7 +223,7 @@ function resolveStockLaunchEntry(input: {
     throw new Error("Selected entry point was not found.");
   }
 
-  const entryContext = input.artifacts?.entryContexts.entryPoints.find(
+  const entryContext = input.artifacts?.entryContexts?.entryPoints.find(
     (entry) => entry.id === input.entryPointId,
   );
 
@@ -238,6 +266,57 @@ function normalizeLaunchEntrySelection(input: {
     artifacts: input.artifacts,
     entryPointId: input.entryPointId,
   });
+}
+
+async function resolveCampaignLaunchEntrySelection(input: {
+  world: GeneratedWorldModule;
+  artifacts: OpenWorldGenerationArtifacts | null;
+  template: CharacterTemplate;
+  entryPointId?: string;
+  customEntryPoint?: ResolvedLaunchEntry;
+  preparedLaunch?: PreparedCampaignLaunch;
+  prompt?: string;
+}): Promise<ResolvedLaunchEntry> {
+  if (input.customEntryPoint || input.entryPointId) {
+    return normalizeLaunchEntrySelection({
+      world: input.world,
+      artifacts: input.artifacts,
+      entryPointId: input.entryPointId,
+      customEntryPoint: input.customEntryPoint,
+    });
+  }
+
+  if (input.preparedLaunch) {
+    const preparedEntryPoint = unscopedResolvedLaunchEntry(input.preparedLaunch.entryPoint);
+    const issues = validateResolvedLaunchEntryAgainstWorld(preparedEntryPoint, input.world);
+
+    if (issues.length === 0) {
+      return preparedEntryPoint;
+    }
+  }
+
+  if (input.world.entryPoints.length > 0) {
+    throw new Error("A stock or custom launch entry selection is required.");
+  }
+
+  const resolvedDraft = await dmClient.resolveObjectiveLaunchEntry({
+    module: input.world,
+    character: input.template,
+    prompt: input.prompt,
+  });
+  const entryPoint = resolvedLaunchEntrySchema.parse({
+    id: `auto_entry_${randomUUID()}`,
+    ...resolvedDraft,
+    isCustom: false,
+    customRequestPrompt: null,
+  });
+  const issues = validateResolvedLaunchEntryAgainstWorld(entryPoint, input.world);
+
+  if (issues.length) {
+    throw new Error(`Auto-generated launch entry failed validation: ${issues.map((issue) => issue.message).join("; ")}`);
+  }
+
+  return entryPoint;
 }
 
 function collectNearbyLocationIds(world: GeneratedWorldModule, startLocationId: string) {
@@ -1555,6 +1634,8 @@ function toAdventureModuleSummary(
   }>,
 ): AdventureModuleSummary {
   const template = parseWorldTemplate(module.openWorldTemplateJson);
+  const generationArtifacts = parseOpenWorldGenerationArtifacts(module.openWorldGenerationArtifactsJson);
+  const scale = moduleScaleMetadata(generationArtifacts);
   return {
     id: module.id,
     title: module.title,
@@ -1562,6 +1643,9 @@ function toAdventureModuleSummary(
     tone: module.tone,
     setting: module.setting,
     generationMode: "open_world",
+    scaleTier: scale.scaleTier,
+    launchableDirectly: scale.launchableDirectly,
+    launchBlockReason: scale.launchBlockReason,
     entryPointCount: template.entryPoints.length,
     campaignCount: module._count.campaigns,
     createdAt: module.createdAt.toISOString(),
@@ -1597,6 +1681,8 @@ export async function getAdventureModuleForUser(moduleId: string): Promise<Adven
   }
 
   const template = parseWorldTemplate(adventureModule.openWorldTemplateJson);
+  const generationArtifacts = parseOpenWorldGenerationArtifacts(adventureModule.openWorldGenerationArtifactsJson);
+  const scale = moduleScaleMetadata(generationArtifacts);
 
   return {
     id: adventureModule.id,
@@ -1605,6 +1691,9 @@ export async function getAdventureModuleForUser(moduleId: string): Promise<Adven
     tone: adventureModule.tone,
     setting: adventureModule.setting,
     generationMode: "open_world",
+    scaleTier: scale.scaleTier,
+    launchableDirectly: scale.launchableDirectly,
+    launchBlockReason: scale.launchBlockReason,
     schemaVersion: adventureModule.schemaVersion,
     entryPoints: template.entryPoints.map((entryPoint) => {
       const location = template.locations.find((location) => location.id === entryPoint.startLocationId);
@@ -1642,6 +1731,16 @@ export async function resolveCustomEntryPointForUser(input: {
   }
 
   const world = parseWorldTemplate(adventureModule.openWorldTemplateJson);
+  const generationArtifacts = parseOpenWorldGenerationArtifacts(adventureModule.openWorldGenerationArtifactsJson);
+  const scale = moduleScaleMetadata(generationArtifacts);
+
+  if (!scale.launchableDirectly) {
+    return {
+      error: "module_requires_descent" as const,
+      launchBlockReason: scale.launchBlockReason,
+    };
+  }
+
   const templateRecord = toTemplateRecord(template);
   const interpretedIntent = await dmClient.interpretCustomEntryIntent({
     prompt: input.prompt,
@@ -1769,6 +1868,7 @@ export async function generateCampaignOpeningDraftForUser(input: {
   customEntryPoint?: ResolvedLaunchEntry;
   prompt?: string;
   previousDraft?: GeneratedCampaignOpening;
+  preparedLaunch?: PreparedCampaignLaunch;
 }) {
   logBackendDiagnostic("campaign.opening_draft.start", {
     moduleId: input.moduleId,
@@ -1796,14 +1896,25 @@ export async function generateCampaignOpeningDraftForUser(input: {
 
   const world = parseWorldTemplate(adventureModule.openWorldTemplateJson);
   const generationArtifacts = parseOpenWorldGenerationArtifacts(adventureModule.openWorldGenerationArtifactsJson);
-  const entryPoint = normalizeLaunchEntrySelection({
-    world,
-    artifacts: generationArtifacts,
-    entryPointId: input.entryPointId,
-    customEntryPoint: input.customEntryPoint,
-  });
+  const scale = moduleScaleMetadata(generationArtifacts);
+
+  if (!scale.launchableDirectly) {
+    return {
+      error: "module_requires_descent" as const,
+      launchBlockReason: scale.launchBlockReason,
+    };
+  }
 
   const character = toTemplateRecord(template);
+  const entryPoint = await resolveCampaignLaunchEntrySelection({
+    world,
+    artifacts: generationArtifacts,
+    template: character,
+    entryPointId: input.entryPointId,
+    customEntryPoint: input.customEntryPoint,
+    preparedLaunch: input.preparedLaunch,
+    prompt: input.prompt,
+  });
   const preparedLaunch = await prepareCampaignLaunch({
     campaignId: `preview_${randomUUID()}`,
     world,
@@ -2456,14 +2567,25 @@ export async function createCampaignFromModuleForUser(input: {
 
   const world = parseWorldTemplate(adventureModule.openWorldTemplateJson);
   const generationArtifacts = parseOpenWorldGenerationArtifacts(adventureModule.openWorldGenerationArtifactsJson);
-  const entryPoint = normalizeLaunchEntrySelection({
-    world,
-    artifacts: generationArtifacts,
-    entryPointId: input.entryPointId,
-    customEntryPoint: input.customEntryPoint,
-  });
+  const scale = moduleScaleMetadata(generationArtifacts);
+
+  if (!scale.launchableDirectly) {
+    return {
+      error: "module_requires_descent" as const,
+      launchBlockReason: scale.launchBlockReason,
+    };
+  }
 
   const templateRecord = toTemplateRecord(template);
+  const entryPoint = await resolveCampaignLaunchEntrySelection({
+    world,
+    artifacts: generationArtifacts,
+    template: templateRecord,
+    entryPointId: input.entryPointId,
+    customEntryPoint: input.customEntryPoint,
+    preparedLaunch: input.preparedLaunch,
+  });
+
   const campaignId = `camp_${randomUUID()}`;
   const { world: instancedWorld, entryPoint: instancedEntryPoint } = instanceWorldForCampaign(
     campaignId,

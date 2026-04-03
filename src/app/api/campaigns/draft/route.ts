@@ -31,6 +31,7 @@ export async function POST(request: Request) {
 
     const result = await dmClient.generateWorldModule({
       prompt: payload.data.prompt,
+      scaleTier: payload.data.scaleTier,
       previousDraft: payload.data.previousDraft,
       onProgress: payload.data.progressId
         ? (update) => {

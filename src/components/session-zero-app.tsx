@@ -7,6 +7,7 @@ import type {
   CharacterTemplateSummary,
   OpenWorldGenerationArtifacts,
   GeneratedWorldModule,
+  WorldScaleTier,
 } from "@/lib/game/types";
 import {
   WORLD_GENERATION_PROGRESS_STAGES,
@@ -40,6 +41,7 @@ function FieldShell({
 export function SessionZeroApp() {
   const router = useRouter();
   const [prompt, setPrompt] = useState("");
+  const [scaleTier, setScaleTier] = useState<WorldScaleTier>("regional");
   const [modules, setModules] = useState<AdventureModuleSummary[]>([]);
   const [characters, setCharacters] = useState<CharacterTemplateSummary[]>([]);
   const [selectedModuleId, setSelectedModuleId] = useState<string | null>(null);
@@ -195,7 +197,12 @@ export function SessionZeroApp() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ prompt, previousDraft: draft ?? undefined, progressId }),
+        body: JSON.stringify({
+          prompt,
+          scaleTier,
+          previousDraft: draft ?? undefined,
+          progressId,
+        }),
       });
 
       const data = (await response.json()) as {
@@ -346,6 +353,19 @@ export function SessionZeroApp() {
                 placeholder="A storm-battered trade city where three factions are quietly preparing for open conflict..."
               />
             </FieldShell>
+            <div className="mt-4 max-w-sm">
+              <FieldShell label="World Scale">
+                <select
+                  className={fieldClassName()}
+                  value={scaleTier}
+                  onChange={(event) => setScaleTier(event.target.value as WorldScaleTier)}
+                >
+                  <option value="settlement">Settlement</option>
+                  <option value="regional">Regional</option>
+                  <option value="world">World</option>
+                </select>
+              </FieldShell>
+            </div>
             {draftProgress ? (
               <div className="mt-4 rounded-2xl border border-zinc-800 bg-zinc-950/80 px-4 py-4">
                 <div className="flex items-center justify-between gap-4">

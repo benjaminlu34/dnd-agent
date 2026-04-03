@@ -17,7 +17,7 @@ test("normalizeSocialCastInput dedupes and clamps social ties so schema-sized ov
           approval: 0,
           isCompanion: false,
           currentConcern: "Another surge is about to tear through his camp.",
-          playerCrossPath: "He needs porters and witnesses before the next collapse.",
+          publicContactSurface: "He works the permit desk that logs salvage crews before the next collapse.",
           ties: {
             locationIds: [
               "loc_blackmoor_ruins_of_power",

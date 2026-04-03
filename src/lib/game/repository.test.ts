@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { repositoryTestUtils } from "./repository";
+import { buildWorldGenerationScalePlan } from "./world-scale";
 import type {
   CampaignRuntimeState,
   CharacterInstance,
@@ -130,6 +131,63 @@ function createWorld(): GeneratedWorldModule {
 
 function createArtifacts(): OpenWorldGenerationArtifacts {
   return {
+    prompt: "A harbor city where rival powers are preparing to move.",
+    model: "test-model",
+    createdAt: new Date().toISOString(),
+    scaleTier: "regional",
+    scalePlan: buildWorldGenerationScalePlan("regional"),
+    worldBible: {
+      title: "Harbor of Knives",
+      premise: "A harbor city where rival powers are preparing to move.",
+      tone: "Tense and investigative",
+      setting: "A rain-dark trade port",
+      groundLevelReality: "Wet stone, ledger desks, and harbor queues define the city.",
+      widespreadBurdens: [
+        "Customs lines squeeze dawn cargo.",
+        "Lamp oil levies hit the poor first.",
+        "Watch shortages leave back piers exposed.",
+        "Guild tolls turn every shortcut into a price.",
+        "Storm repairs absorb the district surplus.",
+      ],
+      presentScars: [
+        "Burned piers still narrow the working harbor.",
+        "Old guild barricades still shape the lane plan.",
+        "A cracked sea wall still floods the lower market.",
+        "Former siege chains still rust at the outer mouth.",
+      ],
+      sharedRealities: [
+        "Queue tokens at every public desk.",
+        "Harbor chalk on wet walls.",
+        "Ledger bells before dawn cargo checks.",
+        "Salt tax stamps on lamp tins.",
+        "Dock prayers before storm shifts.",
+      ],
+      explanationThreads: [],
+      everydayLife: {
+        survival: "People trade favors, queue early, and patch storm damage in shifts.",
+        institutions: ["Harbor Court", "Customs Office", "Watch Barracks", "Dock Ledger Guild"],
+        fears: ["Flooded cellars", "Inspection sweeps", "Broken shifts"],
+        wants: ["Dry storage", "Steady work", "Predictable tolls"],
+        trade: ["Lamp oil", "Salt fish", "Sailcloth"],
+        gossip: [
+          "The ledger bells rang early again.",
+          "Someone is skimming berth fees.",
+          "A broken chain surfaced near the mouth.",
+        ],
+      },
+    },
+    worldSpine: { locations: [], edges: [], factions: [], factionRelations: [] },
+    regionalLife: { locations: [] },
+    socialLayer: { npcs: [], socialGravity: [] },
+    knowledgeEconomy: {
+      information: [],
+      informationLinks: [],
+      knowledgeNetworks: [],
+      pressureSeeds: [],
+      commodities: [],
+      marketPrices: [],
+      locationTradeIdentity: [],
+    },
     entryContexts: {
       entryPoints: [
         {
@@ -149,6 +207,18 @@ function createArtifacts(): OpenWorldGenerationArtifacts {
         },
       ],
     },
+    attempts: [],
+    validationReports: [],
+    idMaps: {
+      factions: {},
+      locations: {},
+      edges: {},
+      factionRelations: {},
+      npcs: {},
+      information: {},
+      commodities: {},
+    },
+    stageSummaries: {},
   } as unknown as OpenWorldGenerationArtifacts;
 }
 

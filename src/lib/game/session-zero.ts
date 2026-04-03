@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { buildWorldGenerationScalePlan } from "@/lib/game/world-scale";
 import {
   buildAdjacency,
   countLocationsWithinHops,
@@ -554,6 +555,41 @@ const WORLD_SPINE_MAX_LOCATIONS = 18;
 const WORLD_SPINE_MAX_EDGES = 42;
 const WORLD_SPINE_MAX_FACTIONS = 14;
 const WORLD_SPINE_MAX_RELATIONS = 28;
+const worldScaleTierSchema = z.enum(["settlement", "regional", "world"]);
+const launchBlockReasonSchema = z.enum([
+  "none",
+  "requires_world_descent",
+  "requires_region_materialization",
+]);
+const targetSemanticScaleSchema = z.enum(["local", "regional", "civilizational"]);
+const detailModeSchema = z.enum(["street_level", "territorial", "civilizational"]);
+const forbiddenDetailModeSchema = z.enum([
+  "single_room",
+  "single_business",
+  "single_street_address",
+  "micro_neighborhood",
+  "full_geographic_enumeration",
+  "cosmological_abstraction",
+]);
+const scaleProfileSchema = z.object({
+  sourceScale: worldScaleTierSchema,
+  targetSemanticScale: targetSemanticScaleSchema,
+  detailMode: detailModeSchema,
+  forbiddenDetailModes: z.array(forbiddenDetailModeSchema),
+  launchableOutput: z.boolean(),
+  expectsChildDescent: z.boolean(),
+});
+const scalePlanSchema = z.object({
+  entryScale: scaleProfileSchema,
+  worldBibleScale: scaleProfileSchema,
+  worldSpineScale: scaleProfileSchema,
+  regionalLifeScale: scaleProfileSchema,
+  socialCastScale: scaleProfileSchema,
+  knowledgeScale: scaleProfileSchema,
+  expectsChildDescent: z.boolean(),
+  launchableDirectly: z.boolean(),
+  launchBlockReason: launchBlockReasonSchema,
+});
 
 const generatedWorldBibleSchemaBase = z
   .object({
@@ -562,9 +598,9 @@ const generatedWorldBibleSchemaBase = z
     tone: z.string().trim().min(1),
     setting: z.string().trim().min(1),
     groundLevelReality: z.string().trim().min(1),
-    widespreadBurdens: z.array(z.string().trim().min(1)).min(7),
-    presentScars: z.array(z.string().trim().min(1)).min(7),
-    sharedRealities: z.array(z.string().trim().min(1)).min(6),
+    widespreadBurdens: z.array(z.string().trim().min(1)).min(3),
+    presentScars: z.array(z.string().trim().min(1)).min(3),
+    sharedRealities: z.array(z.string().trim().min(1)).min(3),
     explanationThreads: z.array(explanationThreadSchema).default([]),
     everydayLife: z.object({
       survival: z.string().trim().min(1),
@@ -755,7 +791,7 @@ const generatedSocialNpcSchema = z.object({
   approval: z.number().int().min(-10).max(10),
   isCompanion: z.boolean(),
   currentConcern: z.string().trim().min(1),
-  playerCrossPath: z.string().trim().min(1),
+  publicContactSurface: z.string().trim().min(1),
   ties: z.object({
     locationIds: z.array(z.string().trim().min(1)).min(1).max(2),
     factionIds: z.array(z.string().trim().min(1)).max(2),
@@ -924,7 +960,7 @@ export const generatedWorldModuleSchema = z
     informationLinks: z.array(informationLinkSchema).min(1),
     commodities: z.array(commoditySchema).min(2),
     marketPrices: z.array(marketPriceSchema).min(2),
-    entryPoints: z.array(entryPointSchema).min(2).max(5),
+    entryPoints: z.array(entryPointSchema).max(5).default([]),
   })
   .superRefine((draft, ctx) => {
     const locationIds = new Set(draft.locations.map((location) => location.id));
@@ -1114,11 +1150,18 @@ export const openWorldGenerationArtifactsSchema = z.object({
   prompt: z.string().trim().min(1),
   model: z.string().trim().min(1),
   createdAt: z.string().trim().min(1),
+  scaleTier: worldScaleTierSchema.default("regional"),
+  scalePlan: scalePlanSchema.optional(),
   worldBible: generatedWorldBibleSchema,
   worldSpine: generatedWorldSpineSchema,
   regionalLife: generatedRegionalLifeSchema,
   socialLayer: z.object({
-    npcs: z.array(npcSchema).min(4),
+    npcs: z.array(
+      npcSchema.extend({
+        currentConcern: z.string().trim().min(1).nullable().optional(),
+        publicContactSurface: z.string().trim().min(1).nullable().optional(),
+      }),
+    ).min(4),
     socialGravity: z.array(
       z.object({
         npcId: z.string().trim().min(1),
@@ -1155,7 +1198,7 @@ export const openWorldGenerationArtifactsSchema = z.object({
         evidenceWorldAlreadyMoving: z.string().trim().min(1),
       }),
     ),
-  }),
+  }).optional(),
   attempts: z.array(
     z.object({
       stage: z.enum([
@@ -1203,7 +1246,10 @@ export const openWorldGenerationArtifactsSchema = z.object({
     commodities: z.record(z.string(), z.string()),
   }),
   stageSummaries: z.record(z.string(), z.string()),
-});
+}).transform((artifacts) => ({
+  ...artifacts,
+  scalePlan: artifacts.scalePlan ?? buildWorldGenerationScalePlan(artifacts.scaleTier),
+}));
 
 export const generatedCampaignOpeningSchema = z.object({
   narration: z.string().trim().min(1),
@@ -1246,6 +1292,7 @@ export const preparedCampaignLaunchSchema = z.object({
 
 export const campaignDraftRequestSchema = z.object({
   prompt: z.string().trim().min(1, "Prompt is required."),
+  scaleTier: worldScaleTierSchema.default("regional"),
   previousDraft: generatedWorldModuleSchema.optional(),
   progressId: z.string().trim().min(1).optional(),
 });
@@ -1263,6 +1310,13 @@ function hasExactlyOneLaunchEntrySelection(input: {
   return (input.entryPointId !== undefined) !== (input.customEntryPoint !== undefined);
 }
 
+function hasAtMostOneLaunchEntrySelection(input: {
+  entryPointId?: string;
+  customEntryPoint?: unknown;
+}) {
+  return !(input.entryPointId !== undefined && input.customEntryPoint !== undefined);
+}
+
 export const campaignOpeningDraftRequestSchema = z.object({
   moduleId: z.string().trim().min(1, "Module selection is required."),
   templateId: z.string().trim().min(1, "Template selection is required."),
@@ -1270,8 +1324,9 @@ export const campaignOpeningDraftRequestSchema = z.object({
   customEntryPoint: resolvedLaunchEntrySchema.optional(),
   prompt: z.string().trim().optional(),
   previousDraft: generatedCampaignOpeningSchema.optional(),
-}).refine(hasExactlyOneLaunchEntrySelection, {
-  message: "Must provide exactly one of entryPointId or customEntryPoint.",
+  preparedLaunch: preparedCampaignLaunchSchema.optional(),
+}).refine(hasAtMostOneLaunchEntrySelection, {
+  message: "Must not provide both entryPointId and customEntryPoint.",
 });
 
 export const campaignCreateRequestSchema = z.object({
@@ -1281,8 +1336,8 @@ export const campaignCreateRequestSchema = z.object({
   customEntryPoint: resolvedLaunchEntrySchema.optional(),
   opening: generatedCampaignOpeningSchema.optional(),
   preparedLaunch: preparedCampaignLaunchSchema.optional(),
-}).refine(hasExactlyOneLaunchEntrySelection, {
-  message: "Must provide exactly one of entryPointId or customEntryPoint.",
+}).refine(hasAtMostOneLaunchEntrySelection, {
+  message: "Must not provide both entryPointId and customEntryPoint.",
 }).refine((input) => input.preparedLaunch !== undefined || input.opening !== undefined, {
   message: "Campaign creation requires either a prepared launch bundle or an opening draft.",
 });

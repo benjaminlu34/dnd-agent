@@ -398,7 +398,7 @@ test("generatedWorldModuleSchema rejects minor locations without justification",
   assert.match(JSON.stringify(parsed.error?.flatten()), /justify why they are topology/);
 });
 
-test("campaign launch request schemas enforce strict XOR for entry selection", () => {
+test("campaign launch request schemas forbid conflicting entry selections while allowing prepared or auto launch flows", () => {
   const openingPayload = {
     moduleId: "mod_1",
     templateId: "tpl_1",
@@ -446,12 +446,40 @@ test("campaign launch request schemas enforce strict XOR for entry selection", (
   );
   assert.equal(
     campaignCreateRequestSchema.safeParse(openingPayload).success,
-    false,
+    true,
   );
   assert.equal(
     campaignCreateRequestSchema.safeParse({
       ...openingPayload,
       entryPointId: "entry_1",
+    }).success,
+    true,
+  );
+  assert.equal(
+    campaignCreateRequestSchema.safeParse({
+      ...openingPayload,
+      preparedLaunch: {
+        previewCampaignId: "preview_launch_1",
+        entryPoint: {
+          id: "auto_entry_1",
+          title: "At the Gate",
+          summary: "Begin under watchful eyes.",
+          startLocationId: "preview_launch_1:location:loc_gate",
+          presentNpcIds: ["preview_launch_1:npc:npc_4"],
+          initialInformationIds: ["preview_launch_1:information:info_2"],
+          immediatePressure: "The line is about to be searched.",
+          publicLead: "The guide is already scanning the line.",
+          localContactNpcId: "preview_launch_1:npc:npc_4",
+          localContactTemporaryActorLabel: null,
+          temporaryLocalActors: [],
+          mundaneActionPath: "Join the queue and play your role.",
+          evidenceWorldAlreadyMoving: "The checkpoint is already active.",
+          isCustom: false,
+          customRequestPrompt: null,
+        },
+        startingLocals: [],
+        opening: openingPayload.opening,
+      },
     }).success,
     true,
   );

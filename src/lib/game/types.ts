@@ -284,6 +284,9 @@ export type AdventureModuleSummary = {
   tone: string;
   setting: string;
   generationMode: "open_world";
+  scaleTier: WorldScaleTier;
+  launchableDirectly: boolean;
+  launchBlockReason: LaunchBlockReason;
   entryPointCount: number;
   campaignCount: number;
   createdAt: string;
@@ -304,6 +307,9 @@ export type AdventureModuleDetail = {
   tone: string;
   setting: string;
   generationMode: "open_world";
+  scaleTier: WorldScaleTier;
+  launchableDirectly: boolean;
+  launchBlockReason: LaunchBlockReason;
   schemaVersion: number;
   entryPoints: ModuleEntryPointSummary[];
   createdAt: string;
@@ -452,6 +458,42 @@ export type WorldGenerationStageName =
   | "entry_contexts"
   | "final_world";
 
+export type WorldScaleTier = "settlement" | "regional" | "world";
+export type LaunchBlockReason =
+  | "none"
+  | "requires_world_descent"
+  | "requires_region_materialization";
+export type TargetSemanticScale = "local" | "regional" | "civilizational";
+export type DetailMode = "street_level" | "territorial" | "civilizational";
+export type ForbiddenDetailMode =
+  | "single_room"
+  | "single_business"
+  | "single_street_address"
+  | "micro_neighborhood"
+  | "full_geographic_enumeration"
+  | "cosmological_abstraction";
+
+export type ScaleProfile = {
+  sourceScale: WorldScaleTier;
+  targetSemanticScale: TargetSemanticScale;
+  detailMode: DetailMode;
+  forbiddenDetailModes: ForbiddenDetailMode[];
+  launchableOutput: boolean;
+  expectsChildDescent: boolean;
+};
+
+export type WorldGenerationScalePlan = {
+  entryScale: ScaleProfile;
+  worldBibleScale: ScaleProfile;
+  worldSpineScale: ScaleProfile;
+  regionalLifeScale: ScaleProfile;
+  socialCastScale: ScaleProfile;
+  knowledgeScale: ScaleProfile;
+  expectsChildDescent: boolean;
+  launchableDirectly: boolean;
+  launchBlockReason: LaunchBlockReason;
+};
+
 export type GeneratedExplanationThread = {
   key: string;
   phenomenon: string;
@@ -550,7 +592,7 @@ export type GeneratedRegionalLife = {
 
 export type GeneratedSocialNpc = Omit<GeneratedNpc, "id"> & {
   currentConcern: string;
-  playerCrossPath: string;
+  publicContactSurface: string;
   ties: {
     locationIds: string[];
     factionIds: string[];
@@ -562,6 +604,11 @@ export type GeneratedSocialNpc = Omit<GeneratedNpc, "id"> & {
   bridgeFactionIds: string[];
 };
 
+export type PersistedGeneratedSocialNpc = GeneratedNpc & {
+  currentConcern?: string | null;
+  publicContactSurface?: string | null;
+};
+
 export type GeneratedSocialGravity = {
   npcId: string;
   importance: "pillar" | "connector" | "local";
@@ -570,7 +617,7 @@ export type GeneratedSocialGravity = {
 };
 
 export type GeneratedSocialLayer = {
-  npcs: GeneratedNpc[];
+  npcs: PersistedGeneratedSocialNpc[];
   socialGravity: GeneratedSocialGravity[];
 };
 
@@ -658,12 +705,14 @@ export type OpenWorldGenerationArtifacts = {
   prompt: string;
   model: string;
   createdAt: string;
+  scaleTier: WorldScaleTier;
+  scalePlan: WorldGenerationScalePlan;
   worldBible: GeneratedWorldBible;
   worldSpine: GeneratedWorldSpine;
   regionalLife: GeneratedRegionalLife;
   socialLayer: GeneratedSocialLayer;
   knowledgeEconomy: GeneratedKnowledgeEconomy;
-  entryContexts: GeneratedEntryContexts;
+  entryContexts?: GeneratedEntryContexts;
   attempts: WorldGenerationAttempt[];
   validationReports: WorldGenerationValidationReport[];
   idMaps: OpenWorldGenerationIdMap;

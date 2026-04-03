@@ -125,8 +125,11 @@ export function CampaignCreationApp({
     };
   }
 
+  const usesAutoLaunchResolution =
+    Boolean(module?.launchableDirectly) && (module?.entryPoints.length ?? 0) === 0 && launchMode !== "custom";
   const hasActiveLaunchSelection =
-    launchMode === "custom" ? Boolean(customEntryPoint) : Boolean(selectedEntryPointId);
+    usesAutoLaunchResolution
+    || (launchMode === "custom" ? Boolean(customEntryPoint) : Boolean(selectedEntryPointId));
 
   const generateDraft = useCallback(
     async (prompt?: string, previousDraft?: GeneratedCampaignOpening) => {
@@ -143,7 +146,7 @@ export function CampaignCreationApp({
             ? { entryPointId: selectedEntryPointId }
             : null;
 
-      if (!launchSelection) {
+      if (!launchSelection && !usesAutoLaunchResolution) {
         return;
       }
 
@@ -159,9 +162,10 @@ export function CampaignCreationApp({
           body: JSON.stringify({
             moduleId,
             templateId,
-            ...launchSelection,
+            ...(launchSelection ?? {}),
             prompt: prompt?.trim() || undefined,
             previousDraft: previousDraft ? normalizeOpeningDraft(previousDraft) : undefined,
+            preparedLaunch: preparedLaunch ?? undefined,
           }),
         });
         const data = (await response.json()) as {
@@ -183,7 +187,7 @@ export function CampaignCreationApp({
         setGenerating(false);
       }
     },
-    [customEntryPoint, launchMode, moduleId, selectedEntryPointId, templateId],
+    [customEntryPoint, launchMode, moduleId, preparedLaunch, selectedEntryPointId, templateId, usesAutoLaunchResolution],
   );
 
   async function resolveCustomEntry() {
@@ -253,7 +257,7 @@ export function CampaignCreationApp({
           ? { entryPointId: selectedEntryPointId }
           : null;
 
-    if (!launchSelection) {
+    if (!launchSelection && !usesAutoLaunchResolution) {
       return;
     }
 
@@ -269,7 +273,7 @@ export function CampaignCreationApp({
         body: JSON.stringify({
           moduleId,
           templateId,
-          ...launchSelection,
+          ...(launchSelection ?? {}),
           opening: normalizeOpeningDraft(draft),
           preparedLaunch,
         }),
@@ -324,6 +328,14 @@ export function CampaignCreationApp({
                 <p className="ui-label">Module</p>
                 <h2 className="ui-title mt-3 text-2xl">{module.title}</h2>
                 <p className="ui-body mt-3">{module.premise}</p>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <span className="rounded-full border border-zinc-800 px-3 py-1 text-[11px] uppercase tracking-[0.18em] text-zinc-400">
+                    {module.scaleTier}
+                  </span>
+                  <span className="rounded-full border border-zinc-800 px-3 py-1 text-[11px] uppercase tracking-[0.18em] text-zinc-400">
+                    {module.launchableDirectly ? "launchable now" : "descent required"}
+                  </span>
+                </div>
               </div>
 
               <div className="app-section p-6">
@@ -334,26 +346,36 @@ export function CampaignCreationApp({
                   </span>
                 </div>
                 <div className="mt-4 space-y-3">
-                  {module.entryPoints.map((entryPoint) => (
-                    <button
-                      key={entryPoint.id}
-                      type="button"
-                      onClick={() => {
-                        setLaunchMode("stock");
-                        setSelectedEntryPointId(entryPoint.id);
-                      }}
-                      className={[
-                        "w-full rounded-2xl border p-4 text-left transition-colors",
-                        launchMode === "stock" && selectedEntryPointId === entryPoint.id
-                          ? "border-zinc-500 bg-black"
-                          : "border-zinc-800 bg-black hover:border-zinc-700",
-                      ].join(" ")}
-                    >
-                      <h3 className="ui-title text-base">{entryPoint.title}</h3>
-                      <p className="ui-body mt-2">{entryPoint.summary}</p>
-                      <p className="ui-label mt-3">{entryPoint.locationName}</p>
-                    </button>
-                  ))}
+                  {module.entryPoints.length > 0 ? (
+                    module.entryPoints.map((entryPoint) => (
+                      <button
+                        key={entryPoint.id}
+                        type="button"
+                        onClick={() => {
+                          setLaunchMode("stock");
+                          setSelectedEntryPointId(entryPoint.id);
+                        }}
+                        className={[
+                          "w-full rounded-2xl border p-4 text-left transition-colors",
+                          launchMode === "stock" && selectedEntryPointId === entryPoint.id
+                            ? "border-zinc-500 bg-black"
+                            : "border-zinc-800 bg-black hover:border-zinc-700",
+                        ].join(" ")}
+                      >
+                        <h3 className="ui-title text-base">{entryPoint.title}</h3>
+                        <p className="ui-body mt-2">{entryPoint.summary}</p>
+                        <p className="ui-label mt-3">{entryPoint.locationName}</p>
+                      </button>
+                    ))
+                  ) : (
+                    <div className="rounded-2xl border border-zinc-800 bg-black p-4">
+                      <h3 className="ui-title text-base">Campaign-Time Opening</h3>
+                      <p className="ui-body mt-2">
+                        This module has no baked entry points. The opening hinge will be resolved from the
+                        module and your character when you generate the campaign launch.
+                      </p>
+                    </div>
+                  )}
                   <div
                     className={[
                       "rounded-2xl border p-4 transition-colors",
@@ -365,7 +387,7 @@ export function CampaignCreationApp({
                     <button
                       type="button"
                       className="w-full text-left"
-                      onClick={() => setLaunchMode("custom")}
+                      onClick={() => module.launchableDirectly && setLaunchMode("custom")}
                     >
                       <h3 className="ui-title text-base">Custom Entry</h3>
                       <p className="ui-body mt-2">
@@ -384,7 +406,7 @@ export function CampaignCreationApp({
                         type="button"
                         className="button-press ui-button-secondary rounded-full px-4 py-2 text-sm font-semibold disabled:opacity-60"
                         onClick={() => void resolveCustomEntry()}
-                        disabled={!customEntryPrompt.trim() || resolvingCustomEntry}
+                        disabled={!module.launchableDirectly || !customEntryPrompt.trim() || resolvingCustomEntry}
                       >
                         {resolvingCustomEntry
                           ? "Resolving..."
@@ -408,6 +430,16 @@ export function CampaignCreationApp({
             </aside>
 
             <div className="app-section p-6">
+              {!module.launchableDirectly ? (
+                <div className="rounded-2xl border border-zinc-800 bg-black/40 p-6">
+                  <p className="ui-label">Launch Deferred</p>
+                  <h2 className="ui-title mt-2 text-2xl">This module still needs region materialization.</h2>
+                  <p className="ui-body mt-3 text-zinc-300">
+                    World-scale modules are reusable skeletons in this pass. They cannot launch directly
+                    until region descent is implemented.
+                  </p>
+                </div>
+              ) : null}
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <p className="ui-label">Opening Draft</p>
@@ -417,14 +449,16 @@ export function CampaignCreationApp({
                         ? "Resolve a custom entry to preview the opening."
                         : hasActiveLaunchSelection
                           ? "Generating entry-point opening..."
-                          : "Choose an entry point to preview the opening.")}
+                          : module.entryPoints.length === 0
+                            ? "A grounded opening will be resolved from the module and character."
+                            : "Choose an entry point to preview the opening.")}
                   </h2>
                 </div>
                 <button
                   type="button"
                   className="button-press ui-button-secondary rounded-full px-4 py-2 text-sm font-semibold disabled:opacity-60"
                   onClick={() => void generateDraft(followUpPrompt, draft ?? undefined)}
-                  disabled={!hasActiveLaunchSelection || generating}
+                  disabled={!module.launchableDirectly || !hasActiveLaunchSelection || generating}
                 >
                   {generating ? "Generating..." : "Regenerate"}
                 </button>
@@ -518,7 +552,7 @@ export function CampaignCreationApp({
                 type="button"
                 className="button-press ui-button-primary mt-8 rounded-full px-5 py-3 text-sm font-semibold disabled:opacity-60"
                 onClick={() => void startCampaign()}
-                disabled={!draft || !preparedLaunch || !hasActiveLaunchSelection || launching}
+                disabled={!module.launchableDirectly || !draft || !preparedLaunch || !hasActiveLaunchSelection || launching}
               >
                 {launching ? "Launching..." : "Launch Campaign"}
               </button>

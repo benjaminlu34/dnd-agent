@@ -6,7 +6,9 @@ import type {
   GeneratedWorldBible,
   GeneratedWorldModule,
   GeneratedWorldSpine,
+  WorldScaleTier,
 } from "@/lib/game/types";
+import { WORLD_BIBLE_SCALE_MINIMUMS } from "@/lib/game/world-scale";
 
 export type ValidationReport = {
   ok: boolean;
@@ -15,6 +17,15 @@ export type ValidationReport = {
 
 type WorldBibleValidationOptions = {
   minimumExplanationThreads?: number;
+  scaleTier?: WorldScaleTier;
+};
+
+type WorldSpineValidationOptions = {
+  scaleTier?: WorldScaleTier;
+};
+
+type SocialLayerValidationOptions = {
+  scaleTier?: WorldScaleTier;
 };
 
 const FACTION_TEXT_STOPWORDS = new Set([
@@ -137,6 +148,8 @@ export function validateWorldBible(
 ): ValidationReport {
   const issues: string[] = [];
   const minimumExplanationThreads = options.minimumExplanationThreads ?? 0;
+  const scaleTier = options.scaleTier ?? "regional";
+  const minimums = WORLD_BIBLE_SCALE_MINIMUMS[scaleTier];
 
   if (bible.explanationThreads.length < minimumExplanationThreads) {
     issues.push(
@@ -148,16 +161,16 @@ export function validateWorldBible(
     issues.push("World bible must describe at least four institutions that shape everyday life.");
   }
 
-  if (bible.widespreadBurdens.length < 7) {
-    issues.push("World bible must define at least seven widespread burdens.");
+  if (bible.widespreadBurdens.length < minimums.burdens) {
+    issues.push(`World bible must define at least ${minimums.burdens} widespread burdens for ${scaleTier} scale.`);
   }
 
-  if (bible.presentScars.length < 7) {
-    issues.push("World bible should include at least seven present scars.");
+  if (bible.presentScars.length < minimums.scars) {
+    issues.push(`World bible should include at least ${minimums.scars} present scars for ${scaleTier} scale.`);
   }
 
-  if (bible.sharedRealities.length < 6) {
-    issues.push("World bible should include at least six shared realities.");
+  if (bible.sharedRealities.length < minimums.sharedRealities) {
+    issues.push(`World bible should include at least ${minimums.sharedRealities} shared realities for ${scaleTier} scale.`);
   }
 
   if (bible.everydayLife.trade.length < 3 || bible.everydayLife.gossip.length < 3) {
@@ -170,7 +183,10 @@ export function validateWorldBible(
   };
 }
 
-export function validateWorldSpine(spine: GeneratedWorldSpine): ValidationReport {
+export function validateWorldSpine(
+  spine: GeneratedWorldSpine,
+  _options: WorldSpineValidationOptions = {},
+): ValidationReport {
   const issues: string[] = [];
   const adjacency = buildAdjacencyFromSpine(spine);
   const factionKeys = new Set(spine.factions.map((faction) => faction.key));
@@ -295,6 +311,7 @@ export function validateRegionalLife(
 export function validateSocialLayer(
   socialLayer: GeneratedSocialLayer,
   expectedLocationIds: string[],
+  _options: SocialLayerValidationOptions = {},
 ): ValidationReport {
   const issues: string[] = [];
   const npcConcentration = new Map<string, number>();
