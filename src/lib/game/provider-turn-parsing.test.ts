@@ -259,6 +259,72 @@ test("normalizeRouterDecision strips invalid npc_detail prerequisites for tempor
   ]);
 });
 
+test("normalizeRouterDecision canonicalizes legacy npc scene refs onto actor-native sceneActors", () => {
+  const normalized = aiProviderTestUtils.normalizeRouterDecision(
+    {
+      profile: "local",
+      confidence: "high",
+      authorizedVectors: ["converse"],
+      requiredPrerequisites: [],
+      reason: "The player addresses Mira directly.",
+      clarification: {
+        needed: false,
+        blocker: null,
+        question: null,
+        options: [],
+      },
+      attention: {
+        primaryIntent: "Talk to Mira.",
+        resolvedReferents: [
+          {
+            phrase: "Mira",
+            targetRef: "npc:npc_mira",
+            targetKind: "scene_actor",
+            confidence: "high",
+          },
+        ],
+        unresolvedReferents: [],
+        impliedDestinationFocus: null,
+        mustCheck: ["sceneActors"],
+      },
+    },
+    {
+      currentLocation: {
+        id: "loc_market",
+        name: "Lantern Market",
+        type: "district",
+        summary: "Awning-covered stalls and morning foot traffic.",
+        state: "busy",
+      },
+      sceneFocus: null,
+      adjacentRoutes: [],
+      sceneActors: [
+        {
+          actorRef: "actor:actor_npc_mira",
+          actorId: "actor_npc_mira",
+          profileNpcId: "npc_mira",
+          kind: "npc",
+          displayLabel: "Mira Brightstone",
+          role: "baker",
+          detailFetchHint: null,
+          lastSummary: "She keeps bread warm beneath clean cloth.",
+        },
+      ],
+      recentLocalEvents: [],
+      recentTurnLedger: [],
+      discoveredInformation: [],
+      activePressures: [],
+      activeThreads: [],
+      inventory: [],
+      worldObjects: [],
+      sceneAspects: [],
+      currency: TEST_CURRENCY,
+    },
+  );
+
+  assert.equal(normalized.attention.resolvedReferents[0]?.targetRef, "actor:actor_npc_mira");
+});
+
 test("normalizeRouterDecision keeps explicit named offscreen locals bound as known_npc targets", () => {
   const normalized = aiProviderTestUtils.normalizeRouterDecision(
     {
@@ -667,18 +733,18 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   assert.match(prompt, /Use sceneActors\.actorRef values exactly only for actorRef fields/);
   assert.match(prompt, /For npcId, citedNpcId, and targetNpcId fields, use the bare NPC id without the npc: prefix/);
   assert.match(prompt, /Use record_local_interaction for current-scene unnamed locals instead of adjust_relationship/);
-  assert.match(prompt, /Use record_npc_interaction for ordinary same-scene dialogue with a grounded named NPC/);
+  assert.match(prompt, /Use record_actor_interaction for ordinary same-scene dialogue with a grounded embodied actor/);
   assert.match(prompt, /Fetched npc_detail for a named NPC is sufficient grounding for identity, memory, and bare npc ids, but it is not physical presence/i);
-  assert.match(prompt, /Use record_npc_interaction only for named NPCs who are immediate scene actors now or are explicitly brought into the scene this turn/i);
+  assert.match(prompt, /Use record_actor_interaction for grounded named NPCs and other embodied scene actors who are immediate scene actors now or are explicitly brought into the scene this turn/i);
   assert.match(prompt, /nearby-but-offscreen/i);
-  assert.match(prompt, /Every record_local_interaction and record_npc_interaction mutation must include socialOutcome/);
+  assert.match(prompt, /Every record_local_interaction, record_actor_interaction, and record_npc_interaction mutation must include socialOutcome/);
   assert.match(prompt, /Choose the most specific valid socialOutcome available/);
   assert.match(prompt, /acknowledges is the only low-intensity fallback outcome/i);
   assert.match(prompt, /interactionSummary must stay unresolved and must not close a decision, agreement, invitation, or emotional resolution/i);
   assert.match(prompt, /Do not describe physical movement, arrivals, departures, returns, repositioning, or new blocking in interactionSummary/i);
-  assert.match(prompt, /Never use record_local_interaction with npc: refs or named sceneActors/);
+  assert.match(prompt, /Never use record_local_interaction with npc:, actor:, or named sceneActors/);
   assert.match(prompt, /Never invent temp: ids/i);
-  assert.match(prompt, /When speaking to a named on-screen NPC, use record_npc_interaction for ordinary dialogue/);
+  assert.match(prompt, /When speaking to a named on-screen NPC, use record_actor_interaction for ordinary dialogue/);
   assert.match(prompt, /If economy_light is active and a bespoke trade is actually agreed upon, resolve it immediately with composed asset mutations/);
   assert.match(prompt, /Use execute_fast_forward only when the player explicitly asks to compress multiple days or weeks into a routine montage/);
   assert.match(prompt, /execute_fast_forward carries aggregate upkeep only\. It must not contain scene mutations/i);
@@ -688,7 +754,7 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   assert.match(prompt, /If the player is looting, pickpocketing, frisking, searching a body's belongings, or otherwise acting on a grounded NPC's custody, request npc_detail first/i);
   assert.match(prompt, /When fetched npc_detail exposes grounded held items or commodity stacks on an NPC, use transfer_assets from that NPC holder/i);
   assert.match(prompt, /willing NPC or temporary-actor exchange/i);
-  assert.match(prompt, /record_local_interaction and record_npc_interaction alone never finalize custody or consumption/i);
+  assert.match(prompt, /record_local_interaction, record_actor_interaction, and record_npc_interaction alone never finalize custody or consumption/i);
   assert.match(prompt, /Do not leave the item in player custody while narrating that someone else now has it/i);
   assert.match(prompt, /asks what to call them, who they are, or another identity-seeking follow-up, request npc_detail for that actor/i);
   assert.match(prompt, /Use spawn_environmental_item before adjust_inventory/);
@@ -698,7 +764,7 @@ test("buildTurnSystemPrompt for player turns encodes router and check-gating rul
   assert.match(prompt, /comes back later in the turn, represent that mechanically with set_scene_actor_presence/);
   assert.match(prompt, /Use set_player_scene_focus for self-directed movement within the current location/);
   assert.match(prompt, /same venue or social space/i);
-  assert.match(prompt, /actorRef npc:<npcId>/i);
+  assert.match(prompt, /grounded actor:<actorId> sceneActors\.actorRef; use npc:<npcId> only as a compatibility fallback/i);
   assert.match(prompt, /label must describe a spatial sub-location or zone/);
   assert.match(prompt, /never a portable object like Coin Purse or Sword/);
   assert.match(prompt, /Never use it to simulate the player arriving somewhere/);

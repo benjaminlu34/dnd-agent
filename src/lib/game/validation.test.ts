@@ -111,6 +111,29 @@ function createSnapshot(): CampaignSnapshot {
         threatLevel: 2,
       },
     ],
+    actors: [
+      {
+        id: "actor_npc_guard",
+        profileNpcId: "npc_guard",
+        isAnonymous: false,
+        label: "Gate Guard",
+        displayLabel: "Gate Guard",
+        currentLocationId: "loc_gate",
+        state: "active",
+        threatLevel: 2,
+        interactionCount: 1,
+        firstSeenAtTurn: 0,
+        lastSeenAtTurn: 0,
+        lastSeenAtTime: 480,
+        recentTopics: [],
+        lastSummary: "A wary watch guard.",
+        holdsInventory: false,
+        affectedWorldState: false,
+        isInMemoryGraph: false,
+        promotedNpcId: "npc_guard",
+        inventory: [],
+      },
+    ],
     knownNpcLocationIds: {
       npc_guard: "loc_gate",
     },
@@ -270,19 +293,23 @@ test("validateTurnCommand rejects fast-forward during active pursuit", () => {
   const snapshot = createSnapshot();
   snapshot.state.characterState.conditions = ["being_pursued"];
 
-  assert.throws(
-    () => validateTurnCommand({
-      snapshot,
-      command: {
-        type: "execute_fast_forward",
-        requestedDurationMinutes: 1440,
-        routineSummary: "You try to lie low for the day.",
-        recurringActivities: ["keep your head down"],
-        intendedOutcomes: ["avoid notice"],
-      },
-    }),
-    /Cannot fast-forward during active combat or pursuit/i,
-  );
+  const validated = validateTurnCommand({
+    snapshot,
+    command: {
+      type: "execute_fast_forward",
+      requestedDurationMinutes: 1440,
+      routineSummary: "You try to lie low for the day.",
+      recurringActivities: ["keep your head down"],
+      intendedOutcomes: ["avoid notice"],
+    },
+  });
+
+  assert.equal(validated.type, "request_clarification");
+  if (validated.type !== "request_clarification") {
+    return;
+  }
+  assert.match(validated.question, /cannot fast-forward time during active combat or pursuit/i);
+  assert.deepEqual(validated.options, ["Attack", "Defend", "Flee", "Take cover"]);
 });
 
 test("validateTurnCommand derives rest duration from restore_health mutations", () => {
@@ -545,6 +572,37 @@ test("validateTurnCommand preserves record_npc_interaction targeting a present n
       socialOutcome: "asks_question",
     },
   ]);
+});
+
+test("validateTurnCommand drops record_actor_interaction targeting an offscene actor", () => {
+  const snapshot = createSnapshot();
+  snapshot.actors = [
+    {
+      ...snapshot.actors?.[0]!,
+      currentLocationId: "loc_market",
+    },
+  ];
+
+  const validated = validateTurnCommand({
+    snapshot,
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Look around"],
+      mutations: [
+        {
+          type: "record_actor_interaction",
+          actorId: "actor_npc_guard",
+          interactionSummary: "You talk to the guard.",
+          socialOutcome: "acknowledges",
+        },
+      ],
+    },
+  });
+
+  assert.equal(validated.type, "resolve_mechanics");
+  assert.deepEqual(validated.mutations, []);
+  assert.match(validated.warnings.join("\n"), /invalid or unavailable actor/i);
 });
 
 test("validateTurnCommand normalizes actorRef-form npc ids for named npc interaction and checks", () => {
@@ -1056,6 +1114,57 @@ test("validateTurnCommand drops substituted actor mutations when only an unresol
     ["advance_time"],
   );
   assert.equal(validated.pendingCheck, undefined);
+  assert.deepEqual(validated.narrationHint, {
+    unresolvedTargetPhrases: ["they"],
+  });
+  assert.match(
+    validated.warnings.join("\n"),
+    /redirect an unresolved target onto a different grounded actor/i,
+  );
+});
+
+test("validateTurnCommand drops actor-native substitutions when only an unresolved temporary actor was referenced", () => {
+  const validated = validateTurnCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Stay alert"],
+      mutations: [
+        {
+          type: "record_actor_interaction",
+          actorId: "actor_npc_guard",
+          interactionSummary: "You catch their wrist before they slip away.",
+          socialOutcome: "resists",
+          topic: "escape",
+        },
+      ],
+    },
+    playerAction: "While they reach over, I grab their wrist before they can slip away.",
+    routerDecision: createRouterDecision({
+      authorizedVectors: ["investigate"],
+      attention: {
+        primaryIntent: "React to the cloaked figure.",
+        resolvedReferents: [],
+        unresolvedReferents: [
+          {
+            phrase: "they",
+            intendedKind: "temporary_actor",
+            confidence: "high",
+          },
+        ],
+        impliedDestinationFocus: null,
+        mustCheck: ["sceneActors", "recentTurnLedger"],
+      },
+    }),
+  });
+
+  assert.equal(validated.type, "resolve_mechanics");
+  if (validated.type !== "resolve_mechanics") {
+    return;
+  }
+
+  assert.deepEqual(validated.mutations, []);
   assert.deepEqual(validated.narrationHint, {
     unresolvedTargetPhrases: ["they"],
   });

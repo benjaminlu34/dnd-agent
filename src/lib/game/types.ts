@@ -67,6 +67,7 @@ export type TurnCodeEntityType =
   | "route"
   | "scene_object"
   | "world_object"
+  | "actor"
   | "npc"
   | "faction"
   | "information"
@@ -80,6 +81,8 @@ export type TurnCausalityCodeName =
   | "TIME_ADVANCED"
   | "LOCATION_CHANGED"
   | "SCENE_FOCUS_CHANGED"
+  | "ACTOR_STATE_CHANGED"
+  | "ACTOR_LOCATION_CHANGED"
   | "NPC_APPROVAL_CHANGED"
   | "INFORMATION_DISCOVERED"
   | "INFORMATION_ADDED"
@@ -176,6 +179,7 @@ export type ItemTemplate = {
 
 export type AssetHolderRef =
   | { kind: "player" }
+  | { kind: "actor"; actorId: string }
   | { kind: "npc"; npcId: string }
   | { kind: "temporary_actor"; actorId: string }
   | { kind: "world_object"; objectId: string }
@@ -184,6 +188,7 @@ export type AssetHolderRef =
 export type ItemInstance = {
   id: string;
   characterInstanceId: string | null;
+  actorId?: string | null;
   npcId?: string | null;
   temporaryActorId?: string | null;
   worldObjectId?: string | null;
@@ -207,6 +212,7 @@ export type CommoditySummary = {
 export type CharacterCommodityStack = {
   id: string;
   characterInstanceId: string | null;
+  actorId?: string | null;
   npcId?: string | null;
   temporaryActorId?: string | null;
   worldObjectId?: string | null;
@@ -221,6 +227,7 @@ export type WorldObjectSummary = {
   id: string;
   name: string;
   characterInstanceId?: string | null;
+  actorId?: string | null;
   npcId?: string | null;
   temporaryActorId?: string | null;
   parentWorldObjectId?: string | null;
@@ -758,6 +765,7 @@ export type FactionRelationSummary = {
 
 export type NpcSummary = {
   id: string;
+  actorId?: string | null;
   name: string;
   role: string;
   tags?: string[];
@@ -799,8 +807,13 @@ export type CrossLocationLead = {
 
 export type TemporaryActorSummary = {
   id: string;
+  profileNpcId?: string | null;
+  isAnonymous?: boolean;
   label: string;
+  displayLabel?: string;
   currentLocationId: string | null;
+  state?: NpcState;
+  threatLevel?: number;
   interactionCount: number;
   firstSeenAtTurn: number;
   lastSeenAtTurn: number;
@@ -813,6 +826,8 @@ export type TemporaryActorSummary = {
   promotedNpcId: string | null;
   inventory: PromptInventoryItem[];
 };
+
+export type ActorSummary = TemporaryActorSummary;
 
 export type RecentLocalEventSummary = {
   id: string;
@@ -852,7 +867,10 @@ export type SceneActorRef = string;
 
 export type SceneActorSummary = {
   actorRef: SceneActorRef;
-  kind: "npc" | "temporary_actor";
+  actorId?: string | null;
+  profileNpcId?: string | null;
+  isAnonymous?: boolean;
+  kind: "npc" | "temporary_actor" | "actor";
   displayLabel: string;
   role: string;
   tags?: string[];
@@ -1001,6 +1019,7 @@ export type CampaignSnapshot = {
   currentLocation: LocationSummary;
   adjacentRoutes: RouteSummary[];
   presentNpcs: NpcSummary[];
+  actors?: ActorSummary[];
   knownNpcLocationIds: Record<string, string | null>;
   knownFactions: FactionSummary[];
   factionRelations: FactionRelationSummary[];
@@ -1307,7 +1326,8 @@ export type RelationshipHistory = {
 export type NpcDetail = NpcSummary & {
   knownInformation: InformationSummary[];
   relationshipHistory: MemoryRecord[];
-  temporaryActorId: string | null;
+  actorId?: string | null;
+  temporaryActorId?: string | null;
   inventory: PromptInventoryItem[];
 };
 
@@ -1476,6 +1496,14 @@ export type MechanicsMutation =
       phase?: MutationPhase;
     }
   | {
+      type: "record_actor_interaction";
+      actorId: string;
+      interactionSummary: string;
+      topic?: string;
+      socialOutcome: SocialOutcome;
+      phase?: MutationPhase;
+    }
+  | {
       type: "record_local_interaction";
       localEntityId: string;
       interactionSummary: string;
@@ -1586,6 +1614,12 @@ export type MechanicsMutation =
   | {
       type: "discover_information";
       informationId: string;
+      phase?: MutationPhase;
+    }
+  | {
+      type: "set_actor_state";
+      actorId: string;
+      newState: NpcState;
       phase?: MutationPhase;
     }
   | {
@@ -1735,6 +1769,7 @@ export type ValidatedTurnCommand =
 export type NpcRoutineCondition =
   | { type: "location_state"; locationId: string; state: string }
   | { type: "faction_at_war"; factionId: string }
+  | { type: "actor_state"; actorId: string; state: NpcState }
   | { type: "npc_state"; npcId: string; state: NpcState }
   | { type: "time_range"; minMinutes: number; maxMinutes: number }
   | { type: "player_in_location"; locationId: string }
@@ -1744,6 +1779,7 @@ export type NpcRoutineCondition =
 export type SimulationPayload =
   | { type: "change_location_state"; locationId: string; newState: string }
   | { type: "change_faction_control"; locationId: string; factionId: string | null }
+  | { type: "change_actor_state"; actorId: string; newState: NpcState }
   | { type: "change_npc_state"; npcId: string; newState: NpcState }
   | { type: "change_faction_resources"; factionId: string; delta: Partial<FactionResourcePool> }
   | {
@@ -1779,6 +1815,7 @@ export type SimulationPayload =
       fromFactionId: string | null;
       toFactionId: string | null;
     }
+  | { type: "change_actor_location"; actorId: string; newLocationId: string }
   | { type: "change_npc_location"; npcId: string; newLocationId: string };
 
 export type GeneratedDailySchedule = {
@@ -1850,6 +1887,7 @@ export type TurnRollbackData = {
   createdWorldEventIds: string[];
   createdFactionMoveIds: string[];
   createdScheduleJobIds: string[];
+  createdActorIds?: string[];
   createdTemporaryActorIds: string[];
   createdCommodityStackIds: string[];
   createdWorldObjectIds: string[];

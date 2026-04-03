@@ -26,6 +26,11 @@ const npcRoutineConditionSchema: z.ZodType<NpcRoutineCondition> = z.lazy(() =>
       factionId: z.string().trim().min(1),
     }),
     z.object({
+      type: z.literal("actor_state"),
+      actorId: z.string().trim().min(1),
+      state: z.enum(["active", "wounded", "incapacitated", "dead"]),
+    }),
+    z.object({
       type: z.literal("npc_state"),
       npcId: z.string().trim().min(1),
       state: z.enum(["active", "wounded", "incapacitated", "dead"]),
@@ -63,6 +68,11 @@ const simulationPayloadSchema: z.ZodType<SimulationPayload> = z.lazy(() =>
       factionId: z.string().trim().min(1).nullable(),
     }),
     z.object({
+      type: z.literal("change_actor_state"),
+      actorId: z.string().trim().min(1),
+      newState: z.enum(["active", "wounded", "incapacitated", "dead"]),
+    }),
+    z.object({
       type: z.literal("change_npc_state"),
       npcId: z.string().trim().min(1),
       newState: z.enum(["active", "wounded", "incapacitated", "dead"]),
@@ -95,6 +105,11 @@ const simulationPayloadSchema: z.ZodType<SimulationPayload> = z.lazy(() =>
               type: z.literal("change_faction_control"),
               locationId: z.string().trim().min(1),
               factionId: z.string().trim().min(1).nullable(),
+            }),
+            z.object({
+              type: z.literal("change_actor_state"),
+              actorId: z.string().trim().min(1),
+              newState: z.enum(["active", "wounded", "incapacitated", "dead"]),
             }),
             z.object({
               type: z.literal("change_npc_state"),
@@ -147,6 +162,11 @@ const simulationPayloadSchema: z.ZodType<SimulationPayload> = z.lazy(() =>
               toFactionId: z.string().trim().min(1).nullable(),
             }),
             z.object({
+              type: z.literal("change_actor_location"),
+              actorId: z.string().trim().min(1),
+              newLocationId: z.string().trim().min(1),
+            }),
+            z.object({
               type: z.literal("change_npc_location"),
               npcId: z.string().trim().min(1),
               newLocationId: z.string().trim().min(1),
@@ -189,6 +209,11 @@ const simulationPayloadSchema: z.ZodType<SimulationPayload> = z.lazy(() =>
       locationId: z.string().trim().min(1),
       fromFactionId: z.string().trim().min(1).nullable(),
       toFactionId: z.string().trim().min(1).nullable(),
+    }),
+    z.object({
+      type: z.literal("change_actor_location"),
+      actorId: z.string().trim().min(1),
+      newLocationId: z.string().trim().min(1),
     }),
     z.object({
       type: z.literal("change_npc_location"),
@@ -330,7 +355,24 @@ export async function evaluateNpcRoutineCondition(input: {
       });
       return Boolean(relation);
     }
+    case "actor_state": {
+      const actor = await tx.actor.findUnique({
+        where: { id: condition.actorId },
+        select: { state: true, campaignId: true },
+      });
+      return Boolean(actor && actor.campaignId === campaignId && actor.state === condition.state);
+    }
     case "npc_state": {
+      const actor = await tx.actor.findFirst({
+        where: {
+          campaignId,
+          profileNpcId: condition.npcId,
+        },
+        select: { state: true },
+      });
+      if (actor) {
+        return actor.state === condition.state;
+      }
       const npc = await tx.nPC.findUnique({
         where: { id: condition.npcId },
         select: { state: true, campaignId: true },
@@ -364,6 +406,59 @@ export async function evaluateNpcRoutineCondition(input: {
   }
 }
 
+async function applyActorStateChange(input: {
+  tx: Prisma.TransactionClient;
+  actorId: string;
+  newState: NpcState;
+  inverses: SimulationInverse[];
+  changedNpcStateIds: Set<string>;
+  outcomes: SimulationOutcomeBucket;
+}) {
+  const actor = await input.tx.actor.findUnique({
+    where: { id: input.actorId },
+    select: { id: true, state: true, profileNpcId: true, displayLabel: true },
+  });
+
+  if (!actor || actor.state === input.newState) {
+    return;
+  }
+
+  recordInverse(input.inverses, "actor", actor.id, "state", actor.state);
+  await input.tx.actor.update({
+    where: { id: actor.id },
+    data: { state: input.newState },
+  });
+  if (actor.profileNpcId) {
+    const npc = await input.tx.nPC.findUnique({
+      where: { id: actor.profileNpcId },
+      select: { id: true, state: true },
+    });
+    if (npc && npc.state !== input.newState) {
+      recordInverse(input.inverses, "nPC", npc.id, "state", npc.state);
+      await input.tx.nPC.update({
+        where: { id: npc.id },
+        data: { state: input.newState },
+      });
+      input.changedNpcStateIds.add(npc.id);
+    }
+  }
+  recordSimulationOutcome({
+    outcomes: input.outcomes,
+    changeCode: "ACTOR_STATE_CHANGED",
+    summary: `${actor.displayLabel} becomes ${input.newState}.`,
+    reasonCode: "actor_state_changed",
+    entityType: "actor",
+    targetId: actor.id,
+    label: actor.displayLabel,
+    metadata: {
+      actorId: actor.id,
+      profileNpcId: actor.profileNpcId,
+      previousState: actor.state,
+      newState: input.newState,
+    },
+  });
+}
+
 async function applyNpcStateChange(input: {
   tx: Prisma.TransactionClient;
   npcId: string;
@@ -372,6 +467,21 @@ async function applyNpcStateChange(input: {
   changedNpcStateIds: Set<string>;
   outcomes: SimulationOutcomeBucket;
 }) {
+  const embodiedActor = await input.tx.actor.findFirst({
+    where: { profileNpcId: input.npcId },
+    select: { id: true },
+  });
+  if (embodiedActor) {
+    await applyActorStateChange({
+      tx: input.tx,
+      actorId: embodiedActor.id,
+      newState: input.newState,
+      inverses: input.inverses,
+      changedNpcStateIds: input.changedNpcStateIds,
+      outcomes: input.outcomes,
+    });
+    return;
+  }
   const npc = await input.tx.nPC.findUnique({
     where: { id: input.npcId },
     select: { id: true, state: true, name: true },
@@ -505,6 +615,16 @@ export async function applySimulationPayload(input: {
       });
       return;
     }
+    case "change_actor_state":
+      await applyActorStateChange({
+        tx,
+        actorId: payload.actorId,
+        newState: payload.newState,
+        inverses,
+        changedNpcStateIds,
+        outcomes: input.outcomes,
+      });
+      return;
     case "change_npc_state":
       await applyNpcStateChange({
         tx,
@@ -784,7 +904,87 @@ export async function applySimulationPayload(input: {
       });
       return;
     }
+    case "change_actor_location": {
+      const actor = await tx.actor.findUnique({
+        where: { id: payload.actorId },
+        select: { id: true, currentLocationId: true, profileNpcId: true, displayLabel: true },
+      });
+
+      if (!actor || actor.currentLocationId === payload.newLocationId) {
+        return;
+      }
+
+      recordInverse(inverses, "actor", actor.id, "currentLocationId", actor.currentLocationId);
+      await tx.actor.update({
+        where: { id: actor.id },
+        data: { currentLocationId: payload.newLocationId },
+      });
+      if (actor.profileNpcId) {
+        const npc = await tx.nPC.findUnique({
+          where: { id: actor.profileNpcId },
+          select: { id: true, currentLocationId: true, factionId: true },
+        });
+        if (npc) {
+          if (npc.currentLocationId !== payload.newLocationId) {
+            recordInverse(inverses, "nPC", npc.id, "currentLocationId", npc.currentLocationId);
+            await tx.nPC.update({
+              where: { id: npc.id },
+              data: { currentLocationId: payload.newLocationId },
+            });
+          }
+          if (npc.factionId) {
+            affectedFactionIds.add(npc.factionId);
+          }
+        }
+      } else {
+        const temporaryActor = await tx.temporaryActor.findUnique({
+          where: { id: actor.id },
+          select: { id: true, currentLocationId: true },
+        });
+        if (temporaryActor && temporaryActor.currentLocationId !== payload.newLocationId) {
+          recordInverse(inverses, "temporaryActor", temporaryActor.id, "currentLocationId", temporaryActor.currentLocationId);
+          await tx.temporaryActor.update({
+            where: { id: temporaryActor.id },
+            data: { currentLocationId: payload.newLocationId },
+          });
+        }
+      }
+      recordSimulationOutcome({
+        outcomes: input.outcomes,
+        changeCode: "ACTOR_LOCATION_CHANGED",
+        summary: `${actor.displayLabel} moves to ${payload.newLocationId}.`,
+        reasonCode: "actor_location_changed",
+        entityType: "actor",
+        targetId: actor.id,
+        label: actor.displayLabel,
+        metadata: {
+          actorId: actor.id,
+          profileNpcId: actor.profileNpcId,
+          previousLocationId: actor.currentLocationId,
+          newLocationId: payload.newLocationId,
+        },
+      });
+      return;
+    }
     case "change_npc_location": {
+      const actor = await tx.actor.findFirst({
+        where: {
+          campaignId,
+          profileNpcId: payload.npcId,
+        },
+        select: { id: true },
+      });
+      if (actor) {
+        await applySimulationPayload({
+          ...input,
+          payload: {
+            type: "change_actor_location",
+            actorId: actor.id,
+            newLocationId: payload.newLocationId,
+          },
+        });
+        return;
+      }
       const npc = await tx.nPC.findUnique({
         where: { id: payload.npcId },
         select: { id: true, currentLocationId: true, factionId: true, name: true },
@@ -837,6 +1037,20 @@ async function simulationPayloadInvalidationReason(input: {
         select: { id: true },
       });
       return location ? null : "Referenced location is no longer valid.";
+    }
+    case "change_actor_state":
+    case "change_actor_location": {
+      const actor = await tx.actor.findFirst({
+        where: { id: payload.actorId, campaignId },
+        select: { id: true, state: true },
+      });
+      if (!actor) {
+        return "Referenced actor is no longer valid.";
+      }
+      if (actor.state === "dead" && payload.type === "change_actor_location") {
+        return "Referenced actor is dead.";
+      }
+      return null;
     }
     case "change_npc_state":
     case "change_npc_location": {
@@ -1053,6 +1267,26 @@ export async function runSimulationTick(input: {
     },
     orderBy: [{ npcId: "asc" }, { priority: "desc" }, { triggerTimeMinutes: "asc" }],
   });
+  const routineActors = await tx.actor.findMany({
+    where: {
+      campaignId,
+      profileNpcId: {
+        in: Array.from(new Set(routines.map((routine) => routine.npcId))),
+      },
+    },
+    select: {
+      id: true,
+      profileNpcId: true,
+      currentLocationId: true,
+      state: true,
+      displayLabel: true,
+    },
+  });
+  const actorByNpcId = new Map(
+    routineActors
+      .filter((actor): actor is typeof actor & { profileNpcId: string } => actor.profileNpcId != null)
+      .map((actor) => [actor.profileNpcId, actor]),
+  );
 
   const routineByNpc = new Map<string, typeof routines[number]>();
   for (const routine of routines) {
@@ -1088,35 +1322,59 @@ export async function runSimulationTick(input: {
   }
 
   for (const routine of routineByNpc.values()) {
-    if (routine.npc.state === "dead" || routine.npc.currentLocationId === routine.targetLocationId) {
+    const actor = actorByNpcId.get(routine.npcId);
+    const currentState = actor?.state ?? routine.npc.state;
+    const currentLocationId = actor?.currentLocationId ?? routine.npc.currentLocationId;
+    if (currentState === "dead" || currentLocationId === routine.targetLocationId) {
       continue;
     }
 
-    const previousLocationId = routine.npc.currentLocationId;
-    recordInverse(inverses, "nPC", routine.npc.id, "currentLocationId", previousLocationId);
-    await tx.nPC.update({
-      where: { id: routine.npc.id },
-      data: { currentLocationId: routine.targetLocationId },
-    });
+    const previousLocationId = currentLocationId;
+    if (actor) {
+      await applySimulationPayload({
+        tx,
+        campaignId,
+        payload: {
+          type: "change_actor_location",
+          actorId: actor.id,
+          newLocationId: routine.targetLocationId,
+        },
+        inverses,
+        createdWorldEventIds,
+        createdFactionMoveIds,
+        affectedFactionIds,
+        changedLocationIds,
+        changedNpcStateIds,
+        outcomes: input.outcomes,
+      });
+    } else {
+      recordInverse(inverses, "nPC", routine.npc.id, "currentLocationId", previousLocationId);
+      await tx.nPC.update({
+        where: { id: routine.npc.id },
+        data: { currentLocationId: routine.targetLocationId },
+      });
+    }
     unexpectedNpcMoves += 1;
     if (routine.npc.factionId) {
       affectedFactionIds.add(routine.npc.factionId);
     }
-    recordSimulationOutcome({
-      outcomes: input.outcomes,
-      changeCode: "NPC_LOCATION_CHANGED",
-      summary: `${routine.npc.name} moves to ${routine.targetLocationId}.`,
-      reasonCode: "npc_routine_moved",
-      entityType: "npc",
-      targetId: routine.npc.id,
-      label: routine.npc.name,
-      metadata: {
-        npcId: routine.npc.id,
-        previousLocationId,
-        newLocationId: routine.targetLocationId,
-        routineId: routine.id,
-      },
-    });
+    if (!actor) {
+      recordSimulationOutcome({
+        outcomes: input.outcomes,
+        changeCode: "NPC_LOCATION_CHANGED",
+        summary: `${routine.npc.name} moves to ${routine.targetLocationId}.`,
+        reasonCode: "npc_routine_moved",
+        entityType: "npc",
+        targetId: routine.npc.id,
+        label: routine.npc.name,
+        metadata: {
+          npcId: routine.npc.id,
+          previousLocationId,
+          newLocationId: routine.targetLocationId,
+          routineId: routine.id,
+        },
+      });
+    }
   }
 
   const dueEvents = await tx.worldEvent.findMany({
@@ -1521,6 +1779,9 @@ export async function applySimulationInverse(
       case "nPC":
         await tx.nPC.delete({ where: { id: inverse.id } });
         return;
+      case "actor":
+        await tx.actor.delete({ where: { id: inverse.id } });
+        return;
       case "temporaryActor":
         await tx.temporaryActor.delete({ where: { id: inverse.id } });
         return;
@@ -1532,6 +1793,9 @@ export async function applySimulationInverse(
         return;
       case "characterCommodityStack":
         await tx.characterCommodityStack.delete({ where: { id: inverse.id } });
+        return;
+      case "worldObject":
+        await tx.worldObject.delete({ where: { id: inverse.id } });
         return;
       case "scheduleGenerationJob":
         await tx.scheduleGenerationJob.delete({ where: { id: inverse.id } });
@@ -1562,6 +1826,12 @@ export async function applySimulationInverse(
       return;
     case "nPC":
       await tx.nPC.update({
+        where: { id: inverse.id },
+        data: { [inverse.field]: inverse.previousValue } as never,
+      });
+      return;
+    case "actor":
+      await tx.actor.update({
         where: { id: inverse.id },
         data: { [inverse.field]: inverse.previousValue } as never,
       });
@@ -1610,6 +1880,12 @@ export async function applySimulationInverse(
       return;
     case "temporaryActor":
       await tx.temporaryActor.update({
+        where: { id: inverse.id },
+        data: { [inverse.field]: inverse.previousValue } as never,
+      });
+      return;
+    case "worldObject":
+      await tx.worldObject.update({
         where: { id: inverse.id },
         data: { [inverse.field]: inverse.previousValue } as never,
       });

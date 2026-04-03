@@ -112,6 +112,50 @@ function createSnapshot(): CampaignSnapshot {
         threatLevel: 2,
       },
     ],
+    actors: [
+      {
+        id: "actor_npc_guard",
+        profileNpcId: "npc_guard",
+        isAnonymous: false,
+        label: "Gate Guard",
+        displayLabel: "Gate Guard",
+        currentLocationId: "loc_gate",
+        state: "active",
+        threatLevel: 2,
+        interactionCount: 1,
+        firstSeenAtTurn: 0,
+        lastSeenAtTurn: 0,
+        lastSeenAtTime: 480,
+        recentTopics: [],
+        lastSummary: "A wary watch guard.",
+        holdsInventory: false,
+        affectedWorldState: false,
+        isInMemoryGraph: false,
+        promotedNpcId: "npc_guard",
+        inventory: [],
+      },
+      {
+        id: "temp_dockhand",
+        profileNpcId: null,
+        isAnonymous: true,
+        label: "dockhand",
+        displayLabel: "dockhand",
+        currentLocationId: "loc_gate",
+        state: "active",
+        threatLevel: 1,
+        interactionCount: 1,
+        firstSeenAtTurn: 0,
+        lastSeenAtTurn: 0,
+        lastSeenAtTime: 480,
+        recentTopics: [],
+        lastSummary: "A dockhand keeps watch by the gate.",
+        holdsInventory: false,
+        affectedWorldState: false,
+        isInMemoryGraph: false,
+        promotedNpcId: null,
+        inventory: [],
+      },
+    ],
     knownNpcLocationIds: {
       npc_guard: "loc_gate",
     },
@@ -176,7 +220,7 @@ function createRouterDecision(
 function createValidatedCommand(
   checkOutcome: "success" | "partial" | "failure",
   mutations: ResolveMechanicsResponse["mutations"],
-): Exclude<ValidatedTurnCommand, { type: "request_clarification" }> {
+): Extract<ValidatedTurnCommand, { type: "resolve_mechanics" }> {
   return {
     type: "resolve_mechanics",
     timeMode: "exploration",
@@ -322,6 +366,32 @@ test("appendMessageToTurnRollback records post-commit narration for undo", () =>
 
   assert.ok(updated?.rollback);
   assert.deepEqual(updated?.rollback.createdMessageIds, ["msg_action", "msg_narration"]);
+});
+
+test("rollbackSupportsActorUndo blocks legacy rollback payloads without actor markers", () => {
+  assert.equal(
+    engineTestUtils.rollbackSupportsActorUndo({
+      schemaVersion: 2,
+      data: {
+        rollback: {
+          createdTemporaryActorIds: [],
+        },
+      },
+    }),
+    false,
+  );
+  assert.equal(
+    engineTestUtils.rollbackSupportsActorUndo({
+      schemaVersion: 2,
+      data: {
+        rollback: {
+          createdActorIds: [],
+          createdTemporaryActorIds: [],
+        },
+      },
+    }),
+    true,
+  );
 });
 
 test("legacyNarrationMessageIdsForUndo selects the latest missing assistant narration", async () => {
@@ -1410,6 +1480,75 @@ test("offscene npc refs can be returned to the scene by prefixed actorRef", () =
   assert.equal(evaluated.stateCommitLog[0]?.metadata?.arrivesInCurrentScene, true);
 });
 
+test("actor-prefixed named actor refs can be returned to the scene", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: {
+      ...createSnapshot(),
+      presentNpcs: [],
+      actors: [
+        {
+          ...createSnapshot().actors?.[0]!,
+          currentLocationId: null,
+        },
+        createSnapshot().actors?.[1]!,
+      ],
+      knownNpcLocationIds: {
+        npc_guard: null,
+      },
+    },
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "downtime",
+      suggestedActions: ["Wait for the guard"],
+      mutations: [
+        {
+          type: "set_scene_actor_presence",
+          actorRef: "actor:actor_npc_guard",
+          newLocationId: "loc_gate",
+          reason: "The guard returns to the gate.",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 10,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+  });
+
+  assert.equal(evaluated.stateCommitLog[0]?.status, "applied");
+  assert.equal(evaluated.stateCommitLog[0]?.reasonCode, "scene_actor_presence_updated");
+  assert.equal(evaluated.stateCommitLog[0]?.metadata?.actorRef, "actor:actor_npc_guard");
+});
+
+test("record_actor_interaction applies to anonymous scene actors", () => {
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot: createSnapshot(),
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Keep talking"],
+      mutations: [
+        {
+          type: "record_actor_interaction",
+          actorId: "temp_dockhand",
+          interactionSummary: "The dockhand shrugs and points toward the harbor office.",
+          socialOutcome: "redirects",
+          topic: "harbor office",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+  });
+
+  assert.equal(evaluated.stateCommitLog[0]?.status, "applied");
+  assert.equal(evaluated.stateCommitLog[0]?.mutationType, "record_actor_interaction");
+  assert.equal(evaluated.stateCommitLog[0]?.reasonCode, "actor_interaction_recorded");
+  assert.equal(evaluated.stateCommitLog[0]?.metadata?.actorRef, "actor:temp_dockhand");
+});
+
 test("temporary actor reuse prefers the most recently seen matching actor", () => {
   const evaluated = engineTestUtils.evaluateResolvedCommand({
     snapshot: {
@@ -2176,7 +2315,7 @@ test("same-turn focus changes keep named actors available within the same venue"
       ["record_npc_interaction", "applied", "npc_interaction_recorded"],
     ],
   );
-  assert.equal(evaluated.nextState.sceneActorFocuses["npc:npc_guard"], "shop_interior");
+  assert.equal(evaluated.nextState.sceneActorFocuses["actor:actor_npc_guard"], "shop_interior");
 });
 
 test("same-turn focus changes do not pull unrelated named actors into the new venue focus", () => {
@@ -2515,7 +2654,7 @@ test("record_npc_interaction stays valid after explicit arrival and a same-venue
       ["record_npc_interaction", "applied", "npc_interaction_recorded"],
     ],
   );
-  assert.equal(evaluated.nextState.sceneActorFocuses["npc:npc_guard"], "shop_interior");
+  assert.equal(evaluated.nextState.sceneActorFocuses["actor:actor_npc_guard"], "shop_interior");
 });
 
 test("record_npc_interaction stays valid after explicit arrival from an unfocused scene", () => {
@@ -2693,6 +2832,51 @@ test("engine rejects npc interaction summaries that imply movement without actor
   assert.equal(evaluated.stateCommitLog[0]?.reasonCode, "invalid_semantics");
 });
 
+test("engine accepts actor interaction movement summaries when actor presence support is provided with actor refs", () => {
+  const snapshot = createSnapshot();
+  snapshot.temporaryActors = snapshot.temporaryActors.map((actor) =>
+    actor.id === "temp_dockhand"
+      ? { ...actor, currentLocationId: null }
+      : actor);
+
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot,
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["See what the dockhand does"],
+      mutations: [
+        {
+          type: "set_scene_actor_presence",
+          actorRef: "actor:temp_dockhand",
+          newLocationId: "loc_gate",
+          reason: "The dockhand walks back over.",
+        },
+        {
+          type: "record_actor_interaction",
+          actorId: "temp_dockhand",
+          interactionSummary: "The dockhand approaches and points you toward the harbor office.",
+          socialOutcome: "redirects",
+          topic: "harbor office",
+        },
+      ],
+      warnings: [],
+      timeElapsed: 5,
+    },
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+    playerAction: "I wave the dockhand over and ask where the harbor office is.",
+  });
+
+  assert.deepEqual(
+    evaluated.stateCommitLog.map((entry) => [entry.mutationType, entry.status, entry.reasonCode]),
+    [
+      ["set_scene_actor_presence", "applied", "scene_actor_presence_updated"],
+      ["record_actor_interaction", "applied", "actor_interaction_recorded"],
+    ],
+  );
+});
+
 test("engine rejects player-relocation language in interaction summaries without player movement support", () => {
   const evaluated = engineTestUtils.evaluateResolvedCommand({
     snapshot: createSnapshot(),
@@ -2854,7 +3038,7 @@ test("set_follow_state persists companion refs into next runtime state", () => {
     routerDecision: createRouterDecision(["converse", "investigate"]),
   });
 
-  assert.deepEqual(evaluated.nextState.characterState.activeCompanions, ["npc:npc_guard"]);
+  assert.deepEqual(evaluated.nextState.characterState.activeCompanions, ["actor:actor_npc_guard"]);
   assert.equal(evaluated.nextState.currentLocationId, "loc_market");
 });
 

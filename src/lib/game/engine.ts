@@ -217,6 +217,10 @@ function tempActorRef(actorId: string) {
   return `temp:${actorId}`;
 }
 
+function actorActorRef(actorId: string) {
+  return `actor:${actorId}`;
+}
+
 function npcActorRef(npcId: string) {
   return `npc:${npcId}`;
 }
@@ -742,10 +746,178 @@ function emptyRollback(snapshot: CampaignSnapshot): TurnRollbackData {
     createdWorldEventIds: [],
     createdFactionMoveIds: [],
     createdScheduleJobIds: [],
+    createdActorIds: [],
     createdTemporaryActorIds: [],
     createdCommodityStackIds: [],
     createdWorldObjectIds: [],
   };
+}
+
+async function actorForNpcProfile(input: {
+  tx: Prisma.TransactionClient;
+  campaignId: string;
+  npcId: string;
+}) {
+  return input.tx.actor.findFirst({
+    where: {
+      campaignId: input.campaignId,
+      profileNpcId: input.npcId,
+    },
+    select: {
+      id: true,
+      profileNpcId: true,
+      isAnonymous: true,
+      displayLabel: true,
+      currentLocationId: true,
+      state: true,
+      threatLevel: true,
+      interactionCount: true,
+      recentTopics: true,
+      lastSummary: true,
+      lastSeenAtTurn: true,
+      lastSeenAtTime: true,
+      holdsInventory: true,
+      affectedWorldState: true,
+      isInMemoryGraph: true,
+    },
+  });
+}
+
+async function syncActorLocationMirror(input: {
+  tx: Prisma.TransactionClient;
+  rollback: TurnRollbackData;
+  actorId: string;
+  newLocationId: string | null;
+}) {
+  const actor = await input.tx.actor.findUnique({
+    where: { id: input.actorId },
+    select: {
+      id: true,
+      profileNpcId: true,
+      currentLocationId: true,
+    },
+  });
+  if (!actor) {
+    return null;
+  }
+  if (actor.currentLocationId !== input.newLocationId) {
+    recordInverse(input.rollback, "actor", actor.id, "currentLocationId", actor.currentLocationId);
+    await input.tx.actor.update({
+      where: { id: actor.id },
+      data: {
+        currentLocationId: input.newLocationId,
+      },
+    });
+  }
+  if (actor.profileNpcId) {
+    const npc = await input.tx.nPC.findUnique({
+      where: { id: actor.profileNpcId },
+      select: { id: true, currentLocationId: true },
+    });
+    if (npc && npc.currentLocationId !== input.newLocationId) {
+      recordInverse(input.rollback, "nPC", npc.id, "currentLocationId", npc.currentLocationId);
+      await input.tx.nPC.update({
+        where: { id: npc.id },
+        data: {
+          currentLocationId: input.newLocationId,
+        },
+      });
+    }
+  } else {
+    const temporaryActor = await input.tx.temporaryActor.findUnique({
+      where: { id: actor.id },
+      select: { id: true, currentLocationId: true },
+    });
+    if (temporaryActor && temporaryActor.currentLocationId !== input.newLocationId) {
+      recordInverse(input.rollback, "temporaryActor", temporaryActor.id, "currentLocationId", temporaryActor.currentLocationId);
+      await input.tx.temporaryActor.update({
+        where: { id: temporaryActor.id },
+        data: {
+          currentLocationId: input.newLocationId,
+        },
+      });
+    }
+  }
+
+  return actor;
+}
+
+async function syncActorStateMirror(input: {
+  tx: Prisma.TransactionClient;
+  rollback: TurnRollbackData;
+  actorId: string;
+  newState: NpcSummary["state"];
+}) {
+  const actor = await input.tx.actor.findUnique({
+    where: { id: input.actorId },
+    select: {
+      id: true,
+      profileNpcId: true,
+      state: true,
+      threatLevel: true,
+    },
+  });
+  if (!actor) {
+    return null;
+  }
+  if (actor.state !== input.newState) {
+    recordInverse(input.rollback, "actor", actor.id, "state", actor.state);
+    await input.tx.actor.update({
+      where: { id: actor.id },
+      data: {
+        state: input.newState,
+      },
+    });
+  }
+  if (actor.profileNpcId) {
+    const npc = await input.tx.nPC.findUnique({
+      where: { id: actor.profileNpcId },
+      select: { id: true, state: true },
+    });
+    if (npc && npc.state !== input.newState) {
+      recordInverse(input.rollback, "nPC", npc.id, "state", npc.state);
+      await input.tx.nPC.update({
+        where: { id: npc.id },
+        data: {
+          state: input.newState,
+        },
+      });
+    }
+  }
+  return actor;
+}
+
+async function syncActorInventoryMirror(input: {
+  tx: Prisma.TransactionClient;
+  rollback: TurnRollbackData;
+  actorId: string;
+  holdsInventory: boolean;
+}) {
+  const actor = await input.tx.actor.findUnique({
+    where: { id: input.actorId },
+    select: { id: true, profileNpcId: true, holdsInventory: true },
+  });
+  if (!actor || actor.holdsInventory === input.holdsInventory) {
+    return;
+  }
+  recordInverse(input.rollback, "actor", actor.id, "holdsInventory", actor.holdsInventory);
+  await input.tx.actor.update({
+    where: { id: actor.id },
+    data: { holdsInventory: input.holdsInventory },
+  });
+  if (!actor.profileNpcId) {
+    const temporaryActor = await input.tx.temporaryActor.findUnique({
+      where: { id: actor.id },
+      select: { id: true, holdsInventory: true },
+    });
+    if (temporaryActor && temporaryActor.holdsInventory !== input.holdsInventory) {
+      recordInverse(input.rollback, "temporaryActor", temporaryActor.id, "holdsInventory", temporaryActor.holdsInventory);
+      await input.tx.temporaryActor.update({
+        where: { id: temporaryActor.id },
+        data: { holdsInventory: input.holdsInventory },
+      });
+    }
+  }
 }
 
 function toPrismaJsonValue(value: unknown): Prisma.InputJsonValue {
@@ -919,6 +1091,20 @@ async function buildPromotedNpcHydrationPayload(input: {
   baseResult: NpcDetail;
 }) {
   const npc = input.baseResult;
+  const embodiedActor = await prisma.actor.findFirst({
+    where: {
+      campaignId: input.campaignId,
+      profileNpcId: npc.id,
+    },
+    select: {
+      id: true,
+      currentLocationId: true,
+      interactionCount: true,
+      recentTopics: true,
+      lastSummary: true,
+      displayLabel: true,
+    },
+  });
   const needsNarrativeHydration = npc.socialLayer === "promoted_local" && !npc.isNarrativelyHydrated;
   const needsIdentityHydration = hasGenericNpcRoleLabelName({ name: npc.name, role: npc.role });
 
@@ -926,12 +1112,13 @@ async function buildPromotedNpcHydrationPayload(input: {
     return null;
   }
 
-  if (!npc.currentLocationId) {
+  const embodiedLocationId = embodiedActor?.currentLocationId ?? npc.currentLocationId;
+  if (!embodiedLocationId) {
     throw new Error("Promoted NPC has no current location for hydration.");
   }
 
   const location = await prisma.locationNode.findFirst({
-    where: { id: npc.currentLocationId, campaignId: input.campaignId },
+    where: { id: embodiedLocationId, campaignId: input.campaignId },
     select: {
       id: true,
       name: true,
@@ -945,7 +1132,7 @@ async function buildPromotedNpcHydrationPayload(input: {
   const localNpcs = await prisma.nPC.findMany({
     where: {
       campaignId: input.campaignId,
-      currentLocationId: npc.currentLocationId,
+      currentLocationId: embodiedLocationId,
     },
     orderBy: { name: "asc" },
     select: {
@@ -959,7 +1146,7 @@ async function buildPromotedNpcHydrationPayload(input: {
   const localInformation = await prisma.information.findMany({
     where: {
       campaignId: input.campaignId,
-      locationId: npc.currentLocationId,
+      locationId: embodiedLocationId,
     },
     orderBy: { updatedAt: "desc" },
     select: {
@@ -972,22 +1159,10 @@ async function buildPromotedNpcHydrationPayload(input: {
     },
     take: 8,
   });
-  const temporaryActor = await prisma.temporaryActor.findFirst({
-    where: {
-      campaignId: input.campaignId,
-      promotedNpcId: npc.id,
-    },
-    select: {
-      label: true,
-      interactionCount: true,
-      recentTopics: true,
-      lastSummary: true,
-    },
-  });
   const nearbyEdges = await prisma.locationEdge.findMany({
     where: {
       campaignId: input.campaignId,
-      OR: [{ sourceId: npc.currentLocationId }, { targetId: npc.currentLocationId }],
+      OR: [{ sourceId: embodiedLocationId }, { targetId: embodiedLocationId }],
     },
     include: {
       source: {
@@ -1086,7 +1261,7 @@ async function buildPromotedNpcHydrationPayload(input: {
         factionId: information.factionId,
       })),
       nearbyRoutes: nearbyEdges.map((edge) => {
-        const target = edge.sourceId === npc.currentLocationId ? edge.target : edge.source;
+        const target = edge.sourceId === embodiedLocationId ? edge.target : edge.source;
         return {
           id: edge.id,
           targetLocationName: target.name,
@@ -1095,10 +1270,10 @@ async function buildPromotedNpcHydrationPayload(input: {
         };
       }),
       temporaryActor: {
-        label: temporaryActor?.label ?? npc.role,
-        interactionCount: temporaryActor?.interactionCount ?? 0,
-        recentTopics: temporaryActor?.recentTopics ?? [],
-        lastSummary: temporaryActor?.lastSummary ?? npc.summary,
+        label: embodiedActor?.displayLabel ?? npc.role,
+        interactionCount: embodiedActor?.interactionCount ?? 0,
+        recentTopics: embodiedActor?.recentTopics ?? [],
+        lastSummary: embodiedActor?.lastSummary ?? npc.summary,
       },
       allowRenameFromGenericRoleLabel: needsIdentityHydration,
     }),
@@ -1117,8 +1292,8 @@ async function buildPromotedNpcHydrationPayload(input: {
       priorFactText: [
         npc.summary,
         npc.description,
-        temporaryActor?.lastSummary ?? null,
-        ...(temporaryActor?.recentTopics ?? []),
+        embodiedActor?.lastSummary ?? null,
+        ...(embodiedActor?.recentTopics ?? []),
       ].filter((entry): entry is string => Boolean(entry && entry.trim())).join("\n"),
     });
 
@@ -1441,6 +1616,7 @@ function resolveSceneActorTargetForEvaluation(input: {
   spawnedTemporaryActorIds: Map<string, string>;
   projectedTemporaryActors: Map<string, ProjectedTemporaryActor>;
   projectedNpcLocationIds: Map<string, string | null>;
+  projectedActorProfileNpcIds: Map<string, string>;
 }) {
   if (isSpawnHandle(input.actorRef)) {
     const temporaryActorId = input.spawnedTemporaryActorIds.get(input.actorRef.slice("spawn:".length)) ?? null;
@@ -1461,8 +1637,21 @@ function resolveSceneActorTargetForEvaluation(input: {
       : null;
   }
 
+  if (input.actorRef.startsWith("actor:")) {
+    const actorId = input.actorRef.slice("actor:".length);
+    if (input.projectedTemporaryActors.has(actorId)) {
+      return { kind: "temporary_actor" as const, actorId };
+    }
+    const npcId = input.projectedActorProfileNpcIds.get(actorId);
+    return npcId ? { kind: "npc" as const, actorId: npcId } : null;
+  }
+
   if (input.projectedTemporaryActors.has(input.actorRef)) {
     return { kind: "temporary_actor" as const, actorId: input.actorRef };
+  }
+
+  if (input.projectedActorProfileNpcIds.has(input.actorRef)) {
+    return { kind: "npc" as const, actorId: input.projectedActorProfileNpcIds.get(input.actorRef)! };
   }
 
   if (input.projectedNpcLocationIds.has(input.actorRef)) {
@@ -1487,6 +1676,42 @@ function resolveInventoryItemIdForEvaluation(input: {
   }
 
   return input.spawnedItemTemplateIds.get(input.itemId.slice("spawn:".length)) ?? null;
+}
+
+function actorLocationCouldBeTargetedThisTurn(input: {
+  actorCurrentLocationId: string | null;
+  previousLocationId: string;
+  nextLocationId: string;
+}) {
+  if (!input.actorCurrentLocationId) {
+    return false;
+  }
+
+  return (
+    input.actorCurrentLocationId === input.previousLocationId
+    || input.actorCurrentLocationId === input.nextLocationId
+  );
+}
+
+function rawRollbackRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const container =
+    record.data && typeof record.data === "object" && !Array.isArray(record.data)
+      ? record.data as Record<string, unknown>
+      : record;
+  const rollback = container.rollback;
+  return rollback && typeof rollback === "object" && !Array.isArray(rollback)
+    ? rollback as Record<string, unknown>
+    : null;
+}
+
+function rollbackSupportsActorUndo(value: unknown) {
+  const rollback = rawRollbackRecord(value);
+  return rollback ? Object.hasOwn(rollback, "createdActorIds") : false;
 }
 
 function resolveInventoryTemplateIdForCommit(input: {
@@ -1546,6 +1771,8 @@ function holderKey(holder: AssetHolderRef) {
   switch (holder.kind) {
     case "player":
       return "player";
+    case "actor":
+      return `actor:${holder.actorId}`;
     case "npc":
       return `npc:${holder.npcId}`;
     case "temporary_actor":
@@ -1574,6 +1801,9 @@ function holderRefForItem(input: {
   if (input.item.temporaryActorId) {
     return { kind: "temporary_actor", actorId: input.item.temporaryActorId };
   }
+  if (input.item.actorId) {
+    return { kind: "actor", actorId: input.item.actorId };
+  }
   if (input.item.worldObjectId) {
     return { kind: "world_object", objectId: input.item.worldObjectId };
   }
@@ -1597,6 +1827,9 @@ function holderRefForCommodityStack(input: {
   if (input.stack.temporaryActorId) {
     return { kind: "temporary_actor", actorId: input.stack.temporaryActorId };
   }
+  if (input.stack.actorId) {
+    return { kind: "actor", actorId: input.stack.actorId };
+  }
   if (input.stack.worldObjectId) {
     return { kind: "world_object", objectId: input.stack.worldObjectId };
   }
@@ -1619,6 +1852,9 @@ function holderRefForWorldObject(input: {
   }
   if (input.object.temporaryActorId) {
     return { kind: "temporary_actor", actorId: input.object.temporaryActorId };
+  }
+  if (input.object.actorId) {
+    return { kind: "actor", actorId: input.object.actorId };
   }
   if (input.object.parentWorldObjectId) {
     return { kind: "world_object", objectId: input.object.parentWorldObjectId };
@@ -1707,7 +1943,7 @@ function wouldExceedObjectNestingLimit(input: {
 }
 
 function normalizeActorRef(actorRef: string) {
-  if (actorRef.startsWith("npc:") || actorRef.startsWith("temp:")) {
+  if (actorRef.startsWith("npc:") || actorRef.startsWith("temp:") || actorRef.startsWith("actor:")) {
     return actorRef;
   }
   return actorRef.trim() || actorRef;
@@ -1721,13 +1957,17 @@ function normalizeActorRefForMovementSupport(input: {
   actorRef: string;
   spawnedTemporaryActorIds: Map<string, string>;
 }) {
+  if (input.actorRef.startsWith("actor:")) {
+    return input.actorRef;
+  }
+
   const resolvedActorId = resolveSpawnedTemporaryActorId({
     actorRef: input.actorRef,
     spawnedTemporaryActorIds: input.spawnedTemporaryActorIds,
   });
 
   if (resolvedActorId && !input.actorRef.startsWith("npc:")) {
-    return tempActorRef(resolvedActorId);
+    return actorActorRef(resolvedActorId);
   }
 
   return normalizeActorRef(input.actorRef);
@@ -1738,12 +1978,16 @@ function commandSupportsActorPresence(input: {
   actorRef: string;
   spawnedTemporaryActorIds: Map<string, string>;
 }) {
+  const normalizedTargetActorRef = normalizeActorRefForMovementSupport({
+    actorRef: input.actorRef,
+    spawnedTemporaryActorIds: input.spawnedTemporaryActorIds,
+  });
   return input.mutations.some((candidate) =>
     candidate.type === "set_scene_actor_presence"
     && normalizeActorRefForMovementSupport({
       actorRef: candidate.actorRef,
       spawnedTemporaryActorIds: input.spawnedTemporaryActorIds,
-    }) === input.actorRef);
+    }) === normalizedTargetActorRef);
 }
 
 function commandSupportsPlayerRelocation(mutations: MechanicsMutation[]) {
@@ -1755,8 +1999,8 @@ function resolveSpawnItemHolderForEvaluation(input: {
   holder: AssetHolderRef;
   spawnedWorldObjectIds: Map<string, string>;
   projectedWorldObjects: Map<string, WorldObjectSummary>;
-  projectedTemporaryActors: Map<string, TemporaryActorSummary>;
-  projectedNpcLocationIds: Map<string, string>;
+  projectedTemporaryActors: Map<string, ProjectedTemporaryActor>;
+  projectedNpcLocationIds: Map<string, string | null>;
   presentNpcs: CampaignSnapshot["presentNpcs"];
   projectedLocationId: string;
 }) {
@@ -1856,6 +2100,41 @@ function actorSummaryForFocusEvaluation(input: {
   projectedSceneActorFocuses: Map<string, string | null>;
   actorRef: string;
 }) {
+  if (input.actorRef.startsWith("actor:")) {
+    const actorId = input.actorRef.slice("actor:".length);
+    const temporaryActor = input.projectedTemporaryActors.get(actorId);
+    if (temporaryActor) {
+      return {
+        displayLabel: temporaryActor.label,
+        role: temporaryActor.label,
+        focusKey:
+          input.projectedSceneActorFocuses.get(input.actorRef)
+          ?? input.projectedSceneActorFocuses.get(tempActorRef(actorId))
+          ?? null,
+        lastSummary: temporaryActor.lastSummary,
+      };
+    }
+
+    const actor = (input.snapshot.actors ?? []).find((entry) => entry.id === actorId);
+    if (!actor) {
+      return null;
+    }
+    const npc = actor.profileNpcId
+      ? input.snapshot.presentNpcs.find((entry) => entry.id === actor.profileNpcId)
+      : null;
+    const displayLabel = npc?.name ?? actor.displayLabel ?? actor.label ?? actor.id;
+    const role = npc?.role ?? actor.displayLabel ?? actor.label ?? actor.id;
+    return {
+      displayLabel,
+      role,
+      focusKey:
+        input.projectedSceneActorFocuses.get(input.actorRef)
+        ?? (actor.profileNpcId ? input.projectedSceneActorFocuses.get(npcActorRef(actor.profileNpcId)) : null)
+        ?? null,
+      lastSummary: npc?.summary ?? actor.lastSummary,
+    };
+  }
+
   if (input.actorRef.startsWith("temp:")) {
     const actor = input.projectedTemporaryActors.get(input.actorRef.slice("temp:".length));
     if (!actor) {
@@ -1932,6 +2211,7 @@ function actorRefsVisibleAtFocus(input: {
   snapshot: CampaignSnapshot;
   projectedTemporaryActors: Map<string, ProjectedTemporaryActor>;
   projectedSceneActorFocuses: Map<string, string | null>;
+  projectedNpcActorIds: Map<string, string>;
   projectedNpcLocationIds: Map<string, string | null>;
   projectedLocationId: string;
   sceneFocus: CampaignRuntimeState["sceneFocus"];
@@ -1943,19 +2223,19 @@ function actorRefsVisibleAtFocus(input: {
   for (const npc of input.snapshot.presentNpcs) {
     const locationId = input.projectedNpcLocationIds.get(npc.id) ?? npc.currentLocationId;
     if (locationId === input.projectedLocationId) {
-      candidateActorRefs.add(npcActorRef(npc.id));
+      candidateActorRefs.add(actorActorRef(input.projectedNpcActorIds.get(npc.id) ?? npc.id));
     }
   }
 
   for (const [npcId, locationId] of input.projectedNpcLocationIds.entries()) {
     if (locationId === input.projectedLocationId) {
-      candidateActorRefs.add(npcActorRef(npcId));
+      candidateActorRefs.add(actorActorRef(input.projectedNpcActorIds.get(npcId) ?? npcId));
     }
   }
 
   for (const actor of input.projectedTemporaryActors.values()) {
     if (actor.promotedNpcId == null && actor.currentLocationId === input.projectedLocationId) {
-      candidateActorRefs.add(tempActorRef(actor.id));
+      candidateActorRefs.add(actorActorRef(actor.id));
     }
   }
 
@@ -1987,6 +2267,7 @@ function namedNpcIsPresentInCurrentScene(input: {
   snapshot: CampaignSnapshot;
   projectedTemporaryActors: Map<string, ProjectedTemporaryActor>;
   projectedSceneActorFocuses: Map<string, string | null>;
+  projectedNpcActorIds: Map<string, string>;
   npcId: string;
   previousSceneFocus: CampaignRuntimeState["sceneFocus"];
   projectedSceneFocus: CampaignRuntimeState["sceneFocus"];
@@ -1994,16 +2275,17 @@ function namedNpcIsPresentInCurrentScene(input: {
   currentFocusActorRefs: Set<string>;
   explicitCurrentSceneActorFocusByRef: Map<string, CampaignRuntimeState["sceneFocus"] | null>;
 }) {
-  const actorRef = npcActorRef(input.npcId);
-  if (input.currentFocusActorRefs.has(actorRef)) {
+  const actorId = input.projectedNpcActorIds.get(input.npcId) ?? null;
+  const actorRefs = actorId ? [actorActorRef(actorId), npcActorRef(input.npcId)] : [npcActorRef(input.npcId)];
+  if (actorRefs.some((actorRef) => input.currentFocusActorRefs.has(actorRef))) {
     return true;
   }
 
-  if (explicitlyPresentActorRemainsAvailable({
+  if (actorRefs.some((actorRef) => explicitlyPresentActorRemainsAvailable({
     explicitCurrentSceneActorFocusByRef: input.explicitCurrentSceneActorFocusByRef,
     actorRef,
     projectedSceneFocus: input.projectedSceneFocus,
-  })) {
+  }))) {
     return true;
   }
 
@@ -2018,13 +2300,13 @@ function namedNpcIsPresentInCurrentScene(input: {
 
   if (
     input.focusChangedThisTurn
-    && actorMatchesSceneFocus({
+    && actorRefs.some((actorRef) => actorMatchesSceneFocus({
       snapshot: input.snapshot,
       projectedTemporaryActors: input.projectedTemporaryActors,
       projectedSceneActorFocuses: input.projectedSceneActorFocuses,
       actorRef,
       sceneFocus: input.previousSceneFocus,
-    })
+    }))
     && sceneFocusesShareVenue(input.previousSceneFocus, input.projectedSceneFocus)
   ) {
     return true;
@@ -2034,7 +2316,10 @@ function namedNpcIsPresentInCurrentScene(input: {
     actor: {
       displayLabel: npc.name,
       role: npc.role,
-      focusKey: input.projectedSceneActorFocuses.get(actorRef) ?? null,
+      focusKey: actorRefs
+        .map((actorRef) => input.projectedSceneActorFocuses.get(actorRef))
+        .find((focusKey): focusKey is string | null => focusKey !== undefined)
+        ?? null,
       lastSummary: npc.summary,
     },
     sceneFocus: input.projectedSceneFocus,
@@ -2288,8 +2573,39 @@ function evaluateResolvedCommand(input: {
       },
     ]),
   );
+  const snapshotActorsById = new Map(
+    (input.snapshot.actors ?? []).map((actor) => [actor.id, { ...actor, recentTopics: [...actor.recentTopics] }]),
+  );
+  const projectedActorProfileNpcIds = new Map(
+    [...snapshotActorsById.values()]
+      .filter((actor): actor is typeof actor & { profileNpcId: string } => actor.profileNpcId != null)
+      .map((actor) => [actor.id, actor.profileNpcId]),
+  );
+  const projectedNpcActorIds = new Map(
+    [...projectedActorProfileNpcIds.entries()].map(([actorId, npcId]) => [npcId, actorId]),
+  );
   const projectedNpcLocationIds = new Map(
     Object.entries(input.snapshot.knownNpcLocationIds),
+  );
+  const projectedActorStates = new Map(
+    [...snapshotActorsById.values()].map((actor) => [
+      actor.id,
+      actor.state
+      ?? (
+        actor.profileNpcId
+          ? input.snapshot.presentNpcs.find((npc) => npc.id === actor.profileNpcId)?.state ?? "active"
+          : "active"
+      ),
+    ]),
+  );
+  const projectedActorInteractionCounts = new Map(
+    [...snapshotActorsById.values()].map((actor) => [actor.id, actor.interactionCount]),
+  );
+  const projectedActorLastSummaries = new Map(
+    [...snapshotActorsById.values()].map((actor) => [actor.id, actor.lastSummary]),
+  );
+  const projectedActorRecentTopics = new Map(
+    [...snapshotActorsById.values()].map((actor) => [actor.id, [...actor.recentTopics]]),
   );
   const spawnedTemporaryActorIds = new Map<string, string>();
   const spawnedItemTemplateIds = new Map<string, string>();
@@ -2313,6 +2629,23 @@ function evaluateResolvedCommand(input: {
   const currentFocusActorRefs = new Set<string>();
   const explicitCurrentSceneActorFocusByRef = new Map<string, CampaignRuntimeState["sceneFocus"] | null>();
   let hasAppliedMove = false;
+  const canonicalActorRefForActorId = (actorId: string) => {
+    return actorActorRef(actorId);
+  };
+  const projectedActorLocationId = (actorId: string) => {
+    const temporaryActor = projectedTemporaryActors.get(actorId);
+    if (temporaryActor) {
+      return temporaryActor.currentLocationId;
+    }
+    const actor = snapshotActorsById.get(actorId);
+    if (!actor) {
+      return null;
+    }
+    if (actor.profileNpcId) {
+      return projectedNpcLocationIds.get(actor.profileNpcId) ?? actor.currentLocationId;
+    }
+    return actor.currentLocationId;
+  };
   const groundedInformation = groundedInformationIdsForDiscovery({
     snapshot: input.snapshot,
     fetchedFacts: input.fetchedFacts,
@@ -2464,6 +2797,7 @@ function evaluateResolvedCommand(input: {
         snapshot: input.snapshot,
         projectedTemporaryActors,
         projectedSceneActorFocuses,
+        projectedNpcActorIds,
         projectedNpcLocationIds,
         projectedLocationId,
         sceneFocus: priorSceneFocus,
@@ -2868,6 +3202,183 @@ function evaluateResolvedCommand(input: {
       continue;
     }
 
+    if (mutation.type === "record_actor_interaction") {
+      if (
+        !hasVector(input.routerDecision, "converse")
+        && !hasVector(input.routerDecision, "economy_light")
+        && !hasVector(input.routerDecision, "investigate")
+      ) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "unauthorized_vector",
+          summary: "Actor interaction is not authorized for this turn.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      const actor = snapshotActorsById.get(mutation.actorId) ?? null;
+      const actorLocationId = projectedActorLocationId(mutation.actorId);
+      const profileNpcId = projectedActorProfileNpcIds.get(mutation.actorId) ?? null;
+      const targetActorRef = canonicalActorRefForActorId(mutation.actorId);
+      if (!actor || actorLocationId !== projectedLocationId) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "That actor is not available here.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (targetWasLeftBehindByFocusShift({
+        snapshot: input.snapshot,
+        projectedTemporaryActors,
+        projectedSceneActorFocuses,
+        previousSceneFocus: previousSceneFocusBeforeLatestChange,
+        projectedSceneFocus,
+        focusChangedThisTurn,
+        currentFocusActorRefs,
+        explicitCurrentSceneActorFocusByRef,
+        actorRef: targetActorRef,
+      })) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_semantics",
+          summary: "That actor was left behind when you changed focus; you cannot keep interacting with them here without bringing them into the new focus.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (
+        profileNpcId
+        && !namedNpcIsPresentInCurrentScene({
+          snapshot: input.snapshot,
+          projectedTemporaryActors,
+          projectedSceneActorFocuses,
+          projectedNpcActorIds,
+          npcId: profileNpcId,
+          previousSceneFocus: previousSceneFocusBeforeLatestChange,
+          projectedSceneFocus,
+          focusChangedThisTurn,
+          currentFocusActorRefs,
+          explicitCurrentSceneActorFocusByRef,
+        })
+      ) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "That actor is known nearby, but not present in this immediate scene.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+
+      const interactionSummary = mutation.interactionSummary.trim();
+      const impliesPlayerRelocation = interactionSummaryMatchesAnyPattern(
+        interactionSummary,
+        INTERACTION_SUMMARY_PLAYER_RELOCATION_PATTERNS,
+      );
+      const impliesActorMovement = interactionSummaryMatchesAnyPattern(
+        interactionSummary,
+        INTERACTION_SUMMARY_ACTOR_MOVEMENT_PATTERNS,
+      );
+      const impliesActorStaging = interactionSummaryMatchesAnyPattern(
+        interactionSummary,
+        INTERACTION_SUMMARY_ACTOR_STAGING_PATTERNS,
+      );
+      const supportsPlayerRelocation = commandSupportsPlayerRelocation(input.command.mutations);
+      const supportsActorPresence = commandSupportsActorPresence({
+        mutations: input.command.mutations,
+        actorRef: targetActorRef,
+        spawnedTemporaryActorIds,
+      });
+      if (impliesPlayerRelocation && !supportsPlayerRelocation) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_semantics",
+          summary: "That interaction summary implies player movement. Use set_player_scene_focus or move_player to progress the physical scene.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (impliesActorMovement && !supportsActorPresence) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_semantics",
+          summary: "That interaction summary implies physical movement or arrival. Use set_scene_actor_presence to progress the physical scene.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (impliesActorStaging) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_semantics",
+          summary: "That interaction summary implies new physical staging or blocking. Manifest physical progression with explicit scene mutations instead.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+
+      const topic = mutation.topic?.trim() || undefined;
+      const nextInteractionCount = (projectedActorInteractionCounts.get(mutation.actorId) ?? actor.interactionCount) + 1;
+      const nextRecentTopics = topic
+        ? dedupeStrings([...(projectedActorRecentTopics.get(mutation.actorId) ?? actor.recentTopics), topic]).slice(-4)
+        : (projectedActorRecentTopics.get(mutation.actorId) ?? actor.recentTopics);
+      projectedActorInteractionCounts.set(mutation.actorId, nextInteractionCount);
+      projectedActorLastSummaries.set(mutation.actorId, interactionSummary);
+      projectedActorRecentTopics.set(mutation.actorId, nextRecentTopics);
+      projectedActorStates.set(
+        mutation.actorId,
+        projectedActorStates.get(mutation.actorId)
+        ?? actor.state
+        ?? (
+          profileNpcId
+            ? input.snapshot.presentNpcs.find((npc) => npc.id === profileNpcId)?.state ?? "active"
+            : "active"
+        ),
+      );
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "actor_interaction_recorded",
+        summary: interactionSummary || actor.displayLabel || actor.label,
+        metadata: {
+          actorId: mutation.actorId,
+          actorRef: targetActorRef,
+          profileNpcId,
+          topic: topic ?? null,
+          socialOutcome: mutation.socialOutcome,
+          phase,
+          interactionCount: nextInteractionCount,
+        } as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({
+        mutation: {
+          ...mutation,
+          topic,
+          phase,
+        } as MechanicsMutation,
+        entry,
+      });
+      continue;
+    }
+
     if (mutation.type === "record_local_interaction") {
       if (isLikelySoloErrandAction(input.playerAction)) {
         stateCommitLog.push({
@@ -3085,6 +3596,7 @@ function evaluateResolvedCommand(input: {
         snapshot: input.snapshot,
         projectedTemporaryActors,
         projectedSceneActorFocuses,
+        projectedNpcActorIds,
         npcId: mutation.npcId,
         previousSceneFocus: previousSceneFocusBeforeLatestChange,
         projectedSceneFocus,
@@ -3214,6 +3726,7 @@ function evaluateResolvedCommand(input: {
         spawnedTemporaryActorIds,
         projectedTemporaryActors,
         projectedNpcLocationIds,
+        projectedActorProfileNpcIds,
       });
       if (!target) {
         stateCommitLog.push({
@@ -3240,6 +3753,7 @@ function evaluateResolvedCommand(input: {
           });
           continue;
         }
+        const canonicalActorRef = actorActorRef(actor.id);
         if (actor.currentLocationId === mutation.newLocationId) {
           stateCommitLog.push({
             kind: "mutation",
@@ -3252,7 +3766,9 @@ function evaluateResolvedCommand(input: {
               : `${actor.label} is already there.`,
             metadata: {
               ...mutation,
-              actorRef: tempActorRef(actor.id),
+              actorRef: canonicalActorRef,
+              actorId: actor.id,
+              profileNpcId: null,
               phase,
             } as unknown as Record<string, unknown>,
           });
@@ -3260,7 +3776,7 @@ function evaluateResolvedCommand(input: {
         }
 
         actor.currentLocationId = mutation.newLocationId;
-        const actorRef = tempActorRef(actor.id);
+        const actorRef = canonicalActorRef;
         if (mutation.newLocationId === projectedLocationId) {
           currentFocusActorRefs.add(actorRef);
           explicitCurrentSceneActorFocusByRef.set(actorRef, projectedSceneFocus);
@@ -3281,7 +3797,9 @@ function evaluateResolvedCommand(input: {
               : `${actor.label} arrives in the scene.`,
           metadata: {
             ...mutation,
-            actorRef: tempActorRef(actor.id),
+            actorRef,
+            actorId: actor.id,
+            profileNpcId: null,
             arrivesInCurrentScene: mutation.newLocationId === projectedLocationId,
             phase,
           } as unknown as Record<string, unknown>,
@@ -3292,6 +3810,8 @@ function evaluateResolvedCommand(input: {
       }
 
       const currentNpcLocation = projectedNpcLocationIds.get(target.actorId) ?? null;
+      const actorId = projectedNpcActorIds.get(target.actorId) ?? null;
+      const canonicalActorRef = actorId ? actorActorRef(actorId) : npcActorRef(target.actorId);
       const npcLabel =
         input.snapshot.presentNpcs.find((npc) => npc.id === target.actorId)?.name
         ?? target.actorId;
@@ -3301,13 +3821,15 @@ function evaluateResolvedCommand(input: {
           mutationType: mutation.type,
           status: "noop",
           reasonCode: "already_applied",
-          summary:
+            summary:
             mutation.newLocationId == null
               ? `${npcLabel} is already away from the scene.`
               : `${npcLabel} is already there.`,
             metadata: {
               ...mutation,
-              actorRef: npcActorRef(target.actorId),
+              actorRef: canonicalActorRef,
+              actorId,
+              profileNpcId: target.actorId,
               phase,
             } as unknown as Record<string, unknown>,
           });
@@ -3315,7 +3837,7 @@ function evaluateResolvedCommand(input: {
       }
 
       projectedNpcLocationIds.set(target.actorId, mutation.newLocationId);
-      const actorRef = npcActorRef(target.actorId);
+      const actorRef = canonicalActorRef;
       if (mutation.newLocationId === projectedLocationId) {
         currentFocusActorRefs.add(actorRef);
         explicitCurrentSceneActorFocusByRef.set(actorRef, projectedSceneFocus);
@@ -3336,7 +3858,9 @@ function evaluateResolvedCommand(input: {
             : `${npcLabel} arrives in the scene.`,
         metadata: {
           ...mutation,
-          actorRef: npcActorRef(target.actorId),
+          actorRef,
+          actorId,
+          profileNpcId: target.actorId,
           arrivesInCurrentScene: mutation.newLocationId === projectedLocationId,
           phase,
         } as unknown as Record<string, unknown>,
@@ -4508,6 +5032,7 @@ function evaluateResolvedCommand(input: {
         spawnedTemporaryActorIds,
         projectedTemporaryActors,
         projectedNpcLocationIds,
+        projectedActorProfileNpcIds,
       });
       if (!target) {
         stateCommitLog.push({
@@ -4521,7 +5046,9 @@ function evaluateResolvedCommand(input: {
         continue;
       }
       const canonicalActorRef =
-        target.kind === "npc" ? npcActorRef(target.actorId) : tempActorRef(target.actorId);
+        target.kind === "npc"
+          ? actorActorRef(projectedNpcActorIds.get(target.actorId) ?? target.actorId)
+          : actorActorRef(target.actorId);
       if (mutation.isFollowing) {
         projectedFollowers.add(canonicalActorRef);
       } else {
@@ -4538,6 +5065,8 @@ function evaluateResolvedCommand(input: {
         metadata: {
           ...mutation,
           actorRef: canonicalActorRef,
+          actorId: target.kind === "npc" ? projectedNpcActorIds.get(target.actorId) ?? null : target.actorId,
+          profileNpcId: target.kind === "npc" ? target.actorId : null,
           phase,
         } as unknown as Record<string, unknown>,
       };
@@ -4679,6 +5208,126 @@ function evaluateResolvedCommand(input: {
       continue;
     }
 
+    if (mutation.type === "set_actor_state") {
+      if (!hasVector(input.routerDecision, "violence")) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "unauthorized_vector",
+          summary: "Violent state changes are not authorized for this turn.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+
+      const actor = snapshotActorsById.get(mutation.actorId) ?? null;
+      const actorLocationId = projectedActorLocationId(mutation.actorId);
+      const profileNpcId = projectedActorProfileNpcIds.get(mutation.actorId) ?? null;
+      const targetActorRef = canonicalActorRefForActorId(mutation.actorId);
+      if (!actor || actorLocationId !== projectedLocationId) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "That actor target is not available here.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (targetWasLeftBehindByFocusShift({
+        snapshot: input.snapshot,
+        projectedTemporaryActors,
+        projectedSceneActorFocuses,
+        previousSceneFocus: previousSceneFocusBeforeLatestChange,
+        projectedSceneFocus,
+        focusChangedThisTurn,
+        currentFocusActorRefs,
+        explicitCurrentSceneActorFocusByRef,
+        actorRef: targetActorRef,
+      })) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_semantics",
+          summary: "That target was left behind when you changed focus; you cannot affect them here without bringing them into the new focus.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      if (
+        profileNpcId
+        && !namedNpcIsPresentInCurrentScene({
+          snapshot: input.snapshot,
+          projectedTemporaryActors,
+          projectedSceneActorFocuses,
+          projectedNpcActorIds,
+          npcId: profileNpcId,
+          previousSceneFocus: previousSceneFocusBeforeLatestChange,
+          projectedSceneFocus,
+          focusChangedThisTurn,
+          currentFocusActorRefs,
+          explicitCurrentSceneActorFocusByRef,
+        })
+      ) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "That actor target is known nearby, but not present in this immediate scene.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      const currentState =
+        projectedActorStates.get(mutation.actorId)
+        ?? actor.state
+        ?? (
+          profileNpcId
+            ? input.snapshot.presentNpcs.find((npc) => npc.id === profileNpcId)?.state ?? "active"
+            : "active"
+        );
+      if (currentState === mutation.newState) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "noop",
+          reasonCode: "already_applied",
+          summary: `${actor.displayLabel ?? actor.label} is already ${mutation.newState}.`,
+          metadata: {
+            ...mutation,
+            actorRef: targetActorRef,
+            profileNpcId,
+            phase,
+          } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+      projectedActorStates.set(mutation.actorId, mutation.newState);
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "actor_state_changed",
+        summary: `${actor.displayLabel ?? actor.label} becomes ${mutation.newState}.`,
+        metadata: {
+          ...mutation,
+          actorRef: targetActorRef,
+          profileNpcId,
+          phase,
+        } as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({
+        mutation: { ...mutation, phase } as MechanicsMutation,
+        entry,
+      });
+      continue;
+    }
+
     if (mutation.type === "set_npc_state") {
       if (!hasVector(input.routerDecision, "violence")) {
         stateCommitLog.push({
@@ -4753,8 +5402,12 @@ function evaluateResolvedCommand(input: {
         status: "applied" as const,
         reasonCode: "npc_state_changed",
         summary: `${npc.name} becomes ${mutation.newState}.`,
-        metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
-      };
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        };
+      const embodiedActorId = projectedNpcActorIds.get(mutation.npcId) ?? null;
+      if (embodiedActorId) {
+        projectedActorStates.set(embodiedActorId, mutation.newState);
+      }
       stateCommitLog.push(entry);
       appliedMutations.push({ mutation: { ...mutation, phase } as MechanicsMutation, entry });
       continue;
@@ -5001,6 +5654,17 @@ function itemHolderData(holder: AssetHolderRef, characterInstanceId: string) {
     case "player":
       return {
         characterInstanceId,
+        actorId: null,
+        npcId: null,
+        temporaryActorId: null,
+        worldObjectId: null,
+        sceneLocationId: null,
+        sceneFocusKey: null,
+      } satisfies Prisma.ItemInstanceUncheckedUpdateInput;
+    case "actor":
+      return {
+        characterInstanceId: null,
+        actorId: holder.actorId,
         npcId: null,
         temporaryActorId: null,
         worldObjectId: null,
@@ -5010,6 +5674,7 @@ function itemHolderData(holder: AssetHolderRef, characterInstanceId: string) {
     case "npc":
       return {
         characterInstanceId: null,
+        actorId: null,
         npcId: holder.npcId,
         temporaryActorId: null,
         worldObjectId: null,
@@ -5019,6 +5684,7 @@ function itemHolderData(holder: AssetHolderRef, characterInstanceId: string) {
     case "temporary_actor":
       return {
         characterInstanceId: null,
+        actorId: holder.actorId,
         npcId: null,
         temporaryActorId: holder.actorId,
         worldObjectId: null,
@@ -5028,6 +5694,7 @@ function itemHolderData(holder: AssetHolderRef, characterInstanceId: string) {
     case "world_object":
       return {
         characterInstanceId: null,
+        actorId: null,
         npcId: null,
         temporaryActorId: null,
         worldObjectId: holder.objectId,
@@ -5037,6 +5704,7 @@ function itemHolderData(holder: AssetHolderRef, characterInstanceId: string) {
     case "scene":
       return {
         characterInstanceId: null,
+        actorId: null,
         npcId: null,
         temporaryActorId: null,
         worldObjectId: null,
@@ -5051,6 +5719,17 @@ function commodityHolderData(holder: AssetHolderRef, characterInstanceId: string
     case "player":
       return {
         characterInstanceId,
+        actorId: null,
+        npcId: null,
+        temporaryActorId: null,
+        worldObjectId: null,
+        sceneLocationId: null,
+        sceneFocusKey: null,
+      } satisfies Prisma.CharacterCommodityStackUncheckedUpdateInput;
+    case "actor":
+      return {
+        characterInstanceId: null,
+        actorId: holder.actorId,
         npcId: null,
         temporaryActorId: null,
         worldObjectId: null,
@@ -5060,6 +5739,7 @@ function commodityHolderData(holder: AssetHolderRef, characterInstanceId: string
     case "npc":
       return {
         characterInstanceId: null,
+        actorId: null,
         npcId: holder.npcId,
         temporaryActorId: null,
         worldObjectId: null,
@@ -5069,6 +5749,7 @@ function commodityHolderData(holder: AssetHolderRef, characterInstanceId: string
     case "temporary_actor":
       return {
         characterInstanceId: null,
+        actorId: holder.actorId,
         npcId: null,
         temporaryActorId: holder.actorId,
         worldObjectId: null,
@@ -5078,6 +5759,7 @@ function commodityHolderData(holder: AssetHolderRef, characterInstanceId: string
     case "world_object":
       return {
         characterInstanceId: null,
+        actorId: null,
         npcId: null,
         temporaryActorId: null,
         worldObjectId: holder.objectId,
@@ -5087,6 +5769,7 @@ function commodityHolderData(holder: AssetHolderRef, characterInstanceId: string
     case "scene":
       return {
         characterInstanceId: null,
+        actorId: null,
         npcId: null,
         temporaryActorId: null,
         worldObjectId: null,
@@ -5101,6 +5784,17 @@ function worldObjectHolderData(holder: AssetHolderRef, characterInstanceId: stri
     case "player":
       return {
         characterInstanceId,
+        actorId: null,
+        npcId: null,
+        temporaryActorId: null,
+        parentWorldObjectId: null,
+        sceneLocationId: null,
+        sceneFocusKey: null,
+      } satisfies Prisma.WorldObjectUncheckedUpdateInput;
+    case "actor":
+      return {
+        characterInstanceId: null,
+        actorId: holder.actorId,
         npcId: null,
         temporaryActorId: null,
         parentWorldObjectId: null,
@@ -5110,6 +5804,7 @@ function worldObjectHolderData(holder: AssetHolderRef, characterInstanceId: stri
     case "npc":
       return {
         characterInstanceId: null,
+        actorId: null,
         npcId: holder.npcId,
         temporaryActorId: null,
         parentWorldObjectId: null,
@@ -5119,6 +5814,7 @@ function worldObjectHolderData(holder: AssetHolderRef, characterInstanceId: stri
     case "temporary_actor":
       return {
         characterInstanceId: null,
+        actorId: holder.actorId,
         npcId: null,
         temporaryActorId: holder.actorId,
         parentWorldObjectId: null,
@@ -5128,6 +5824,7 @@ function worldObjectHolderData(holder: AssetHolderRef, characterInstanceId: stri
     case "world_object":
       return {
         characterInstanceId: null,
+        actorId: null,
         npcId: null,
         temporaryActorId: null,
         parentWorldObjectId: holder.objectId,
@@ -5137,6 +5834,7 @@ function worldObjectHolderData(holder: AssetHolderRef, characterInstanceId: stri
     case "scene":
       return {
         characterInstanceId: null,
+        actorId: null,
         npcId: null,
         temporaryActorId: null,
         parentWorldObjectId: null,
@@ -5150,6 +5848,8 @@ function itemHolderWhere(holder: AssetHolderRef, characterInstanceId: string): P
   switch (holder.kind) {
     case "player":
       return { characterInstanceId };
+    case "actor":
+      return { actorId: holder.actorId };
     case "npc":
       return { npcId: holder.npcId };
     case "temporary_actor":
@@ -5168,6 +5868,8 @@ function commodityHolderWhere(
   switch (holder.kind) {
     case "player":
       return { characterInstanceId };
+    case "actor":
+      return { actorId: holder.actorId };
     case "npc":
       return { npcId: holder.npcId };
     case "temporary_actor":
@@ -5186,6 +5888,8 @@ function worldObjectHolderWhere(
   switch (holder.kind) {
     case "player":
       return { characterInstanceId };
+    case "actor":
+      return { actorId: holder.actorId };
     case "npc":
       return { npcId: holder.npcId };
     case "temporary_actor":
@@ -5291,17 +5995,12 @@ async function applyResolvedMutations(input: {
       recordCreated(input.rollback, "worldObject", objectId);
       input.rollback.createdWorldObjectIds.push(objectId);
       if (holder.kind === "temporary_actor") {
-        const actor = await input.tx.temporaryActor.findUnique({
-          where: { id: holder.actorId },
-          select: { id: true, holdsInventory: true },
+        await syncActorInventoryMirror({
+          tx: input.tx,
+          rollback: input.rollback,
+          actorId: holder.actorId,
+          holdsInventory: true,
         });
-        if (actor && !actor.holdsInventory) {
-          recordInverse(input.rollback, "temporaryActor", actor.id, "holdsInventory", actor.holdsInventory);
-          await input.tx.temporaryActor.update({
-            where: { id: actor.id },
-            data: { holdsInventory: true },
-          });
-        }
       }
       continue;
     }
@@ -5451,7 +6150,7 @@ async function applyResolvedMutations(input: {
       const existingActor = input.snapshot.temporaryActors.find((actor) => actor.id === actorId) ?? null;
 
       if (existingActor) {
-        const reusableActor = await input.tx.temporaryActor.findUnique({
+        const reusableActor = await input.tx.actor.findUnique({
           where: { id: actorId },
           select: {
             id: true,
@@ -5464,32 +6163,62 @@ async function applyResolvedMutations(input: {
         if (!reusableActor) {
           throw new Error("Evaluated temporary-actor reuse target no longer exists.");
         }
-        const updateData: Prisma.TemporaryActorUncheckedUpdateInput = {};
+        const updateData: Prisma.ActorUncheckedUpdateInput = {};
         if (reusableActor.currentLocationId !== currentLocationId) {
-          recordInverse(input.rollback, "temporaryActor", reusableActor.id, "currentLocationId", reusableActor.currentLocationId);
+          recordInverse(input.rollback, "actor", reusableActor.id, "currentLocationId", reusableActor.currentLocationId);
           updateData.currentLocationId = currentLocationId;
         }
         if (reusableActor.lastSummary !== lastSummary) {
-          recordInverse(input.rollback, "temporaryActor", reusableActor.id, "lastSummary", reusableActor.lastSummary);
+          recordInverse(input.rollback, "actor", reusableActor.id, "lastSummary", reusableActor.lastSummary);
           updateData.lastSummary = lastSummary;
         }
         if (reusableActor.lastSeenAtTurn !== input.nextTurnCount) {
-          recordInverse(input.rollback, "temporaryActor", reusableActor.id, "lastSeenAtTurn", reusableActor.lastSeenAtTurn);
+          recordInverse(input.rollback, "actor", reusableActor.id, "lastSeenAtTurn", reusableActor.lastSeenAtTurn);
           updateData.lastSeenAtTurn = input.nextTurnCount;
         }
         if (reusableActor.lastSeenAtTime !== input.nextState.globalTime) {
-          recordInverse(input.rollback, "temporaryActor", reusableActor.id, "lastSeenAtTime", reusableActor.lastSeenAtTime);
+          recordInverse(input.rollback, "actor", reusableActor.id, "lastSeenAtTime", reusableActor.lastSeenAtTime);
           updateData.lastSeenAtTime = input.nextState.globalTime;
         }
         if (Object.keys(updateData).length) {
-          await input.tx.temporaryActor.update({
+          await input.tx.actor.update({
             where: { id: reusableActor.id },
             data: updateData,
           });
         }
+        await input.tx.temporaryActor.updateMany({
+          where: { id: reusableActor.id },
+          data: {
+            currentLocationId,
+            lastSummary,
+            lastSeenAtTurn: input.nextTurnCount,
+            lastSeenAtTime: input.nextState.globalTime,
+          },
+        });
         continue;
       }
 
+      await input.tx.actor.create({
+        data: {
+          id: actorId,
+          campaignId: input.snapshot.campaignId,
+          profileNpcId: null,
+          isAnonymous: true,
+          displayLabel: normalizeWhitespace(mutation.role),
+          currentLocationId,
+          state: "active",
+          threatLevel: 1,
+          interactionCount: 0,
+          firstSeenAtTurn: input.nextTurnCount,
+          lastSeenAtTurn: input.nextTurnCount,
+          lastSeenAtTime: input.nextState.globalTime,
+          recentTopics: [],
+          lastSummary,
+          holdsInventory: false,
+          affectedWorldState: false,
+          isInMemoryGraph: false,
+        },
+      });
       await input.tx.temporaryActor.create({
         data: {
           id: actorId,
@@ -5508,6 +6237,8 @@ async function applyResolvedMutations(input: {
           promotedNpcId: null,
         },
       });
+      recordCreated(input.rollback, "actor", actorId);
+      (input.rollback.createdActorIds ??= []).push(actorId);
       recordCreated(input.rollback, "temporaryActor", actorId);
       input.rollback.createdTemporaryActorIds.push(actorId);
       continue;
@@ -5522,16 +6253,21 @@ async function applyResolvedMutations(input: {
         throw new Error("Local interaction referenced an unresolved temporary actor.");
       }
 
-      const actor = await input.tx.temporaryActor.findFirst({
+      const actor = await input.tx.actor.findFirst({
         where: {
           id: actorId,
           campaignId: input.snapshot.campaignId,
           currentLocationId,
+          profileNpcId: null,
         },
         select: {
           id: true,
-          label: true,
+          displayLabel: true,
+          profileNpcId: true,
+          isAnonymous: true,
           currentLocationId: true,
+          state: true,
+          threatLevel: true,
           interactionCount: true,
           recentTopics: true,
           lastSummary: true,
@@ -5540,7 +6276,6 @@ async function applyResolvedMutations(input: {
           holdsInventory: true,
           affectedWorldState: true,
           isInMemoryGraph: true,
-          promotedNpcId: true,
         },
       });
       if (!actor) {
@@ -5554,12 +6289,22 @@ async function applyResolvedMutations(input: {
       const nextInteractionCount = actor.interactionCount + 1;
       const nextSummary = mutation.interactionSummary.trim() || actor.lastSummary;
 
-      recordInverse(input.rollback, "temporaryActor", actor.id, "interactionCount", actor.interactionCount);
-      recordInverse(input.rollback, "temporaryActor", actor.id, "recentTopics", actor.recentTopics);
-      recordInverse(input.rollback, "temporaryActor", actor.id, "lastSummary", actor.lastSummary);
-      recordInverse(input.rollback, "temporaryActor", actor.id, "lastSeenAtTurn", actor.lastSeenAtTurn);
-      recordInverse(input.rollback, "temporaryActor", actor.id, "lastSeenAtTime", actor.lastSeenAtTime);
-      await input.tx.temporaryActor.update({
+      recordInverse(input.rollback, "actor", actor.id, "interactionCount", actor.interactionCount);
+      recordInverse(input.rollback, "actor", actor.id, "recentTopics", actor.recentTopics);
+      recordInverse(input.rollback, "actor", actor.id, "lastSummary", actor.lastSummary);
+      recordInverse(input.rollback, "actor", actor.id, "lastSeenAtTurn", actor.lastSeenAtTurn);
+      recordInverse(input.rollback, "actor", actor.id, "lastSeenAtTime", actor.lastSeenAtTime);
+      await input.tx.actor.update({
+        where: { id: actor.id },
+        data: {
+          interactionCount: nextInteractionCount,
+          recentTopics: nextTopics,
+          lastSummary: nextSummary,
+          lastSeenAtTurn: input.nextTurnCount,
+          lastSeenAtTime: input.nextState.globalTime,
+        },
+      });
+      await input.tx.temporaryActor.updateMany({
         where: { id: actor.id },
         data: {
           interactionCount: nextInteractionCount,
@@ -5576,7 +6321,7 @@ async function applyResolvedMutations(input: {
           holdsInventory: actor.holdsInventory,
           affectedWorldState: actor.affectedWorldState,
           isInMemoryGraph: actor.isInMemoryGraph,
-          promotedNpcId: actor.promotedNpcId,
+          promotedNpcId: actor.profileNpcId,
         })
       ) {
         const location = actor.currentLocationId
@@ -5585,11 +6330,11 @@ async function applyResolvedMutations(input: {
               select: { name: true },
             })
           : null;
-        const role = toPromotedTemporaryActorRole(actor.label);
-        const name = toPromotedTemporaryActorName(actor.label);
+        const role = toPromotedTemporaryActorRole(actor.displayLabel);
+        const name = toPromotedTemporaryActorName(actor.displayLabel);
         const seedText = buildPromotedTemporaryActorSeedText({
           actor: {
-            label: actor.label,
+            label: actor.displayLabel,
             recentTopics: nextTopics,
             lastSummary: nextSummary,
           },
@@ -5619,11 +6364,23 @@ async function applyResolvedMutations(input: {
           },
         });
         recordCreated(input.rollback, "nPC", promotedNpcId);
-        recordInverse(input.rollback, "temporaryActor", actor.id, "promotedNpcId", actor.promotedNpcId);
-        await input.tx.temporaryActor.update({
+        recordInverse(input.rollback, "actor", actor.id, "profileNpcId", actor.profileNpcId);
+        recordInverse(input.rollback, "actor", actor.id, "isAnonymous", actor.isAnonymous);
+        recordInverse(input.rollback, "actor", actor.id, "displayLabel", actor.displayLabel);
+        await input.tx.actor.update({
+          where: { id: actor.id },
+          data: {
+            profileNpcId: promotedNpcId,
+            isAnonymous: false,
+            displayLabel: name,
+          },
+        });
+        recordInverse(input.rollback, "temporaryActor", actor.id, "promotedNpcId", null);
+        await input.tx.temporaryActor.updateMany({
           where: { id: actor.id },
           data: {
             promotedNpcId,
+            label: name,
           },
         });
         stateCommitLog.push({
@@ -5634,6 +6391,7 @@ async function applyResolvedMutations(input: {
           summary: `${name} steps forward as a remembered local presence.`,
           metadata: {
             localEntityId: tempActorRef(actor.id),
+            actorId: actor.id,
             promotedNpcId,
             promotedNpcName: name,
           },
@@ -5642,27 +6400,88 @@ async function applyResolvedMutations(input: {
       continue;
     }
 
-    if (mutation.type === "record_npc_interaction") {
-      const npc = await input.tx.nPC.findFirst({
-        where: {
-          id: mutation.npcId,
-          campaignId: input.snapshot.campaignId,
-        },
-        select: {
-          id: true,
-          name: true,
-          role: true,
-          summary: true,
-          socialLayer: true,
-          currentLocationId: true,
-        },
-      });
-      if (!npc) {
+    if (mutation.type === "record_actor_interaction" || mutation.type === "record_npc_interaction") {
+      const actor =
+        mutation.type === "record_actor_interaction"
+          ? await input.tx.actor.findFirst({
+              where: {
+                id: mutation.actorId,
+                campaignId: input.snapshot.campaignId,
+              },
+              select: {
+                id: true,
+                profileNpcId: true,
+                displayLabel: true,
+                currentLocationId: true,
+                interactionCount: true,
+                recentTopics: true,
+                lastSummary: true,
+                lastSeenAtTurn: true,
+                lastSeenAtTime: true,
+              },
+            })
+          : await actorForNpcProfile({
+              tx: input.tx,
+              campaignId: input.snapshot.campaignId,
+              npcId: mutation.npcId,
+            });
+      if (
+        !actor
+        || (
+          mutation.type === "record_actor_interaction"
+          && !actorLocationCouldBeTargetedThisTurn({
+            actorCurrentLocationId: actor.currentLocationId,
+            previousLocationId: input.snapshot.state.currentLocationId,
+            nextLocationId: input.nextState.currentLocationId,
+          })
+        )
+      ) {
+        continue;
+      }
+      const npc =
+        actor.profileNpcId
+          ? await input.tx.nPC.findFirst({
+              where: {
+                id: actor.profileNpcId,
+                campaignId: input.snapshot.campaignId,
+              },
+              select: {
+                id: true,
+                name: true,
+                role: true,
+                summary: true,
+                socialLayer: true,
+                currentLocationId: true,
+              },
+            })
+          : null;
+      if (mutation.type === "record_npc_interaction" && !npc) {
         continue;
       }
 
-      if (npc.socialLayer === "promoted_local" || hasGenericNpcRoleLabelName({ name: npc.name, role: npc.role })) {
-        const nextSummary = mutation.interactionSummary.trim() || npc.summary;
+      const topic = mutation.topic?.trim() || null;
+      const nextTopics = topic
+        ? dedupeStrings([...actor.recentTopics, topic]).slice(-4)
+        : actor.recentTopics;
+      const nextInteractionCount = actor.interactionCount + 1;
+      const nextSummary = mutation.interactionSummary.trim() || actor.lastSummary;
+      recordInverse(input.rollback, "actor", actor.id, "interactionCount", actor.interactionCount);
+      recordInverse(input.rollback, "actor", actor.id, "recentTopics", actor.recentTopics);
+      recordInverse(input.rollback, "actor", actor.id, "lastSummary", actor.lastSummary);
+      recordInverse(input.rollback, "actor", actor.id, "lastSeenAtTurn", actor.lastSeenAtTurn);
+      recordInverse(input.rollback, "actor", actor.id, "lastSeenAtTime", actor.lastSeenAtTime);
+      await input.tx.actor.update({
+        where: { id: actor.id },
+        data: {
+          interactionCount: nextInteractionCount,
+          recentTopics: nextTopics,
+          lastSummary: nextSummary,
+          lastSeenAtTurn: input.nextTurnCount,
+          lastSeenAtTime: input.nextState.globalTime,
+        },
+      });
+
+      if (npc && (npc.socialLayer === "promoted_local" || hasGenericNpcRoleLabelName({ name: npc.name, role: npc.role }))) {
         if (nextSummary && nextSummary !== npc.summary) {
           recordInverse(input.rollback, "nPC", npc.id, "summary", npc.summary);
           await input.tx.nPC.update({
@@ -5679,50 +6498,47 @@ async function applyResolvedMutations(input: {
     if (mutation.type === "set_scene_actor_presence") {
       const resolvedActorRef =
         typeof entry.metadata?.actorRef === "string" ? entry.metadata.actorRef : mutation.actorRef;
-      if (!resolvedActorRef.startsWith("npc:")) {
-        const actorId = resolveSpawnedTemporaryActorId({
-          actorRef: resolvedActorRef,
-          spawnedTemporaryActorIds,
+      const directActorId =
+        resolvedActorRef.startsWith("actor:")
+          ? resolvedActorRef.slice("actor:".length).trim()
+          : !resolvedActorRef.startsWith("npc:")
+            ? resolveSpawnedTemporaryActorId({
+                actorRef: resolvedActorRef,
+                spawnedTemporaryActorIds,
+              })
+            : null;
+      if (directActorId) {
+        const actor = await input.tx.actor.findUnique({
+          where: { id: directActorId },
+          select: { id: true, profileNpcId: true },
         });
-        if (!actorId) {
-          throw new Error("Scene presence update referenced an unresolved temporary actor.");
+        if (!actor) {
+          throw new Error("Scene presence update referenced an unresolved actor.");
         }
-        const actor = await input.tx.temporaryActor.findUnique({
-          where: { id: actorId },
-          select: { id: true, currentLocationId: true, promotedNpcId: true },
+        await syncActorLocationMirror({
+          tx: input.tx,
+          rollback: input.rollback,
+          actorId: actor.id,
+          newLocationId: mutation.newLocationId,
         });
-        if (!actor || actor.promotedNpcId) {
-          continue;
-        }
-        if (actor.currentLocationId !== mutation.newLocationId) {
-          recordInverse(input.rollback, "temporaryActor", actor.id, "currentLocationId", actor.currentLocationId);
-          await input.tx.temporaryActor.update({
-            where: { id: actor.id },
-            data: {
-              currentLocationId: mutation.newLocationId,
-            },
-          });
-        }
         continue;
       }
 
       const npcId = resolvedActorRef.slice("npc:".length);
-      const npc = await input.tx.nPC.findUnique({
-        where: { id: npcId },
-        select: { id: true, currentLocationId: true },
+      const actor = await actorForNpcProfile({
+        tx: input.tx,
+        campaignId: input.snapshot.campaignId,
+        npcId,
       });
-      if (!npc) {
+      if (!actor) {
         continue;
       }
-      if (npc.currentLocationId !== mutation.newLocationId) {
-        recordInverse(input.rollback, "nPC", npc.id, "currentLocationId", npc.currentLocationId);
-        await input.tx.nPC.update({
-          where: { id: npc.id },
-          data: {
-            currentLocationId: mutation.newLocationId,
-          },
-        });
-      }
+      await syncActorLocationMirror({
+        tx: input.tx,
+        rollback: input.rollback,
+        actorId: actor.id,
+        newLocationId: mutation.newLocationId,
+      });
       continue;
     }
 
@@ -5989,17 +6805,12 @@ async function applyResolvedMutations(input: {
         }
       }
       if (destination.kind === "temporary_actor") {
-        const actor = await input.tx.temporaryActor.findUnique({
-          where: { id: destination.actorId },
-          select: { id: true, holdsInventory: true },
+        await syncActorInventoryMirror({
+          tx: input.tx,
+          rollback: input.rollback,
+          actorId: destination.actorId,
+          holdsInventory: true,
         });
-        if (actor && !actor.holdsInventory) {
-          recordInverse(input.rollback, "temporaryActor", actor.id, "holdsInventory", actor.holdsInventory);
-          await input.tx.temporaryActor.update({
-            where: { id: actor.id },
-            data: { holdsInventory: true },
-          });
-        }
       }
       continue;
     }
@@ -6082,17 +6893,12 @@ async function applyResolvedMutations(input: {
         recordCreated(input.rollback, "itemInstance", created.id);
       }
       if (holder.kind === "temporary_actor") {
-        const actor = await input.tx.temporaryActor.findUnique({
-          where: { id: holder.actorId },
-          select: { id: true, holdsInventory: true },
+        await syncActorInventoryMirror({
+          tx: input.tx,
+          rollback: input.rollback,
+          actorId: holder.actorId,
+          holdsInventory: true,
         });
-        if (actor && !actor.holdsInventory) {
-          recordInverse(input.rollback, "temporaryActor", actor.id, "holdsInventory", actor.holdsInventory);
-          await input.tx.temporaryActor.update({
-            where: { id: actor.id },
-            data: { holdsInventory: true },
-          });
-        }
       }
       continue;
     }
@@ -6173,6 +6979,14 @@ async function applyResolvedMutations(input: {
           select: { id: true },
         });
         recordCreated(input.rollback, "itemInstance", created.id);
+      }
+      if (holder.kind === "temporary_actor") {
+        await syncActorInventoryMirror({
+          tx: input.tx,
+          rollback: input.rollback,
+          actorId: holder.actorId,
+          holdsInventory: true,
+        });
       }
       continue;
     }
@@ -6260,22 +7074,53 @@ async function applyResolvedMutations(input: {
       continue;
     }
 
-    if (mutation.type === "set_npc_state") {
-      const npc = await input.tx.nPC.findUnique({
-        where: { id: mutation.npcId },
-        select: { id: true, state: true, factionId: true, name: true },
-      });
-      if (!npc) {
+    if (mutation.type === "set_actor_state" || mutation.type === "set_npc_state") {
+      const actor =
+        mutation.type === "set_actor_state"
+          ? await input.tx.actor.findUnique({
+              where: { id: mutation.actorId },
+              select: {
+                id: true,
+                profileNpcId: true,
+                currentLocationId: true,
+                state: true,
+              },
+            })
+          : await actorForNpcProfile({
+              tx: input.tx,
+              campaignId: input.snapshot.campaignId,
+              npcId: mutation.npcId,
+            });
+      if (
+        !actor
+        || (
+          mutation.type === "set_actor_state"
+          && !actorLocationCouldBeTargetedThisTurn({
+            actorCurrentLocationId: actor.currentLocationId,
+            previousLocationId: input.snapshot.state.currentLocationId,
+            nextLocationId: input.nextState.currentLocationId,
+          })
+        )
+      ) {
         continue;
       }
-      recordInverse(input.rollback, "nPC", npc.id, "state", npc.state);
-      await input.tx.nPC.update({
-        where: { id: npc.id },
-        data: {
-          state: mutation.newState,
-        },
+      const npc =
+        actor.profileNpcId
+          ? await input.tx.nPC.findUnique({
+              where: { id: actor.profileNpcId },
+              select: { id: true, state: true, factionId: true, name: true },
+            })
+          : null;
+      if (mutation.type === "set_npc_state" && !npc) {
+        continue;
+      }
+      await syncActorStateMirror({
+        tx: input.tx,
+        rollback: input.rollback,
+        actorId: actor.id,
+        newState: mutation.newState,
       });
-      if (npc.factionId) {
+      if (npc?.factionId) {
         affectedFactionIds.add(npc.factionId);
         await createTestingMoveForFaction({
           tx: input.tx,
@@ -6315,19 +7160,29 @@ async function applyResolvedMutations(input: {
   if (currentLocationId !== input.snapshot.state.currentLocationId) {
     for (const actorRef of input.nextState.characterState.activeCompanions) {
       const normalizedActorRef = normalizeActorRef(actorRef);
+      if (normalizedActorRef.startsWith("actor:")) {
+        const actorId = normalizedActorRef.slice("actor:".length);
+        await syncActorLocationMirror({
+          tx: input.tx,
+          rollback: input.rollback,
+          actorId,
+          newLocationId: currentLocationId,
+        });
+        continue;
+      }
       if (normalizedActorRef.startsWith("npc:")) {
         const npcId = normalizedActorRef.slice("npc:".length);
-        const npc = await input.tx.nPC.findUnique({
-          where: { id: npcId },
-          select: { id: true, currentLocationId: true },
+        const actor = await actorForNpcProfile({
+          tx: input.tx,
+          campaignId: input.snapshot.campaignId,
+          npcId,
         });
-        if (npc && npc.currentLocationId !== currentLocationId) {
-          recordInverse(input.rollback, "nPC", npc.id, "currentLocationId", npc.currentLocationId);
-          await input.tx.nPC.update({
-            where: { id: npc.id },
-            data: {
-              currentLocationId,
-            },
+        if (actor) {
+          await syncActorLocationMirror({
+            tx: input.tx,
+            rollback: input.rollback,
+            actorId: actor.id,
+            newLocationId: currentLocationId,
           });
         }
         continue;
@@ -6335,19 +7190,12 @@ async function applyResolvedMutations(input: {
 
       if (normalizedActorRef.startsWith("temp:")) {
         const actorId = normalizedActorRef.slice("temp:".length);
-        const actor = await input.tx.temporaryActor.findUnique({
-          where: { id: actorId },
-          select: { id: true, currentLocationId: true, promotedNpcId: true },
+        await syncActorLocationMirror({
+          tx: input.tx,
+          rollback: input.rollback,
+          actorId,
+          newLocationId: currentLocationId,
         });
-        if (actor && actor.promotedNpcId == null && actor.currentLocationId !== currentLocationId) {
-          recordInverse(input.rollback, "temporaryActor", actor.id, "currentLocationId", actor.currentLocationId);
-          await input.tx.temporaryActor.update({
-            where: { id: actor.id },
-            data: {
-              currentLocationId,
-            },
-          });
-        }
       }
     }
   }
@@ -6412,7 +7260,7 @@ async function ensureDailyScheduleGenerated(input: {
     return;
   }
 
-  const [locations, factions, npcs, information] = await Promise.all([
+  const [locations, factions, npcs, actors, information] = await Promise.all([
     input.tx.locationNode.findMany({
       where: { campaignId: input.snapshot.campaignId },
       orderBy: { name: "asc" },
@@ -6424,6 +7272,13 @@ async function ensureDailyScheduleGenerated(input: {
     input.tx.nPC.findMany({
       where: { campaignId: input.snapshot.campaignId },
       orderBy: { name: "asc" },
+    }),
+    input.tx.actor.findMany({
+      where: {
+        campaignId: input.snapshot.campaignId,
+        profileNpcId: { not: null },
+      },
+      orderBy: { id: "asc" },
     }),
     input.tx.information.findMany({
       where: {
@@ -6459,15 +7314,18 @@ async function ensureDailyScheduleGenerated(input: {
         pressureClock: faction.pressureClock,
         resources: faction.resources,
       })),
-      npcs: npcs.map((npc) => ({
-        id: npc.id,
-        name: npc.name,
-        role: npc.role,
-        factionId: npc.factionId,
-        currentLocationId: npc.currentLocationId,
-        state: npc.state,
-        threatLevel: npc.threatLevel,
-      })),
+      npcs: npcs.map((npc) => {
+        const actor = actors.find((entry) => entry.profileNpcId === npc.id);
+        return {
+          id: npc.id,
+          name: npc.name,
+          role: npc.role,
+          factionId: npc.factionId,
+          currentLocationId: actor?.currentLocationId ?? npc.currentLocationId,
+          state: actor?.state ?? npc.state,
+          threatLevel: actor?.threatLevel ?? npc.threatLevel,
+        };
+      }),
       discoveredInformation: information.map((entry) => ({
         id: entry.id,
         title: entry.title,
@@ -6647,7 +7505,9 @@ function determineMemoryKind(input: {
   command: ValidatedTurnActionCommand;
   stateCommitLog: StateCommitLog;
 }) {
-  if (input.stateCommitLog.some((entry) => entry.status === "applied" && entry.mutationType === "set_npc_state")) {
+  if (input.stateCommitLog.some((entry) =>
+    entry.status === "applied"
+    && (entry.mutationType === "set_npc_state" || entry.mutationType === "set_actor_state"))) {
     return "conflict" as const;
   }
   if (input.stateCommitLog.some((entry) => entry.status === "applied" && entry.mutationType === "commit_market_trade")) {
@@ -6673,6 +7533,7 @@ function determineMemoryKind(input: {
       entry.status === "applied"
       && (
         entry.mutationType === "record_npc_interaction"
+        || entry.mutationType === "record_actor_interaction"
         || entry.mutationType === "record_local_interaction"
       )
       && typeof entry.metadata?.socialOutcome === "string"
@@ -6757,8 +7618,17 @@ function collectMemoryEntityLinks(input: {
       pushKey("location", typeof entry.metadata.targetLocationId === "string" ? entry.metadata.targetLocationId : null);
       pushKey("route", typeof entry.metadata.routeEdgeId === "string" ? entry.metadata.routeEdgeId : null);
     }
-    if (entry.mutationType === "adjust_relationship" || entry.mutationType === "set_npc_state") {
+    if (
+      entry.mutationType === "adjust_relationship"
+      || entry.mutationType === "set_npc_state"
+      || entry.mutationType === "set_actor_state"
+    ) {
       pushKey("npc", typeof entry.metadata.npcId === "string" ? entry.metadata.npcId : null);
+      pushKey("actor", typeof entry.metadata.actorId === "string" ? entry.metadata.actorId : null);
+    }
+    if (entry.mutationType === "record_actor_interaction") {
+      pushKey("actor", typeof entry.metadata.actorId === "string" ? entry.metadata.actorId : null);
+      pushKey("npc", typeof entry.metadata.profileNpcId === "string" ? entry.metadata.profileNpcId : null);
     }
     if (entry.mutationType === "record_npc_interaction") {
       pushKey("npc", typeof entry.metadata.npcId === "string" ? entry.metadata.npcId : null);
@@ -6794,10 +7664,9 @@ function collectMemoryEntityLinks(input: {
     }
     if (
       entry.mutationType === "set_scene_actor_presence"
-      && typeof entry.metadata.actorRef === "string"
-      && entry.metadata.actorRef.startsWith("npc:")
+      && typeof entry.metadata.profileNpcId === "string"
     ) {
-      pushKey("npc", entry.metadata.actorRef.slice("npc:".length));
+      pushKey("npc", entry.metadata.profileNpcId);
     }
     if (entry.kind === "simulation") {
       const entityType = entry.metadata?.entityType;
@@ -6911,10 +7780,37 @@ function buildTurnCausality(input: {
         targetId: typeof entry.metadata?.npcId === "string" ? entry.metadata.npcId : null,
         metadata: null,
       });
+      if (typeof entry.metadata?.actorId === "string") {
+        changeCodes.push({
+          code: "ACTOR_STATE_CHANGED",
+          entityType: "actor",
+          targetId: entry.metadata.actorId,
+          metadata: null,
+        });
+      }
       reasonCodes.push({
         code: "PLAYER_COMBAT",
-        entityType: "npc",
-        targetId: typeof entry.metadata?.npcId === "string" ? entry.metadata.npcId : null,
+        entityType: typeof entry.metadata?.actorId === "string" ? "actor" : "npc",
+        targetId:
+          typeof entry.metadata?.actorId === "string"
+            ? entry.metadata.actorId
+            : typeof entry.metadata?.npcId === "string"
+              ? entry.metadata.npcId
+              : null,
+        metadata: null,
+      });
+    }
+    if (entry.mutationType === "set_actor_state") {
+      changeCodes.push({
+        code: "ACTOR_STATE_CHANGED",
+        entityType: "actor",
+        targetId: typeof entry.metadata?.actorId === "string" ? entry.metadata.actorId : null,
+        metadata: null,
+      });
+      reasonCodes.push({
+        code: "PLAYER_COMBAT",
+        entityType: "actor",
+        targetId: typeof entry.metadata?.actorId === "string" ? entry.metadata.actorId : null,
         metadata: null,
       });
     }
@@ -6995,13 +7891,24 @@ function buildTurnCausality(input: {
     }
     if (
       entry.mutationType === "set_scene_actor_presence"
-      && typeof entry.metadata?.actorRef === "string"
-      && entry.metadata.actorRef.startsWith("npc:")
+      && typeof entry.metadata?.profileNpcId === "string"
     ) {
       changeCodes.push({
         code: "NPC_LOCATION_CHANGED",
         entityType: "npc",
-        targetId: entry.metadata.actorRef.slice("npc:".length),
+        targetId: entry.metadata.profileNpcId,
+        metadata: null,
+      });
+    }
+    if (
+      entry.mutationType === "set_scene_actor_presence"
+      && typeof entry.metadata?.actorId === "string"
+      && (!entry.metadata.actorRef || !String(entry.metadata.actorRef).startsWith("npc:"))
+    ) {
+      changeCodes.push({
+        code: "ACTOR_LOCATION_CHANGED",
+        entityType: "actor",
+        targetId: entry.metadata.actorId,
         metadata: null,
       });
     }
@@ -7024,6 +7931,14 @@ function buildTurnCausality(input: {
         code: "PLAYER_CONVERSATION",
         entityType: "npc",
         targetId: typeof entry.metadata?.npcId === "string" ? entry.metadata.npcId : null,
+        metadata: null,
+      });
+    }
+    if (entry.mutationType === "record_actor_interaction") {
+      reasonCodes.push({
+        code: "PLAYER_CONVERSATION",
+        entityType: "actor",
+        targetId: typeof entry.metadata?.actorId === "string" ? entry.metadata.actorId : null,
         metadata: null,
       });
     }
@@ -8225,7 +9140,7 @@ async function persistResolvedTurnNarration(input: {
 }
 
 function appendMessageToTurnRollback(
-  resultJson: Prisma.JsonValue | null | undefined,
+  resultJson: unknown,
   messageId: string,
 ): TurnResultPayload | null {
   const parsedResult = parseTurnResultPayloadJson(resultJson);
@@ -8280,6 +9195,7 @@ export const engineTestUtils = {
   deterministicNarrationFallback,
   evaluateResolvedCommand,
   appendMessageToTurnRollback,
+  rollbackSupportsActorUndo,
   legacyNarrationMessageIdsForUndo,
 };
 
@@ -9439,6 +10355,7 @@ export async function cancelPendingTurn() {
 export async function resolvePendingCheck(input: ResolvePendingCheckRequest & {
   stream?: TurnStream;
 }) {
+  const abortController = new AbortController();
   const pendingTurn = await prisma.turn.findUnique({
     where: { id: input.pendingTurnId },
   });
@@ -9669,6 +10586,9 @@ export async function retryLastTurn(turnId: string) {
 
   if (!rollback) {
     throw new Error("Turn rollback data is missing.");
+  }
+  if (!rollbackSupportsActorUndo(turn.resultJson)) {
+    throw new Error("Turn undo is blocked for pre-actor-migration turns.");
   }
 
   await prisma.$transaction(async (tx) => {

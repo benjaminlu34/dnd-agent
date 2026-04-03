@@ -357,6 +357,7 @@ test("toRouterSceneAspectSummaries emits compact duration-aware aspect records",
     pendingTurnId: null,
     lastActionSummary: null,
     sceneFocus: null,
+    sceneActorFocuses: {},
     customTitle: null,
     sceneAspects: {
       forge_smoke: {
@@ -801,7 +802,9 @@ test("toRouterKnownNpcSummaries keeps same-location named NPCs available when fo
     ],
     focusedSceneActors: [
       {
-        actorRef: "npc:npc_mira",
+        actorRef: "actor:actor_npc_mira",
+        actorId: "actor_npc_mira",
+        profileNpcId: "npc_mira",
         kind: "npc",
         displayLabel: "Mira Brightstone",
         role: "Baker",
@@ -1217,6 +1220,7 @@ test("toPlayerCampaignSnapshot preserves latest retryable turn metadata", () => 
       pendingTurnId: null,
       lastActionSummary: null,
       sceneFocus: null,
+      sceneActorFocuses: {},
       sceneAspects: {},
       characterState: {
         conditions: [],

@@ -2350,6 +2350,10 @@ const assetHolderSchema = z.discriminatedUnion("kind", [
     kind: z.literal("player"),
   }),
   z.object({
+    kind: z.literal("actor"),
+    actorId: z.string().trim().min(1),
+  }),
+  z.object({
     kind: z.literal("npc"),
     npcId: z.string().trim().min(1),
   }),
@@ -2384,6 +2388,14 @@ const mechanicsMutationSchema = z.discriminatedUnion("type", [
     type: z.literal("adjust_currency"),
     delta: currencyDenominationsSchema,
     reason: z.string().trim().min(1).max(120),
+    phase: z.enum(["immediate", "conditional"]).optional(),
+  }),
+  z.object({
+    type: z.literal("record_actor_interaction"),
+    actorId: z.string().trim().min(1),
+    interactionSummary: z.string().trim().min(1).max(240),
+    topic: z.string().trim().min(1).max(80).optional(),
+    socialOutcome: z.enum(SOCIAL_OUTCOMES),
     phase: z.enum(["immediate", "conditional"]).optional(),
   }),
   z.object({
@@ -2503,6 +2515,12 @@ const mechanicsMutationSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("discover_information"),
     informationId: z.string().trim().min(1),
+    phase: z.enum(["immediate", "conditional"]).optional(),
+  }),
+  z.object({
+    type: z.literal("set_actor_state"),
+    actorId: z.string().trim().min(1),
+    newState: z.enum(["active", "wounded", "incapacitated", "dead"]),
     phase: z.enum(["immediate", "conditional"]).optional(),
   }),
   z.object({
@@ -2742,11 +2760,28 @@ function normalizeSceneActorRef(
     return normalized;
   }
 
-  if (normalized.startsWith("npc:") || normalized.startsWith("temp:")) {
-    return normalized;
-  }
-
-  const sceneActor = context.sceneActors.find((actor) => actor.actorRef === `npc:${normalized}` || actor.actorRef === `temp:${normalized}`);
+  const sceneActor = context.sceneActors.find((actor) => {
+    if (actor.actorRef === normalized) {
+      return true;
+    }
+    if (normalized.startsWith("actor:")) {
+      const actorId = normalized.slice("actor:".length).trim();
+      return actor.actorId === actorId;
+    }
+    if (normalized.startsWith("npc:")) {
+      const npcId = normalized.slice("npc:".length).trim();
+      return actor.profileNpcId === npcId;
+    }
+    if (normalized.startsWith("temp:")) {
+      const actorId = normalized.slice("temp:".length).trim();
+      return actor.actorId === actorId;
+    }
+    return actor.actorRef === `actor:${normalized}`
+      || actor.actorRef === `npc:${normalized}`
+      || actor.actorRef === `temp:${normalized}`
+      || actor.actorId === normalized
+      || actor.profileNpcId === normalized;
+  });
   return sceneActor?.actorRef ?? normalized;
 }
 
@@ -2759,9 +2794,10 @@ function normalizeKnownNpcId(
   const candidatePool = [
     ...(context?.knownNearbyNpcs ?? []),
     ...(context?.sceneActors
-      .filter((actor) => actor.kind === "npc" && actor.actorRef.startsWith("npc:"))
+      .filter((actor): actor is typeof actor & { profileNpcId: string } =>
+        actor.kind === "npc" && typeof actor.profileNpcId === "string")
       .map((actor) => ({
-        id: actor.actorRef.slice("npc:".length),
+        id: actor.profileNpcId,
         name: actor.displayLabel,
         role: actor.role,
       })) ?? []),
@@ -2803,7 +2839,7 @@ function isGroundedResolvedReferent(
       return context.sceneActors.some((actor) => actor.actorRef === entry.targetRef);
     case "known_npc":
       return (context.knownNearbyNpcs ?? []).some((npc) => npc.id === entry.targetRef)
-        || context.sceneActors.some((actor) => actor.kind === "npc" && actor.actorRef === `npc:${entry.targetRef}`);
+        || context.sceneActors.some((actor) => actor.kind === "npc" && actor.profileNpcId === entry.targetRef);
     case "world_object":
       return context.worldObjects.some((object) => object.id === entry.targetRef);
     case "inventory_item":
@@ -2821,7 +2857,12 @@ function isGroundedResolvedReferent(
 
 function looksLikeActorishTargetRef(targetRef: string): boolean {
   const normalized = targetRef.trim().toLowerCase();
-  return normalized.startsWith("temp:") || normalized.startsWith("temp_") || normalized.startsWith("npc:") || normalized.startsWith("npc_");
+  return normalized.startsWith("temp:")
+    || normalized.startsWith("temp_")
+    || normalized.startsWith("npc:")
+    || normalized.startsWith("npc_")
+    || normalized.startsWith("actor:")
+    || normalized.startsWith("actor_");
 }
 
 function canonicalizeRouterNpcPrerequisiteId(
@@ -2837,13 +2878,24 @@ function canonicalizeRouterNpcPrerequisiteId(
     return null;
   }
 
+  if (normalized.startsWith("actor:")) {
+    const actorId = normalized.slice("actor:".length).trim();
+    const sceneActor = context.sceneActors.find((actor) => actor.actorRef === `actor:${actorId}` || actor.actorId === actorId);
+    return typeof sceneActor?.profileNpcId === "string" ? sceneActor.profileNpcId : null;
+  }
+
   if (normalized.startsWith("npc:")) {
     return normalized.slice("npc:".length).trim();
   }
 
-  const sceneActor = context.sceneActors.find((actor) => actor.actorRef === `npc:${normalized}` || actor.actorRef === normalized);
-  if (sceneActor?.kind === "npc" && sceneActor.actorRef.startsWith("npc:")) {
-    return sceneActor.actorRef.slice("npc:".length);
+  const sceneActor = context.sceneActors.find((actor) =>
+    actor.actorRef === `actor:${normalized}`
+    || actor.actorRef === `npc:${normalized}`
+    || actor.actorRef === normalized
+    || actor.actorId === normalized
+    || actor.profileNpcId === normalized);
+  if (typeof sceneActor?.profileNpcId === "string") {
+    return sceneActor.profileNpcId;
   }
   if (sceneActor?.kind === "temporary_actor") {
     return null;
@@ -3372,19 +3424,21 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Advance the scene or world only through passive observation or waiting.",
         "Do not create combat, market trade, or deliberate social escalation in observe mode.",
         "Use sceneActors.actorRef values exactly only for actorRef fields such as set_scene_actor_presence and set_follow_state.",
+        "Prefer record_actor_interaction and set_actor_state for embodied mechanics when a grounded actorId is available in sceneActors.",
         "For npcId, citedNpcId, and targetNpcId fields, use the bare NPC id without the npc: prefix.",
-        "Every record_local_interaction and record_npc_interaction mutation must include socialOutcome.",
+        "Every record_local_interaction, record_actor_interaction, and record_npc_interaction mutation must include socialOutcome.",
         "Choose the most specific valid socialOutcome available; do not default to acknowledges if the NPC accepts, declines, hesitates, redirects, asks a question, shares a fact, resists, withdraws, counteroffers, or agrees conditionally.",
         "acknowledges is the only low-intensity fallback outcome and must not silently imply agreement.",
         "interactionSummary is the single grounded detail field and should state the concrete result when relevant.",
         "If socialOutcome is acknowledges, hesitates, withholds, asks_question, redirects, resists, or withdraws, interactionSummary must stay unresolved and must not close a decision, agreement, invitation, or emotional resolution.",
         "Do not describe physical movement, arrivals, departures, returns, repositioning, or new blocking in interactionSummary. Use set_scene_actor_presence, set_player_scene_focus, or move_player to manifest physical progression.",
         "Fetched npc_detail for a named NPC is sufficient grounding for identity, memory, and bare npc ids, but it is not physical presence.",
-        "Use record_npc_interaction only for named NPCs who are immediate scene actors now or are explicitly brought into the scene this turn.",
+        "Use record_actor_interaction for grounded named NPCs, creatures, and anonymous locals already manifested in sceneActors.",
+        "Use record_npc_interaction only as a compatibility fallback when an embodied actorId is unavailable.",
         "If a named NPC is only in knownNearbyNpcs or fetched_facts, treat them as nearby-but-offscreen: you may search for them, move toward them, call for them, or fetch details about them, but do not commit direct same-scene dialogue until they are present in sceneActors or moved in with explicit scene mutations.",
         "Do not spawn a duplicate temporary actor just to stand in for a fetched named NPC.",
         "Living creatures such as mounts, familiars, pets, and animal companions are actors, not world objects. Do not use spawn_world_object for a horse, dog, owl, raven, or similar living companion.",
-        "Never use record_local_interaction with npc: refs or named sceneActors. It is only for unnamed temporary locals referenced as temp:..., spawn:..., or raw temporary-actor ids.",
+        "Never use record_local_interaction with npc:, actor:, or named sceneActors. It is only for unnamed temporary locals referenced as temp:..., spawn:..., or raw temporary-actor ids.",
         "Never invent temp: ids. temp: refs are only for temporary actors already grounded in sceneActors; if the person is new, spawn_temporary_actor first and then reference spawn:<key>.",
         "If an owned or familiar animal is present but not yet grounded, manifest it as a temporary actor first. If a grounded NPC companion or tagged beast is already present, use that actor and prefer set_follow_state or set_scene_actor_presence over creating a prop.",
         "If the player reaches for a plausible unlisted local, improvised item, or environmental condition, spawn it first before interacting with it only when the noun is a fresh generic local role or a new same-scene manifestation implied by the current action.",
@@ -3406,10 +3460,10 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Self-directed downtime work may use adjust_inventory, spawn_environmental_item, and spawn_scene_aspect for grounded byproducts, consumed materials, and scene conditions.",
         `The currency system uses cp, sp, gp, and pp. ${COPPER_PER_SILVER} cp = 1 sp, ${COPPER_PER_GOLD} cp = 1 gp, and ${COPPER_PER_PLATINUM} cp = 1 pp.`,
         "Use adjust_currency for incidental payments, rewards, bribes, tips, fees, and other non-market currency movement; express the delta with denomination fields rather than flattened copper arithmetic.",
-        "If economy_light is active and a bespoke trade is actually agreed upon, resolve it immediately with composed asset mutations such as adjust_currency plus spawn_fiat_item and/or transfer_assets. Do not rely on record_npc_interaction alone to finalize the trade.",
+        "If economy_light is active and a bespoke trade is actually agreed upon, resolve it immediately with composed asset mutations such as adjust_currency plus spawn_fiat_item and/or transfer_assets. Do not rely on record_actor_interaction or record_npc_interaction alone to finalize the trade.",
         "If an offer is still on the table but not yet accepted, you may track it with a scene-duration spawn_scene_aspect such as pending_trade_offer instead of finalizing the exchange early.",
         "Use transfer_assets for non-market stashing, dropping, storing, retrieving, feeding, lending, or handing over items, commodities, or currency between the player, world objects, scenes, temporary actors, and willing NPCs.",
-        "If the player gives, feeds, hands over, drops off, retrieves, stores, or takes a concrete item, include the matching asset mutation. record_local_interaction and record_npc_interaction alone never finalize custody or consumption.",
+        "If the player gives, feeds, hands over, drops off, retrieves, stores, or takes a concrete item, include the matching asset mutation. record_local_interaction, record_actor_interaction, and record_npc_interaction alone never finalize custody or consumption.",
         "When fetched npc_detail exposes grounded held items or commodity stacks on an NPC, use transfer_assets from that NPC holder for looting, stealing, or taking those assets. Do not replace grounded NPC-held goods with spawn_fiat_item.",
         "Use update_world_object_state to lock, hide, or hitch a durable world object.",
         "Use update_item_state for equipping, changing charges, or toggling durable item state like lit/unlit.",
@@ -3430,8 +3484,8 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "If attention_packet.mustCheck lists inventory, do not remove or consume an item unless it is grounded in context.authoritativeState.inventory or fetched_facts.",
         "If attention_packet.mustCheck lists sceneActors, do not target a named actor through record_local_interaction.",
         "If attention_packet.resolvedReferents includes a known_npc or fetched_facts includes npc_detail for a named person the player is seeking, keep the turn anchored to that NPC instead of spawning a generic local stand-in.",
-        "A known_npc or fetched named NPC can anchor search, contact, and movement decisions, but not direct record_npc_interaction unless that NPC is present in sceneActors or explicitly brought into the scene this turn.",
-        "If a known nearby named NPC arrives or is called over this turn, use set_scene_actor_presence with actorRef npc:<npcId>; do not invent a temp: ref or spawn a duplicate stand-in for them.",
+        "A known_npc or fetched named NPC can anchor search, contact, and movement decisions, but not direct record_actor_interaction unless that NPC is present in sceneActors or explicitly brought into the scene this turn.",
+        "If a known nearby named NPC arrives or is called over this turn, use set_scene_actor_presence with that grounded actor:<actorId> sceneActors.actorRef; use npc:<npcId> only as a compatibility fallback and do not invent a temp: ref or spawn a duplicate stand-in for them.",
         "If attention_packet.mustCheck lists sceneAspects or routes, verify those surfaces before depending on them in mutations.",
         "Only scene actors, world objects, inventory, routes, and scene aspects already grounded in context are valid direct interaction targets.",
         "recentTurnLedger contains grounded prior outcomes only. It is memory, not target authority.",
@@ -3489,24 +3543,27 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Use adjust_currency for incidental payments, rewards, bribes, tips, fees, or other non-market currency movement.",
         "Use move_player only for actual route travel to a known adjacent location.",
         "Use record_local_interaction for current-scene unnamed locals instead of adjust_relationship.",
-        "Use record_npc_interaction for ordinary same-scene dialogue with a grounded named NPC when the exchange matters but no relationship shift is required.",
-        "Every record_local_interaction and record_npc_interaction mutation must include socialOutcome.",
+        "Use record_actor_interaction for ordinary same-scene dialogue with a grounded embodied actor when the exchange matters but no relationship shift is required.",
+        "Use record_npc_interaction only as a compatibility fallback when no grounded actorId is available.",
+        "Every record_local_interaction, record_actor_interaction, and record_npc_interaction mutation must include socialOutcome.",
         "Choose the most specific valid socialOutcome available; do not default to acknowledges if the NPC accepts, declines, hesitates, redirects, asks a question, shares a fact, resists, withdraws, counteroffers, or agrees conditionally.",
         "acknowledges is the only low-intensity fallback outcome and must not silently imply agreement.",
         "interactionSummary is the single grounded detail field and should state the concrete result when relevant.",
         "If socialOutcome is acknowledges, hesitates, withholds, asks_question, redirects, resists, or withdraws, interactionSummary must stay unresolved and must not close a decision, agreement, invitation, or emotional resolution.",
         "Do not describe physical movement, arrivals, departures, returns, repositioning, or new blocking in interactionSummary. Use set_scene_actor_presence, set_player_scene_focus, or move_player to manifest physical progression.",
         "Use sceneActors.actorRef values exactly only for actorRef fields such as set_scene_actor_presence and set_follow_state.",
+        "Prefer record_actor_interaction and set_actor_state for embodied mechanics when a grounded actorId is available in sceneActors.",
         "For npcId, citedNpcId, and targetNpcId fields, use the bare NPC id without the npc: prefix.",
         "Fetched npc_detail for a named NPC is sufficient grounding for identity, memory, and bare npc ids, but it is not physical presence.",
-        "Use record_npc_interaction only for named NPCs who are immediate scene actors now or are explicitly brought into the scene this turn.",
+        "Use record_actor_interaction for grounded named NPCs and other embodied scene actors who are immediate scene actors now or are explicitly brought into the scene this turn.",
+        "Use record_npc_interaction only as a compatibility fallback when an embodied actorId is unavailable.",
         "If a named NPC is only in knownNearbyNpcs or fetched_facts, treat them as nearby-but-offscreen: you may search for them, move toward them, call for them, or fetch details about them, but do not commit direct same-scene dialogue until they are present in sceneActors or moved in with explicit scene mutations.",
         "Do not spawn a duplicate temporary actor just to stand in for a fetched named NPC.",
         "Living creatures such as mounts, familiars, pets, and animal companions are actors, not world objects. Do not use spawn_world_object for a horse, dog, owl, raven, or similar living companion.",
-        "Never use record_local_interaction with npc: refs or named sceneActors. It is only for unnamed temporary locals referenced as temp:..., spawn:..., or raw temporary-actor ids.",
+        "Never use record_local_interaction with npc:, actor:, or named sceneActors. It is only for unnamed temporary locals referenced as temp:..., spawn:..., or raw temporary-actor ids.",
         "Never invent temp: ids. temp: refs are only for temporary actors already grounded in sceneActors; if the person is new, spawn_temporary_actor first and then reference spawn:<key>.",
         "If an owned or familiar animal is present but not yet grounded, manifest it as a temporary actor first. If a grounded NPC companion or tagged beast is already present, use that actor and prefer set_follow_state or set_scene_actor_presence over creating a prop.",
-        "When speaking to a named on-screen NPC, use record_npc_interaction for ordinary dialogue, use adjust_relationship only for meaningful social shifts, and use checkIntent only when success or failure would materially change what can happen.",
+        "When speaking to a named on-screen NPC, use record_actor_interaction for ordinary dialogue, use adjust_relationship only for meaningful social shifts, and use checkIntent only when success or failure would materially change what can happen.",
         "If the player reaches for a plausible unlisted local, improvised item, or environmental condition, spawn it first before interacting with it only when the noun is a fresh generic local role or a new same-scene manifestation implied by the current action.",
         "Use spawn_temporary_actor before record_local_interaction when the local is not already listed in sceneActors.",
         "If the player addresses a generic person like someone, passerby, customer, shopper, stranger, or interested local, keep them generic: do not redirect them to a named scene actor; spawn_temporary_actor first if the action engages them.",
@@ -3524,11 +3581,11 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Default manifestation pattern: plausible generic nearby people become spawn_temporary_actor such as stablehand, customer, porter, or watch patrol.",
         "Default manifestation pattern: intra-location repositioning becomes set_player_scene_focus.",
         "Self-directed downtime work may use adjust_inventory, spawn_environmental_item, and spawn_scene_aspect for grounded byproducts, consumed materials, and scene conditions.",
-        "If economy_light is active and a bespoke trade is actually agreed upon, resolve it immediately with composed asset mutations such as adjust_currency plus spawn_fiat_item and/or transfer_assets. Do not rely on record_npc_interaction alone to finalize the trade.",
+        "If economy_light is active and a bespoke trade is actually agreed upon, resolve it immediately with composed asset mutations such as adjust_currency plus spawn_fiat_item and/or transfer_assets. Do not rely on record_actor_interaction or record_npc_interaction alone to finalize the trade.",
         "If an offer is still on the table but not yet accepted, you may track it with a scene-duration spawn_scene_aspect such as pending_trade_offer instead of finalizing the exchange early.",
         "Use transfer_assets only for non-market custody changes. Do not use it for buying or selling from fetched market prices.",
         "Use transfer_assets under economy_light for stash/drop/store/retrieve, under converse for willing NPC or temporary-actor exchange, under investigate for stealthy NPC-source transfers, and under violence for forceful NPC-source transfers.",
-        "If the player gives, feeds, hands over, drops off, retrieves, stores, or takes a concrete item, include the matching asset mutation. record_local_interaction and record_npc_interaction alone never finalize custody or consumption.",
+        "If the player gives, feeds, hands over, drops off, retrieves, stores, or takes a concrete item, include the matching asset mutation. record_local_interaction, record_actor_interaction, and record_npc_interaction alone never finalize custody or consumption.",
         "When fetched npc_detail exposes grounded held items or commodity stacks on an NPC, use transfer_assets from that NPC holder for looting, stealing, or taking those assets. Do not replace grounded NPC-held goods with spawn_fiat_item.",
         "Use update_world_object_state to lock, hide, or hitch a durable world object.",
         "Use update_item_state for equipping, changing charges, or toggling durable item state like lit/unlit.",
@@ -3538,7 +3595,7 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Use update_character_state for track-only conditions like disguised, poisoned, or exhausted.",
         "Use set_follow_state when someone starts or stops following the player through location and focus changes.",
         "Use adjust_inventory for gaining, losing, consuming, or handing over grounded inventory items.",
-        "Use set_npc_state only for direct violence, subdual, or comparable physical outcomes.",
+        "Use set_actor_state only for direct violence, subdual, or comparable physical outcomes.",
         "Use adjust_relationship for meaningful social shifts with a present NPC.",
         "Use discover_information only for specific known information ids grounded in context or fetched facts.",
         "Use set_player_scene_focus for self-directed movement within the current location, like heading back to the forge, moving to the workbench, or stepping from the street to a nearby shopfront.",
@@ -3554,8 +3611,8 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "If attention_packet.mustCheck lists inventory, do not remove or consume an item unless it is grounded in context.authoritativeState.inventory or fetched_facts.",
         "If attention_packet.mustCheck lists sceneActors, do not target a named actor through record_local_interaction.",
         "If attention_packet.resolvedReferents includes a known_npc or fetched_facts includes npc_detail for a named person the player is seeking, keep the turn anchored to that NPC instead of spawning a generic local stand-in.",
-        "A known_npc or fetched named NPC can anchor search, contact, and movement decisions, but not direct record_npc_interaction unless that NPC is present in sceneActors or explicitly brought into the scene this turn.",
-        "If a known nearby named NPC arrives or is called over this turn, use set_scene_actor_presence with actorRef npc:<npcId>; do not invent a temp: ref or spawn a duplicate stand-in for them.",
+        "A known_npc or fetched named NPC can anchor search, contact, and movement decisions, but not direct record_actor_interaction unless that NPC is present in sceneActors or explicitly brought into the scene this turn.",
+        "If a known nearby named NPC arrives or is called over this turn, use set_scene_actor_presence with that grounded actor:<actorId> sceneActors.actorRef; use npc:<npcId> only as a compatibility fallback and do not invent a temp: ref or spawn a duplicate stand-in for them.",
         "If attention_packet.mustCheck lists sceneAspects or routes, verify those surfaces before depending on them in mutations.",
         "Only scene actors, world objects, inventory, routes, and scene aspects already grounded in context are valid direct interaction targets.",
         "recentTurnLedger contains grounded prior outcomes only. It is memory, not target authority.",
@@ -3687,7 +3744,7 @@ function buildTurnRouterSystemPrompt(correctionNotes?: string | null) {
     "When the player strongly implies movement into a clear sub-location within the current macro-location, emit attention.impliedDestinationFocus with a concise key and label such as back_room/The Back Room, yard/Yard, stable_entrance/Stable Entrance, workbench/Workbench, stall_front/Stall Front, or alleyway/Alleyway.",
     "Do not emit impliedDestinationFocus for macro travel between location nodes or vague attention shifts with no clear sub-location.",
     "If no grounded ref exists but the noun is plausible, emit it in unresolvedReferents instead of resolvedReferents.",
-    "resolvedReferents.targetRef must be an actual grounded ref from router_context, such as npc:... for scene actors, a known NPC id from knownNearbyNpcs, a real inventory id, a world object id, a route id, an information id, or a location id.",
+    "resolvedReferents.targetRef must be an actual grounded ref from router_context, such as actor:... for scene actors, a known NPC id from knownNearbyNpcs, a real inventory id, a world object id, a route id, an information id, or a location id.",
     "Never use schema words like temporary_actor, scene_actor, inventory_item, world_object, route, information, or location as targetRef values.",
     "Only the authoritative current-state surfaces in router_context are valid interaction targets. recentGroundedHistory is memory, not authority.",
     "Never remap an unresolved pronoun or stale narrated referent onto a different grounded actor just to satisfy the schema.",
@@ -3859,6 +3916,7 @@ function buildResolvedNarrationConstraints(input: ResolvedTurnNarrationInput) {
     (entry) =>
       (
         entry.mutationType === "record_local_interaction"
+        || entry.mutationType === "record_actor_interaction"
         || entry.mutationType === "record_npc_interaction"
         || entry.mutationType === "set_scene_actor_presence"
       )
@@ -3868,6 +3926,7 @@ function buildResolvedNarrationConstraints(input: ResolvedTurnNarrationInput) {
     (entry) =>
       (
         entry.mutationType === "record_local_interaction"
+        || entry.mutationType === "record_actor_interaction"
         || entry.mutationType === "record_npc_interaction"
         || entry.mutationType === "set_scene_actor_presence"
       )
@@ -3890,6 +3949,7 @@ function buildResolvedNarrationConstraints(input: ResolvedTurnNarrationInput) {
       && rejectedNonTimeMutations.every(
         (entry) =>
           entry.mutationType === "record_local_interaction"
+          || entry.mutationType === "record_actor_interaction"
           || entry.mutationType === "record_npc_interaction"
           || entry.mutationType === "set_scene_actor_presence",
       ),
@@ -3988,7 +4048,7 @@ function buildResolvedTurnNarrationPrompt(input: ResolvedTurnNarrationInput) {
     "Preserve failure honestly: rejected or failed actions must remain visibly failed in-world. Make failure legible, but only name a specific cause if it is supported by the committed log, fetched facts, or authoritative context. If rejectedOutcomeOnly is true, do not narrate rejected outcomes as if they happened. If rejectedInteractionOnly is true, the attempt may stall or go unanswered, but do not invent direct replies, completed errands, or offscreen returns.",
     "Keep committed uncertainty intact: only context.authoritativeState.sceneActors and context.authoritativeState.worldObjects are stable immediate interaction targets. recentNarrativeProse is continuity only, not authority. Unresolved targets must stay unresolved and may not be substituted — if unresolvedTargetFailure is true, the intended target is gone, unreachable, or lost. Arrivals and returns only happened if the committed log makes them explicit; if the player waited for one that did not commit, say it has not happened yet. Ambiguous scene aspects stay ambiguous — narrate only the visible condition, not the hidden cause. Spawned actors are noticed naturally, not announced.",
     "Do not visually place, quote, or otherwise present a named NPC as being in the room unless they are listed in context.authoritativeState.sceneActors or an applied set_scene_actor_presence entry brought them in this turn.",
-    "For applied record_local_interaction and record_npc_interaction entries, state_commit_log.metadata.socialOutcome is immutable truth. Reflect it exactly. Do not soften declines into acceptance, withholds into full answers, counteroffers into closed deals, or acknowledges into agreement.",
+    "For applied record_local_interaction, record_actor_interaction, and record_npc_interaction entries, state_commit_log.metadata.socialOutcome is immutable truth. Reflect it exactly. Do not soften declines into acceptance, withholds into full answers, counteroffers into closed deals, or acknowledges into agreement.",
     "Do not render acknowledges, hesitates, withholds, asks_question, redirects, resists, or withdraws as acceptance, invitation, agreement, or emotionally closed dialogue. Quoted dialogue may not close the beat unless the committed outcome itself is a closure state.",
     "Do not narrate completed item custody changes, consumption, gifting, feeding, storage, or item use by another holder unless state_commit_log includes the applied asset mutation that makes it true.",
     "If state_commit_log includes a rejected record_local_interaction or set_scene_actor_presence with reasonCode invalid_target, narrate that the player looked for or attempted that contact but could not find or reach them. Do not narrate a successful encounter.",

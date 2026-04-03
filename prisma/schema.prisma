@@ -89,6 +89,7 @@ model Campaign {
   factions            Faction[]
   factionRelations    FactionRelation[]
   npcs                NPC[]
+  actors              Actor[]
   information         Information[]
   informationLinks    InformationLink[]
   commodities         Commodity[]
@@ -123,6 +124,7 @@ model CharacterInstance {
 model CharacterCommodityStack {
   id                  String            @id @default(cuid())
   characterInstanceId String?
+  actorId             String?
   npcId               String?
   temporaryActorId    String?
   worldObjectId       String?
@@ -133,6 +135,7 @@ model CharacterCommodityStack {
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt
   characterInstance   CharacterInstance? @relation(fields: [characterInstanceId], references: [id], onDelete: Cascade)
+  actor               Actor?            @relation("ActorCommodityHolder", fields: [actorId], references: [id], onDelete: Cascade)
   npc                 NPC?              @relation("NpcCommodityHolder", fields: [npcId], references: [id], onDelete: Cascade)
   temporaryActor      TemporaryActor?   @relation("TemporaryActorCommodityHolder", fields: [temporaryActorId], references: [id], onDelete: Cascade)
   worldObject         WorldObject?      @relation("WorldObjectCommodityHolder", fields: [worldObjectId], references: [id], onDelete: Cascade)
@@ -140,6 +143,7 @@ model CharacterCommodityStack {
   commodity           Commodity         @relation(fields: [commodityId], references: [id], onDelete: Cascade)
 
   @@index([characterInstanceId])
+  @@index([actorId])
   @@index([npcId])
   @@index([temporaryActorId])
   @@index([worldObjectId])
@@ -168,6 +172,7 @@ model ItemTemplate {
 model ItemInstance {
   id                  String            @id @default(cuid())
   characterInstanceId String?
+  actorId             String?
   npcId               String?
   temporaryActorId    String?
   worldObjectId       String?
@@ -180,6 +185,7 @@ model ItemInstance {
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt
   characterInstance   CharacterInstance? @relation(fields: [characterInstanceId], references: [id], onDelete: Cascade)
+  actor               Actor?            @relation("ActorItemHolder", fields: [actorId], references: [id], onDelete: Cascade)
   npc                 NPC?              @relation("NpcItemHolder", fields: [npcId], references: [id], onDelete: Cascade)
   temporaryActor      TemporaryActor?   @relation("TemporaryActorItemHolder", fields: [temporaryActorId], references: [id], onDelete: Cascade)
   worldObject         WorldObject?      @relation("WorldObjectItemHolder", fields: [worldObjectId], references: [id], onDelete: Cascade)
@@ -187,6 +193,7 @@ model ItemInstance {
   template            ItemTemplate      @relation(fields: [templateId], references: [id], onDelete: Cascade)
 
   @@index([characterInstanceId])
+  @@index([actorId])
   @@index([npcId])
   @@index([temporaryActorId])
   @@index([worldObjectId])
@@ -291,6 +298,7 @@ model LocationNode {
   marketPrices         MarketPrice[]
   worldEvents          WorldEvent[]
   npcRoutineTargets    NpcRoutine[]    @relation("NpcRoutineTarget")
+  actors               Actor[]
   temporaryActors      TemporaryActor[]
   sceneItemPlacements  ItemInstance[]  @relation("SceneItemPlacement")
   sceneCommodityPlacements CharacterCommodityStack[] @relation("SceneCommodityPlacement")
@@ -385,6 +393,7 @@ model NPC {
   information       Information[] @relation("InformationSourceNpc")
   marketPrices      MarketPrice[] @relation("VendorNpc")
   npcRoutines       NpcRoutine[]
+  actors            Actor[]
   promotedTemporaryActors TemporaryActor[]
   knowledge         NpcKnowledge[]
   heldItems         ItemInstance[] @relation("NpcItemHolder")
@@ -393,6 +402,39 @@ model NPC {
 
   @@index([campaignId])
   @@index([campaignId, currentLocationId])
+}
+
+model Actor {
+  id                  String                   @id @default(cuid())
+  campaignId          String
+  profileNpcId        String?
+  isAnonymous         Boolean                  @default(false)
+  displayLabel        String
+  currentLocationId   String?
+  state               String                   @default("active")
+  threatLevel         Int                      @default(1)
+  interactionCount    Int                      @default(0)
+  firstSeenAtTurn     Int                      @default(0)
+  lastSeenAtTurn      Int                      @default(0)
+  lastSeenAtTime      Int                      @default(0)
+  recentTopics        String[]                 @default([])
+  lastSummary         String?
+  holdsInventory      Boolean                  @default(false)
+  affectedWorldState  Boolean                  @default(false)
+  isInMemoryGraph     Boolean                  @default(false)
+  createdAt           DateTime                 @default(now())
+  updatedAt           DateTime                 @updatedAt
+  campaign            Campaign                 @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  profileNpc          NPC?                     @relation(fields: [profileNpcId], references: [id], onDelete: SetNull)
+  currentLocation     LocationNode?            @relation(fields: [currentLocationId], references: [id], onDelete: SetNull)
+  heldItems           ItemInstance[]           @relation("ActorItemHolder")
+  heldCommodityStacks CharacterCommodityStack[] @relation("ActorCommodityHolder")
+  heldWorldObjects    WorldObject[]            @relation("WorldObjectActorHolder")
+
+  @@index([campaignId, profileNpcId])
+  @@index([campaignId, currentLocationId])
+  @@index([campaignId, lastSeenAtTurn])
+  @@index([campaignId, lastSeenAtTime])
 }
 
 model Information {
@@ -623,6 +665,7 @@ model WorldObject {
   campaignId                String
   name                      String
   characterInstanceId       String?
+  actorId                   String?
   npcId                     String?
   temporaryActorId          String?
   parentWorldObjectId       String?
@@ -639,6 +682,7 @@ model WorldObject {
   updatedAt                 DateTime               @updatedAt
   campaign                  Campaign               @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   characterInstance         CharacterInstance?     @relation("WorldObjectCharacterHolder", fields: [characterInstanceId], references: [id], onDelete: Cascade)
+  actor                     Actor?                 @relation("WorldObjectActorHolder", fields: [actorId], references: [id], onDelete: Cascade)
   npc                       NPC?                   @relation("WorldObjectNpcHolder", fields: [npcId], references: [id], onDelete: Cascade)
   temporaryActor            TemporaryActor?        @relation("WorldObjectTemporaryActorHolder", fields: [temporaryActorId], references: [id], onDelete: Cascade)
   parentWorldObject         WorldObject?           @relation("WorldObjectParentChild", fields: [parentWorldObjectId], references: [id], onDelete: Cascade)
@@ -650,6 +694,7 @@ model WorldObject {
 
   @@index([campaignId])
   @@index([characterInstanceId])
+  @@index([actorId])
   @@index([npcId])
   @@index([temporaryActorId])
   @@index([parentWorldObjectId])

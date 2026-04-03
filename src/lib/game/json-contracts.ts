@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { Prisma } from "@prisma/client";
 import type {
   CampaignRuntimeState,
   FactionResourcePool,
@@ -79,6 +80,8 @@ const turnCausalityCodeNameValues = [
   "TIME_ADVANCED",
   "LOCATION_CHANGED",
   "SCENE_FOCUS_CHANGED",
+  "ACTOR_STATE_CHANGED",
+  "ACTOR_LOCATION_CHANGED",
   "NPC_APPROVAL_CHANGED",
   "INFORMATION_DISCOVERED",
   "INFORMATION_ADDED",
@@ -128,6 +131,7 @@ const turnCausalityCodeSchema: z.ZodType<TurnCausalityCode> = z.object({
     "route",
     "scene_object",
     "world_object",
+    "actor",
     "npc",
     "faction",
     "information",
@@ -160,6 +164,7 @@ const stateCommitLogEntrySchema: z.ZodType<StateCommitLogEntry> = z.object({
       "advance_time",
       "move_player",
       "adjust_currency",
+      "record_actor_interaction",
       "record_local_interaction",
       "record_npc_interaction",
       "spawn_scene_aspect",
@@ -172,6 +177,7 @@ const stateCommitLogEntrySchema: z.ZodType<StateCommitLogEntry> = z.object({
       "adjust_inventory",
       "adjust_relationship",
       "discover_information",
+      "set_actor_state",
       "set_npc_state",
       "set_player_scene_focus",
       "set_scene_actor_presence",
@@ -265,6 +271,7 @@ const turnResultPayloadSchema: z.ZodType<TurnResultPayload> = z.object({
       createdWorldEventIds: z.array(z.string()),
       createdFactionMoveIds: z.array(z.string()),
       createdScheduleJobIds: z.array(z.string()).default([]),
+      createdActorIds: z.array(z.string()).default([]),
       createdTemporaryActorIds: z.array(z.string()),
       createdCommodityStackIds: z.array(z.string()),
       createdWorldObjectIds: z.array(z.string()).default([]),
@@ -354,11 +361,11 @@ export function parseFactionResourcesJson(value: unknown): FactionResourcePool {
   return factionResourcesSchema.parse(value);
 }
 
-export function toTurnResultPayloadJson(payload: TurnResultPayload) {
+export function toTurnResultPayloadJson(payload: TurnResultPayload): Prisma.InputJsonValue {
   return cloneJson({
     schemaVersion: 2,
     data: payload,
-  });
+  }) as Prisma.InputJsonValue;
 }
 
 export function parseTurnResultPayloadJson(value: unknown): TurnResultPayload | null {

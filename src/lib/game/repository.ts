@@ -24,6 +24,7 @@ import type {
   AdventureModuleSummary,
   ActivePressureSummary,
   ActiveThreadSummary,
+  ActorSummary,
   CampaignListItem,
   CampaignRuntimeState,
   CampaignSnapshot,
@@ -108,6 +109,11 @@ type PrismaCommodityStackRecord = Prisma.CharacterCommodityStackGetPayload<{
 }>;
 
 type PrismaWorldObjectRecord = Prisma.WorldObjectGetPayload<Record<string, never>>;
+type PrismaActorRecord = Prisma.ActorGetPayload<{
+  include: {
+    profileNpc: true;
+  };
+}>;
 
 type SnapshotDbClient = Prisma.TransactionClient | typeof prisma;
 
@@ -893,6 +899,7 @@ function toItemInstanceRecord(
   return {
     id: instance.id,
     characterInstanceId: instance.characterInstanceId,
+    actorId: instance.actorId,
     npcId: instance.npcId,
     temporaryActorId: instance.temporaryActorId,
     worldObjectId: instance.worldObjectId,
@@ -928,6 +935,7 @@ function toCommodityStackRecord(
   return {
     id: stack.id,
     characterInstanceId: stack.characterInstanceId,
+    actorId: stack.actorId,
     npcId: stack.npcId,
     temporaryActorId: stack.temporaryActorId,
     worldObjectId: stack.worldObjectId,
@@ -952,6 +960,7 @@ function toWorldObjectSummary(
     id: object.id,
     name: object.name,
     characterInstanceId: object.characterInstanceId,
+    actorId: object.actorId,
     npcId: object.npcId,
     temporaryActorId: object.temporaryActorId,
     parentWorldObjectId: object.parentWorldObjectId,
@@ -1902,6 +1911,7 @@ async function createCampaignInTx(
     pendingTurnId: null,
     lastActionSummary: input.opening.activeThreat ?? input.opening.scene.summary,
     sceneFocus: null,
+    sceneActorFocuses: {},
     sceneAspects: {},
     characterState: {
       conditions: [],
@@ -2046,6 +2056,11 @@ async function createCampaignInTx(
     state: "active",
     threatLevel: 1,
   }));
+  const anonymousEntryActors = input.instancedEntryPoint.temporaryLocalActors.map((actor) => ({
+    id: `tactor_${randomUUID()}`,
+    label: actor.label,
+    summary: actor.summary,
+  }));
 
   if (input.instancedWorld.npcs.length || hydratedStartingNpcRecords.length) {
     await tx.nPC.createMany({
@@ -2072,12 +2087,55 @@ async function createCampaignInTx(
         ...hydratedStartingNpcRecords,
       ],
     });
+
+    await tx.actor.createMany({
+      data: [
+        ...input.instancedWorld.npcs.map((npc) => ({
+          id: `actor_${npc.id}`,
+          campaignId: campaign.id,
+          profileNpcId: npc.id,
+          isAnonymous: false,
+          displayLabel: npc.name,
+          currentLocationId: npc.currentLocationId,
+          state: "active",
+          threatLevel: 1,
+          interactionCount: 0,
+          firstSeenAtTurn: 0,
+          lastSeenAtTurn: 0,
+          lastSeenAtTime: state.globalTime,
+          recentTopics: [],
+          lastSummary: npc.summary,
+          holdsInventory: false,
+          affectedWorldState: false,
+          isInMemoryGraph: false,
+        })),
+        ...input.hydratedStartingNpcs.map((npc) => ({
+          id: `actor_${npc.id}`,
+          campaignId: campaign.id,
+          profileNpcId: npc.id,
+          isAnonymous: false,
+          displayLabel: npc.name,
+          currentLocationId: npc.currentLocationId,
+          state: "active",
+          threatLevel: 1,
+          interactionCount: 0,
+          firstSeenAtTurn: 0,
+          lastSeenAtTurn: 0,
+          lastSeenAtTime: state.globalTime,
+          recentTopics: [],
+          lastSummary: npc.summary,
+          holdsInventory: false,
+          affectedWorldState: false,
+          isInMemoryGraph: false,
+        })),
+      ],
+    });
   }
 
-  if (input.instancedEntryPoint.temporaryLocalActors.length) {
+  if (anonymousEntryActors.length) {
     await tx.temporaryActor.createMany({
-      data: input.instancedEntryPoint.temporaryLocalActors.map((actor) => ({
-        id: `tactor_${randomUUID()}`,
+      data: anonymousEntryActors.map((actor) => ({
+        id: actor.id,
         campaignId: campaign.id,
         label: actor.label,
         currentLocationId: input.instancedEntryPoint.startLocationId,
@@ -2091,6 +2149,27 @@ async function createCampaignInTx(
         affectedWorldState: false,
         isInMemoryGraph: false,
         promotedNpcId: null,
+      })),
+    });
+    await tx.actor.createMany({
+      data: anonymousEntryActors.map((actor) => ({
+        id: actor.id,
+        campaignId: campaign.id,
+        profileNpcId: null,
+        isAnonymous: true,
+        displayLabel: actor.label,
+        currentLocationId: input.instancedEntryPoint.startLocationId,
+        state: "active",
+        threatLevel: 1,
+        interactionCount: 0,
+        firstSeenAtTurn: 0,
+        lastSeenAtTurn: 0,
+        lastSeenAtTime: state.globalTime,
+        recentTopics: [],
+        lastSummary: actor.summary,
+        holdsInventory: false,
+        affectedWorldState: false,
+        isInMemoryGraph: false,
       })),
     });
   }
@@ -2565,11 +2644,18 @@ function toFactionRelationSummary(
 function toNpcSummary(
   npc: Prisma.NPCGetPayload<Record<string, never>>,
   factions: Prisma.FactionGetPayload<Record<string, never>>[],
+  embodied?: {
+    actorId?: string | null;
+    currentLocationId?: string | null;
+    state?: NpcSummary["state"];
+    threatLevel?: number;
+  },
 ): NpcSummary {
   const faction = npc.factionId ? factions.find((entry) => entry.id === npc.factionId) : null;
 
   return {
     id: npc.id,
+    actorId: embodied?.actorId ?? null,
     name: npc.name,
     role: npc.role,
     tags: [...(npc.tags ?? [])],
@@ -2579,12 +2665,12 @@ function toNpcSummary(
     isNarrativelyHydrated: npc.isNarrativelyHydrated,
     factionId: npc.factionId,
     factionName: faction?.name ?? null,
-    currentLocationId: npc.currentLocationId,
+    currentLocationId: embodied?.currentLocationId ?? npc.currentLocationId,
     approval: npc.approval,
     approvalBand: approvalBandForValue(npc.approval),
     isCompanion: npc.isCompanion,
-    state: npc.state as NpcSummary["state"],
-    threatLevel: npc.threatLevel,
+    state: embodied?.state ?? npc.state as NpcSummary["state"],
+    threatLevel: embodied?.threatLevel ?? npc.threatLevel,
   };
 }
 
@@ -2622,14 +2708,37 @@ function toInformationSummary(
 }
 
 function toTemporaryActorSummary(input: {
-  actor: Prisma.TemporaryActorGetPayload<Record<string, never>>;
+  actor: Pick<
+    PrismaActorRecord,
+    | "id"
+    | "profileNpcId"
+    | "isAnonymous"
+    | "displayLabel"
+    | "currentLocationId"
+    | "state"
+    | "threatLevel"
+    | "interactionCount"
+    | "firstSeenAtTurn"
+    | "lastSeenAtTurn"
+    | "lastSeenAtTime"
+    | "recentTopics"
+    | "lastSummary"
+    | "holdsInventory"
+    | "affectedWorldState"
+    | "isInMemoryGraph"
+  >;
   inventory: PromptInventoryItem[];
 }): TemporaryActorSummary {
   const { actor, inventory } = input;
   return {
     id: actor.id,
-    label: actor.label,
+    profileNpcId: actor.profileNpcId,
+    isAnonymous: actor.isAnonymous,
+    label: actor.displayLabel,
+    displayLabel: actor.displayLabel,
     currentLocationId: actor.currentLocationId,
+    state: actor.state as TemporaryActorSummary["state"],
+    threatLevel: actor.threatLevel,
     interactionCount: actor.interactionCount,
     firstSeenAtTurn: actor.firstSeenAtTurn,
     lastSeenAtTurn: actor.lastSeenAtTurn,
@@ -2639,25 +2748,106 @@ function toTemporaryActorSummary(input: {
     holdsInventory: actor.holdsInventory,
     affectedWorldState: actor.affectedWorldState,
     isInMemoryGraph: actor.isInMemoryGraph,
-    promotedNpcId: actor.promotedNpcId,
+    promotedNpcId: actor.profileNpcId,
     inventory,
+  };
+}
+
+function toActorSummary(input: {
+  actor: PrismaActorRecord;
+  inventory: PromptInventoryItem[];
+}): ActorSummary {
+  return toTemporaryActorSummary(input);
+}
+
+function actorInventoryForSummary(input: {
+  actor: PrismaActorRecord;
+  assetItems: ItemInstance[];
+  assetCommodityStacks: CharacterCommodityStack[];
+}) {
+  return toPromptAssetInventory({
+    items: input.assetItems.filter((item) =>
+      item.actorId === input.actor.id
+      || (item.actorId == null && input.actor.profileNpcId != null && item.npcId === input.actor.profileNpcId)
+      || (item.actorId == null && input.actor.profileNpcId == null && item.temporaryActorId === input.actor.id)),
+    commodityStacks: input.assetCommodityStacks.filter((stack) =>
+      stack.actorId === input.actor.id
+      || (stack.actorId == null && input.actor.profileNpcId != null && stack.npcId === input.actor.profileNpcId)
+      || (stack.actorId == null && input.actor.profileNpcId == null && stack.temporaryActorId === input.actor.id)),
+  });
+}
+
+function buildActorSnapshotViews(input: {
+  actors: PrismaActorRecord[];
+  assetItems: ItemInstance[];
+  assetCommodityStacks: CharacterCommodityStack[];
+  factions: Prisma.FactionGetPayload<Record<string, never>>[];
+  currentLocationId: string;
+}) {
+  const actorSummaries = input.actors.map((actor) =>
+    toActorSummary({
+      actor,
+      inventory: actorInventoryForSummary({
+        actor,
+        assetItems: input.assetItems,
+        assetCommodityStacks: input.assetCommodityStacks,
+      }),
+    }),
+  );
+  const presentNpcs = input.actors
+    .filter((actor) => actor.profileNpcId != null && actor.currentLocationId === input.currentLocationId && actor.profileNpc != null)
+    .map((actor) =>
+      toNpcSummary(actor.profileNpc!, input.factions, {
+        actorId: actor.id,
+        currentLocationId: actor.currentLocationId,
+        state: actor.state as NpcSummary["state"],
+        threatLevel: actor.threatLevel,
+      }),
+    );
+  const temporaryActors = actorSummaries.filter((actor) => actor.profileNpcId == null);
+  const knownNpcLocationIds = Object.fromEntries(
+    input.actors
+      .filter((actor): actor is PrismaActorRecord & { profileNpcId: string } => actor.profileNpcId != null)
+      .map((actor) => [actor.profileNpcId, actor.currentLocationId]),
+  );
+
+  return {
+    actors: actorSummaries,
+    presentNpcs,
+    temporaryActors,
+    knownNpcLocationIds,
   };
 }
 
 function toSceneActorSummaries(input: {
   presentNpcs: NpcSummary[];
-  temporaryActors: TemporaryActorSummary[];
+  actors: ActorSummary[];
   currentLocationId: string;
   sceneActorFocuses?: Record<string, string | null>;
 }): SceneActorSummary[] {
+  const actorByProfileNpcId = new Map(
+    input.actors
+      .filter((actor): actor is ActorSummary & { profileNpcId: string } => actor.profileNpcId != null)
+      .map((actor) => [actor.profileNpcId, actor]),
+  );
+
   return [
     ...input.presentNpcs.map<SceneActorSummary>((npc) => ({
-      actorRef: `npc:${npc.id}`,
+      actorRef:
+        actorByProfileNpcId.get(npc.id)?.id != null || npc.actorId != null
+          ? `actor:${actorByProfileNpcId.get(npc.id)?.id ?? npc.actorId}`
+          : `npc:${npc.id}`,
+      actorId: actorByProfileNpcId.get(npc.id)?.id ?? npc.actorId ?? null,
+      profileNpcId: npc.id,
+      isAnonymous: false,
       kind: "npc",
       displayLabel: npc.name,
       role: npc.role,
       tags: npc.isCompanion ? Array.from(new Set([...(npc.tags ?? []), "companion"])) : [...(npc.tags ?? [])],
-      focusKey: input.sceneActorFocuses?.[`npc:${npc.id}`] ?? null,
+      focusKey:
+        input.sceneActorFocuses?.[`actor:${actorByProfileNpcId.get(npc.id)?.id ?? npc.actorId}`]
+        ?? input.sceneActorFocuses?.[`npc:${npc.id}`]
+        ?? null,
       detailFetchHint:
         npc.socialLayer === "promoted_local" && !npc.isNarrativelyHydrated
           ? {
@@ -2667,15 +2857,21 @@ function toSceneActorSummaries(input: {
           : null,
       lastSummary: npc.summary,
     })),
-    ...input.temporaryActors
-      .filter((actor) => actor.currentLocationId === input.currentLocationId && actor.promotedNpcId == null)
+    ...input.actors
+      .filter((actor) => actor.currentLocationId === input.currentLocationId && actor.profileNpcId == null)
       .map<SceneActorSummary>((actor) => ({
-        actorRef: `temp:${actor.id}`,
+        actorRef: `actor:${actor.id}`,
+        actorId: actor.id,
+        profileNpcId: null,
+        isAnonymous: actor.isAnonymous,
         kind: "temporary_actor",
-        displayLabel: actor.label,
+        displayLabel: actor.displayLabel ?? actor.label,
         role: actor.label,
         tags: actor.inventory.length > 0 ? ["holds_inventory"] : [],
-        focusKey: input.sceneActorFocuses?.[`temp:${actor.id}`] ?? null,
+        focusKey:
+          input.sceneActorFocuses?.[`actor:${actor.id}`]
+          ?? input.sceneActorFocuses?.[`temp:${actor.id}`]
+          ?? null,
         inventory: actor.inventory,
         detailFetchHint: null,
         lastSummary: actor.lastSummary,
@@ -2689,8 +2885,15 @@ function toRouterKnownNpcSummaries(input: {
 }): RouterKnownNpcSummary[] {
   const visibleNpcIds = new Set(
     input.focusedSceneActors
-      .filter((actor) => actor.kind === "npc" && actor.actorRef.startsWith("npc:"))
-      .map((actor) => actor.actorRef.slice("npc:".length)),
+      .map((actor) => {
+        if (typeof actor.profileNpcId === "string" && actor.profileNpcId.length > 0) {
+          return actor.profileNpcId;
+        }
+        return actor.kind === "npc" && actor.actorRef.startsWith("npc:")
+          ? actor.actorRef.slice("npc:".length)
+          : null;
+      })
+      .filter((npcId): npcId is string => typeof npcId === "string" && npcId.length > 0),
   );
 
   return input.presentNpcs
@@ -2903,7 +3106,7 @@ export async function fetchNpcDetailsBulk(
     return new Map<string, NpcDetail>();
   }
 
-  const [factions, locations, npcs, temporaryActors, memoriesByNpcId, npcKnowledge, factionKnowledge, locationKnowledge] =
+  const [factions, locations, npcs, actors, memoriesByNpcId, npcKnowledge, factionKnowledge] =
     await Promise.all([
       prisma.faction.findMany({
         where: { campaignId },
@@ -2914,11 +3117,24 @@ export async function fetchNpcDetailsBulk(
       prisma.nPC.findMany({
         where: { campaignId },
       }),
-      prisma.temporaryActor.findMany({
+      prisma.actor.findMany({
         where: {
           campaignId,
-          promotedNpcId: {
+          profileNpcId: {
             in: uniqueNpcIds,
+          },
+        },
+        include: {
+          profileNpc: true,
+          heldItems: {
+            include: {
+              template: true,
+            },
+          },
+          heldCommodityStacks: {
+            include: {
+              commodity: true,
+            },
           },
         },
       }),
@@ -2952,24 +3168,27 @@ export async function fetchNpcDetailsBulk(
         },
         orderBy: { informationId: "asc" },
       }),
-      prisma.locationKnowledge.findMany({
-        where: {
-          campaignId,
-          locationId: {
-            in: Array.from(new Set(npcRecords.flatMap((npc) => (npc.currentLocationId ? [npc.currentLocationId] : [])))),
-          },
-        },
-        include: {
-          information: true,
-        },
-        orderBy: { informationId: "asc" },
-      }),
     ]);
+  const locationKnowledge = await prisma.locationKnowledge.findMany({
+    where: {
+      campaignId,
+      locationId: {
+        in: Array.from(new Set([
+          ...npcRecords.flatMap((npc) => (npc.currentLocationId ? [npc.currentLocationId] : [])),
+          ...actors.flatMap((actor) => (actor.currentLocationId ? [actor.currentLocationId] : [])),
+        ])),
+      },
+    },
+    include: {
+      information: true,
+    },
+    orderBy: { informationId: "asc" },
+  });
 
-  const temporaryActorByNpcId = new Map(
-    temporaryActors
-      .filter((actor): actor is typeof actor & { promotedNpcId: string } => actor.promotedNpcId != null)
-      .map((actor) => [actor.promotedNpcId, actor.id]),
+  const actorByNpcId = new Map(
+    actors
+      .filter((actor): actor is typeof actor & { profileNpcId: string } => actor.profileNpcId != null)
+      .map((actor) => [actor.profileNpcId, actor]),
   );
   const npcKnowledgeByNpcId = new Map<string, typeof npcKnowledge>();
   const factionKnowledgeByFactionId = new Map<string, typeof factionKnowledge>();
@@ -2993,6 +3212,8 @@ export async function fetchNpcDetailsBulk(
 
   return new Map(
     npcRecords.map((npc) => {
+      const actor = actorByNpcId.get(npc.id) ?? null;
+      const embodiedLocationId = actor?.currentLocationId ?? npc.currentLocationId;
       const visibleKnowledgeById = new Map<string, InformationSummary>();
       for (const entry of npcKnowledgeByNpcId.get(npc.id) ?? []) {
         if (entry.shareability === "private" && !entry.information.isDiscovered) {
@@ -3016,8 +3237,8 @@ export async function fetchNpcDetailsBulk(
           }
         }
       }
-      if (npc.currentLocationId) {
-        for (const entry of locationKnowledgeByLocationId.get(npc.currentLocationId) ?? []) {
+      if (embodiedLocationId) {
+        for (const entry of locationKnowledgeByLocationId.get(embodiedLocationId) ?? []) {
           if (entry.information.accessibility === "secret" && !entry.information.isDiscovered) {
             continue;
           }
@@ -3031,13 +3252,19 @@ export async function fetchNpcDetailsBulk(
       }
 
       return [npc.id, {
-        ...toNpcSummary(npc, factions),
+        ...toNpcSummary(npc, factions, {
+          actorId: actor?.id ?? null,
+          currentLocationId: embodiedLocationId,
+          state: actor?.state as NpcSummary["state"] | undefined,
+          threatLevel: actor?.threatLevel,
+        }),
         knownInformation: Array.from(visibleKnowledgeById.values()).slice(0, 12),
         relationshipHistory: memoriesByNpcId.get(npc.id) ?? [],
-        temporaryActorId: temporaryActorByNpcId.get(npc.id) ?? null,
+        actorId: actor?.id ?? null,
         inventory: toPromptAssetInventory({
-          items: npc.heldItems.map((item) => toItemInstanceRecord(item)),
-          commodityStacks: npc.heldCommodityStacks.map((stack) => toCommodityStackRecord(stack)),
+          items: (actor?.heldItems ?? npc.heldItems).map((item) => toItemInstanceRecord(item)),
+          commodityStacks: (actor?.heldCommodityStacks ?? npc.heldCommodityStacks)
+            .map((stack) => toCommodityStackRecord(stack)),
         }),
       } satisfies NpcDetail];
     }),
@@ -3645,6 +3872,12 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
       npcs: {
         orderBy: { name: "asc" },
       },
+      actors: {
+        include: {
+          profileNpc: true,
+        },
+        orderBy: [{ lastSeenAtTurn: "desc" }, { lastSeenAtTime: "desc" }, { id: "asc" }],
+      },
       information: {
         orderBy: { title: "asc" },
       },
@@ -3669,10 +3902,6 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
         },
         orderBy: { scheduledAtTime: "asc" },
         take: 30,
-      },
-      temporaryActors: {
-        orderBy: [{ lastSeenAtTurn: "desc" }, { lastSeenAtTime: "desc" }, { id: "asc" }],
-        take: 50,
       },
       turns: {
         where: { status: "resolved" },
@@ -3736,10 +3965,17 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
       };
     });
 
-  const presentNpcs = campaign.npcs
-    .filter((npc) => npc.currentLocationId === currentLocation.id)
-    .map((npc) => toNpcSummary(npc, campaign.factions));
-
+  const assetItems = campaignItemInstances.map(toItemInstanceRecord);
+  const assetCommodityStacks = campaignCommodityStacks.map(toCommodityStackRecord);
+  const worldObjects = campaignWorldObjectRecords.map(toWorldObjectSummary);
+  const actorViews = buildActorSnapshotViews({
+    actors: campaign.actors,
+    assetItems,
+    assetCommodityStacks,
+    factions: campaign.factions,
+    currentLocationId: currentLocation.id,
+  });
+  const presentNpcs = actorViews.presentNpcs;
   const discoveredIds = new Set(
     campaign.information.filter((information) => information.isDiscovered).map((information) => information.id),
   );
@@ -3800,10 +4036,6 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
       (relation) => knownFactionIds.has(relation.factionAId) && knownFactionIds.has(relation.factionBId),
     )
     .map((relation) => toFactionRelationSummary(relation, campaign.factions));
-
-  const assetItems = campaignItemInstances.map(toItemInstanceRecord);
-  const assetCommodityStacks = campaignCommodityStacks.map(toCommodityStackRecord);
-  const worldObjects = campaignWorldObjectRecords.map(toWorldObjectSummary);
   const instance: CharacterInstance = {
     id: campaign.characterInstance.id,
     templateId: campaign.characterInstance.templateId,
@@ -3858,28 +4090,9 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
           : null,
     }));
 
-  const temporaryActorInventoryById = new Map<string, PromptInventoryItem[]>();
-  for (const actor of campaign.temporaryActors) {
-    if (actor.promotedNpcId != null) {
-      continue;
-    }
-    temporaryActorInventoryById.set(
-      actor.id,
-      toPromptAssetInventory({
-        items: assetItems.filter((item) => item.temporaryActorId === actor.id),
-        commodityStacks: assetCommodityStacks.filter((stack) => stack.temporaryActorId === actor.id),
-      }),
-    );
-  }
-  const temporaryActors = campaign.temporaryActors
-    .filter((actor) => actor.promotedNpcId == null)
-    .map((actor) => toTemporaryActorSummary({
-      actor,
-      inventory: temporaryActorInventoryById.get(actor.id) ?? [],
-    }));
-  const knownNpcLocationIds = Object.fromEntries(
-    campaign.npcs.map((npc) => [npc.id, npc.currentLocationId]),
-  );
+  const actors = actorViews.actors;
+  const temporaryActors = actorViews.temporaryActors;
+  const knownNpcLocationIds = actorViews.knownNpcLocationIds;
   const latestRetryableTurnId =
     env.enableTurnUndo && campaign.turns[0]?.sessionId === session.id
       ? campaign.turns[0]?.id ?? null
@@ -3910,6 +4123,7 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     currentLocation,
     adjacentRoutes,
     presentNpcs,
+    actors,
     knownNpcLocationIds,
     knownFactions,
     factionRelations,
@@ -4026,21 +4240,17 @@ async function getTurnSnapshotFromClient(
     },
     orderBy: { name: "asc" },
   });
-  const offscreenNpcRecords = await db.nPC.findMany({
+  const actorRecords = await db.actor.findMany({
     where: {
       campaignId,
-      currentLocationId: null,
-    },
-    orderBy: { name: "asc" },
-  });
-  const temporaryActorRecords = await db.temporaryActor.findMany({
-    where: {
-      campaignId,
-      promotedNpcId: null,
       OR: [
+        { profileNpcId: { not: null } },
         { currentLocationId: state.currentLocationId },
         { currentLocationId: null },
       ],
+    },
+    include: {
+      profileNpc: true,
     },
     orderBy: [{ lastSeenAtTurn: "desc" }, { lastSeenAtTime: "desc" }, { id: "asc" }],
     take: 50,
@@ -4057,11 +4267,15 @@ async function getTurnSnapshotFromClient(
     return null;
   }
 
+  const presentNpcIds = actorRecords
+    .filter((actor): actor is PrismaActorRecord & { profileNpcId: string } =>
+      actor.profileNpcId != null && actor.currentLocationId === state.currentLocationId)
+    .map((actor) => actor.profileNpcId);
   const baseKnownFactionIds = new Set<string>();
   if (currentLocationRecord.controllingFactionId) {
     baseKnownFactionIds.add(currentLocationRecord.controllingFactionId);
   }
-  for (const npc of presentNpcRecords) {
+  for (const npc of presentNpcRecords.filter((entry) => presentNpcIds.includes(entry.id))) {
     if (npc.factionId) {
       baseKnownFactionIds.add(npc.factionId);
     }
@@ -4083,12 +4297,12 @@ async function getTurnSnapshotFromClient(
         },
       })
     : [];
-  const npcKnowledge = presentNpcRecords.length
+  const npcKnowledge = presentNpcIds.length
     ? await db.npcKnowledge.findMany({
         where: {
           campaignId,
           npcId: {
-            in: presentNpcRecords.map((npc) => npc.id),
+            in: presentNpcIds,
           },
           shareability: {
             not: "private",
@@ -4100,7 +4314,7 @@ async function getTurnSnapshotFromClient(
   const discoveredIds = new Set(discoveredInfoRecords.map((information) => information.id));
   const visibleKnowledgeIds = buildRelevantKnowledgeIds({
     currentLocationId: state.currentLocationId,
-    presentNpcIds: presentNpcRecords.map((npc) => npc.id),
+    presentNpcIds,
     knownFactionIds: Array.from(baseKnownFactionIds),
     locationKnowledge,
     factionKnowledge,
@@ -4166,7 +4380,7 @@ async function getTurnSnapshotFromClient(
     ...relevantInformationRecords.flatMap((information) => (information.factionId ? [information.factionId] : [])),
   ]));
   const relevantNpcIds = Array.from(new Set([
-    ...presentNpcRecords.map((npc) => npc.id),
+    ...presentNpcIds,
     ...relevantInformationRecords.flatMap((information) => (information.sourceNpcId ? [information.sourceNpcId] : [])),
   ]));
 
@@ -4218,10 +4432,6 @@ async function getTurnSnapshotFromClient(
       description: edge.description,
     };
   });
-  const presentNpcs = presentNpcRecords.map((npc) => toNpcSummary(npc, factionRecords));
-  const knownNpcLocationIds = Object.fromEntries(
-    [...presentNpcRecords, ...offscreenNpcRecords].map((npc) => [npc.id, npc.currentLocationId]),
-  );
 
   const localInformation = relevantInformationRecords
     .filter(
@@ -4314,6 +4524,15 @@ async function getTurnSnapshotFromClient(
   const assetItems = campaignItemInstances.map(toItemInstanceRecord);
   const assetCommodityStacks = campaignCommodityStacks.map(toCommodityStackRecord);
   const worldObjects = campaignWorldObjectRecords.map(toWorldObjectSummary);
+  const actorViews = buildActorSnapshotViews({
+    actors: actorRecords,
+    assetItems,
+    assetCommodityStacks,
+    factions: normalizedFactionRecords,
+    currentLocationId: currentLocation.id,
+  });
+  const presentNpcs = actorViews.presentNpcs;
+  const knownNpcLocationIds = actorViews.knownNpcLocationIds;
   const instance: CharacterInstance = {
     id: campaign.characterInstance.id,
     templateId: campaign.characterInstance.templateId,
@@ -4365,20 +4584,8 @@ async function getTurnSnapshotFromClient(
           ? (structuredClone(message.payload) as Record<string, unknown>)
           : null,
     }));
-  const temporaryActorInventoryById = new Map<string, PromptInventoryItem[]>();
-  for (const actor of temporaryActorRecords) {
-    temporaryActorInventoryById.set(
-      actor.id,
-      toPromptAssetInventory({
-        items: assetItems.filter((item) => item.temporaryActorId === actor.id),
-        commodityStacks: assetCommodityStacks.filter((stack) => stack.temporaryActorId === actor.id),
-      }),
-    );
-  }
-  const temporaryActors = temporaryActorRecords.map((actor) => toTemporaryActorSummary({
-    actor,
-    inventory: temporaryActorInventoryById.get(actor.id) ?? [],
-  }));
+  const actors = actorViews.actors;
+  const temporaryActors = actorViews.temporaryActors;
   const latestRetryableTurnId =
     env.enableTurnUndo && campaign.turns[0]?.sessionId === session.id
       ? campaign.turns[0]?.id ?? null
@@ -4409,6 +4616,7 @@ async function getTurnSnapshotFromClient(
     currentLocation,
     adjacentRoutes,
     presentNpcs,
+    actors,
     knownNpcLocationIds,
     knownFactions,
     factionRelations: normalizedFactionRelations,
@@ -4476,6 +4684,7 @@ export function toPlayerCampaignSnapshot(snapshot: CampaignSnapshot): PlayerCamp
     currentLocation: snapshot.currentLocation,
     adjacentRoutes: snapshot.adjacentRoutes,
     presentNpcs: snapshot.presentNpcs,
+    actors: snapshot.actors,
     knownFactions: snapshot.knownFactions,
     localInformation: snapshot.localInformation,
     discoveredInformation: snapshot.discoveredInformation,
@@ -4606,7 +4815,7 @@ export async function getTurnRouterContext(snapshot: CampaignSnapshot): Promise<
   const focusedSceneActors = filterSceneActorsForFocus(
     toSceneActorSummaries({
       presentNpcs: snapshot.presentNpcs,
-      temporaryActors: snapshot.temporaryActors,
+      actors: snapshot.actors ?? snapshot.temporaryActors,
       currentLocationId: snapshot.currentLocation.id,
       sceneActorFocuses: snapshot.state.sceneActorFocuses,
     }),
@@ -4668,7 +4877,7 @@ export async function getPromptContext(
   const focusedSceneActors = filterSceneActorsForFocus(
     toSceneActorSummaries({
       presentNpcs: snapshot.presentNpcs,
-      temporaryActors: snapshot.temporaryActors,
+      actors: snapshot.actors ?? snapshot.temporaryActors,
       currentLocationId: snapshot.currentLocation.id,
       sceneActorFocuses: snapshot.state.sceneActorFocuses,
     }),

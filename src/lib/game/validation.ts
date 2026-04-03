@@ -80,6 +80,7 @@ function shouldUseShortLocalDowntimeDuration(command: ResolveMechanicsResponse) 
 
   return command.mutations.some((mutation) =>
     mutation.type === "set_player_scene_focus"
+    || mutation.type === "record_actor_interaction"
     || mutation.type === "record_local_interaction"
     || mutation.type === "record_npc_interaction"
     || mutation.type === "spawn_temporary_actor"
@@ -249,6 +250,17 @@ function isValidNpcInteractionTarget(
   return findPresentNpc(snapshot, normalized) != null || findFetchedNpc(fetchedFacts, normalized) != null;
 }
 
+function isValidActorInteractionTarget(snapshot: CampaignSnapshot, actorId: string) {
+  const normalized = actorId.trim();
+  if (!normalized) {
+    return false;
+  }
+
+  return (snapshot.actors ?? []).some(
+    (actor) => actor.id === normalized && actor.currentLocationId === snapshot.currentLocation.id,
+  );
+}
+
 function normalizeLocalInteractionTargetForTurn(
   mutations: readonly MechanicsMutation[],
   localEntityId: string,
@@ -296,12 +308,16 @@ function unresolvedTemporaryActorPhrases(routerDecision: RouterDecision | undefi
 
 function targetedActorRefForMutation(mutation: MechanicsMutation): string | null {
   switch (mutation.type) {
+    case "record_actor_interaction":
+      return `actor:${mutation.actorId}`;
     case "record_local_interaction":
       return mutation.localEntityId.trim();
     case "record_npc_interaction":
       return `npc:${mutation.npcId}`;
     case "adjust_relationship":
       return `npc:${mutation.npcId}`;
+    case "set_actor_state":
+      return `actor:${mutation.actorId}`;
     case "set_npc_state":
       return `npc:${mutation.npcId}`;
     case "set_scene_actor_presence":
@@ -331,7 +347,11 @@ function mutationWouldSubstituteUnresolvedActor(input: {
     return false;
   }
 
-  return actorRef.startsWith("npc:") && !input.resolvedActorRefs.has(actorRef);
+  if (actorRef.startsWith("actor:") || actorRef.startsWith("npc:")) {
+    return !input.resolvedActorRefs.has(actorRef);
+  }
+
+  return false;
 }
 
 export function isLikelySoloErrandAction(playerAction: string | undefined) {
@@ -406,6 +426,9 @@ function mutationPhaseForCheckStakes(mutation: MechanicsMutation): "immediate" |
     return "immediate";
   }
   if (mutation.type === "record_local_interaction") {
+    return "immediate";
+  }
+  if (mutation.type === "record_actor_interaction") {
     return "immediate";
   }
   if (mutation.type === "record_npc_interaction") {
@@ -638,6 +661,13 @@ export function validateTurnCommand(input: {
     }
 
     if (
+      mutation.type === "record_actor_interaction"
+      || mutation.type === "set_actor_state"
+    ) {
+      return mutation;
+    }
+
+    if (
       mutation.type === "record_npc_interaction"
       || mutation.type === "adjust_relationship"
       || mutation.type === "set_npc_state"
@@ -703,6 +733,18 @@ export function validateTurnCommand(input: {
 
       warnings.push(
         "Mechanics response targeted record_npc_interaction at an invalid or unavailable NPC; mutation was dropped.",
+      );
+      return false;
+    }
+
+    if (mutation.type === "record_actor_interaction" || mutation.type === "set_actor_state") {
+      const actorId = mutation.type === "record_actor_interaction" ? mutation.actorId : mutation.actorId;
+      if (isValidActorInteractionTarget(snapshot, actorId)) {
+        return true;
+      }
+
+      warnings.push(
+        `Mechanics response targeted ${mutation.type} at an invalid or unavailable actor; mutation was dropped.`,
       );
       return false;
     }
