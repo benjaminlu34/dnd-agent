@@ -38,6 +38,9 @@ const FACTION_TEXT_STOPWORDS = new Set([
   "cult",
 ]);
 
+const MAX_MINOR_LOCATIONS_PER_PARENT = 5;
+const MIN_TOPOLOGY_TRAVEL_MINUTES = 5;
+
 export function buildAdjacency(module: {
   locations: Array<{ id: string }>;
   edges: Array<{ sourceId: string; targetId: string }>;
@@ -199,6 +202,12 @@ export function validateWorldSpine(spine: GeneratedWorldSpine): ValidationReport
   for (const edge of spine.edges) {
     if (!locationKeys.has(edge.sourceKey) || !locationKeys.has(edge.targetKey)) {
       issues.push(`Route ${edge.key} references an unknown location.`);
+    }
+
+    if (edge.travelTimeMinutes < MIN_TOPOLOGY_TRAVEL_MINUTES) {
+      issues.push(
+        `Route ${edge.key} takes only ${edge.travelTimeMinutes} minute(s). Intra-location movement should stay narrative instead of becoming topology.`,
+      );
     }
   }
 
@@ -426,11 +435,47 @@ export function validateWorldModuleCoherence(module: GeneratedWorldModule): Vali
   const factionIds = new Set(module.factions.map((faction) => faction.id));
   const npcIds = new Set(module.npcs.map((npc) => npc.id));
   const informationIds = new Set(module.information.map((information) => information.id));
+  const edgeIds = new Set(module.edges.map((edge) => edge.id));
   const adjacency = buildAdjacency(module);
+  const locationNames = new Map(module.locations.map((location) => [location.id, location.name]));
+  const minorChildrenByParent = new Map<string, number>();
 
   for (const edge of module.edges) {
     if (!locationIds.has(edge.sourceId) || !locationIds.has(edge.targetId)) {
       issues.push(`Edge ${edge.id} references an unknown location.`);
+    }
+
+    if (edge.travelTimeMinutes < MIN_TOPOLOGY_TRAVEL_MINUTES) {
+      issues.push(
+        `Edge ${edge.id} takes only ${edge.travelTimeMinutes} minute(s). Intra-location movement should stay narrative instead of becoming topology.`,
+      );
+    }
+  }
+
+  for (const location of module.locations) {
+    if (location.locationKind === "minor") {
+      if (!location.parentLocationId) {
+        issues.push(`Minor location ${location.name} is missing a parent location.`);
+      }
+
+      if (!location.justificationForNode?.trim()) {
+        issues.push(`Minor location ${location.name} is missing justificationForNode.`);
+      }
+
+      if (location.parentLocationId) {
+        minorChildrenByParent.set(
+          location.parentLocationId,
+          (minorChildrenByParent.get(location.parentLocationId) ?? 0) + 1,
+        );
+      }
+    }
+  }
+
+  for (const [parentLocationId, childCount] of minorChildrenByParent.entries()) {
+    if (childCount > MAX_MINOR_LOCATIONS_PER_PARENT) {
+      issues.push(
+        `Location ${locationNames.get(parentLocationId) ?? parentLocationId} has ${childCount} minor locations attached. Consolidate micro-places into world objects or scene focus instead of topology.`,
+      );
     }
   }
 
@@ -462,6 +507,18 @@ export function validateWorldModuleCoherence(module: GeneratedWorldModule): Vali
     if (information.sourceNpcId && !npcIds.has(information.sourceNpcId)) {
       issues.push(`Information ${information.id} references an unknown source NPC.`);
     }
+
+    for (const edgeId of information.revealsEdgeIds ?? []) {
+      if (!edgeIds.has(edgeId)) {
+        issues.push(`Information ${information.id} reveals unknown edge ${edgeId}.`);
+      }
+    }
+
+    for (const locationId of information.revealsLocationIds ?? []) {
+      if (!locationIds.has(locationId)) {
+        issues.push(`Information ${information.id} reveals unknown location ${locationId}.`);
+      }
+    }
   }
 
   for (const price of module.marketPrices) {
@@ -491,6 +548,11 @@ export function validateWorldModuleCoherence(module: GeneratedWorldModule): Vali
   for (const entryPoint of module.entryPoints) {
     if (!locationIds.has(entryPoint.startLocationId)) {
       issues.push(`Entry point ${entryPoint.id} references an unknown start location.`);
+    }
+
+    const startLocation = module.locations.find((location) => location.id === entryPoint.startLocationId);
+    if (startLocation?.discoveryState === "ambient") {
+      issues.push(`Entry point ${entryPoint.id} starts at an ambient-only location.`);
     }
   }
 

@@ -2411,7 +2411,11 @@ test("observe mechanics safety allows passive mutations but rejects active ones"
       type: "resolve_mechanics",
       timeMode: "exploration",
       suggestedActions: ["Approach the guard"],
-      mutations: [{ type: "move_player", routeEdgeId: "edge_gate_market", targetLocationId: "loc_market" }],
+      mutations: [{
+        type: "move_player",
+        targetLocationId: "loc_market",
+        relocationReason: "forced_transport",
+      }],
     }),
     false,
   );

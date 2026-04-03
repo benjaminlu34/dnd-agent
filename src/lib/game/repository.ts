@@ -141,6 +141,13 @@ function parseOpenWorldGenerationArtifacts(value: unknown): OpenWorldGenerationA
   return openWorldGenerationArtifactsSchema.parse(value);
 }
 
+function stripLocationGenerationMetadata(world: GeneratedWorldModule): GeneratedWorldModule {
+  return {
+    ...world,
+    locations: world.locations.map(({ justificationForNode: _justificationForNode, ...location }) => location),
+  };
+}
+
 function fallbackLocalContactNpcId(
   world: GeneratedWorldModule,
   entryPoint: GeneratedWorldModule["entryPoints"][number],
@@ -1702,17 +1709,18 @@ export async function createAdventureModule(input: {
   artifacts?: OpenWorldGenerationArtifacts;
 }) {
   const user = await ensureLocalUser();
+  const sanitizedDraft = stripLocationGenerationMetadata(input.draft);
 
   const adventureModule = await prisma.adventureModule.create({
     data: {
       userId: user.id,
-      title: input.draft.title,
-      premise: input.draft.premise,
-      tone: input.draft.tone,
-      setting: input.draft.setting,
+      title: sanitizedDraft.title,
+      premise: sanitizedDraft.premise,
+      tone: sanitizedDraft.tone,
+      setting: sanitizedDraft.setting,
       generationMode: "open_world",
       schemaVersion: 1,
-      openWorldTemplateJson: input.draft,
+      openWorldTemplateJson: sanitizedDraft,
       openWorldGenerationArtifactsJson: input.artifacts ?? Prisma.JsonNull,
     },
     include: {

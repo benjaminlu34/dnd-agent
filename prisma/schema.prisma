@@ -104,6 +104,9 @@ model Campaign {
   locationKnowledge   LocationKnowledge[]
   scheduleGenerationJobs ScheduleGenerationJob[]
   memoryEntityLinks   MemoryEntityLink[]
+  knownRoutes         CampaignKnownRoute[]
+  promptCache         CampaignPromptCache?
+  activeJourney       ActiveJourney?
 }
 
 model CharacterInstance {
@@ -280,6 +283,9 @@ model LocationNode {
   campaignId           String
   name                 String
   type                 String
+  locationKind         String          @default("spine")
+  parentLocationId     String?
+  discoveryState       String          @default("revealed")
   summary              String
   description          String?
   localTextureJson     Json?
@@ -290,8 +296,13 @@ model LocationNode {
   updatedAt            DateTime        @updatedAt
   campaign             Campaign        @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   controllingFaction   Faction?        @relation("ControlledLocationFaction", fields: [controllingFactionId], references: [id], onDelete: SetNull)
+  parentLocation       LocationNode?   @relation("LocationNodeParentChild", fields: [parentLocationId], references: [id], onDelete: SetNull)
+  childLocations       LocationNode[]  @relation("LocationNodeParentChild")
   edgesFrom            LocationEdge[]  @relation("EdgeSource")
   edgesTo              LocationEdge[]  @relation("EdgeTarget")
+  revealedByInformation InformationRevealsLocation[]
+  activeJourneysAsOrigin ActiveJourney[] @relation("JourneyOriginLocation")
+  activeJourneysAsDestination ActiveJourney[] @relation("JourneyDestinationLocation")
   npcs                 NPC[]
   information          Information[]
   knowledge            LocationKnowledge[]
@@ -306,6 +317,7 @@ model LocationNode {
 
   @@index([campaignId])
   @@index([campaignId, controllingFactionId])
+  @@index([campaignId, parentLocationId])
 }
 
 model LocationEdge {
@@ -316,12 +328,17 @@ model LocationEdge {
   travelTimeMinutes Int
   dangerLevel       Int          @default(1)
   currentStatus     String       @default("open")
+  visibility        String       @default("public")
+  accessRequirementText String?
   description       String?
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
   campaign          Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   source            LocationNode @relation("EdgeSource", fields: [sourceId], references: [id], onDelete: Cascade)
   target            LocationNode @relation("EdgeTarget", fields: [targetId], references: [id], onDelete: Cascade)
+  revealedByInformation InformationRevealsEdge[]
+  knownByCampaigns   CampaignKnownRoute[]
+  activeJourneys     ActiveJourney[]
 
   @@index([campaignId, sourceId])
   @@index([campaignId, targetId])
@@ -395,6 +412,7 @@ model NPC {
   npcRoutines       NpcRoutine[]
   actors            Actor[]
   promotedTemporaryActors TemporaryActor[]
+  journeyMemberships   JourneyNpc[]
   knowledge         NpcKnowledge[]
   heldItems         ItemInstance[] @relation("NpcItemHolder")
   heldCommodityStacks CharacterCommodityStack[] @relation("NpcCommodityHolder")
@@ -430,6 +448,7 @@ model Actor {
   heldItems           ItemInstance[]           @relation("ActorItemHolder")
   heldCommodityStacks CharacterCommodityStack[] @relation("ActorCommodityHolder")
   heldWorldObjects    WorldObject[]            @relation("WorldObjectActorHolder")
+  journeyMemberships  JourneyActor[]
 
   @@index([campaignId, profileNpcId])
   @@index([campaignId, currentLocationId])
@@ -459,6 +478,8 @@ model Information {
   sourceNpc        NPC?              @relation("InformationSourceNpc", fields: [sourceNpcId], references: [id], onDelete: SetNull)
   sourceLinks      InformationLink[] @relation("InformationLinkSource")
   targetLinks      InformationLink[] @relation("InformationLinkTarget")
+  revealsEdges     InformationRevealsEdge[]
+  revealsLocations InformationRevealsLocation[]
   npcKnowledge     NpcKnowledge[]
   factionKnowledge FactionKnowledge[]
   locationKnowledge LocationKnowledge[]
@@ -531,6 +552,123 @@ model InformationLink {
 
   @@unique([campaignId, sourceId, targetId])
   @@index([campaignId])
+}
+
+model InformationRevealsEdge {
+  id            String       @id @default(cuid())
+  informationId String
+  edgeId        String
+  createdAt     DateTime     @default(now())
+  information   Information  @relation(fields: [informationId], references: [id], onDelete: Cascade)
+  edge          LocationEdge @relation(fields: [edgeId], references: [id], onDelete: Cascade)
+
+  @@unique([informationId, edgeId])
+  @@index([edgeId])
+}
+
+model InformationRevealsLocation {
+  id            String       @id @default(cuid())
+  informationId String
+  locationId    String
+  createdAt     DateTime     @default(now())
+  information   Information  @relation(fields: [informationId], references: [id], onDelete: Cascade)
+  location      LocationNode @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@unique([informationId, locationId])
+  @@index([locationId])
+}
+
+model CampaignKnownRoute {
+  id         String       @id @default(cuid())
+  campaignId String
+  edgeId     String
+  createdAt  DateTime     @default(now())
+  campaign   Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  edge       LocationEdge @relation(fields: [edgeId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, edgeId])
+  @@index([edgeId])
+}
+
+model ActiveJourney {
+  id                   String               @id @default(cuid())
+  campaignId           String               @unique
+  edgeId               String
+  originLocationId     String
+  destinationLocationId String
+  elapsedMinutes       Int                  @default(0)
+  totalDurationMinutes Int
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+  campaign             Campaign             @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  edge                 LocationEdge         @relation(fields: [edgeId], references: [id], onDelete: Restrict)
+  originLocation       LocationNode         @relation("JourneyOriginLocation", fields: [originLocationId], references: [id], onDelete: Restrict)
+  destinationLocation  LocationNode         @relation("JourneyDestinationLocation", fields: [destinationLocationId], references: [id], onDelete: Restrict)
+  journeyNpcs          JourneyNpc[]
+  journeyActors        JourneyActor[]
+  journeyTemporaryActors JourneyTemporaryActor[]
+  journeyWorldObjects  JourneyWorldObject[]
+
+  @@index([edgeId])
+  @@index([originLocationId])
+  @@index([destinationLocationId])
+}
+
+model JourneyNpc {
+  id        String        @id @default(cuid())
+  journeyId String
+  npcId     String
+  createdAt DateTime      @default(now())
+  journey   ActiveJourney @relation(fields: [journeyId], references: [id], onDelete: Cascade)
+  npc       NPC           @relation(fields: [npcId], references: [id], onDelete: Cascade)
+
+  @@unique([journeyId, npcId])
+  @@index([npcId])
+}
+
+model JourneyActor {
+  id        String        @id @default(cuid())
+  journeyId String
+  actorId   String
+  createdAt DateTime      @default(now())
+  journey   ActiveJourney @relation(fields: [journeyId], references: [id], onDelete: Cascade)
+  actor     Actor         @relation(fields: [actorId], references: [id], onDelete: Cascade)
+
+  @@unique([journeyId, actorId])
+  @@index([actorId])
+}
+
+model JourneyTemporaryActor {
+  id               String        @id @default(cuid())
+  journeyId        String
+  temporaryActorId String
+  createdAt        DateTime      @default(now())
+  journey          ActiveJourney @relation(fields: [journeyId], references: [id], onDelete: Cascade)
+  temporaryActor   TemporaryActor @relation(fields: [temporaryActorId], references: [id], onDelete: Cascade)
+
+  @@unique([journeyId, temporaryActorId])
+  @@index([temporaryActorId])
+}
+
+model JourneyWorldObject {
+  id            String        @id @default(cuid())
+  journeyId     String
+  worldObjectId String
+  createdAt     DateTime      @default(now())
+  journey       ActiveJourney @relation(fields: [journeyId], references: [id], onDelete: Cascade)
+  worldObject   WorldObject   @relation(fields: [worldObjectId], references: [id], onDelete: Cascade)
+
+  @@unique([journeyId, worldObjectId])
+  @@index([worldObjectId])
+}
+
+model CampaignPromptCache {
+  campaignId         String   @id
+  promptRequestId    String
+  discoveryHooksJson Json
+  latentTargetsJson  Json
+  updatedAt          DateTime @updatedAt
+  campaign           Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 }
 
 model Commodity {
@@ -654,6 +792,7 @@ model TemporaryActor {
   heldItems           ItemInstance[] @relation("TemporaryActorItemHolder")
   heldCommodityStacks CharacterCommodityStack[] @relation("TemporaryActorCommodityHolder")
   heldWorldObjects    WorldObject[] @relation("WorldObjectTemporaryActorHolder")
+  journeyMemberships  JourneyTemporaryActor[]
 
   @@index([campaignId, currentLocationId])
   @@index([campaignId, lastSeenAtTurn])
@@ -691,6 +830,7 @@ model WorldObject {
   securityKeyTemplate       ItemTemplate?          @relation("WorldObjectSecurityKeyTemplate", fields: [securityKeyItemTemplateId], references: [id], onDelete: SetNull)
   storedItems               ItemInstance[]         @relation("WorldObjectItemHolder")
   storedCommodityStacks     CharacterCommodityStack[] @relation("WorldObjectCommodityHolder")
+  journeyMemberships        JourneyWorldObject[]
 
   @@index([campaignId])
   @@index([characterInstanceId])

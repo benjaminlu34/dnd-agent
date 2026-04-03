@@ -1433,6 +1433,15 @@ const WORLD_GEN_PRINCIPLES = [
   "Reuse exact nouns or noun phrases from the prompt whenever possible instead of renaming the setting into a new generic brand.",
 ];
 
+const WORLD_GEN_SCALE_GUIDE = [
+  "Entity routing guide:",
+  "Use location nodes only for places that deserve geography: they require meaningful transit time, mechanical isolation, access control, or physical risk to enter.",
+  "World spine locations should be regions, districts, chokepoints, settlements, forts, dungeons, harbors, and other major places people navigate between.",
+  "Do not mint bakeries, stalls, ordinary taverns, warehouses, routine storefronts, or individual rooms as location nodes unless the place is unusually isolated, fortified, hidden, or risky to reach.",
+  "Micro-geography and scene furniture should stay inside the parent place as narrative space or world objects rather than becoming travel topology.",
+  "If you ever create a minor location node, justify it through travel, barriers, secrecy, or danger from its parent place.",
+];
+
 const WORLD_GEN_ANTI_PATTERNS = [
   "Do not default to chosen ones, ancient evils, prophecy, dark lords, or vague magical corruption.",
   "Do not create ornamental NPCs, empty postcard locations, or generic stock-setting filler.",
@@ -1447,6 +1456,7 @@ const WORLD_GEN_ANTI_PATTERNS = [
 function buildWorldGenSystemPrompt(lines: string[]) {
   return [
     ...WORLD_GEN_PRINCIPLES,
+    ...WORLD_GEN_SCALE_GUIDE,
     "Forbidden patterns:",
     ...WORLD_GEN_ANTI_PATTERNS.map((line) => `- ${line}`),
     "Success criteria:",
@@ -2379,9 +2389,42 @@ const mechanicsMutationSchema = z.discriminatedUnion("type", [
     phase: z.enum(["immediate", "conditional"]).optional(),
   }),
   z.object({
+    type: z.literal("start_journey"),
+    edgeId: z.string().trim().min(1),
+    destinationLocationId: z.string().trim().min(1),
+    phase: z.enum(["immediate", "conditional"]).optional(),
+  }),
+  z.object({
     type: z.literal("move_player"),
-    routeEdgeId: z.string().trim().min(1),
     targetLocationId: z.string().trim().min(1),
+    relocationReason: z.enum([
+      "teleportation",
+      "magical_portal",
+      "trap_relocation",
+      "forced_transport",
+    ]),
+    phase: z.enum(["immediate", "conditional"]).optional(),
+  }),
+  z.object({
+    type: z.literal("arrive_at_destination"),
+    authoredTimeElapsedMinutes: z.number().int().min(0).max(2880),
+    phase: z.enum(["immediate", "conditional"]).optional(),
+  }),
+  z.object({
+    type: z.literal("turn_back_travel"),
+    authoredTimeElapsedMinutes: z.number().int().min(0).max(2880),
+    phase: z.enum(["immediate", "conditional"]).optional(),
+  }),
+  z.object({
+    type: z.literal("resolve_discovery_hook"),
+    hookAlias: z.string().trim().min(1).max(120),
+    reason: z.string().trim().min(1).max(160),
+    phase: z.enum(["immediate", "conditional"]).optional(),
+  }),
+  z.object({
+    type: z.literal("force_reveal_discovery"),
+    targetAlias: z.string().trim().min(1).max(120),
+    reason: z.string().trim().min(1).max(160),
     phase: z.enum(["immediate", "conditional"]).optional(),
   }),
   z.object({
@@ -2849,7 +2892,7 @@ function isGroundedResolvedReferent(
     case "information":
       return context.discoveredInformation.some((information) => information.id === entry.targetRef);
     case "location":
-      return context.currentLocation.id === entry.targetRef;
+      return context.currentLocation?.id === entry.targetRef;
     default:
       return true;
   }
@@ -3118,6 +3161,25 @@ function formatRouterRouteLine(route: TurnRouterContext["adjacentRoutes"][number
   return `${compactPromptText(route.targetLocationName, 80)} (${route.travelTimeMinutes}m, ${route.currentStatus}, danger ${route.dangerLevel}) [${route.id}]`;
 }
 
+function formatPromptRouteLine(route: SpatialPromptContext["adjacentRoutes"][number]) {
+  const visibility = route.visibility ? `, ${route.visibility}` : "";
+  const known = route.isKnown ? ", known" : "";
+  const gated = route.accessRequirementText ? `, gate: ${compactPromptText(route.accessRequirementText, 70)}` : "";
+  return `${compactPromptText(route.targetLocationName, 80)} (${route.travelTimeMinutes}m, ${route.currentStatus}${visibility}${known}, danger ${route.dangerLevel}${gated}) [${route.id}]`;
+}
+
+function formatPromptLocationLeadLine(lead: NonNullable<SpatialPromptContext["locationLeads"]>[number]) {
+  return `${compactPromptText(lead.name, 80)} (${lead.type}, ${lead.discoveryState}) [${lead.locationId}] - ${compactPromptText(lead.summary, 110)}`;
+}
+
+function formatPromptDiscoveryHookLine(hook: NonNullable<SpatialPromptContext["discoveryHooks"]>[number]) {
+  return `${hook.kind}:${hook.hookAlias} -> ${compactPromptText(hook.label, 80)} (${compactPromptText(hook.reason, 100)})`;
+}
+
+function formatPromptLatentTargetLine(target: NonNullable<SpatialPromptContext["latentTargets"]>[number]) {
+  return `${target.kind}:${target.targetAlias} -> ${compactPromptText(target.label, 80)}`;
+}
+
 function formatRouterInventoryLine(item: TurnRouterContext["inventory"][number]) {
   const ids = item.instanceIds?.length ? ` instanceIds ${item.instanceIds.slice(0, 3).join(",")}` : "";
   const tags = item.stateTags?.length ? ` ${item.stateTags.join("/")}` : "";
@@ -3153,13 +3215,24 @@ function formatRouterKnownNpcLine(npc: NonNullable<TurnRouterContext["knownNearb
   return `${label}${role ? ` (${role})` : ""} [${npc.id}, known-npc, nearby-not-present-at-this-focus${detailHint}${tags}]${summary ? ` - ${summary}` : ""}`;
 }
 
+function formatRouterLocationLeadLine(lead: NonNullable<TurnRouterContext["locationLeads"]>[number]) {
+  return `${compactPromptText(lead.name, 80)} (${lead.type}, ${lead.discoveryState}) [${lead.locationId}] - ${compactPromptText(lead.summary, 100)}`;
+}
+
 function formatRouterContextForModel(context: TurnRouterContext) {
   const sceneFocusLabel = context.sceneFocus?.label?.trim() || null;
+  const currentLocationLabel = context.currentLocation?.name ?? "the road between locations";
+  const currentLocationSummary = context.currentLocation
+    ? `${context.currentLocation.name} (${context.currentLocation.type}, state: ${context.currentLocation.state})`
+    : "Journey in progress";
+  const activeJourneySummary = context.activeJourney
+    ? `${context.activeJourney.originLocationName} -> ${context.activeJourney.destinationLocationName} (${context.activeJourney.elapsedMinutes}/${context.activeJourney.totalDurationMinutes}m, ${context.activeJourney.remainingMinutes}m remaining) [${context.activeJourney.edgeId}]`
+    : null;
   return {
     locationOrientation: sceneFocusLabel
-      ? `You are in ${context.currentLocation.name}. Your current focus/position is: ${sceneFocusLabel}.`
-      : `You are in ${context.currentLocation.name}.`,
-    currentLocation: `${context.currentLocation.name} (${context.currentLocation.type}, state: ${context.currentLocation.state})`,
+      ? `You are in ${currentLocationLabel}. Your current focus/position is: ${sceneFocusLabel}.`
+      : `You are in ${currentLocationLabel}.`,
+    currentLocation: currentLocationSummary,
     currency: context.currency,
     authoritativeState: {
       sceneActors: context.sceneActors.slice(0, 8).map(formatRouterSceneActorLine),
@@ -3168,6 +3241,8 @@ function formatRouterContextForModel(context: TurnRouterContext) {
       worldObjects: context.worldObjects.slice(0, 8).map(formatRouterWorldObjectLine),
       sceneAspects: context.sceneAspects.slice(0, 8).map(formatRouterSceneAspectLine),
       routes: context.adjacentRoutes.slice(0, 6).map(formatRouterRouteLine),
+      locationLeads: (context.locationLeads ?? []).slice(0, 6).map(formatRouterLocationLeadLine),
+      activeJourney: activeJourneySummary,
     },
     recentLocalEvents: context.recentLocalEvents
       .slice(0, 2)
@@ -3431,7 +3506,7 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "acknowledges is the only low-intensity fallback outcome and must not silently imply agreement.",
         "interactionSummary is the single grounded detail field and should state the concrete result when relevant.",
         "If socialOutcome is acknowledges, hesitates, withholds, asks_question, redirects, resists, or withdraws, interactionSummary must stay unresolved and must not close a decision, agreement, invitation, or emotional resolution.",
-        "Do not describe physical movement, arrivals, departures, returns, repositioning, or new blocking in interactionSummary. Use set_scene_actor_presence, set_player_scene_focus, or move_player to manifest physical progression.",
+        "Do not describe physical movement, arrivals, departures, returns, repositioning, or new blocking in interactionSummary. Use set_scene_actor_presence, set_player_scene_focus, start_journey, or move_player to manifest physical progression.",
         "Fetched npc_detail for a named NPC is sufficient grounding for identity, memory, and bare npc ids, but it is not physical presence.",
         "Use record_actor_interaction for grounded named NPCs, creatures, and anonymous locals already manifested in sceneActors.",
         "Use record_npc_interaction only as a compatibility fallback when an embodied actorId is unavailable.",
@@ -3541,7 +3616,8 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Use commit_market_trade only for strict commodity trade backed by fetched market prices.",
         `The currency system uses cp, sp, gp, and pp. ${COPPER_PER_SILVER} cp = 1 sp, ${COPPER_PER_GOLD} cp = 1 gp, and ${COPPER_PER_PLATINUM} cp = 1 pp.`,
         "Use adjust_currency for incidental payments, rewards, bribes, tips, fees, or other non-market currency movement.",
-        "Use move_player only for actual route travel to a known adjacent location.",
+        "Use start_journey for ordinary physical route travel to a known adjacent location.",
+        "Use move_player only for teleportation, magical portals, trap relocation, or forced transport.",
         "Use record_local_interaction for current-scene unnamed locals instead of adjust_relationship.",
         "Use record_actor_interaction for ordinary same-scene dialogue with a grounded embodied actor when the exchange matters but no relationship shift is required.",
         "Use record_npc_interaction only as a compatibility fallback when no grounded actorId is available.",
@@ -3550,7 +3626,7 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "acknowledges is the only low-intensity fallback outcome and must not silently imply agreement.",
         "interactionSummary is the single grounded detail field and should state the concrete result when relevant.",
         "If socialOutcome is acknowledges, hesitates, withholds, asks_question, redirects, resists, or withdraws, interactionSummary must stay unresolved and must not close a decision, agreement, invitation, or emotional resolution.",
-        "Do not describe physical movement, arrivals, departures, returns, repositioning, or new blocking in interactionSummary. Use set_scene_actor_presence, set_player_scene_focus, or move_player to manifest physical progression.",
+        "Do not describe physical movement, arrivals, departures, returns, repositioning, or new blocking in interactionSummary. Use set_scene_actor_presence, set_player_scene_focus, start_journey, or move_player to manifest physical progression.",
         "Use sceneActors.actorRef values exactly only for actorRef fields such as set_scene_actor_presence and set_follow_state.",
         "Prefer record_actor_interaction and set_actor_state for embodied mechanics when a grounded actorId is available in sceneActors.",
         "For npcId, citedNpcId, and targetNpcId fields, use the bare NPC id without the npc: prefix.",
@@ -3766,14 +3842,23 @@ function buildTurnRouterSystemPrompt(correctionNotes?: string | null) {
 
 function formatSpatialPromptContext(context: SpatialPromptContext) {
   const sceneFocusLabel = context.sceneFocus?.label?.trim() || null;
+  const currentLocationLabel = context.currentLocation?.name ?? "the road between locations";
+  const activeJourneyLine = context.activeJourney
+    ? `${context.activeJourney.originLocationName} -> ${context.activeJourney.destinationLocationName} (${context.activeJourney.elapsedMinutes}/${context.activeJourney.totalDurationMinutes}m, ${context.activeJourney.remainingMinutes}m remaining) [${context.activeJourney.edgeId}]`
+    : null;
   return {
     locationOrientation: sceneFocusLabel
-      ? `You are in ${context.currentLocation.name}. Your current focus/position is: ${sceneFocusLabel}.`
-      : `You are in ${context.currentLocation.name}.`,
+      ? `You are in ${currentLocationLabel}. Your current focus/position is: ${sceneFocusLabel}.`
+      : `You are in ${currentLocationLabel}.`,
+    promptRequestId: context.promptRequestId ?? null,
     authoritativeState: {
       currentLocation: context.currentLocation,
       sceneFocus: context.sceneFocus,
-      adjacentRoutes: context.adjacentRoutes,
+      routes: context.adjacentRoutes.map(formatPromptRouteLine),
+      locationLeads: (context.locationLeads ?? []).map(formatPromptLocationLeadLine),
+      activeJourney: activeJourneyLine,
+      discoveryHooks: (context.discoveryHooks ?? []).map(formatPromptDiscoveryHookLine),
+      latentTargets: (context.latentTargets ?? []).map(formatPromptLatentTargetLine),
       sceneActors: context.sceneActors,
       inventory: context.inventory,
       currency: context.currency,
@@ -3815,7 +3900,7 @@ function buildTurnUserPrompt(input: {
   ].join("\n\n");
 }
 
-function isAppliedArrivalMutation(entry: StateCommitLog[number], currentLocationId: string) {
+function isAppliedArrivalMutation(entry: StateCommitLog[number], currentLocationId: string | null) {
   if (entry.status !== "applied") {
     return false;
   }
@@ -3962,7 +4047,7 @@ function buildResolvedNarrationConstraints(input: ResolvedTurnNarrationInput) {
     unresolvedTargetFailure: unresolvedTargetMentions.length > 0,
     unresolvedTargetMentions,
     hasArrivalCommit: sanitizedCommitLog.some((entry) =>
-      isAppliedArrivalMutation(entry, input.promptContext.currentLocation.id),
+      isAppliedArrivalMutation(entry, input.promptContext.currentLocation?.id ?? null),
     ),
   };
 }
@@ -4749,6 +4834,7 @@ class DungeonMasterClient {
                 "Use only known faction keys in controllingFactionKey.",
                 "Do not repeat or rename any existing location shown above.",
                 `Ensure at least ${minimumEverydayNeededThisBatch} of this batch's locations are work sites, civic hubs, chokepoints, or settlements ordinary people actually use day to day.`,
+                "Generate major world locations, not individual businesses, ordinary rooms, or routine storefronts.",
                 suggestedNonEverydaySlotsThisBatch > 0
                   ? `Use the remaining ${suggestedNonEverydaySlotsThisBatch} slot(s) for dangerous, sacred, remote, hidden, or otherwise special-purpose locations people do not use in everyday routine.`
                   : "If this batch is forced to be fully everyday-use by the composition tracker, keep later batches available for stranger or more dangerous special-purpose sites.",
@@ -5544,6 +5630,10 @@ class DungeonMasterClient {
               id: idMaps.locations[location.key],
               name: location.name,
               type: location.type,
+              locationKind: "spine",
+              parentLocationId: null,
+              discoveryState: "revealed",
+              justificationForNode: null,
               summary: location.summary,
               description: enrichLocationDescription(
                 `${location.description} ${location.localIdentity}`,
@@ -5749,6 +5839,10 @@ class DungeonMasterClient {
           id: idMaps.locations[location.key],
           name: location.name,
           type: location.type,
+          locationKind: "spine",
+          parentLocationId: null,
+          discoveryState: "revealed",
+          justificationForNode: null,
           summary: location.summary,
           description: enrichLocationDescription(
             `${location.description} ${location.localIdentity}`,

@@ -41,11 +41,19 @@ function remapLocation(
   factionIds: Map<string, string>,
 ): GeneratedLocationNode {
   return {
-    ...location,
     id: locationIds.get(location.id) ?? location.id,
+    name: location.name,
+    type: location.type,
+    locationKind: location.locationKind,
+    parentLocationId: location.parentLocationId,
+    discoveryState: location.discoveryState,
     controllingFactionId: location.controllingFactionId
       ? (factionIds.get(location.controllingFactionId) ?? location.controllingFactionId)
       : null,
+    summary: location.summary,
+    description: location.description,
+    state: location.state,
+    tags: location.tags,
   };
 }
 
@@ -95,6 +103,7 @@ function remapInformation(
   factionIds: Map<string, string>,
   locationIds: Map<string, string>,
   npcIds: Map<string, string>,
+  edgeIds: Map<string, string>,
 ): GeneratedInformation {
   return {
     ...information,
@@ -106,6 +115,10 @@ function remapInformation(
     sourceNpcId: information.sourceNpcId
       ? (npcIds.get(information.sourceNpcId) ?? information.sourceNpcId)
       : null,
+    revealsEdgeIds: (information.revealsEdgeIds ?? []).map((edgeId) => edgeIds.get(edgeId) ?? edgeId),
+    revealsLocationIds: (information.revealsLocationIds ?? []).map((locationId) =>
+      locationIds.get(locationId) ?? locationId
+    ),
   };
 }
 
@@ -200,7 +213,7 @@ export function instanceWorldForCampaign(
       ),
       npcs: world.npcs.map((npc) => remapNpc(npc, npcIds, factionIds, locationIds)),
       information: world.information.map((information) =>
-        remapInformation(information, informationIds, factionIds, locationIds, npcIds),
+        remapInformation(information, informationIds, factionIds, locationIds, npcIds, edgeIds),
       ),
       informationLinks: world.informationLinks.map((link) =>
         remapInformationLink(link, informationLinkIds, informationIds),

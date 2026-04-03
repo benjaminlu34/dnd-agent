@@ -197,7 +197,7 @@ test("validateTurnCommand trims clarification options", () => {
   assert.deepEqual(validated.options, ["front gate", "captain", "harbor watch", "extra"]);
 });
 
-test("validateTurnCommand derives travel time from move_player mutations", () => {
+test("validateTurnCommand treats move_player as instant relocation time", () => {
   const validated = validateTurnCommand({
     snapshot: createSnapshot(),
     command: {
@@ -207,15 +207,15 @@ test("validateTurnCommand derives travel time from move_player mutations", () =>
       mutations: [
         {
           type: "move_player",
-          routeEdgeId: "edge_gate_market",
           targetLocationId: "loc_market",
+          relocationReason: "teleportation",
         },
       ],
     },
   });
 
   assert.equal(validated.type, "resolve_mechanics");
-  assert.equal(validated.timeElapsed, 15);
+  assert.equal(validated.timeElapsed, 0);
 });
 
 test("validateTurnCommand derives explicit advance_time duration", () => {
@@ -933,8 +933,8 @@ test("validateTurnCommand preserves explicit command warnings", () => {
       mutations: [
         {
           type: "move_player",
-          routeEdgeId: "edge_gate_market",
           targetLocationId: "loc_market",
+          relocationReason: "forced_transport",
         },
       ],
     },

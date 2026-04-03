@@ -324,6 +324,7 @@ export type GeneratedLocationNode = {
   locationKind?: LocationKind;
   parentLocationId?: string | null;
   discoveryState?: LocationDiscoveryState;
+  justificationForNode?: string | null;
   summary: string;
   description: string;
   state: string;
@@ -1245,8 +1246,10 @@ export type RouterAuthorizedVector =
 
 export type RequiredPrerequisite =
   | {
-      type: "market_prices";
-      locationId: string;
+      type: "move_player";
+      targetLocationId: string;
+      relocationReason: RelocationReason;
+      phase?: MutationPhase;
     }
   | {
       type: "npc_detail";
@@ -1576,7 +1579,6 @@ export type MechanicsMutation =
   | {
       type: "move_player";
       targetLocationId: string;
-      routeEdgeId?: string;
       relocationReason: RelocationReason;
       phase?: MutationPhase;
     }

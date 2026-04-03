@@ -1905,7 +1905,11 @@ test("scene-duration aspects clear only on successful travel", () => {
   const moved = engineTestUtils.evaluateResolvedCommand({
     snapshot,
     command: createValidatedCommand("success", [
-      { type: "move_player", routeEdgeId: "edge_gate_market", targetLocationId: "loc_market" },
+      {
+        type: "move_player",
+        targetLocationId: "loc_market",
+        relocationReason: "teleportation",
+      },
     ]),
     fetchedFacts: [],
     routerDecision: createRouterDecision(["investigate"]),
@@ -1925,7 +1929,7 @@ test("scene-duration aspects clear only on successful travel", () => {
       ],
     },
     command: createValidatedCommand("success", [
-      { type: "move_player", routeEdgeId: "edge_gate_market", targetLocationId: "loc_market" },
+      { type: "start_journey", edgeId: "edge_gate_market", destinationLocationId: "loc_market" },
     ]),
     fetchedFacts: [],
     routerDecision: createRouterDecision(["investigate"]),
@@ -2073,7 +2077,11 @@ test("set_player_scene_focus updates intra-location focus and clears on macro tr
       },
     },
     command: createValidatedCommand("success", [
-      { type: "move_player", routeEdgeId: "edge_gate_market", targetLocationId: "loc_market" },
+      {
+        type: "move_player",
+        targetLocationId: "loc_market",
+        relocationReason: "magical_portal",
+      },
     ]),
     fetchedFacts: [],
     routerDecision: createRouterDecision(["investigate"]),
@@ -2994,7 +3002,7 @@ test("noop scene actor presence entries do not carry arrival metadata", () => {
   assert.equal(evaluated.stateCommitLog[0]?.metadata?.arrivesInCurrentScene, undefined);
 });
 
-test("blocked routes reject move_player deterministically", () => {
+test("blocked routes reject start_journey deterministically", () => {
   const snapshot = {
     ...createSnapshot(),
     adjacentRoutes: [
@@ -3008,7 +3016,7 @@ test("blocked routes reject move_player deterministically", () => {
   const evaluated = engineTestUtils.evaluateResolvedCommand({
     snapshot,
     command: createValidatedCommand("success", [
-      { type: "move_player", routeEdgeId: "edge_gate_market", targetLocationId: "loc_market" },
+      { type: "start_journey", edgeId: "edge_gate_market", destinationLocationId: "loc_market" },
     ]),
     fetchedFacts: [],
     routerDecision: createRouterDecision(["investigate"]),
@@ -3030,8 +3038,8 @@ test("set_follow_state persists companion refs into next runtime state", () => {
       },
       {
         type: "move_player",
-        routeEdgeId: "edge_gate_market",
         targetLocationId: "loc_market",
+        relocationReason: "forced_transport",
       },
     ]),
     fetchedFacts: [],

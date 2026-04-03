@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   getCampaignSnapshot,
+  issueSnapshotPromptContext,
   toPlayerCampaignSnapshot,
   deleteCampaignForUser,
   renameCampaignForUser,
@@ -20,8 +21,10 @@ export async function GET(_: Request, context: Context) {
     return NextResponse.json({ error: "Campaign not found." }, { status: 404 });
   }
 
+  const hydratedSnapshot = await issueSnapshotPromptContext(snapshot);
+
   return NextResponse.json({
-    snapshot: toPlayerCampaignSnapshot(snapshot),
+    snapshot: toPlayerCampaignSnapshot(hydratedSnapshot),
   });
 }
 

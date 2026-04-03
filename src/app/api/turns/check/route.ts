@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { resolvePendingCheck } from "@/lib/game/engine";
-import { getTurnSnapshot, toPlayerCampaignSnapshot } from "@/lib/game/repository";
+import { getTurnSnapshot, issueSnapshotPromptContext, toPlayerCampaignSnapshot } from "@/lib/game/repository";
 import { createNdjsonStream } from "@/lib/http/ndjson";
-import { TurnLockedError } from "@/lib/game/errors";
+import { StalePromptContextError, TurnLockedError } from "@/lib/game/errors";
 import type { ResolvePendingCheckRequest } from "@/lib/game/types";
 
 export const runtime = "nodejs";
@@ -74,9 +74,11 @@ export async function POST(request: Request) {
         }
 
         if (result.type === "state_conflict") {
+          const latestSnapshot = await getTurnSnapshot(body.campaignId!, body.sessionId!);
+          const hydratedSnapshot = latestSnapshot ? await issueSnapshotPromptContext(latestSnapshot) : null;
           send({
             type: "state_conflict",
-            latestSnapshot: result.payload.latestSnapshot,
+            latestSnapshot: hydratedSnapshot ? toPlayerCampaignSnapshot(hydratedSnapshot) : result.payload.latestSnapshot,
             latestStateVersion: result.payload.latestStateVersion,
             missedTurnDigests: result.payload.missedTurnDigests,
           });
@@ -90,15 +92,29 @@ export async function POST(request: Request) {
 
         const snapshot = await getTurnSnapshot(body.campaignId!, body.sessionId!);
         if (snapshot) {
+          const hydratedSnapshot = await issueSnapshotPromptContext(snapshot);
           send({
             type: "state",
-            snapshot: toPlayerCampaignSnapshot(snapshot),
+            snapshot: toPlayerCampaignSnapshot(hydratedSnapshot),
           });
         }
       } catch (error) {
         if (error instanceof TurnLockedError) {
           send({ type: "error", message: error.message });
           return;
+        }
+        if (error instanceof StalePromptContextError) {
+          const snapshot = await getTurnSnapshot(body.campaignId!, body.sessionId!);
+          const hydratedSnapshot = snapshot ? await issueSnapshotPromptContext(snapshot) : null;
+          if (hydratedSnapshot) {
+            send({
+              type: "stale_prompt_context",
+              error: "stale_prompt_context",
+              latestSnapshot: toPlayerCampaignSnapshot(hydratedSnapshot),
+              message: "stale_prompt_context",
+            });
+            return;
+          }
         }
 
         throw error;

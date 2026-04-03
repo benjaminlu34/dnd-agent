@@ -110,7 +110,7 @@ async function buildScheduleInput(campaignId: string, dayStartTime: number) {
       premise: campaign.module.premise,
       tone: campaign.module.tone,
       setting: campaign.module.setting,
-      currentLocationId: state.currentLocationId,
+      currentLocationId: state.currentLocationId ?? campaign.locationNodes[0]?.id ?? "",
       dayStartTime,
       locations: campaign.locationNodes.map((location) => ({
         id: location.id,

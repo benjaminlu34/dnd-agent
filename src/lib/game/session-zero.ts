@@ -34,16 +34,56 @@ const factionResourcesSchema = z.object({
   information: z.number().int().min(0),
 });
 
-const locationSchema = z.object({
-  id: z.string().trim().min(1),
-  name: z.string().trim().min(1),
-  type: z.string().trim().min(1),
-  summary: z.string().trim().min(1),
-  description: z.string().trim().min(1),
-  state: z.string().trim().min(1),
-  controllingFactionId: z.string().trim().min(1).nullable(),
-  tags: z.array(z.string().trim().min(1)),
-});
+const MINOR_LOCATION_JUSTIFICATION_DESCRIPTION =
+  "Explain why this location deserves to exist as a navigable place instead of scene dressing. Minor locations must require meaningful travel, isolation, access control, or risk from their parent. If it is only a shop, stall, ordinary room, or routine storefront, do not make it a location node; keep it as narrative space or a world object inside the parent place.";
+
+const locationSchema = z
+  .object({
+    id: z.string().trim().min(1),
+    name: z.string().trim().min(1),
+    type: z.string().trim().min(1),
+    locationKind: z.enum(["spine", "minor"]),
+    parentLocationId: z.string().trim().min(1).nullable(),
+    discoveryState: z.enum(["ambient", "rumored", "revealed", "promoted"]),
+    justificationForNode: z
+      .string()
+      .trim()
+      .min(1)
+      .nullable()
+      .optional()
+      .default(null)
+      .describe(MINOR_LOCATION_JUSTIFICATION_DESCRIPTION),
+    summary: z.string().trim().min(1),
+    description: z.string().trim().min(1),
+    state: z.string().trim().min(1),
+    controllingFactionId: z.string().trim().min(1).nullable(),
+    tags: z.array(z.string().trim().min(1)),
+  })
+  .superRefine((location, ctx) => {
+    if (location.locationKind === "spine" && location.parentLocationId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["parentLocationId"],
+        message: "Spine locations may not reference a parentLocationId.",
+      });
+    }
+
+    if (location.locationKind === "minor" && !location.parentLocationId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["parentLocationId"],
+        message: "Minor locations must reference a parentLocationId.",
+      });
+    }
+
+    if (location.locationKind === "minor" && !location.justificationForNode) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["justificationForNode"],
+        message: "Minor locations must justify why they are topology instead of scene dressing.",
+      });
+    }
+  });
 
 const edgeSchema = z.object({
   id: z.string().trim().min(1),
@@ -52,6 +92,8 @@ const edgeSchema = z.object({
   travelTimeMinutes: z.number().int().min(1),
   dangerLevel: z.number().int().min(0).max(10),
   currentStatus: z.string().trim().min(1),
+  visibility: z.enum(["public", "hidden"]),
+  accessRequirementText: z.string().trim().min(1).nullable(),
   description: z.string().trim().min(1).nullable(),
 });
 
@@ -94,6 +136,8 @@ const informationSchema = z.object({
   locationId: z.string().trim().min(1).nullable(),
   factionId: z.string().trim().min(1).nullable(),
   sourceNpcId: z.string().trim().min(1).nullable(),
+  revealsEdgeIds: z.array(z.string().trim().min(1)).default([]),
+  revealsLocationIds: z.array(z.string().trim().min(1)).default([]),
 });
 
 const informationLinkSchema = z.object({
@@ -847,6 +891,7 @@ export const generatedWorldModuleSchema = z
     const npcIds = new Set(draft.npcs.map((npc) => npc.id));
     const informationIds = new Set(draft.information.map((information) => information.id));
     const commodityIds = new Set(draft.commodities.map((commodity) => commodity.id));
+    const edgeIds = new Set(draft.edges.map((edge) => edge.id));
 
     draft.edges.forEach((edge, index) => {
       if (!locationIds.has(edge.sourceId)) {
@@ -872,6 +917,14 @@ export const generatedWorldModuleSchema = z
           code: z.ZodIssueCode.custom,
           path: ["locations", index, "controllingFactionId"],
           message: "Location controller must reference a known faction.",
+        });
+      }
+
+      if (location.parentLocationId && !locationIds.has(location.parentLocationId)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["locations", index, "parentLocationId"],
+          message: "Location parentLocationId must reference a known location.",
         });
       }
     });
@@ -928,6 +981,26 @@ export const generatedWorldModuleSchema = z
           message: "Information sourceNpcId must reference a known NPC.",
         });
       }
+
+      information.revealsEdgeIds.forEach((edgeId, revealIndex) => {
+        if (!edgeIds.has(edgeId)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["information", index, "revealsEdgeIds", revealIndex],
+            message: "Information revealsEdgeIds must reference known edges.",
+          });
+        }
+      });
+
+      information.revealsLocationIds.forEach((locationId, revealIndex) => {
+        if (!locationIds.has(locationId)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["information", index, "revealsLocationIds", revealIndex],
+            message: "Information revealsLocationIds must reference known locations.",
+          });
+        }
+      });
     });
 
     draft.informationLinks.forEach((link, index) => {
@@ -975,6 +1048,15 @@ export const generatedWorldModuleSchema = z
     });
 
     draft.entryPoints.forEach((entryPoint, index) => {
+      const startLocation = draft.locations.find((location) => location.id === entryPoint.startLocationId);
+      if (startLocation?.discoveryState === "ambient") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["entryPoints", index, "startLocationId"],
+          message: "Entry point start locations must already be surfaced to the player.",
+        });
+      }
+
       addEntryPointIssues(
         validateEntryPointReferencesAgainstWorld(entryPoint, {
           locations: draft.locations,

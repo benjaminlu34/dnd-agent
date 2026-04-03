@@ -38,6 +38,12 @@ export type StreamEvent =
       latestStateVersion: number;
       message: string;
     }
+  | {
+      type: "stale_prompt_context";
+      error: "stale_prompt_context";
+      latestSnapshot: PlayerCampaignSnapshot;
+      message: string;
+    }
   | { type: "warning"; message: string }
   | { type: "error"; message: string }
   | { type: "done" };

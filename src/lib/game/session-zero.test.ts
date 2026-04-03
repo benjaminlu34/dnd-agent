@@ -25,6 +25,9 @@ function createWorld(): GeneratedWorldModule {
         summary: "Arrival district.",
         description: "A guarded gate district.",
         state: "active",
+        locationKind: "spine",
+        parentLocationId: null,
+        discoveryState: "revealed",
         controllingFactionId: "fac_watch",
         tags: [],
       },
@@ -35,6 +38,9 @@ function createWorld(): GeneratedWorldModule {
         summary: "Crowded market.",
         description: "A noisy exchange quarter.",
         state: "active",
+        locationKind: "spine",
+        parentLocationId: null,
+        discoveryState: "revealed",
         controllingFactionId: "fac_guild",
         tags: [],
       },
@@ -45,6 +51,9 @@ function createWorld(): GeneratedWorldModule {
         summary: "Harbor front.",
         description: "Wet piers and hidden cargo.",
         state: "contested",
+        locationKind: "spine",
+        parentLocationId: null,
+        discoveryState: "revealed",
         controllingFactionId: "fac_smugglers",
         tags: [],
       },
@@ -55,6 +64,9 @@ function createWorld(): GeneratedWorldModule {
         summary: "Watch command.",
         description: "A hard stone keep.",
         state: "active",
+        locationKind: "spine",
+        parentLocationId: null,
+        discoveryState: "revealed",
         controllingFactionId: "fac_watch",
         tags: [],
       },
@@ -67,6 +79,8 @@ function createWorld(): GeneratedWorldModule {
         travelTimeMinutes: 10,
         dangerLevel: 1,
         currentStatus: "open",
+        visibility: "public",
+        accessRequirementText: null,
         description: null,
       },
       {
@@ -76,6 +90,8 @@ function createWorld(): GeneratedWorldModule {
         travelTimeMinutes: 15,
         dangerLevel: 2,
         currentStatus: "open",
+        visibility: "public",
+        accessRequirementText: null,
         description: null,
       },
       {
@@ -85,6 +101,8 @@ function createWorld(): GeneratedWorldModule {
         travelTimeMinutes: 12,
         dangerLevel: 1,
         currentStatus: "open",
+        visibility: "public",
+        accessRequirementText: null,
         description: null,
       },
       {
@@ -94,6 +112,8 @@ function createWorld(): GeneratedWorldModule {
         travelTimeMinutes: 18,
         dangerLevel: 3,
         currentStatus: "contested",
+        visibility: "public",
+        accessRequirementText: null,
         description: null,
       },
     ],
@@ -283,6 +303,22 @@ test("generatedWorldModuleSchema rejects market prices with unknown factionId", 
 
   assert.equal(parsed.success, false);
   assert.match(JSON.stringify(parsed.error?.flatten()), /factionId/);
+});
+
+test("generatedWorldModuleSchema rejects minor locations without justification", () => {
+  const world = createWorld();
+  world.locations[1] = {
+    ...world.locations[1]!,
+    locationKind: "minor",
+    parentLocationId: "loc_gate",
+    discoveryState: "rumored",
+    justificationForNode: null,
+  };
+
+  const parsed = generatedWorldModuleSchema.safeParse(world);
+
+  assert.equal(parsed.success, false);
+  assert.match(JSON.stringify(parsed.error?.flatten()), /justify why they are topology/);
 });
 
 test("campaign launch request schemas enforce strict XOR for entry selection", () => {

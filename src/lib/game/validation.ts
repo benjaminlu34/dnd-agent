@@ -95,12 +95,17 @@ function deriveTimeElapsed(command: ResolveMechanicsResponse, snapshot: Campaign
     return explicitDuration;
   }
 
-  const moveMutation = command.mutations.find((mutation) => mutation.type === "move_player");
-  if (moveMutation?.type === "move_player") {
-    const route = snapshot.adjacentRoutes.find((entry) => entry.id === moveMutation.routeEdgeId);
-    if (route && route.targetLocationId === moveMutation.targetLocationId) {
-      return route.travelTimeMinutes;
-    }
+  const arrivalMutation = command.mutations.find((mutation) => mutation.type === "arrive_at_destination");
+  if (arrivalMutation?.type === "arrive_at_destination") {
+    return arrivalMutation.authoredTimeElapsedMinutes;
+  }
+
+  const turnBackMutation = command.mutations.find((mutation) => mutation.type === "turn_back_travel");
+  if (turnBackMutation?.type === "turn_back_travel") {
+    return turnBackMutation.authoredTimeElapsedMinutes;
+  }
+
+  if (command.mutations.some((mutation) => mutation.type === "move_player")) {
     return 0;
   }
 
@@ -256,8 +261,13 @@ function isValidActorInteractionTarget(snapshot: CampaignSnapshot, actorId: stri
     return false;
   }
 
+  if (!snapshot.currentLocation) {
+    return false;
+  }
+
+  const currentLocationId = snapshot.currentLocation.id;
   return (snapshot.actors ?? []).some(
-    (actor) => actor.id === normalized && actor.currentLocationId === snapshot.currentLocation.id,
+    (actor) => actor.id === normalized && actor.currentLocationId === currentLocationId,
   );
 }
 

@@ -38,3 +38,10 @@ export class InvalidExpectedStateVersionError extends Error {
     this.latestStateVersion = latestStateVersion;
   }
 }
+
+export class StalePromptContextError extends Error {
+  constructor(message = "stale_prompt_context") {
+    super(message);
+    this.name = "StalePromptContextError";
+  }
+}

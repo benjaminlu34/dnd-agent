@@ -302,6 +302,62 @@ test("world module coherence accepts a connected valid graph", () => {
   assert.deepEqual(report.issues, []);
 });
 
+test("world module coherence rejects over-dense minor sibling locations", () => {
+  const world = createWorld();
+
+  world.locations[0] = {
+    ...world.locations[0]!,
+    locationKind: "spine",
+    parentLocationId: null,
+    discoveryState: "revealed",
+  };
+
+  for (let index = 1; index <= 6; index += 1) {
+    const minorId = `loc_minor_${index}`;
+    world.locations.push({
+      id: minorId,
+      name: `Minor ${index}`,
+      type: "minor_site",
+      locationKind: "minor",
+      parentLocationId: "loc_gate",
+      discoveryState: "rumored",
+      justificationForNode: "Reaching it requires crossing guarded access points away from the main district.",
+      summary: "A gated sub-location.",
+      description: "A sub-location that is isolated from the parent district.",
+      state: "active",
+      controllingFactionId: null,
+      tags: [],
+    });
+    world.edges.push({
+      id: `edge_minor_${index}`,
+      sourceId: "loc_gate",
+      targetId: minorId,
+      travelTimeMinutes: 8,
+      dangerLevel: 1,
+      currentStatus: "open",
+      description: null,
+    });
+  }
+
+  const report = validateWorldModuleCoherence(world);
+
+  assert.equal(report.ok, false);
+  assert.match(report.issues.join("\n"), /minor locations attached/);
+});
+
+test("world module coherence rejects topology edges that are too short", () => {
+  const world = createWorld();
+  world.edges[0] = {
+    ...world.edges[0]!,
+    travelTimeMinutes: 4,
+  };
+
+  const report = validateWorldModuleCoherence(world);
+
+  assert.equal(report.ok, false);
+  assert.match(report.issues.join("\n"), /Intra-location movement should stay narrative/);
+});
+
 test("world module playability rejects over-concentrated NPC placement", () => {
   const world = createWorld();
   world.npcs = world.npcs.map((npc) => ({
