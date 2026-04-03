@@ -936,8 +936,43 @@ const WORLD_SCALE_MICRO_DETAIL_TERMS = [
 ] as const;
 
 function hasWorldScaleMicroDetail(text: string) {
-  const haystack = text.toLowerCase();
-  return WORLD_SCALE_MICRO_DETAIL_TERMS.some((term) => haystack.includes(term));
+  const tokens = new Set(
+    text
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter(Boolean),
+  );
+  return WORLD_SCALE_MICRO_DETAIL_TERMS.some((term) => tokens.has(term));
+}
+
+function buildWorldScaleWorldSpineCorrectionNotes(
+  flaggedLocations: z.infer<typeof worldSpineLocationSchema>[],
+) {
+  const flaggedNames = flaggedLocations.map((location) => location.name);
+  const quotedNames = flaggedNames.map((name) => `"${name}"`).join(", ");
+
+  return [
+    "At world scale, world_spine locations must be macro containers such as regions, civilizations, frontiers, maritime worlds, pilgrimage belts, trade corridors, sacred geographies, oceanic corridors, or macro-polities rather than taverns, streets, shops, or single buildings.",
+    flaggedNames.length > 0
+      ? `Revise these locations so they become macro containers instead of local special sites: ${quotedNames}.`
+      : "Revise any flagged locations so they become macro containers instead of local special sites.",
+    "Use this container test: a valid world-scale location must be something large populations can inhabit, cross, administer, tax, defend, ritualize, trade through, or otherwise organize life around at continental scale.",
+    "Keep the core idea, but widen the scale: turn a singular shrine, blight zone, fortress, tavern, ruin, or named route into a larger frontier, basin-region, dominion, coast, marches, archipelago, corridor world, pilgrimage belt, or sacred geography that contains many local sites within it.",
+    "If the concept is primarily a phenomenon, hazard, scar, landmark, or route, rewrite it as the broader region, borderlands, marches, coast, basin, corridor, or ritual belt organized around living with, crossing, exploiting, or revering that condition.",
+    "Name and summarize each location like a map label, macro system, or civilization-scale geography, not like an encounter area or one-off adventure site.",
+    "Descriptions should emphasize span, movement, trade, populations, border pressure, ritual traffic, governance, or competing powers rather than room-level or site-level detail.",
+  ];
+}
+
+function scaleLabel(scaleTier: WorldScaleTier) {
+  switch (scaleTier) {
+    case "settlement":
+      return "Settlement-scale";
+    case "regional":
+      return "Regional-scale";
+    case "world":
+      return "World-scale";
+  }
 }
 
 function validateScaleAwareWorldSpine(
@@ -948,23 +983,19 @@ function validateScaleAwareWorldSpine(
     return { category: "coherence", issues: [] };
   }
 
-  const issues = locations.flatMap((location) => {
+  const flaggedLocations = locations.filter((location) => {
     const surface = `${location.name} ${location.summary} ${location.description}`;
-    return hasWorldScaleMicroDetail(surface)
-      ? [
-          `World-scale location ${location.name} reads too micro-geographic for a macro region/civilization/frontier node.`,
-        ]
-      : [];
+    return hasWorldScaleMicroDetail(surface);
   });
+  const issues = flaggedLocations.map(
+    (location) =>
+      `World-scale location ${location.name} reads too micro-geographic for a macro region/civilization/frontier node.`,
+  );
 
   return {
     category: "coherence",
     issues,
-    correctionNotes: issues.length
-      ? [
-          "At world scale, world_spine locations must be regions, civilizations, frontiers, oceanic corridors, or macro-polities rather than taverns, streets, shops, or single buildings.",
-        ]
-      : undefined,
+    correctionNotes: issues.length ? buildWorldScaleWorldSpineCorrectionNotes(flaggedLocations) : undefined,
   };
 }
 
@@ -994,6 +1025,204 @@ function validateScaleAwareSocialCast(
         ]
       : undefined,
   };
+}
+
+async function critiqueWorldSpineScaleWithModel(input: {
+  scaleTier: WorldScaleTier;
+  locations: z.infer<typeof worldSpineLocationSchema>[];
+}): Promise<StageValidation> {
+  const fallbackWorldSpineCritique = () =>
+    validateScaleAwareWorldSpine(input.scaleTier, input.locations);
+
+  const critiqueModel = env.openRouterPlannerModel.trim() || env.openRouterModel;
+  if (!critiqueModel) {
+    return fallbackWorldSpineCritique();
+  }
+
+  try {
+    const systemLinesByScale: Record<WorldScaleTier, string[]> = {
+      settlement: [
+        "You are a strict structured critique pass for settlement-scale world spine locations.",
+        "Judge semantic scale, not vibe.",
+        "A valid settlement-scale spine location should read like a district, ward, quarter, harbor, civic hub, chokepoint, fortified site, or other major urban/local sub-place people navigate between.",
+        "Flag locations that read like a single room, single business, private interior, stall, counter, or scene prop, or that balloon upward into continent-scale geography.",
+        "Do not invent new locations. Evaluate only the provided ones.",
+      ],
+      regional: [
+        "You are a strict structured critique pass for regional-scale world spine locations.",
+        "Judge semantic scale, not vibe.",
+        "A valid regional-scale spine location should read like a city, frontier, pass, basin, coast, corridor, marches, stronghold-territory, or other territorial place people travel between across a region.",
+        "Flag locations that read like a single room, single business, tiny neighborhood fragment, or conversely like a whole world, total cosmology, or full civilizational sphere.",
+        "Do not invent new locations. Evaluate only the provided ones.",
+      ],
+      world: [
+        "You are a strict structured critique pass for world-scale world spine locations.",
+        "Judge semantic scale, not vibe.",
+        "A valid world-scale spine location should read like a macro container: a region, civilization, frontier, dominion, archipelago, corridor world, basin-region, marches, sacred geography, pilgrimage belt, maritime world, or macro-polity.",
+        "Flag locations that read like a single site, encounter area, scenic sub-zone, one-off hazard pocket, or adventure destination rather than a macro container people can inhabit, cross, trade through, ritualize, or organize life around.",
+        "Do not invent new locations. Evaluate only the provided ones.",
+      ],
+    };
+    const finalInstructionByScale: Record<WorldScaleTier, string[]> = {
+      settlement: [
+        "Return accept if every location reads like a valid district, ward, civic hub, chokepoint, or other settlement-scale navigable place.",
+        "Return revise if any location reads like a room, business, stall, private interior, or tiny scene fragment rather than a map-usable local place.",
+        "For each flagged location, explain the scale problem concretely.",
+        "Correction notes should tell the generator how to widen or right-size the location without discarding its core concept.",
+      ],
+      regional: [
+        "Return accept if every location reads like a valid city, frontier, route zone, pass, basin, coast, corridor, or regional territory.",
+        "Return revise if any location reads like a room, business, street fragment, or a whole world/civilization rather than a regional map container.",
+        "For each flagged location, explain the scale problem concretely.",
+        "Correction notes should tell the generator how to widen or narrow the location into a proper regional container without discarding its core concept.",
+      ],
+      world: [
+        "Return accept if every location reads like a valid world-scale macro container such as a region, civilization, frontier, corridor world, pilgrimage belt, sacred geography, maritime world, or macro-polity.",
+        "Return revise if any location still reads like only a local site, scenic hazard pocket, named route, crater rim, single grove, single ruin, or encounter area rather than a map-scale container people organize life around.",
+        "For each flagged location, explain the scale problem concretely.",
+        "Correction notes should tell the generator how to widen the flagged location into a macro container without discarding its core concept.",
+      ],
+    };
+
+    const response = await runCompletion({
+      model: critiqueModel,
+      temperature: 0.1,
+      maxTokens: 900,
+      system: systemLinesByScale[input.scaleTier].join("\n"),
+      user: [
+        formatPromptBlock("scale_tier", input.scaleTier),
+        formatPromptBlock("locations", input.locations),
+        formatFinalInstruction(finalInstructionByScale[input.scaleTier]),
+      ].join("\n\n"),
+      tools: [worldSpineScaleCritiqueTool],
+    });
+
+    const parsed = worldSpineScaleCritiqueSchema.safeParse(response?.input);
+    if (!parsed.success) {
+      return fallbackWorldSpineCritique();
+    }
+
+    if (parsed.data.verdict === "accept") {
+      return { category: "coherence", issues: [] };
+    }
+
+    const flaggedLocations = input.locations.filter((location) =>
+      parsed.data.fieldIssues.some((issue) => issue.locationName === location.name),
+    );
+
+    return {
+      category: "coherence",
+      issues: parsed.data.fieldIssues.map(
+        (issue) => `${scaleLabel(input.scaleTier)} location ${issue.locationName} ${issue.issue}.`,
+      ),
+      correctionNotes: parsed.data.correctionNotes.length
+        ? parsed.data.correctionNotes
+        : buildWorldScaleWorldSpineCorrectionNotes(flaggedLocations),
+    };
+  } catch (error) {
+    logOpenRouterResponse("world_spine.critique_error", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return fallbackWorldSpineCritique();
+  }
+}
+
+async function critiqueSocialCastScaleWithModel(input: {
+  scaleTier: WorldScaleTier;
+  npcs: z.infer<typeof generatedSocialLayerInputSchema>["npcs"];
+}): Promise<StageValidation> {
+  const fallbackSocialCastCritique = () =>
+    validateScaleAwareSocialCast(input.scaleTier, input.npcs);
+
+  const critiqueModel = env.openRouterPlannerModel.trim() || env.openRouterModel;
+  if (!critiqueModel) {
+    return fallbackSocialCastCritique();
+  }
+
+  try {
+    const systemLinesByScale: Record<WorldScaleTier, string[]> = {
+      settlement: [
+        "You are a strict structured critique pass for settlement-scale social cast batches.",
+        "Judge semantic anchoring, not prose flair.",
+        "At settlement scale, NPCs should be anchored to public-facing local systems such as ward offices, gatehouses, shrine queues, permit desks, market counters, harbor checkpoints, granary lines, or repair crews.",
+        "Flag NPCs that drift into purely private rooms, decorative scene furniture, or implausibly world-spanning public roles.",
+        "Do not invent new NPCs. Evaluate only the provided ones.",
+      ],
+      regional: [
+        "You are a strict structured critique pass for regional-scale social cast batches.",
+        "Judge semantic anchoring, not prose flair.",
+        "At regional scale, NPCs should be anchored to territorial public systems such as customs lines, caravan depots, relay stations, border inspections, ferry offices, tax circuits, or route-maintenance bodies.",
+        "Flag NPCs that drift into tiny local-address detail or that claim whole-world authority unrelated to the provided regional locations.",
+        "Do not invent new NPCs. Evaluate only the provided ones.",
+      ],
+      world: [
+        "You are a strict structured critique pass for world-scale social cast batches.",
+        "Judge semantic anchoring, not prose flair.",
+        "At world scale, NPCs should be anchored to macro regions or civilizations and should meet the public through macro-regional offices, checkpoints, registries, shrines, ports, ration systems, or trade interfaces.",
+        "Flag NPCs that drift into taverns, rooms, alleys, stalls, shops, or other unmapped local-address detail.",
+        "Do not invent new NPCs. Evaluate only the provided ones.",
+      ],
+    };
+    const finalInstructionByScale: Record<WorldScaleTier, string[]> = {
+      settlement: [
+        "Return accept if every NPC remains plausibly anchored to a settlement-scale public system.",
+        "Return revise if any NPC description, current concern, or public contact surface implies only a private room, decorative prop, or scale-mismatched grand institution instead of a usable local public interface.",
+        "For each flagged NPC, explain the drift concretely.",
+        "Correction notes should tell the generator how to keep the same NPC role while anchoring it to the right local public system.",
+      ],
+      regional: [
+        "Return accept if every NPC remains plausibly anchored to a regional public system or territorial route network.",
+        "Return revise if any NPC description, current concern, or public contact surface implies only a tiny local address or an implausibly whole-world institution instead of a regional public interface.",
+        "For each flagged NPC, explain the drift concretely.",
+        "Correction notes should tell the generator how to keep the same NPC role while anchoring it to the right regional public system.",
+      ],
+      world: [
+        "Return accept if every NPC remains plausibly anchored at world scale.",
+        "Return revise if any NPC description, current concern, or public contact surface implies a local address, small business, room, alley, or other micro-geography instead of a macro-regional public system.",
+        "For each flagged NPC, explain the drift concretely.",
+        "Correction notes should tell the generator how to keep the same NPC role while widening the public interface to a region-scale institution or system.",
+      ],
+    };
+
+    const response = await runCompletion({
+      model: critiqueModel,
+      temperature: 0.1,
+      maxTokens: 900,
+      system: systemLinesByScale[input.scaleTier].join("\n"),
+      user: [
+        formatPromptBlock("scale_tier", input.scaleTier),
+        formatPromptBlock("npcs", input.npcs),
+        formatFinalInstruction(finalInstructionByScale[input.scaleTier]),
+      ].join("\n\n"),
+      tools: [socialCastScaleCritiqueTool],
+    });
+
+    const parsed = socialCastScaleCritiqueSchema.safeParse(response?.input);
+    if (!parsed.success) {
+      return fallbackSocialCastCritique();
+    }
+
+    if (parsed.data.verdict === "accept") {
+      return { category: "immersion", issues: [] };
+    }
+
+    return {
+      category: "immersion",
+      issues: parsed.data.fieldIssues.map(
+        (issue) => `${scaleLabel(input.scaleTier)} NPC ${issue.npcName} ${issue.issue}.`,
+      ),
+      correctionNotes: parsed.data.correctionNotes.length
+        ? parsed.data.correctionNotes
+        : [
+            "At world scale, anchor NPCs to regions or civilizations and define their public contact surface as a macro-regional office, checkpoint, queue, ritual circuit, registry, port authority, ration network, or trade interface rather than a tavern, shop, alley, stall, or room.",
+          ],
+    };
+  } catch (error) {
+    logOpenRouterResponse("social_cast.critique_error", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return fallbackSocialCastCritique();
+  }
 }
 
 function createStructuredTool(
@@ -1598,7 +1827,7 @@ const WORLD_GEN_PRINCIPLES = [
 const WORLD_GEN_SCALE_GUIDE = [
   "Entity routing guide:",
   "Use location nodes only for places that deserve geography: they require meaningful transit time, mechanical isolation, access control, or physical risk to enter.",
-  "World spine locations should be regions, districts, chokepoints, settlements, forts, dungeons, harbors, and other major places people navigate between.",
+  "World spine locations should be major navigable places appropriate to the chosen scale: districts, wards, and civic hubs at settlement scale; cities, frontier points, passes, and territorial corridors at regional scale; and at world scale, macro containers such as regions, civilizations, frontier expanses, maritime worlds, pilgrimage belts, trade corridors, sacred geographies, and macro-polities that people live under or move across at continental scale.",
   "Do not mint bakeries, stalls, ordinary taverns, warehouses, routine storefronts, or individual rooms as location nodes unless the place is unusually isolated, fortified, hidden, or risky to reach.",
   "Micro-geography and scene furniture should stay inside the parent place as narrative space or world objects rather than becoming travel topology.",
   "If you ever create a minor location node, justify it through travel, barriers, secrecy, or danger from its parent place.",
@@ -2366,6 +2595,34 @@ const worldBibleCritiqueSchema = z.object({
   correctionNotes: z.array(z.string().trim().min(1)).max(6),
 });
 
+const worldSpineScaleCritiqueSchema = z.object({
+  verdict: z.enum(["accept", "revise"]),
+  fieldIssues: z
+    .array(
+      z.object({
+        locationName: z.string().trim().min(1),
+        issue: z.string().trim().min(1),
+        offendingText: z.string().trim().min(1),
+      }),
+    )
+    .max(8),
+  correctionNotes: z.array(z.string().trim().min(1)).max(6),
+});
+
+const socialCastScaleCritiqueSchema = z.object({
+  verdict: z.enum(["accept", "revise"]),
+  fieldIssues: z
+    .array(
+      z.object({
+        npcName: z.string().trim().min(1),
+        issue: z.string().trim().min(1),
+        offendingText: z.string().trim().min(1),
+      }),
+    )
+    .max(8),
+  correctionNotes: z.array(z.string().trim().min(1)).max(6),
+});
+
 const worldSpineFactionsSchema = z.object({
   factions: generatedWorldSpineSchema.shape.factions,
 });
@@ -2453,6 +2710,18 @@ const worldBibleCritiqueTool = createStructuredTool(
   "critique_world_bible",
   "Critique whether a generated world bible feels like a lived-in place instead of a generic campaign setting.",
   worldBibleCritiqueSchema,
+);
+
+const worldSpineScaleCritiqueTool = createStructuredTool(
+  "critique_world_spine_scale",
+  "Critique whether world-scale spine locations read like macro regions or civilizations instead of local sites.",
+  worldSpineScaleCritiqueSchema,
+);
+
+const socialCastScaleCritiqueTool = createStructuredTool(
+  "critique_social_cast_scale",
+  "Critique whether world-scale social cast NPCs stay anchored to macro-regional public systems rather than local addresses.",
+  socialCastScaleCritiqueSchema,
 );
 
 const regionalLifeTool = createStructuredTool(
@@ -5213,11 +5482,21 @@ class DungeonMasterClient {
             `This world should finish with ${worldSpineLocationTarget} total locations, returned in batches of ${WORLD_SPINE_LOCATION_BATCH_SIZE}.`,
             "Every generated key must be 40 characters or fewer.",
             "At least half the final location set should be work sites, civic hubs, chokepoints, or settlements ordinary people actually use day to day.",
-            "The rest should lean toward dangerous routes, sacred sites, remote hazards, vaults, monster territory, extraction zones, or other special-purpose places people approach for a reason rather than daily routine.",
+            input.scaleTier === "world"
+              ? "Across the full world spine, keep a mix of stability profiles: some prosperous or orderly core regions, some sacred or ritual-central geographies, some commercially flourishing corridors, some contested borderlands, and some dangerous or collapsing frontiers."
+              : "The rest should lean toward dangerous routes, sacred sites, remote hazards, vaults, monster territory, extraction zones, or other special-purpose places people approach for a reason rather than daily routine.",
             "Do not make every location a work site, civic hub, chokepoint, or settlement.",
             "Preserve the prompt's specific imagery and avoid generic city, ruin, or temple reskins.",
             input.scaleTier === "world"
-              ? "At world scale, locations must be regions, civilizations, frontier expanses, oceanic corridors, or macro-polities rather than taverns, streets, or single buildings."
+              ? [
+                  "At world scale, locations must be macro containers such as regions, civilizations, frontier expanses, oceanic corridors, pilgrimage belts, sacred geographies, maritime worlds, or macro-polities rather than taverns, streets, or single buildings.",
+                  "Use this container test: every world-scale location must be something large populations can inhabit, cross, administer, tax, defend, ritualize, trade through, or otherwise organize life around at continental scale.",
+                  "If a concept is mainly a scar, weather system, landmark, chokepoint, hazard, or route, do not output the phenomenon by itself; output the larger marches, basin, coast, corridor world, ritual belt, borderlands, or region organized around living with, crossing, exploiting, or revering it.",
+                  "Avoid naming world-scale nodes as a single pass, road, route, stair, gate, bridge, or shrine unless the node is explicitly framed as the larger belt, corridor, highlands, marches, or region surrounding that feature.",
+                  "Do not make every world-scale location a crisis zone, extraction frontier, or decaying chokepoint.",
+                  "Some world-scale locations should be important because they are prosperous, orderly, fertile, ritually central, commercially dominant, or legally prestigious, even if they still contain tensions.",
+                  "Distinctiveness at world scale can come from abundance, ritual centrality, legal prestige, agricultural reliability, trade density, or strategic centrality, not only from hazard or collapse.",
+                ].join(" ")
               : "Stay appropriate to the chosen scale; do not collapse into single-room or single-business micro geography unless the stage scale allows it.",
             "Keep descriptions concise enough for structured output, but leave room for a distinctive sensory or systemic detail when it makes the location more memorable.",
           ]),
@@ -5286,7 +5565,7 @@ class DungeonMasterClient {
           attempts,
           validationReports,
           stageSummaries,
-          validate: (parsed) => {
+          validate: async (parsed) => {
             const issues = findDuplicateStrings(parsed.locations.map((location) => location.key)).map(
               (key) => `Location key ${key} is duplicated within this batch.`,
             );
@@ -5314,7 +5593,10 @@ class DungeonMasterClient {
               );
             }
 
-            const scaleValidation = validateScaleAwareWorldSpine(input.scaleTier, parsed.locations);
+            const scaleValidation = await critiqueWorldSpineScaleWithModel({
+              scaleTier: input.scaleTier,
+              locations: parsed.locations,
+            });
             return [
               { category: "coherence", issues },
               scaleValidation,
@@ -5555,10 +5837,10 @@ class DungeonMasterClient {
       if (!worldSpineValidation.ok) {
         throw new Error(`world_spine coherence failed: ${worldSpineValidation.issues.join("; ")}`);
       }
-      const worldSpineScaleValidation = validateScaleAwareWorldSpine(
-        input.scaleTier,
-        worldSpineParsed.data.locations,
-      );
+      const worldSpineScaleValidation = await critiqueWorldSpineScaleWithModel({
+        scaleTier: input.scaleTier,
+        locations: worldSpineParsed.data.locations,
+      });
       validationReports.push({
         stage: "world_spine",
         attempt: attempts.filter((attempt) => attempt.stage === "world_spine").length,
@@ -5811,7 +6093,7 @@ class DungeonMasterClient {
           validationReports,
           stageSummaries,
           normalizeInput: (input) => normalizeSocialCastInput(input, locationBatch.length),
-          validate: (parsed) => {
+          validate: async (parsed) => {
             const issues: string[] = [];
             const locationIds = new Set(locationBatch.map((location) => location.id));
             const allLocationIds = new Set(lockedLocations.map((location) => location.id));
@@ -5884,7 +6166,10 @@ class DungeonMasterClient {
 
             return [
               { category: "immersion", issues },
-              validateScaleAwareSocialCast(input.scaleTier, parsed.npcs),
+              await critiqueSocialCastScaleWithModel({
+                scaleTier: input.scaleTier,
+                npcs: parsed.npcs,
+              }),
             ];
           },
           summarize: (parsed) =>
@@ -6148,6 +6433,8 @@ class DungeonMasterClient {
               travelTimeMinutes: edge.travelTimeMinutes,
               dangerLevel: edge.dangerLevel,
               currentStatus: edge.currentStatus,
+              visibility: "public",
+              accessRequirementText: null,
               description: edge.description,
             })),
             factions: worldSpine.factions.map((faction) => ({
@@ -6372,6 +6659,8 @@ class DungeonMasterClient {
           travelTimeMinutes: edge.travelTimeMinutes,
           dangerLevel: edge.dangerLevel,
           currentStatus: edge.currentStatus,
+          visibility: "public",
+          accessRequirementText: null,
           description: edge.description,
         })),
         factions: worldSpine.factions.map((faction) => ({

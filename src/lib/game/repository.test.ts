@@ -48,6 +48,8 @@ function createWorld(): GeneratedWorldModule {
         travelTimeMinutes: 10,
         dangerLevel: 1,
         currentStatus: "open",
+        visibility: "public",
+        accessRequirementText: null,
         description: null,
       },
     ],

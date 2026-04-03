@@ -345,8 +345,8 @@ export type GeneratedLocationEdge = {
   travelTimeMinutes: number;
   dangerLevel: number;
   currentStatus: string;
-  visibility?: RouteVisibility;
-  accessRequirementText?: string | null;
+  visibility: RouteVisibility;
+  accessRequirementText: string | null;
   description: string | null;
 };
 

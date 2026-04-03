@@ -70,6 +70,8 @@ function createWorld(): GeneratedWorldModule {
         travelTimeMinutes: 10,
         dangerLevel: 1,
         currentStatus: "open",
+        visibility: "public",
+        accessRequirementText: null,
         description: null,
       },
       {
@@ -79,6 +81,8 @@ function createWorld(): GeneratedWorldModule {
         travelTimeMinutes: 15,
         dangerLevel: 2,
         currentStatus: "open",
+        visibility: "public",
+        accessRequirementText: null,
         description: null,
       },
       {
@@ -88,6 +92,8 @@ function createWorld(): GeneratedWorldModule {
         travelTimeMinutes: 12,
         dangerLevel: 1,
         currentStatus: "open",
+        visibility: "public",
+        accessRequirementText: null,
         description: null,
       },
       {
@@ -97,6 +103,8 @@ function createWorld(): GeneratedWorldModule {
         travelTimeMinutes: 18,
         dangerLevel: 3,
         currentStatus: "contested",
+        visibility: "public",
+        accessRequirementText: null,
         description: null,
       },
     ],
@@ -416,6 +424,8 @@ test("world module coherence rejects over-dense minor sibling locations", () => 
       travelTimeMinutes: 8,
       dangerLevel: 1,
       currentStatus: "open",
+      visibility: "public",
+      accessRequirementText: null,
       description: null,
     });
   }
@@ -1026,6 +1036,8 @@ test("entry contexts allow connected worlds with longer overall travel diameter"
       travelTimeMinutes: 20,
       dangerLevel: 2,
       currentStatus: "open",
+      visibility: "public",
+      accessRequirementText: null,
       description: null,
     },
     {
@@ -1035,6 +1047,8 @@ test("entry contexts allow connected worlds with longer overall travel diameter"
       travelTimeMinutes: 20,
       dangerLevel: 2,
       currentStatus: "open",
+      visibility: "public",
+      accessRequirementText: null,
       description: null,
     },
     {
@@ -1044,6 +1058,8 @@ test("entry contexts allow connected worlds with longer overall travel diameter"
       travelTimeMinutes: 20,
       dangerLevel: 2,
       currentStatus: "open",
+      visibility: "public",
+      accessRequirementText: null,
       description: null,
     },
   );

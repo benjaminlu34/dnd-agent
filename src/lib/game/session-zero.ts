@@ -93,8 +93,8 @@ const edgeSchema = z.object({
   travelTimeMinutes: z.number().int().min(1),
   dangerLevel: z.number().int().min(0).max(10),
   currentStatus: z.string().trim().min(1),
-  visibility: z.enum(["public", "hidden"]),
-  accessRequirementText: z.string().trim().min(1).nullable(),
+  visibility: z.enum(["public", "hidden"]).default("public"),
+  accessRequirementText: z.string().trim().min(1).nullable().default(null),
   description: z.string().trim().min(1).nullable(),
 });
 

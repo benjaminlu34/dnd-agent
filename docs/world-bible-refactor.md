@@ -272,3 +272,176 @@ This is explicit product behavior, not an accidental 500.
 - campaign modules are non-disposable and must preserve parse compatibility
 - first pass goal is scale-aware architecture plus player/objective decoupling, not recursive descent
 - world-scale modules being non-launchable in this pass is acceptable if clearly surfaced in API/UI
+
+## Next steps
+
+- It’s a real architectural feature, not a quick extension.
+
+Short version:
+
+regional -> settlement is medium-to-large.
+world -> regional -> settlement is large.
+Why:
+The current refactor gave us the scaffolding for this:
+
+explicit scaleTier
+scalePlan
+scale-aware prompts
+scale-aware stage semantics
+non-launchable world modules as skeletons
+But we still have a flat generation pipeline. Right now a module is generated in one pass, not as a tree of child artifacts. So recursive bibles means adding a new layer of generated objects and orchestration, not just tweaking prompts.
+
+What has to change:
+
+New artifact hierarchy:
+world bible
+child regional bibles
+child settlement bibles
+Parent-to-child context contracts:
+what world-level burdens/scars/shared realities get handed to a region
+what regional tensions get handed to a settlement
+Materialization/orchestration:
+when children are generated
+whether all are generated eagerly or on demand
+how retries/failures work per node
+Persistence shape:
+either nested artifacts in one module blob
+or explicit persisted child generation records
+Launch flow:
+world module launch would need region materialization
+regional module launch might need settlement materialization depending on depth
+UI/editor/debuggability:
+inspect a world, then a region inside it, then a settlement inside that
+Validation:
+cross-level coherence
+no contradiction between parent and child scales
+no duplicate or nonsensical topology across descendants
+Effort by slice:
+
+regional -> settlement
+
+This is the easier first step.
+You already have regional-ish texture stages, so the main task is splitting them into:
+regional skeleton
+settlement child generation
+Likely medium-to-large because it touches provider orchestration, artifact schemas, repository parsing, and launch flow.
+world -> regional -> settlement
+
+This adds one more recursion layer and compounds orchestration and persistence complexity.
+It also raises design questions like eager vs lazy descent and how many child regions to fully materialize.
+That’s firmly large.
+My recommendation:
+
+Do regional -> settlement first.
+Make it lazy/on-demand, not full eager recursion.
+Once that works, add world -> regional materialization.
+Only then decide whether world -> regional -> settlement should happen eagerly or progressively.
+If I had to ballpark:
+
+regional -> settlement: several focused implementation sessions
+world -> regional -> settlement: a substantial multi-step project
+So: feasible, but definitely not “just add another prompt
+### Addendum: Recursive location graph design
+
+The current world-scale graph is acceptable as a public macro skeleton:
+- world-scale `world_spine` nodes are broad containers such as regions, corridor systems, sacred geographies, maritime worlds, and civilizational frontiers
+- those nodes should usually remain publicly known to ordinary people
+- `discoveryState: "revealed"` is a sane default at world scale
+- most world-scale edges can remain broadly public too, because the player is not meaningfully discovering that a continent exists
+
+The richer topology model becomes much more important once we descend:
+- hidden routes
+- gated crossings
+- parent/child locations
+- minor nodes
+- promoted discoveries
+- access requirements
+- traversal bottlenecks that change what the player can physically do
+
+That means recursive generation should treat the location graph differently at each scale.
+
+World scale:
+- the graph is a macro navigation and pressure map, not a room-to-room traversal layer
+- nodes represent containers of civilization, movement, ritual life, exchange, or frontier survival
+- edges represent broad movement relationships such as maritime passage, imperial roads, pilgrimage corridors, mountain crossings, or unstable border belts
+- hidden edges should be rare at this layer
+- access requirements at this layer should describe macro travel permission or danger, not local gatekeeping
+- the main value of the graph is orientation, route pressure, and top-level world coherence
+
+Regional scale:
+- this is where the graph starts becoming genuinely playable
+- nodes should include major settlements, civic hubs, frontier chokepoints, extraction zones, sacred complexes, ports, and dangerous outlands
+- edges should begin expressing real movement constraints:
+  - ferries
+  - toll roads
+  - seasonal passes
+  - military checkpoints
+  - quarantine routes
+  - restricted river crossings
+- some edges should now be `hidden` or conditionally usable
+- access requirements should start carrying mechanical meaning:
+  - permit systems
+  - faction protection
+  - weather windows
+  - ritual timing
+  - convoy participation
+- regional descent should also begin producing minor child locations beneath major regional nodes when those places deserve their own navigable identity
+
+Settlement scale:
+- this is where the full topology/discovery model should be exercised
+- parent/child structure matters:
+  - district -> subdistrict
+  - harbor -> warehouse row
+  - temple precinct -> sealed crypt
+  - keep -> lower records hall
+- `locationKind: "minor"` should become common where it serves traversal and play
+- `discoveryState` variation becomes meaningful:
+  - public places are `revealed`
+  - whispered or unofficial places are `rumored`
+  - hidden sub-sites and restricted passages begin unsurfaced until discovered
+- edges should meaningfully vary by visibility and gating:
+  - public streets
+  - servant passages
+  - contraband routes
+  - flooded tunnels
+  - night-only crossings
+  - ritual-only access
+- access requirements should become concrete enough to drive play:
+  - stamped transit writ
+  - harbor token
+  - guild escort
+  - flood slack tide
+  - stolen key
+  - shrine blessing
+
+Recommended recursive graph strategy:
+- do not fully materialize every graph layer eagerly
+- a world-scale module should persist a stable macro graph
+- selecting or launching into a region should materialize a regional graph under one or more world nodes
+- selecting or launching into a settlement should materialize a settlement graph under one regional node
+- each child graph should inherit a constrained subset of parent burdens, scars, shared realities, and factions
+- each child graph should reinterpret parent edges as local movement realities where appropriate
+- each child graph should create its own local nodes and edges rather than flattening the parent graph verbatim
+- preserve parent references so the UI can explain where a region or settlement sits inside the larger world
+
+Concrete graph work required for recursive playability:
+- child artifact schemas for regional and settlement graph slices
+- explicit parent-child graph references
+- a rule for when a parent node expands into:
+  - a regional graph
+  - a settlement graph
+  - or remains a leaf
+- scale-aware edge generation rules so world edges do not pretend to be settlement alleys, and settlement edges do not collapse back into macro abstractions
+- launch-time materialization rules that can choose a concrete regional or settlement entry graph from a broader parent module
+- validation that checks:
+  - child nodes remain semantically inside the parent container
+  - child edges are compatible with parent route logic
+  - hidden/gated traversal appears mostly at regional and settlement scales, not world scale
+  - discovery progression is spatially meaningful rather than random metadata
+
+Practical recommendation:
+- do `regional -> settlement` first
+- make it lazy/on-demand, not full eager recursion
+- make the regional graph produce a genuinely playable settlement subgraph with hidden/gated traversal
+- once that works, add `world -> regional` materialization
+- only after that decide whether `world -> regional -> settlement` should happen eagerly or progressively
