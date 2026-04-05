@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { aiProviderTestUtils } from "../ai/provider";
-import { generatedSocialLayerInputSchema } from "./session-zero";
+import {
+  generatedKnowledgeThreadsInputSchema,
+  generatedRegionalLifeSchema,
+  generatedSocialLayerInputSchema,
+} from "./session-zero";
 import type { OpenWorldGenerationCheckpoint, PromptIntentProfile } from "./types";
 
 test("normalizeSocialCastInput dedupes and clamps social ties so schema-sized overflows recover", () => {
@@ -238,17 +242,23 @@ test("summarizeWorldBibleForPrompt tiers world bible context by stage distance",
 
   const worldSpineContext = aiProviderTestUtils.summarizeWorldBibleForPrompt(worldBible, "world_spine");
   const socialContext = aiProviderTestUtils.summarizeWorldBibleForPrompt(worldBible, "social_cast");
+  const knowledgeContext = aiProviderTestUtils.summarizeWorldBibleForPrompt(worldBible, "knowledge_web");
 
-  assert.equal(worldSpineContext.widespreadBurdens.length, 7);
+  assert.equal(worldSpineContext.widespreadBurdens.length, 6);
   assert.equal(worldSpineContext.presentScars.length, 2);
   assert.equal(worldSpineContext.sharedRealities.length, 6);
   assert.equal(worldSpineContext.competingExplanations.length, 0);
 
   assert.equal(socialContext.widespreadBurdens.length, 4);
-  assert.equal(socialContext.presentScars.length, 0);
-  assert.equal(socialContext.sharedRealities.length, 4);
+  assert.equal(socialContext.presentScars.length, 1);
+  assert.equal(socialContext.sharedRealities.length, 5);
   assert.equal(socialContext.competingExplanations.length, 0);
   assert.equal(socialContext.everydayLife.gossip.length, 4);
+
+  assert.equal(knowledgeContext.widespreadBurdens.length, 6);
+  assert.equal(knowledgeContext.presentScars.length, 3);
+  assert.equal(knowledgeContext.sharedRealities.length, 6);
+  assert.equal(knowledgeContext.competingExplanations.length, 3);
 });
 
 test("shared worldgen prompt builder removes the old simulation-first worldview layer", () => {
@@ -273,6 +283,126 @@ test("shared worldgen prompt builder removes the old simulation-first worldview 
   assert.doesNotMatch(systemPrompt, /Translate the prompt into concrete systemic pressures/i);
   assert.match(systemPrompt, /Prompt intent guardrails:/);
   assert.match(systemPrompt, /ritual-ceremonial/);
+  assert.match(systemPrompt, /present-tense and ongoing/i);
+  assert.match(systemPrompt, /settlement: routines, upkeep, habits/i);
+  assert.match(systemPrompt, /regional: circulation, jurisdiction, migration/i);
+  assert.match(systemPrompt, /world: civilizational adaptation, shared systems/i);
+  assert.match(systemPrompt, /Do not force every place, faction, or NPC to revolve around a ceremony, convoy, inspection, emergency, or discrete event/i);
+});
+
+test("world spine location instructions emphasize inhabited present-tense life without logistics overfitting", () => {
+  const instructions = aiProviderTestUtils.buildWorldSpineLocationSuccessLines({
+    scaleTier: "regional",
+    worldSpineScaleProfile: {
+      sourceScale: "regional",
+      targetSemanticScale: "regional",
+      detailMode: "territorial",
+      forbiddenDetailModes: ["single_room"],
+      launchableOutput: false,
+      expectsChildDescent: false,
+    },
+    worldSpineLocationTarget: 12,
+  }).join("\n");
+
+  assert.match(instructions, /Every location should feel present-tense, inhabited, and already in use/i);
+  assert.match(instructions, /Show ongoing use, dependence, adaptation, authority, reputation, labor, ritual, ecology, or circulation/i);
+  assert.match(instructions, /Do not require every location to hinge on a convoy, inspection, emergency, or event-like public disruption/i);
+  assert.doesNotMatch(instructions, /moving through it/i);
+  assert.doesNotMatch(instructions, /being managed/i);
+});
+
+test("world spine batch instructions stay scale-aware outside world tier", () => {
+  const regionalLines = aiProviderTestUtils.buildWorldSpineBatchFinalInstructionLines({
+    scaleTier: "regional",
+    batchIndex: 1,
+    batchCount: 4,
+  }).join("\n");
+  const settlementLines = aiProviderTestUtils.buildWorldSpineBatchFinalInstructionLines({
+    scaleTier: "settlement",
+    batchIndex: 0,
+    batchCount: 3,
+  }).join("\n");
+
+  assert.match(regionalLines, /Generate major regional locations/i);
+  assert.doesNotMatch(regionalLines, /Generate major world locations/i);
+  assert.match(settlementLines, /Generate major local locations/i);
+  assert.doesNotMatch(settlementLines, /Generate major world locations/i);
+});
+
+test("critique instruction helpers include the new inertness, role-shell, and static-fact checks", () => {
+  const worldBibleCritique = aiProviderTestUtils.buildWorldBibleCritiqueInstructions();
+  const worldSpineCritique = aiProviderTestUtils.buildWorldSpineScaleCritiqueInstructions("regional");
+  const socialCritique = aiProviderTestUtils.buildSocialCastScaleCritiqueInstructions("settlement");
+  const knowledgeCritique = aiProviderTestUtils.buildKnowledgeWebCritiqueInstructions();
+
+  assert.match(worldBibleCritique.system.join("\n"), /inertness/i);
+  assert.match(worldBibleCritique.finalInstruction.join("\n"), /do not require overt drama, emergencies, or scripted events/i);
+
+  assert.match(worldSpineCritique.finalInstruction.join("\n"), /postcard-like locations/i);
+  assert.match(worldSpineCritique.finalInstruction.join("\n"), /Do not penalize a location merely for being stable, prosperous, ceremonially important, fertile, quiet, or socially central/i);
+
+  assert.match(socialCritique.finalInstruction.join("\n"), /job shell/i);
+  assert.match(socialCritique.finalInstruction.join("\n"), /private stake/i);
+  assert.match(socialCritique.finalInstruction.join("\n"), /clerk, registrar, inspector/i);
+
+  assert.match(knowledgeCritique.system.join("\n"), /entry point into something already happening/i);
+  assert.match(knowledgeCritique.finalInstruction.join("\n"), /encyclopedia-like static fact dumps/i);
+  assert.match(knowledgeCritique.finalInstruction.join("\n"), /procedural instruction sheets/i);
+});
+
+test("scale fallback correction notes stay on the requested tier", () => {
+  const regionalWorldSpineFallback = aiProviderTestUtils.buildWorldSpineScaleFallbackCorrectionNotes(
+    "regional",
+    [
+      {
+        name: "Mistwater Factorum District",
+      } as Parameters<typeof aiProviderTestUtils.buildWorldSpineScaleFallbackCorrectionNotes>[1][number],
+    ],
+  ).join("\n");
+  const settlementSocialFallback = aiProviderTestUtils.buildSocialCastScaleFallbackCorrectionNotes(
+    "settlement",
+  ).join("\n");
+
+  assert.match(regionalWorldSpineFallback, /regional scale/i);
+  assert.doesNotMatch(regionalWorldSpineFallback, /world scale/i);
+  assert.match(settlementSocialFallback, /settlement scale/i);
+  assert.doesNotMatch(settlementSocialFallback, /At world scale/i);
+});
+
+test("regional life and knowledge threads schemas allow calmer optional arrays", () => {
+  const regionalLifeParsed = generatedRegionalLifeSchema.safeParse({
+    locations: [
+      {
+        locationId: "loc_1",
+        publicActivity: "Market day repairs continue.",
+        dominantActivities: ["repairs", "trading"],
+        localPressure: "Timber arrives late after the thaw.",
+        classTexture: "Boat crews and ledger families share the quay uneasily.",
+        everydayTexture: "Tar smoke hangs over the piers.",
+        publicHazards: ["slick docks"],
+        ordinaryKnowledge: ["Which pier floods first", "Which foreman pays fairly"],
+        institutions: ["Harbor board"],
+        gossip: ["The bell-ringers skipped a watch"],
+        reasonsToLinger: ["Reliable ferry work"],
+        routineSeeds: ["Morning cargo weighing"],
+        eventSeeds: [],
+      },
+    ],
+  });
+  const knowledgeThreadsParsed = generatedKnowledgeThreadsInputSchema.safeParse({
+    knowledgeNetworks: [],
+    pressureSeeds: [],
+  });
+
+  assert.equal(regionalLifeParsed.success, true);
+  assert.equal(knowledgeThreadsParsed.success, true);
+});
+
+test("knowledge-web truncation recovery no longer forces one node per location", () => {
+  const issues = aiProviderTestUtils.buildStageTruncationRecoveryIssues("knowledge_web").join("\n");
+
+  assert.match(issues, /meaningful knowledge presence for every location/i);
+  assert.doesNotMatch(issues, /one information node per location/i);
 });
 
 test("prompt-intent system prompt does not seed intent guardrails before inference", () => {

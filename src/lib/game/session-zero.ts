@@ -797,7 +797,7 @@ const regionalLifeLocationSchema = z.object({
   gossip: z.array(z.string().trim().min(1)).min(1),
   reasonsToLinger: z.array(z.string().trim().min(1)).min(1),
   routineSeeds: z.array(z.string().trim().min(1)).min(1),
-  eventSeeds: z.array(z.string().trim().min(1)).min(1),
+  eventSeeds: z.array(z.string().trim().min(1)).default([]),
 });
 
 export const generatedRegionalLifeSchema = z.object({
@@ -901,7 +901,7 @@ export const generatedKnowledgeWebInputSchema = z
 
 export const generatedKnowledgeThreadsInputSchema = z
   .object({
-    knowledgeNetworks: z.array(knowledgeNetworkInputSchema).min(1).max(4),
+    knowledgeNetworks: z.array(knowledgeNetworkInputSchema).max(4).default([]),
     pressureSeeds: z.array(pressureSeedSchema).max(8).default([]),
   });
 
