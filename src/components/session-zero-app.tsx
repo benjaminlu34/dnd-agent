@@ -75,8 +75,11 @@ export function SessionZeroApp() {
   const progressStreamRef = useRef<EventSource | null>(null);
 
   const selectedModule = modules.find((module) => module.id === selectedModuleId) ?? null;
+  const compatibleCharacters = selectedModuleId
+    ? characters.filter((character) => character.moduleId === selectedModuleId)
+    : characters;
   const selectedCharacter =
-    characters.find((character) => character.id === selectedTemplateId) ?? null;
+    compatibleCharacters.find((character) => character.id === selectedTemplateId) ?? null;
   const activeStep = !selectedModuleId ? 1 : !selectedTemplateId ? 2 : 3;
   const totalGenerationStages = WORLD_GENERATION_PROGRESS_STAGES.length;
   const currentGenerationStage =
@@ -287,6 +290,18 @@ export function SessionZeroApp() {
       cancelled = true;
     };
   }, [draftProgressId, draftProgress?.status, draft]);
+
+  useEffect(() => {
+    if (!selectedModuleId) {
+      return;
+    }
+
+    if (selectedTemplateId && compatibleCharacters.some((character) => character.id === selectedTemplateId)) {
+      return;
+    }
+
+    setSelectedTemplateId(compatibleCharacters[0]?.id ?? null);
+  }, [compatibleCharacters, selectedModuleId, selectedTemplateId]);
 
   async function generateDraft() {
     if (!prompt.trim() || drafting) {
@@ -653,9 +668,9 @@ export function SessionZeroApp() {
 
           {loading ? (
             <p className="mt-4 text-sm leading-relaxed text-zinc-400">Loading characters...</p>
-          ) : characters.length ? (
+          ) : compatibleCharacters.length ? (
             <div className="mt-6 space-y-3">
-              {characters.map((character) => (
+              {compatibleCharacters.map((character) => (
                 <button
                   key={character.id}
                   type="button"
@@ -672,18 +687,18 @@ export function SessionZeroApp() {
                       {character.name}
                     </h3>
                     <p className="mt-1 text-[10px] font-medium uppercase tracking-widest text-zinc-500">
-                      {character.archetype}
+                      {character.drivingGoal ?? "Playable template"}
                     </p>
                   </div>
                   <span className="text-[10px] font-medium uppercase tracking-widest text-zinc-500">
-                    Max HP {character.maxHealth}
+                    VIT {character.vitality ?? character.maxHealth}
                   </span>
                 </button>
               ))}
             </div>
           ) : (
             <p className="mt-4 text-sm italic leading-relaxed text-zinc-600">
-              Create a character template first.
+              Create or adapt a module-bound character template for this module first.
             </p>
           )}
         </section>

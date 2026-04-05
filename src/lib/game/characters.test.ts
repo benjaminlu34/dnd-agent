@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { characterTemplateDraftSchema } from "./characters";
+import { compileCharacterFramework } from "./character-framework";
+import { characterTemplateDraftSchema, toCampaignCharacter } from "./characters";
+import type { CharacterInstance, CharacterTemplate } from "./types";
 
 test("characterTemplateDraftSchema normalizes starter items", () => {
   const parsed = characterTemplateDraftSchema.parse({
@@ -47,4 +49,69 @@ test("characterTemplateDraftSchema rejects more than four unique starter items",
   });
 
   assert.equal(parsed.success, false);
+});
+
+test("toCampaignCharacter reads framework modifiers from the runtime instance snapshot and honors runtime vitality", () => {
+  const framework = compileCharacterFramework({
+    frameworkVersion: "salvage-crew-v1",
+    fields: [
+      { id: "grit", label: "Grit", type: "numeric", min: -2, max: 3, defaultValue: 0, maxModifier: 3 },
+      { id: "nerve", label: "Nerve", type: "numeric", min: -2, max: 3, defaultValue: 0, maxModifier: 3 },
+    ],
+    approaches: [
+      { id: "brace", label: "Brace", fieldId: "grit" },
+      { id: "bluff", label: "Bluff", fieldId: "nerve" },
+    ],
+    baseVitality: 10,
+    vitalityLabel: "Vitality",
+    currencyProfile: {
+      unitName: "script",
+      unitLabel: "Dock Script",
+      shortLabel: "ds",
+      precision: 0,
+    },
+    presentationProfile: {
+      vitalityLabel: "Vitality",
+      approachLabel: "Approach",
+      conceptLabel: "Concept",
+      templateLabel: "Playable Character",
+    },
+  });
+
+  const template: CharacterTemplate = {
+    id: "tpl_1",
+    moduleId: "mod_1",
+    sourceConceptId: null,
+    frameworkVersion: "salvage-crew-v1",
+    frameworkValues: {
+      grit: 0,
+      nerve: 1,
+    },
+    name: "Sable",
+    appearance: null,
+    backstory: "Former deck runner.",
+    drivingGoal: "Pay off a dockside debt.",
+    vitality: 14,
+    starterItems: ["hook knife"],
+  };
+
+  const instance: CharacterInstance = {
+    id: "inst_1",
+    templateId: "tpl_1",
+    health: 6,
+    currencyCp: 42,
+    frameworkValues: {
+      grit: 3,
+      nerve: -1,
+    },
+    inventory: [],
+    commodityStacks: [],
+  };
+
+  const campaignCharacter = toCampaignCharacter(template, instance, framework, 11);
+
+  assert.equal(campaignCharacter.stats?.brace, 3);
+  assert.equal(campaignCharacter.stats?.bluff, -1);
+  assert.equal(campaignCharacter.maxVitality, 11);
+  assert.equal(campaignCharacter.health, 6);
 });

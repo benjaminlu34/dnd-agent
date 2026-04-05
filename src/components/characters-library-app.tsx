@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowUpRight, Plus } from "lucide-react";
-import type { CharacterTemplateSummary } from "@/lib/game/types";
+import type { CharacterConceptSummary, CharacterTemplateSummary } from "@/lib/game/types";
 import { backOrPush } from "@/lib/ui/navigation";
 
 function LibraryCharacterCard({
@@ -48,12 +48,11 @@ function LibraryCharacterCard({
 
       <div className="my-5 grid grid-cols-5 gap-2 border-y border-zinc-800/50 py-4">
         {[
-          ["STR", character.strength],
-          ["DEX", character.dexterity],
-          ["CON", character.constitution],
-          ["INT", character.intelligence],
-          ["WIS", character.wisdom],
-          ["CHA", character.charisma]
+          ["VIT", character.vitality],
+          ["MODULE", (character.moduleId ?? "module").slice(0, 6)],
+          ["FRAME", (character.frameworkVersion ?? "frame").slice(0, 6)],
+          ["GOAL", (character.drivingGoal ?? "Unset").slice(0, 6)],
+          ["SRC", character.sourceConceptId ? "Concept" : "Direct"]
         ].map(([label, value]) => (
           <div key={String(label)} className="flex flex-col items-center">
             <span className="text-[10px] text-zinc-600">{label}</span>
@@ -81,8 +80,67 @@ function LibraryCharacterCard({
           {deleting ? "Deleting..." : "Delete"}
         </button>
         <span className="rounded-full border border-zinc-800 px-2 py-0.5 text-[10px] text-zinc-600">
-          MAX HP {character.maxHealth}
+          {character.vitality} VIT
         </span>
+      </div>
+    </article>
+  );
+}
+
+function LibraryConceptCard({
+  concept,
+  deleting,
+  onEdit,
+  onAdapt,
+  onDelete,
+}: {
+  concept: CharacterConceptSummary;
+  deleting: boolean;
+  onEdit: () => void;
+  onAdapt: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <article className="relative flex min-h-[260px] flex-col overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950/20 p-6">
+      <div className="pr-8">
+        <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-500">
+          Character Concept
+        </p>
+        <h2 className="mt-3 truncate text-xl font-medium tracking-tight text-zinc-100">
+          {concept.name}
+        </h2>
+        <p className="mt-2 text-xs leading-relaxed text-zinc-500 italic">
+          {concept.drivingGoal || "No driving goal recorded yet."}
+        </p>
+      </div>
+
+      <p className="mt-5 line-clamp-3 text-sm leading-relaxed text-zinc-400">
+        {concept.backstory || "No backstory recorded yet."}
+      </p>
+
+      <div className="mt-auto flex flex-wrap items-center gap-3 pt-6">
+        <button
+          type="button"
+          onClick={onEdit}
+          className="button-press rounded-full border border-zinc-800 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-200 hover:bg-zinc-900"
+        >
+          Edit Concept
+        </button>
+        <button
+          type="button"
+          onClick={onAdapt}
+          className="button-press rounded-full border border-zinc-800 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-200 hover:bg-zinc-900"
+        >
+          Adapt to Module
+        </button>
+        <button
+          type="button"
+          onClick={onDelete}
+          disabled={deleting}
+          className="button-press rounded-full border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-red-200 hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {deleting ? "Deleting..." : "Delete"}
+        </button>
       </div>
     </article>
   );
@@ -91,8 +149,10 @@ function LibraryCharacterCard({
 export function CharactersLibraryApp() {
   const router = useRouter();
   const [characters, setCharacters] = useState<CharacterTemplateSummary[]>([]);
+  const [concepts, setConcepts] = useState<CharacterConceptSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [deletingTemplateId, setDeletingTemplateId] = useState<string | null>(null);
+  const [deletingConceptId, setDeletingConceptId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -105,6 +165,7 @@ export function CharactersLibraryApp() {
         const response = await fetch("/api/characters");
         const data = (await response.json()) as {
           characters?: CharacterTemplateSummary[];
+          concepts?: CharacterConceptSummary[];
           error?: string;
         };
 
@@ -114,6 +175,7 @@ export function CharactersLibraryApp() {
 
         if (active) {
           setCharacters(data.characters ?? []);
+          setConcepts(data.concepts ?? []);
         }
       } catch (loadError) {
         if (active) {
@@ -164,6 +226,33 @@ export function CharactersLibraryApp() {
     }
   }
 
+  async function deleteConcept(concept: CharacterConceptSummary) {
+    const confirmed = window.confirm(`Delete ${concept.name}?`);
+    if (!confirmed || deletingConceptId) {
+      return;
+    }
+
+    setDeletingConceptId(concept.id);
+    setError(null);
+
+    try {
+      const response = await fetch(`/api/characters/concepts/${concept.id}`, {
+        method: "DELETE",
+      });
+      const data = (await response.json()) as { conceptId?: string; error?: string };
+
+      if (!response.ok || !data.conceptId) {
+        throw new Error(data.error ?? "Failed to delete concept.");
+      }
+
+      setConcepts((current) => current.filter((entry) => entry.id !== concept.id));
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Failed to delete concept.");
+    } finally {
+      setDeletingConceptId(null);
+    }
+  }
+
   return (
     <main className="app-shell">
       <div className="app-frame max-w-6xl">
@@ -210,6 +299,31 @@ export function CharactersLibraryApp() {
         {error ? <p className="mt-6 text-sm text-red-400">{error}</p> : null}
 
         <section className="mt-8">
+          {concepts.length ? (
+            <div className="mb-8">
+              <div className="mb-4">
+                <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-500">
+                  Standalone Concepts
+                </p>
+                <p className="mt-2 max-w-2xl text-sm leading-relaxed text-zinc-500">
+                  Narrative blueprints stay module-free until you adapt them into a playable template.
+                </p>
+              </div>
+              <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+                {concepts.map((concept) => (
+                  <LibraryConceptCard
+                    key={concept.id}
+                    concept={concept}
+                    deleting={deletingConceptId === concept.id}
+                    onEdit={() => router.push(`/characters/new?mode=concept&conceptId=${concept.id}`)}
+                    onAdapt={() => router.push(`/characters/new?mode=adapt&conceptId=${concept.id}`)}
+                    onDelete={() => void deleteConcept(concept)}
+                  />
+                ))}
+              </div>
+            </div>
+          ) : null}
+
           {loading ? (
             <div className="app-section p-8 text-sm text-zinc-400">
               Loading characters...

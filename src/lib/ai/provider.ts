@@ -4,12 +4,14 @@ import OpenAI from "openai";
 import { z } from "zod";
 import { env } from "@/lib/env";
 import {
-  COPPER_PER_GOLD,
-  COPPER_PER_PLATINUM,
-  COPPER_PER_SILVER,
   currencyDenominationsSchema,
 } from "@/lib/game/currency";
-import { characterTemplateDraftSchema } from "@/lib/game/characters";
+import { compileCharacterFramework } from "@/lib/game/character-framework";
+import {
+  buildCharacterTemplateDraftSchema,
+  characterConceptDraftSchema,
+  characterTemplateDraftSchema,
+} from "@/lib/game/characters";
 import { MAX_STARTER_ITEMS, normalizeItemNameList } from "@/lib/game/item-utils";
 import { canonicalizeNpcIdAgainstCandidates } from "@/lib/game/npc-identity";
 import {
@@ -31,6 +33,7 @@ import type {
   CheckResult,
   CharacterTemplate,
   CharacterTemplateDraft,
+  CharacterConceptDraft,
   GeneratedDailySchedule,
   GeneratedCampaignOpening,
   CheckpointableWorldGenerationStageName,
@@ -4034,22 +4037,70 @@ const routerDecisionSchema = z.object({
   attention: routerAttentionSchema,
 });
 
-const checkIntentSchema = z.discriminatedUnion("type", [
-  z.object({
-    type: z.literal("challenge"),
-    reason: z.string().trim().min(1).max(240),
-    challengeApproach: z.enum(["force", "finesse", "endure", "analyze", "notice", "influence"]),
-    citedNpcId: z.string().trim().min(1).optional(),
-    mode: z.enum(["normal", "advantage", "disadvantage"]).optional(),
-  }),
-  z.object({
-    type: z.literal("combat"),
-    reason: z.string().trim().min(1).max(240),
-    targetNpcId: z.string().trim().min(1),
-    approach: z.enum(["attack", "subdue", "assassinate"]),
-    mode: z.enum(["normal", "advantage", "disadvantage"]).optional(),
-  }),
-]);
+const LEGACY_APPROACH_IDS = [
+  "force",
+  "finesse",
+  "endure",
+  "analyze",
+  "notice",
+  "influence",
+] as const;
+
+function buildApproachIdSchema(approachIds?: string[]) {
+  const ids = Array.from(new Set(
+    (approachIds?.length ? approachIds : [...LEGACY_APPROACH_IDS])
+      .map((value) => value.trim())
+      .filter(Boolean),
+  ));
+
+  if (ids.length === 0) {
+    return z.string().trim().min(1);
+  }
+
+  const [firstId, ...restIds] = ids;
+  return z.enum([firstId, ...restIds]);
+}
+
+function buildCheckIntentSchema(approachIds?: string[]) {
+  const approachIdSchema = buildApproachIdSchema(approachIds);
+  if (approachIds?.length) {
+    return z.discriminatedUnion("type", [
+      z.object({
+        type: z.literal("challenge"),
+        reason: z.string().trim().min(1).max(240),
+        approachId: approachIdSchema,
+        citedNpcId: z.string().trim().min(1).optional(),
+        mode: z.enum(["normal", "advantage", "disadvantage"]).optional(),
+      }),
+      z.object({
+        type: z.literal("combat"),
+        reason: z.string().trim().min(1).max(240),
+        targetNpcId: z.string().trim().min(1),
+        approachId: approachIdSchema,
+        mode: z.enum(["normal", "advantage", "disadvantage"]).optional(),
+      }),
+    ]);
+  }
+
+  return z.discriminatedUnion("type", [
+    z.object({
+      type: z.literal("challenge"),
+      reason: z.string().trim().min(1).max(240),
+      approachId: approachIdSchema.optional(),
+      challengeApproach: buildApproachIdSchema().optional(),
+      citedNpcId: z.string().trim().min(1).optional(),
+      mode: z.enum(["normal", "advantage", "disadvantage"]).optional(),
+    }),
+    z.object({
+      type: z.literal("combat"),
+      reason: z.string().trim().min(1).max(240),
+      targetNpcId: z.string().trim().min(1),
+      approachId: approachIdSchema.optional(),
+      approach: z.enum(["attack", "subdue", "assassinate"]).optional(),
+      mode: z.enum(["normal", "advantage", "disadvantage"]).optional(),
+    }),
+  ]);
+}
 
 const assetHolderSchema = z.discriminatedUnion("kind", [
   z.object({
@@ -4329,18 +4380,20 @@ const mechanicsMutationSchema = z.discriminatedUnion("type", [
   }),
 ]);
 
-const resolveMechanicsSchema = z.object({
-  type: z.literal("resolve_mechanics"),
-  timeMode: z.enum(["combat", "exploration", "travel", "rest", "downtime"]),
-  durationMagnitude: z.enum(["instant", "brief", "standard", "extended", "long"]).optional(),
-  suggestedActions: z.array(z.string().trim().min(1)).max(4).default([]),
-  memorySummary: z.string().trim().min(1).max(240).optional(),
-  checkIntent: z.preprocess(
-    (value) => (value === null ? undefined : value),
-    checkIntentSchema.optional(),
-  ),
-  mutations: z.array(mechanicsMutationSchema).max(8).default([]),
-});
+function buildResolveMechanicsSchema(approachIds?: string[]) {
+  return z.object({
+    type: z.literal("resolve_mechanics"),
+    timeMode: z.enum(["combat", "exploration", "travel", "rest", "downtime"]),
+    durationMagnitude: z.enum(["instant", "brief", "standard", "extended", "long"]).optional(),
+    suggestedActions: z.array(z.string().trim().min(1)).max(4).default([]),
+    memorySummary: z.string().trim().min(1).max(240).optional(),
+    checkIntent: z.preprocess(
+      (value) => (value === null ? undefined : value),
+      buildCheckIntentSchema(approachIds).optional(),
+    ),
+    mutations: z.array(mechanicsMutationSchema).max(8).default([]),
+  });
+}
 
 const executeFastForwardSchema = z.object({
   type: z.literal("execute_fast_forward"),
@@ -4359,17 +4412,29 @@ const executeFastForwardSchema = z.object({
   memorySummary: z.string().trim().min(1).max(240).optional(),
 });
 
-const turnActionToolCallSchema = z.discriminatedUnion("type", [
-  requestClarificationSchema,
-  resolveMechanicsSchema,
-  executeFastForwardSchema,
-]);
+function buildTurnActionSchemas(approachIds?: string[]) {
+  const resolveMechanicsSchema = buildResolveMechanicsSchema(approachIds);
+  const turnActionToolCallSchema = z.discriminatedUnion("type", [
+    requestClarificationSchema,
+    resolveMechanicsSchema,
+    executeFastForwardSchema,
+  ]);
 
-const resolveMechanicsTool = createStructuredTool(
-  "resolve_mechanics",
-  "Return the bounded mechanical plan for this turn using only engine-validated mutations.",
-  resolveMechanicsSchema.omit({ type: true }),
-);
+  return {
+    resolveMechanicsSchema,
+    turnActionToolCallSchema,
+    resolveMechanicsTool: createStructuredTool(
+      "resolve_mechanics",
+      "Return the bounded mechanical plan for this turn using only engine-validated mutations.",
+      resolveMechanicsSchema.omit({ type: true }),
+    ),
+  };
+}
+
+const defaultTurnActionSchemas = buildTurnActionSchemas();
+const resolveMechanicsSchema = defaultTurnActionSchemas.resolveMechanicsSchema;
+const turnActionToolCallSchema = defaultTurnActionSchemas.turnActionToolCallSchema;
+const resolveMechanicsTool = defaultTurnActionSchemas.resolveMechanicsTool;
 
 const executeFastForwardTool = createStructuredTool(
   "execute_fast_forward",
@@ -4841,6 +4906,15 @@ function compactPromptText(value: string | null | undefined, maxLength = 120) {
   return value.replace(/\s+/g, " ").trim().slice(0, maxLength);
 }
 
+function formatApproachSummary(approaches: SpatialPromptContext["approaches"] | TurnRouterContext["approaches"]) {
+  return (approaches ?? []).map((approach) => ({
+    id: approach.id,
+    label: approach.label,
+    fieldId: approach.fieldId,
+    description: approach.description ?? null,
+  }));
+}
+
 function formatRouterSceneActorLine(actor: TurnRouterContext["sceneActors"][number]) {
   const label = compactPromptText(actor.displayLabel, 80) || "Unknown actor";
   const role = compactPromptText(actor.role, 60);
@@ -4930,6 +5004,11 @@ function formatRouterContextForModel(context: TurnRouterContext) {
       : `You are in ${currentLocationLabel}.`,
     currentLocation: currentLocationSummary,
     currency: context.currency,
+    mechanicsProfile: {
+      approaches: formatApproachSummary(context.approaches),
+      currencyProfile: context.currencyProfile ?? null,
+      presentationProfile: context.presentationProfile ?? null,
+    },
     authoritativeState: {
       sceneActors: context.sceneActors.slice(0, 8).map(formatRouterSceneActorLine),
       knownNearbyNpcs: (context.knownNearbyNpcs ?? []).slice(0, 8).map(formatRouterKnownNpcLine),
@@ -5096,8 +5175,10 @@ function normalizeFinalActionToolCallInput(command: unknown): unknown {
   };
 }
 
-function parseFinalActionToolCall(command: unknown) {
-  return turnActionToolCallSchema.safeParse(normalizeFinalActionToolCallInput(command));
+function parseFinalActionToolCall(command: unknown, approachIds?: string[]) {
+  return buildTurnActionSchemas(approachIds).turnActionToolCallSchema.safeParse(
+    normalizeFinalActionToolCallInput(command),
+  );
 }
 
 function extractToolInput(response: OpenAI.Chat.Completions.ChatCompletion) {
@@ -5190,6 +5271,7 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "If the player implies a plausible local detail that is not yet grounded, prefer bounded manifestation over rejection.",
         "If the action is purely atmospheric, stay in FLAVOR and do not escalate it into mechanics.",
         "Use only bounded mutations. The engine will validate, filter, and commit them.",
+        "When checkIntent is present, use approachId exactly as listed in mechanicsProfile.approaches. Do not invent legacy challengeApproach labels or combat-only aliases when module approaches are provided.",
         "Mark resource costs, fees, and other upfront expenditures as phase immediate.",
         "Mark success-only rewards or outcomes as phase conditional.",
         "Advance the scene or world only through passive observation or waiting.",
@@ -5229,8 +5311,8 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Default manifestation pattern: plausible generic nearby people become spawn_temporary_actor such as stablehand, customer, porter, or watch patrol.",
         "Default manifestation pattern: intra-location repositioning becomes set_player_scene_focus.",
         "Self-directed downtime work may use adjust_inventory, spawn_environmental_item, and spawn_scene_aspect for grounded byproducts, consumed materials, and scene conditions.",
-        `The currency system uses cp, sp, gp, and pp. ${COPPER_PER_SILVER} cp = 1 sp, ${COPPER_PER_GOLD} cp = 1 gp, and ${COPPER_PER_PLATINUM} cp = 1 pp.`,
-        "Use adjust_currency for incidental payments, rewards, bribes, tips, fees, and other non-market currency movement; express the delta with denomination fields rather than flattened copper arithmetic.",
+        "Currency uses signed base-unit deltas. Read naming and display cues from mechanicsProfile.currencyProfile when present, but encode adjust_currency.delta as a single integer base-unit change.",
+        "Use adjust_currency for incidental payments, rewards, bribes, tips, fees, and other non-market currency movement.",
         "If economy_light is active and a bespoke trade is actually agreed upon, resolve it immediately with composed asset mutations such as adjust_currency plus spawn_fiat_item and/or transfer_assets. Do not rely on record_actor_interaction or record_npc_interaction alone to finalize the trade.",
         "If an offer is still on the table but not yet accepted, you may track it with a scene-duration spawn_scene_aspect such as pending_trade_offer instead of finalizing the exchange early.",
         "Use transfer_assets for non-market stashing, dropping, storing, retrieving, feeding, lending, or handing over items, commodities, or currency between the player, world objects, scenes, temporary actors, and willing NPCs.",
@@ -5305,12 +5387,13 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "checkIntent is a top-level field on resolve_mechanics, not a mutation. Never put an entry with type checkIntent inside mutations.",
         "If a check is needed, set top-level checkIntent and list only the success-state mutations. The engine will reject them automatically on failure or partial success.",
         "Only set citedNpcId when the player is directly engaging that NPC on-screen this turn.",
+        "When checkIntent is present, use approachId exactly as listed in mechanicsProfile.approaches. Do not invent legacy challengeApproach labels or combat-only aliases when module approaches are provided.",
         "For notice/analyze/search/listen turns that use checkIntent, any newly noticed actor, clue, item, or scene detail must be phase conditional so the roll gates whether it appears.",
         "Never use placeholder ids like none, null, unknown, or n/a for citedNpcId, targetNpcId, localEntityId, or spawn references. Omit the field instead when there is no real id.",
         "Mark resource costs, fees, and other upfront expenditures as phase immediate.",
         "Mark success-only rewards or outcomes as phase conditional.",
         "Use commit_market_trade only for strict commodity trade backed by fetched market prices.",
-        `The currency system uses cp, sp, gp, and pp. ${COPPER_PER_SILVER} cp = 1 sp, ${COPPER_PER_GOLD} cp = 1 gp, and ${COPPER_PER_PLATINUM} cp = 1 pp.`,
+        "Currency uses signed base-unit deltas. Read naming and display cues from mechanicsProfile.currencyProfile when present, but encode adjust_currency.delta as a single integer base-unit change.",
         "Use adjust_currency for incidental payments, rewards, bribes, tips, fees, or other non-market currency movement.",
         "Use start_journey for ordinary physical route travel to a known adjacent location.",
         "Use move_player only for teleportation, magical portals, trap relocation, or forced transport.",
@@ -5547,6 +5630,11 @@ function formatSpatialPromptContext(context: SpatialPromptContext) {
       ? `You are in ${currentLocationLabel}. Your current focus/position is: ${sceneFocusLabel}.`
       : `You are in ${currentLocationLabel}.`,
     promptRequestId: context.promptRequestId ?? null,
+    mechanicsProfile: {
+      approaches: formatApproachSummary(context.approaches),
+      currencyProfile: context.currencyProfile ?? null,
+      presentationProfile: context.presentationProfile ?? null,
+    },
     authoritativeState: {
       currentLocation: context.currentLocation,
       sceneFocus: context.sceneFocus,
@@ -5589,8 +5677,19 @@ function buildTurnUserPrompt(input: {
     formatPromptBlock("context", formatSpatialPromptContext(input.promptContext)),
     formatPromptBlock("character", {
       name: input.character.name,
-      archetype: input.character.archetype,
-      stats: input.character.stats,
+      drivingGoal: input.character.drivingGoal ?? null,
+      vitality: {
+        current: input.character.health,
+        max: input.character.maxVitality ?? input.character.maxHealth ?? input.character.health,
+        label: input.character.presentationProfile?.vitalityLabel ?? "Vitality",
+      },
+      approaches: formatApproachSummary(input.character.approaches),
+      approachModifiers: input.character.stats,
+      frameworkValues: input.character.frameworkValues,
+      currency: {
+        totalBaseUnits: input.character.currencyCp,
+        profile: input.character.currencyProfile ?? null,
+      },
     }),
     formatPromptBlock("fetched_facts", input.fetchedFacts),
   ].join("\n\n");
@@ -6288,6 +6387,82 @@ class DungeonMasterClient {
         message: error instanceof Error ? error.message : String(error),
       });
       throw new Error(error instanceof Error ? error.message : "Character generation failed.");
+    }
+  }
+
+  async generateCharacterConcept(prompt: string): Promise<{ concept: CharacterConceptDraft; source: "openrouter" }> {
+    const conceptTool = createStructuredTool(
+      "generate_character_concept",
+      "Generate one narrative-only character concept with no mechanics, no stats, and no module assumptions.",
+      characterConceptDraftSchema,
+    );
+
+    try {
+      const response = await runCompletion({
+        system: [
+          "You create standalone solo-RPG character concepts.",
+          "Return only narrative fields. Do not invent mechanics, framework values, approaches, or vitality numbers.",
+          `starterItems must contain at most ${MAX_STARTER_ITEMS} specific, mundane items.`,
+        ].join("\n"),
+        user: prompt,
+        tools: [conceptTool],
+      });
+
+      const parsed = characterConceptDraftSchema.safeParse(response?.input);
+      if (!parsed.success) {
+        throw new Error(`Character concept generation returned invalid structured data: ${parsed.error.message}`);
+      }
+
+      return { concept: parsed.data, source: "openrouter" };
+    } catch (error) {
+      throw new Error(error instanceof Error ? error.message : "Character concept generation failed.");
+    }
+  }
+
+  async generateModuleCharacterTemplate(input: {
+    prompt: string;
+    module: GeneratedWorldModule;
+    sourceConcept?: CharacterConceptDraft | null;
+  }): Promise<{ character: CharacterTemplateDraft; source: "openrouter" }> {
+    const compiledFramework = compileCharacterFramework(input.module.characterFramework!);
+    const templateSchema = buildCharacterTemplateDraftSchema(compiledFramework);
+    const templateTool = createStructuredTool(
+      "generate_module_character_template",
+      "Generate one playable module-bound character template that strictly matches the provided framework.",
+      templateSchema,
+    );
+
+    try {
+      const response = await runCompletion({
+        system: [
+          "You create playable solo-RPG protagonists bound to a specific module framework.",
+          "Always return frameworkVersion exactly as provided.",
+          "frameworkValues must strictly satisfy the provided field ids and allowed values.",
+          "Do not invent extra framework fields or rename ids.",
+          "Keep the character grounded in the module's tone and setting.",
+        ].join("\n"),
+        user: [
+          formatPromptBlock("prompt", input.prompt),
+          formatPromptBlock("module", {
+            title: input.module.title,
+            premise: input.module.premise,
+            tone: input.module.tone,
+            setting: input.module.setting,
+          }),
+          formatPromptBlock("character_framework", compiledFramework.framework),
+          formatPromptBlock("source_concept", input.sourceConcept ?? null),
+        ].join("\n\n"),
+        tools: [templateTool],
+      });
+
+      const parsed = templateSchema.safeParse(response?.input);
+      if (!parsed.success) {
+        throw new Error(`Module character generation returned invalid structured data: ${parsed.error.message}`);
+      }
+
+      return { character: parsed.data, source: "openrouter" };
+    } catch (error) {
+      throw new Error(error instanceof Error ? error.message : "Module character generation failed.");
     }
   }
 
@@ -8981,6 +9156,12 @@ class DungeonMasterClient {
   async runTurn(input: TurnInput): Promise<TurnResolution> {
     try {
       const baseSystem = buildTurnSystemPrompt(input.turnMode);
+      const approachIds = Array.from(new Set(
+        (input.promptContext.approaches ?? input.character.approaches ?? [])
+          .map((approach) => approach.id.trim())
+          .filter(Boolean),
+      ));
+      const dynamicResolveMechanicsTool = buildTurnActionSchemas(approachIds).resolveMechanicsTool;
 
       let correctionNotes: string | null = null;
       let lastFailureSummary: string | null = null;
@@ -9011,7 +9192,7 @@ class DungeonMasterClient {
         const response = await runCompletion({
           system,
           user,
-          tools: [resolveMechanicsTool, executeFastForwardTool, requestClarificationTool],
+          tools: [dynamicResolveMechanicsTool, executeFastForwardTool, requestClarificationTool],
           maxTokens: 1200,
           signal: input.signal,
         });
@@ -9039,7 +9220,7 @@ class DungeonMasterClient {
         });
 
         if (normalized) {
-          const parsedAction = parseFinalActionToolCall(normalized);
+          const parsedAction = parseFinalActionToolCall(normalized, approachIds);
           if (!parsedAction.success) {
             const validationIssues = zodIssuesToText(parsedAction.error.issues);
             lastFailureSummary = response?.likelyTruncated

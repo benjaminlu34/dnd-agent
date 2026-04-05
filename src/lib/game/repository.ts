@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { dmClient, logBackendDiagnostic } from "@/lib/ai/provider";
+import { buildDefaultCharacterFramework, compileCharacterFramework } from "@/lib/game/character-framework";
 import { toPromptCurrencySummary } from "@/lib/game/currency";
 import { toCampaignCharacter, toCharacterStats } from "@/lib/game/characters";
 import { parseTurnResultPayloadJson, parseCampaignRuntimeStateJson, approvalBandForValue, toCampaignRuntimeStateJson, toFactionResourcesJson } from "@/lib/game/json-contracts";
@@ -31,6 +32,9 @@ import type {
   CampaignRuntimeState,
   CampaignSnapshot,
   CharacterCommodityStack,
+  CharacterConcept,
+  CharacterConceptDraft,
+  CharacterConceptSummary,
   CharacterInstance,
   CharacterTemplate,
   CharacterTemplateDraft,
@@ -86,22 +90,34 @@ import { prisma } from "@/lib/prisma";
 
 const characterTemplateSummarySelect = {
   id: true,
+  moduleId: true,
+  sourceConceptId: true,
+  frameworkVersion: true,
   name: true,
-  archetype: true,
-  strength: true,
-  dexterity: true,
-  constitution: true,
-  intelligence: true,
-  wisdom: true,
-  charisma: true,
-  maxHealth: true,
+  appearance: true,
   backstory: true,
+  drivingGoal: true,
+  vitality: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.CharacterTemplateSelect;
 
+const characterConceptSummarySelect = {
+  id: true,
+  name: true,
+  appearance: true,
+  backstory: true,
+  drivingGoal: true,
+  createdAt: true,
+  updatedAt: true,
+} satisfies Prisma.CharacterConceptSelect;
+
 type PrismaCharacterTemplateSummaryRecord = Prisma.CharacterTemplateGetPayload<{
   select: typeof characterTemplateSummarySelect;
+}>;
+
+type PrismaCharacterConceptSummaryRecord = Prisma.CharacterConceptGetPayload<{
+  select: typeof characterConceptSummarySelect;
 }>;
 
 type PrismaItemInstanceRecord = Prisma.ItemInstanceGetPayload<{
@@ -134,6 +150,31 @@ type SnapshotDbClient = Prisma.TransactionClient | typeof prisma;
 
 function parseWorldTemplate(value: unknown): GeneratedWorldModule {
   return generatedWorldModuleSchema.parse(value);
+}
+
+function resolveModuleCharacterFramework(module: {
+  title: string;
+  openWorldTemplateJson: unknown;
+  characterFrameworkJson?: unknown;
+}) {
+  const parsedWorld = parseWorldTemplate(module.openWorldTemplateJson);
+  return compileCharacterFramework(
+    (module.characterFrameworkJson as GeneratedWorldModule["characterFramework"])
+      ?? parsedWorld.characterFramework
+      ?? buildDefaultCharacterFramework(module.title),
+  ).framework;
+}
+
+function resolveModuleWorld(module: {
+  title: string;
+  openWorldTemplateJson: unknown;
+  characterFrameworkJson?: unknown;
+}): GeneratedWorldModule {
+  const parsedWorld = parseWorldTemplate(module.openWorldTemplateJson);
+  return {
+    ...parsedWorld,
+    characterFramework: resolveModuleCharacterFramework(module),
+  };
 }
 
 function parseOpenWorldGenerationArtifacts(value: unknown): OpenWorldGenerationArtifacts | null {
@@ -974,16 +1015,16 @@ async function generateStartingHydratedNpcs(input: {
 function toTemplateRecord(template: Prisma.CharacterTemplateGetPayload<Record<string, never>>): CharacterTemplate {
   return {
     id: template.id,
+    moduleId: template.moduleId,
+    sourceConceptId: template.sourceConceptId,
+    frameworkVersion: template.frameworkVersion,
+    frameworkValues: template.frameworkValues as CharacterTemplate["frameworkValues"],
     name: template.name,
-    archetype: template.archetype,
-    strength: template.strength,
-    dexterity: template.dexterity,
-    constitution: template.constitution,
-    intelligence: template.intelligence,
-    wisdom: template.wisdom,
-    charisma: template.charisma,
-    maxHealth: template.maxHealth,
+    appearance: template.appearance,
     backstory: template.backstory,
+    drivingGoal: template.drivingGoal,
+    vitality: template.vitality,
+    maxHealth: template.vitality,
     starterItems: [...template.starterItems],
   };
 }
@@ -991,18 +1032,40 @@ function toTemplateRecord(template: Prisma.CharacterTemplateGetPayload<Record<st
 function toTemplateSummary(template: PrismaCharacterTemplateSummaryRecord): CharacterTemplateSummary {
   return {
     id: template.id,
+    moduleId: template.moduleId,
+    sourceConceptId: template.sourceConceptId,
+    frameworkVersion: template.frameworkVersion,
     name: template.name,
-    archetype: template.archetype,
-    strength: template.strength,
-    dexterity: template.dexterity,
-    constitution: template.constitution,
-    intelligence: template.intelligence,
-    wisdom: template.wisdom,
-    charisma: template.charisma,
-    maxHealth: template.maxHealth,
+    appearance: template.appearance,
     backstory: template.backstory,
+    drivingGoal: template.drivingGoal,
+    vitality: template.vitality,
+    maxHealth: template.vitality,
     createdAt: template.createdAt.toISOString(),
     updatedAt: template.updatedAt.toISOString(),
+  };
+}
+
+function toConceptRecord(concept: Prisma.CharacterConceptGetPayload<Record<string, never>>): CharacterConcept {
+  return {
+    id: concept.id,
+    name: concept.name,
+    appearance: concept.appearance,
+    backstory: concept.backstory,
+    drivingGoal: concept.drivingGoal,
+    starterItems: [...concept.starterItems],
+  };
+}
+
+function toConceptSummary(concept: PrismaCharacterConceptSummaryRecord): CharacterConceptSummary {
+  return {
+    id: concept.id,
+    name: concept.name,
+    appearance: concept.appearance,
+    backstory: concept.backstory,
+    drivingGoal: concept.drivingGoal,
+    createdAt: concept.createdAt.toISOString(),
+    updatedAt: concept.updatedAt.toISOString(),
   };
 }
 
@@ -1170,7 +1233,11 @@ function toPromptAssetInventory(input: {
 }
 
 function toPromptInventory(
-  character: CharacterInstance,
+  character: {
+    inventory: CharacterInstance["inventory"];
+    commodityStacks: CharacterInstance["commodityStacks"];
+    [key: string]: unknown;
+  },
   campaignItemTemplates: Array<{ id: string; name: string; description: string | null }> = [],
 ): PromptInventoryItem[] {
   return toPromptAssetInventory({
@@ -1204,7 +1271,11 @@ function toRouterWorldObjectSummary(object: WorldObjectSummary, summary: string)
   };
 }
 
-function toRouterInventorySummary(character: CharacterInstance) {
+function toRouterInventorySummary(character: {
+  inventory: CharacterInstance["inventory"];
+  commodityStacks: CharacterInstance["commodityStacks"];
+  [key: string]: unknown;
+}) {
   const itemsById = new Map<string, { templateId: string; name: string; quantity: number; instanceIds: string[]; stateTags: string[] }>();
 
   for (const item of character.inventory) {
@@ -1538,6 +1609,26 @@ export async function listCharacterTemplates(): Promise<CharacterTemplateSummary
   return templates.map(toTemplateSummary);
 }
 
+export async function listCharacterConcepts(): Promise<CharacterConceptSummary[]> {
+  const user = await ensureLocalUser();
+  const concepts = await prisma.characterConcept.findMany({
+    where: { userId: user.id },
+    select: characterConceptSummarySelect,
+    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+  });
+
+  return concepts.map(toConceptSummary);
+}
+
+export async function getCharacterConceptForUser(conceptId: string) {
+  const user = await ensureLocalUser();
+  const concept = await prisma.characterConcept.findFirst({
+    where: { id: conceptId, userId: user.id },
+  });
+
+  return concept ? toConceptRecord(concept) : null;
+}
+
 export async function getCharacterTemplateForUser(templateId: string) {
   const user = await ensureLocalUser();
   const template = await prisma.characterTemplate.findFirst({
@@ -1547,22 +1638,111 @@ export async function getCharacterTemplateForUser(templateId: string) {
   return template ? toTemplateRecord(template) : null;
 }
 
+async function getModuleFramework(moduleId: string) {
+  const module = await prisma.adventureModule.findUnique({
+    where: { id: moduleId },
+    select: {
+      id: true,
+      title: true,
+      characterFrameworkJson: true,
+      openWorldTemplateJson: true,
+    },
+  });
+
+  if (!module) {
+    return null;
+  }
+
+  return compileCharacterFramework(resolveModuleCharacterFramework(module));
+}
+
+export async function createCharacterConcept(input: CharacterConceptDraft) {
+  const user = await ensureLocalUser();
+
+  return prisma.characterConcept.create({
+    data: {
+      userId: user.id,
+      name: input.name,
+      appearance: input.appearance,
+      backstory: input.backstory ?? "",
+      drivingGoal: input.drivingGoal ?? "",
+      starterItems: input.starterItems,
+    },
+  });
+}
+
+export async function updateCharacterConceptForUser(conceptId: string, input: CharacterConceptDraft) {
+  const user = await ensureLocalUser();
+  const concept = await prisma.characterConcept.findFirst({
+    where: { id: conceptId, userId: user.id },
+    select: { id: true },
+  });
+
+  if (!concept) {
+    return null;
+  }
+
+  return prisma.characterConcept.update({
+    where: { id: concept.id },
+    data: {
+      name: input.name,
+      appearance: input.appearance,
+      backstory: input.backstory ?? "",
+      drivingGoal: input.drivingGoal ?? "",
+      starterItems: input.starterItems,
+    },
+  });
+}
+
+export async function deleteCharacterConceptForUser(conceptId: string) {
+  const user = await ensureLocalUser();
+  const concept = await prisma.characterConcept.findFirst({
+    where: { id: conceptId, userId: user.id },
+    select: { id: true },
+  });
+
+  if (!concept) {
+    return null;
+  }
+
+  await prisma.characterConcept.delete({
+    where: { id: concept.id },
+  });
+
+  return {
+    conceptId: concept.id,
+  };
+}
+
 export async function createCharacterTemplate(input: CharacterTemplateDraft) {
   const user = await ensureLocalUser();
+  if (!input.moduleId || !input.frameworkVersion || !input.frameworkValues || typeof input.vitality !== "number") {
+    throw new Error("Module-bound character templates require moduleId, frameworkVersion, frameworkValues, and vitality.");
+  }
+  const compiledFramework = await getModuleFramework(input.moduleId);
+
+  if (!compiledFramework) {
+    throw new Error("Selected module was not found.");
+  }
+
+  if (compiledFramework.framework.frameworkVersion !== input.frameworkVersion) {
+    throw new Error("Character template frameworkVersion does not match the target module.");
+  }
+
+  const frameworkValues = compiledFramework.valuesSchema.parse(input.frameworkValues);
 
   return prisma.characterTemplate.create({
     data: {
       userId: user.id,
+      moduleId: input.moduleId,
+      sourceConceptId: input.sourceConceptId ?? null,
+      frameworkVersion: input.frameworkVersion,
+      frameworkValues: frameworkValues as Prisma.InputJsonValue,
       name: input.name,
-      archetype: input.archetype,
-      strength: input.strength,
-      dexterity: input.dexterity,
-      constitution: input.constitution,
-      intelligence: input.intelligence,
-      wisdom: input.wisdom,
-      charisma: input.charisma,
-      maxHealth: input.maxHealth,
-      backstory: input.backstory,
+      appearance: input.appearance,
+      backstory: input.backstory ?? "",
+      drivingGoal: input.drivingGoal ?? "",
+      vitality: input.vitality,
       starterItems: input.starterItems,
     },
   });
@@ -1575,26 +1755,39 @@ export async function updateCharacterTemplateForUser(
   const user = await ensureLocalUser();
   const template = await prisma.characterTemplate.findFirst({
     where: { id: templateId, userId: user.id },
-    select: { id: true },
+    select: { id: true, moduleId: true },
   });
 
   if (!template) {
     return null;
   }
 
+  if (!input.frameworkVersion || !input.frameworkValues || typeof input.vitality !== "number") {
+    throw new Error("Module-bound character templates require frameworkVersion, frameworkValues, and vitality.");
+  }
+
+  const compiledFramework = await getModuleFramework(template.moduleId);
+  if (!compiledFramework) {
+    throw new Error("Selected module was not found.");
+  }
+
+  if (compiledFramework.framework.frameworkVersion !== input.frameworkVersion) {
+    throw new Error("Character template frameworkVersion does not match the target module.");
+  }
+
+  const frameworkValues = compiledFramework.valuesSchema.parse(input.frameworkValues);
+
   return prisma.characterTemplate.update({
     where: { id: template.id },
     data: {
+      sourceConceptId: input.sourceConceptId ?? null,
+      frameworkVersion: input.frameworkVersion,
+      frameworkValues: frameworkValues as Prisma.InputJsonValue,
       name: input.name,
-      archetype: input.archetype,
-      strength: input.strength,
-      dexterity: input.dexterity,
-      constitution: input.constitution,
-      intelligence: input.intelligence,
-      wisdom: input.wisdom,
-      charisma: input.charisma,
-      maxHealth: input.maxHealth,
-      backstory: input.backstory,
+      appearance: input.appearance,
+      backstory: input.backstory ?? "",
+      drivingGoal: input.drivingGoal ?? "",
+      vitality: input.vitality,
       starterItems: input.starterItems,
     },
   });
@@ -1680,7 +1873,7 @@ export async function getAdventureModuleForUser(moduleId: string): Promise<Adven
     return null;
   }
 
-  const template = parseWorldTemplate(adventureModule.openWorldTemplateJson);
+  const template = resolveModuleWorld(adventureModule);
   const generationArtifacts = parseOpenWorldGenerationArtifacts(adventureModule.openWorldGenerationArtifactsJson);
   const scale = moduleScaleMetadata(generationArtifacts);
 
@@ -1695,6 +1888,7 @@ export async function getAdventureModuleForUser(moduleId: string): Promise<Adven
     launchableDirectly: scale.launchableDirectly,
     launchBlockReason: scale.launchBlockReason,
     schemaVersion: adventureModule.schemaVersion,
+    characterFramework: template.characterFramework,
     entryPoints: template.entryPoints.map((entryPoint) => {
       const location = template.locations.find((location) => location.id === entryPoint.startLocationId);
       return {
@@ -1707,6 +1901,20 @@ export async function getAdventureModuleForUser(moduleId: string): Promise<Adven
     createdAt: adventureModule.createdAt.toISOString(),
     updatedAt: adventureModule.updatedAt.toISOString(),
   };
+}
+
+export async function getAdventureModuleWorldForUser(moduleId: string): Promise<GeneratedWorldModule | null> {
+  const user = await ensureLocalUser();
+  const adventureModule = await prisma.adventureModule.findFirst({
+    where: { id: moduleId, userId: user.id },
+    select: { title: true, openWorldTemplateJson: true, characterFrameworkJson: true },
+  });
+
+  if (!adventureModule) {
+    return null;
+  }
+
+  return resolveModuleWorld(adventureModule);
 }
 
 export async function resolveCustomEntryPointForUser(input: {
@@ -1730,7 +1938,11 @@ export async function resolveCustomEntryPointForUser(input: {
     return { error: "template_not_found" as const };
   }
 
-  const world = parseWorldTemplate(adventureModule.openWorldTemplateJson);
+  const world = resolveModuleWorld(adventureModule);
+  const moduleFramework = world.characterFramework ?? buildDefaultCharacterFramework(adventureModule.title);
+  if (template.moduleId !== adventureModule.id || template.frameworkVersion !== moduleFramework.frameworkVersion) {
+    return { error: "template_incompatible" as const };
+  }
   const generationArtifacts = parseOpenWorldGenerationArtifacts(adventureModule.openWorldGenerationArtifactsJson);
   const scale = moduleScaleMetadata(generationArtifacts);
 
@@ -1820,6 +2032,7 @@ export async function createAdventureModule(input: {
       generationMode: "open_world",
       schemaVersion: 1,
       openWorldTemplateJson: sanitizedDraft,
+      characterFrameworkJson: (sanitizedDraft.characterFramework ?? buildDefaultCharacterFramework(sanitizedDraft.title)) as Prisma.InputJsonValue,
       openWorldGenerationArtifactsJson: input.artifacts ?? Prisma.JsonNull,
     },
     include: {
@@ -1894,7 +2107,11 @@ export async function generateCampaignOpeningDraftForUser(input: {
     return { error: "template_not_found" as const };
   }
 
-  const world = parseWorldTemplate(adventureModule.openWorldTemplateJson);
+  const world = resolveModuleWorld(adventureModule);
+  const moduleFramework = world.characterFramework ?? buildDefaultCharacterFramework(adventureModule.title);
+  if (template.moduleId !== adventureModule.id || template.frameworkVersion !== moduleFramework.frameworkVersion) {
+    return { error: "template_incompatible" as const };
+  }
   const generationArtifacts = parseOpenWorldGenerationArtifacts(adventureModule.openWorldGenerationArtifactsJson);
   const scale = moduleScaleMetadata(generationArtifacts);
 
@@ -2064,6 +2281,7 @@ async function createCampaignInTx(
     characterState: {
       conditions: [],
       activeCompanions: [],
+      maxVitality: input.template.vitality ?? input.template.maxHealth ?? null,
     },
   };
 
@@ -2083,8 +2301,9 @@ async function createCampaignInTx(
       characterInstance: {
         create: {
           templateId: input.template.id,
-          health: input.template.maxHealth,
+          health: input.template.vitality ?? input.template.maxHealth ?? 1,
           currencyCp: 0,
+          frameworkValues: (input.template.frameworkValues ?? {}) as Prisma.InputJsonValue,
         },
       },
       sessions: {
@@ -2108,13 +2327,9 @@ async function createCampaignInTx(
         },
       },
     },
-    select: {
-      id: true,
-      characterInstance: {
-        select: { id: true },
-      },
+    include: {
+      characterInstance: true,
       sessions: {
-        select: { id: true },
         take: 1,
       },
     },
@@ -2565,7 +2780,11 @@ export async function createCampaignFromModuleForUser(input: {
     hasOpeningDraft: Boolean(input.opening),
   });
 
-  const world = parseWorldTemplate(adventureModule.openWorldTemplateJson);
+  const world = resolveModuleWorld(adventureModule);
+  const moduleFramework = world.characterFramework ?? buildDefaultCharacterFramework(adventureModule.title);
+  if (template.moduleId !== adventureModule.id || template.frameworkVersion !== moduleFramework.frameworkVersion) {
+    return { error: "template_incompatible" as const };
+  }
   const generationArtifacts = parseOpenWorldGenerationArtifacts(adventureModule.openWorldGenerationArtifactsJson);
   const scale = moduleScaleMetadata(generationArtifacts);
 
@@ -2713,7 +2932,7 @@ export async function listCampaigns(): Promise<CampaignListItem[]> {
        template: {
          select: {
            name: true,
-           archetype: true,
+           drivingGoal: true,
          },
        },
      },
@@ -2758,7 +2977,7 @@ export async function listCampaigns(): Promise<CampaignListItem[]> {
         setting: campaign.module.setting,
         tone: campaign.module.tone,
         characterName: campaign.template.name,
-        characterArchetype: campaign.template.archetype,
+        characterArchetype: campaign.template.drivingGoal,
         currentLocationName: currentLocationNameByCampaignId.get(campaign.id) ?? "Unknown location",
         updatedAt: campaign.updatedAt.toISOString(),
         createdAt: campaign.createdAt.toISOString(),
@@ -4372,6 +4591,7 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     templateId: campaign.characterInstance.templateId,
     health: campaign.characterInstance.health,
     currencyCp: campaign.characterInstance.currencyCp,
+    frameworkValues: campaign.characterInstance.frameworkValues as CharacterInstance["frameworkValues"],
     inventory: assetItems.filter(
       (item) =>
         item.characterInstanceId === campaign.characterInstance?.id
@@ -4382,7 +4602,12 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     ),
   };
 
-  const character = toCampaignCharacter(toTemplateRecord(campaign.template), instance);
+  const character = toCampaignCharacter(
+    toTemplateRecord(campaign.template),
+    instance,
+    resolveModuleCharacterFramework(campaign.module),
+    state.characterState.maxVitality ?? null,
+  );
   const activePressures = buildActivePressures({
     factions: campaign.factions,
     knownFactionIds,
@@ -4450,7 +4675,6 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     worldObjects,
     character: {
       ...character,
-      stats: toCharacterStats(character),
     },
     currentLocation,
     adjacentRoutes,
@@ -4910,6 +5134,7 @@ async function getTurnSnapshotFromClient(
     templateId: campaign.characterInstance.templateId,
     health: campaign.characterInstance.health,
     currencyCp: campaign.characterInstance.currencyCp,
+    frameworkValues: campaign.characterInstance.frameworkValues as CharacterInstance["frameworkValues"],
     inventory: assetItems.filter(
       (item) =>
         item.characterInstanceId === campaign.characterInstance?.id
@@ -4919,7 +5144,12 @@ async function getTurnSnapshotFromClient(
       (stack) => stack.characterInstanceId === campaign.characterInstance?.id,
     ),
   };
-  const character = toCampaignCharacter(toTemplateRecord(campaign.template), instance);
+  const character = toCampaignCharacter(
+    toTemplateRecord(campaign.template),
+    instance,
+    resolveModuleCharacterFramework(campaign.module),
+    state.characterState.maxVitality ?? null,
+  );
   const activePressures = buildActivePressures({
     factions: normalizedFactionRecords,
     knownFactionIds,
@@ -4984,7 +5214,6 @@ async function getTurnSnapshotFromClient(
     worldObjects,
     character: {
       ...character,
-      stats: toCharacterStats(character),
     },
     currentLocation,
     adjacentRoutes,
@@ -5500,6 +5729,9 @@ export async function getTurnRouterContext(snapshot: CampaignSnapshot): Promise<
     activePressures: snapshot.activePressures,
     activeThreads: snapshot.activeThreads,
     inventory: toRouterInventorySummary(snapshot.character),
+    approaches: snapshot.character.approaches ?? [],
+    currencyProfile: snapshot.character.currencyProfile ?? buildDefaultCharacterFramework("runtime").currencyProfile,
+    presentationProfile: snapshot.character.presentationProfile ?? buildDefaultCharacterFramework("runtime").presentationProfile,
     worldObjects: visibleWorldObjects.map<RouterWorldObjectSummary>((object) =>
       toRouterWorldObjectSummary(
         object,
@@ -5517,7 +5749,10 @@ export async function getTurnRouterContext(snapshot: CampaignSnapshot): Promise<
       presentNpcs: snapshot.presentNpcs,
       focusedSceneActors,
     }),
-    currency: toPromptCurrencySummary(snapshot.character.currencyCp),
+    currency: toPromptCurrencySummary(
+      snapshot.character.currencyCp,
+      snapshot.character.currencyProfile,
+    ),
   };
 }
 
@@ -5603,7 +5838,13 @@ export async function getPromptContext(
     recentWorldShifts: isLocal ? [] : snapshot.recentWorldShifts,
     activeThreads: isLocal ? [] : routerContext.activeThreads,
     inventory: toPromptInventory(snapshot.character, campaignItemTemplates),
-    currency: toPromptCurrencySummary(snapshot.character.currencyCp),
+    currency: toPromptCurrencySummary(
+      snapshot.character.currencyCp,
+      snapshot.character.currencyProfile,
+    ),
+    approaches: snapshot.character.approaches ?? [],
+    currencyProfile: snapshot.character.currencyProfile ?? buildDefaultCharacterFramework("runtime").currencyProfile,
+    presentationProfile: snapshot.character.presentationProfile ?? buildDefaultCharacterFramework("runtime").presentationProfile,
     worldObjects: visibleWorldObjects.map<PromptWorldObject>((object) =>
       toPromptWorldObjectSummary(
         object,

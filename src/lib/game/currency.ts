@@ -1,66 +1,66 @@
 import { z } from "zod";
-import type { CurrencyDenominations, PromptCurrencySummary } from "@/lib/game/types";
+import type { CurrencyProfile, PromptCurrencySummary } from "@/lib/game/types";
 
 export const COPPER_PER_SILVER = 10;
 export const COPPER_PER_GOLD = 100;
 export const COPPER_PER_PLATINUM = 10_000;
-
-export const currencyDenominationsSchema: z.ZodType<CurrencyDenominations> = z.object({
+export const baseCurrencyDeltaSchema = z.coerce.number().int();
+const legacyCurrencyDenominationsSchema = z.object({
   cp: z.number().int().optional(),
   sp: z.number().int().optional(),
   gp: z.number().int().optional(),
   pp: z.number().int().optional(),
-}).refine((data) => {
-  const values = Object.values(data).filter((value): value is number => value !== undefined && value !== 0);
-  if (values.length === 0) {
-    return false;
-  }
-  const isPositive = values[0] > 0;
-  return values.every((value) => (value > 0) === isPositive);
-}, {
-  message: "Currency denominations must not be empty or zero, and all non-zero values must share the same sign.",
 });
 
-export function flattenCurrencyToCp(currency: CurrencyDenominations): number {
-  return (currency.cp ?? 0)
-    + ((currency.sp ?? 0) * COPPER_PER_SILVER)
-    + ((currency.gp ?? 0) * COPPER_PER_GOLD)
-    + ((currency.pp ?? 0) * COPPER_PER_PLATINUM);
+export const currencyDenominationsSchema = z.union([
+  baseCurrencyDeltaSchema,
+  legacyCurrencyDenominationsSchema,
+]);
+
+export const defaultCurrencyProfile: CurrencyProfile = {
+  unitName: "copper piece",
+  unitLabel: "Copper Pieces",
+  shortLabel: "cp",
+  precision: 0,
+};
+
+export function formatCurrency(totalBaseUnits: number, profile: CurrencyProfile = defaultCurrencyProfile): string {
+  const sign = totalBaseUnits < 0 ? "-" : "";
+  const magnitude = Math.abs(totalBaseUnits);
+  const precision = profile.precision ?? 0;
+  const divisor = precision > 0 ? 10 ** precision : 1;
+  const rendered =
+    precision > 0
+      ? (magnitude / divisor).toFixed(precision)
+      : String(magnitude);
+
+  return `${sign}${rendered} ${profile.shortLabel}`;
 }
 
-export function formatCurrency(totalCp: number): string {
-  const sign = totalCp < 0 ? "-" : "";
-  let remaining = Math.abs(totalCp);
-  const pp = Math.floor(remaining / COPPER_PER_PLATINUM);
-  remaining %= COPPER_PER_PLATINUM;
-  const gp = Math.floor(remaining / COPPER_PER_GOLD);
-  remaining %= COPPER_PER_GOLD;
-  const sp = Math.floor(remaining / COPPER_PER_SILVER);
-  remaining %= COPPER_PER_SILVER;
-  const cp = remaining;
+export function formatCurrencyCompact(totalBaseUnits: number, profile: CurrencyProfile = defaultCurrencyProfile): string {
+  return formatCurrency(totalBaseUnits, profile);
+}
 
-  const parts = [
-    pp ? `${pp} pp` : null,
-    gp ? `${gp} gp` : null,
-    sp ? `${sp} sp` : null,
-    cp ? `${cp} cp` : null,
-  ].filter(Boolean);
-
-  if (!parts.length) {
-    return "0 cp";
+export function flattenCurrencyToCp(value: number | { cp?: number; sp?: number; gp?: number; pp?: number }) {
+  if (typeof value === "number") {
+    return value;
   }
 
-  return `${sign}${parts.join(", ")}`;
+  return (value.cp ?? 0)
+    + ((value.sp ?? 0) * COPPER_PER_SILVER)
+    + ((value.gp ?? 0) * COPPER_PER_GOLD)
+    + ((value.pp ?? 0) * COPPER_PER_PLATINUM);
 }
 
-export function formatCurrencyCompact(totalCp: number): string {
-  return formatCurrency(totalCp);
-}
-
-export function toPromptCurrencySummary(totalCp: number): PromptCurrencySummary {
+export function toPromptCurrencySummary(
+  totalBaseUnits: number,
+  profile: CurrencyProfile = defaultCurrencyProfile,
+): PromptCurrencySummary {
   return {
-    totalCp,
-    formatted: formatCurrencyCompact(totalCp),
+    totalBaseUnits,
+    formatted: formatCurrencyCompact(totalBaseUnits, profile),
+    unitLabel: profile.unitLabel,
+    shortLabel: profile.shortLabel,
+    totalCp: totalBaseUnits,
   };
 }
-

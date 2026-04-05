@@ -1,9 +1,12 @@
 import { NextResponse } from "next/server";
-import { listCharacterTemplates } from "@/lib/game/repository";
+import { listCharacterConcepts, listCharacterTemplates } from "@/lib/game/repository";
 
 export const runtime = "nodejs";
 
 export async function GET() {
-  const characters = await listCharacterTemplates();
-  return NextResponse.json({ characters });
+  const [concepts, templates] = await Promise.all([
+    listCharacterConcepts(),
+    listCharacterTemplates(),
+  ]);
+  return NextResponse.json({ characters: templates, templates, concepts });
 }

@@ -31,7 +31,8 @@ const rawCampaignRuntimeStateSchema = z.object({
   characterState: z.object({
     conditions: z.array(z.string().trim().min(1)).default([]),
     activeCompanions: z.array(z.string().trim().min(1)).default([]),
-  }).nullish().default({ conditions: [], activeCompanions: [] }),
+    maxVitality: z.number().int().positive().nullish().default(null),
+  }).nullish().default({ conditions: [], activeCompanions: [], maxVitality: null }),
   sceneFocus: z.object({
     key: z.string().trim().min(1),
     label: z.string().trim().min(1),
@@ -63,7 +64,7 @@ const campaignRuntimeStateSchema: z.ZodType<CampaignRuntimeState> = rawCampaignR
     globalTime: value.globalTime,
     pendingTurnId: value.pendingTurnId,
     lastActionSummary: value.lastActionSummary,
-    characterState: value.characterState ?? { conditions: [], activeCompanions: [] },
+    characterState: value.characterState ?? { conditions: [], activeCompanions: [], maxVitality: null },
     sceneFocus: value.sceneFocus ?? null,
     sceneActorFocuses: value.sceneActorFocuses ?? {},
     sceneAspects: normalizedAspects,
@@ -236,7 +237,8 @@ const turnResultPayloadSchema: z.ZodType<TurnResultPayload> = z.object({
   narrationBounds: turnNarrationBoundsSchema.optional().nullable(),
   pendingCheck: z
     .object({
-      stat: z.enum(["strength", "dexterity", "constitution", "intelligence", "wisdom", "charisma"]),
+      approachId: z.string(),
+      stat: z.string().optional(),
       mode: z.enum(["normal", "advantage", "disadvantage"]),
       reason: z.string(),
       modifier: z.number().int(),
@@ -246,10 +248,13 @@ const turnResultPayloadSchema: z.ZodType<TurnResultPayload> = z.object({
     .nullable(),
   checkResult: z
     .object({
-      stat: z.enum(["strength", "dexterity", "constitution", "intelligence", "wisdom", "charisma"]),
+      approachId: z.string(),
+      stat: z.string().optional(),
       mode: z.enum(["normal", "advantage", "disadvantage"]),
       reason: z.string(),
-      rolls: z.tuple([z.number().int(), z.number().int()]),
+      rolls: z.tuple([z.number().int(), z.number().int()]).optional(),
+      rollPairs: z.array(z.tuple([z.number().int(), z.number().int()])),
+      selectedRollPairIndex: z.number().int().nonnegative(),
       modifier: z.number().int(),
       total: z.number().int(),
       dc: z.number().int().optional(),

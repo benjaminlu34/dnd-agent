@@ -498,7 +498,18 @@ function isPendingCheckToolBundle(value: unknown): value is PendingCheckToolBund
     && Array.isArray(bundle.groundedItemIds);
 }
 
-function normalizeSubmittedRolls(mode: PendingCheck["mode"], rolls: [number, number]): [number, number] {
+function pairForSubmittedTotal(total: number): [number, number] {
+  const first = Math.max(1, Math.min(6, total - 1));
+  const second = total - first;
+
+  if (second < 1 || second > 6) {
+    return [Math.max(1, total - 6), Math.min(6, total)];
+  }
+
+  return [first, second];
+}
+
+function normalizeSubmittedRolls(mode: PendingCheck["mode"], rolls: [number, number]): Array<[number, number]> {
   const first = Number(rolls[0]);
   const second = Number(rolls[1]);
   const valid = (value: number) => Number.isInteger(value) && value >= 2 && value <= 12;
@@ -508,10 +519,10 @@ function normalizeSubmittedRolls(mode: PendingCheck["mode"], rolls: [number, num
   }
 
   if (mode === "normal") {
-    return [first, first];
+    return [pairForSubmittedTotal(first)];
   }
 
-  return [first, second];
+  return [pairForSubmittedTotal(first), pairForSubmittedTotal(second)];
 }
 
 async function persistClarificationRequest(input: {
@@ -2825,12 +2836,13 @@ function evaluateResolvedCommand(input: {
   const checkOutcome = input.command.checkResult?.outcome;
 
   if (input.command.checkResult) {
+    const label = input.command.checkResult.approachId ?? input.command.checkResult.stat ?? "CHECK";
     stateCommitLog.push({
       kind: "check",
       mutationType: null,
       status: "applied",
       reasonCode: `check_${input.command.checkResult.outcome}`,
-      summary: `${input.command.checkResult.stat.toUpperCase()} ${input.command.checkResult.outcome} (${input.command.checkResult.total})`,
+      summary: `${label.toUpperCase()} ${input.command.checkResult.outcome} (${input.command.checkResult.total})`,
       metadata: input.command.checkResult as unknown as Record<string, unknown>,
     });
   }
@@ -3200,9 +3212,7 @@ function evaluateResolvedCommand(input: {
       const appliedDeltaCp = clampIncidentalCurrencyDelta(requestedDeltaCp);
       const appliedMutation = {
         ...mutation,
-        delta: {
-          cp: appliedDeltaCp,
-        },
+        delta: appliedDeltaCp,
         phase,
       } as MechanicsMutation;
       const authorized =
@@ -5786,12 +5796,13 @@ function evaluateResolvedCommand(input: {
     }
 
     if (mutation.type === "restore_health") {
+      const maxVitality = input.snapshot.character.maxVitality ?? input.snapshot.character.maxHealth ?? input.snapshot.character.health;
       if (mutation.mode === "light_rest") {
-        projectedHealth = Math.max(projectedHealth, Math.ceil(input.snapshot.character.maxHealth * 0.5));
+        projectedHealth = Math.max(projectedHealth, Math.ceil(maxVitality * 0.5));
       } else if (mutation.mode === "full_rest") {
-        projectedHealth = input.snapshot.character.maxHealth;
+        projectedHealth = maxVitality;
       } else {
-        projectedHealth = Math.min(input.snapshot.character.maxHealth, projectedHealth + (mutation.amount ?? 0));
+        projectedHealth = Math.min(maxVitality, projectedHealth + (mutation.amount ?? 0));
       }
       const appliedMutation = { ...mutation, phase } as MechanicsMutation;
       const entry = {
@@ -7911,12 +7922,13 @@ async function applyResolvedMutations(input: {
 
     if (mutation.type === "restore_health") {
       let restoredHealth = characterInstance.health;
+      const maxVitality = input.snapshot.character.maxVitality ?? input.snapshot.character.maxHealth ?? characterInstance.health;
       if (mutation.mode === "light_rest") {
-        restoredHealth = Math.max(characterInstance.health, Math.ceil(input.snapshot.character.maxHealth * 0.5));
+        restoredHealth = Math.max(characterInstance.health, Math.ceil(maxVitality * 0.5));
       } else if (mutation.mode === "full_rest") {
-        restoredHealth = input.snapshot.character.maxHealth;
+        restoredHealth = maxVitality;
       } else {
-        restoredHealth = Math.min(input.snapshot.character.maxHealth, characterInstance.health + (mutation.amount ?? 0));
+        restoredHealth = Math.min(maxVitality, characterInstance.health + (mutation.amount ?? 0));
       }
 
       if (restoredHealth !== characterInstance.health) {
@@ -8962,12 +8974,13 @@ async function commitResolvedTurn(input: {
     });
 
     if (command.checkResult) {
+      const label = command.checkResult.approachId ?? command.checkResult.stat ?? "CHECK";
       await createMessage({
         tx,
         sessionId,
         role: "system",
         kind: "warning",
-        content: `${command.checkResult.stat.toUpperCase()} ${command.checkResult.outcome} (${command.checkResult.total})`,
+        content: `${label.toUpperCase()} ${command.checkResult.outcome} (${command.checkResult.total})`,
         payload: command.checkResult as unknown as Prisma.JsonObject,
         rollback,
       });
@@ -11228,7 +11241,8 @@ export async function resolvePendingCheck(input: ResolvePendingCheckRequest & {
     const normalizedRolls = normalizeSubmittedRolls(bundle.command.pendingCheck.mode, input.rolls);
     const checkResult = buildCheckResult({
       ...bundle.command.pendingCheck,
-      rolls: normalizedRolls,
+      approachId: bundle.command.pendingCheck.approachId ?? bundle.command.pendingCheck.stat ?? "force",
+      rollPairs: normalizedRolls,
     });
     input.stream?.checkResult?.(checkResult);
 

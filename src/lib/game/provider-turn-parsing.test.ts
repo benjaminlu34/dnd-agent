@@ -527,6 +527,30 @@ test("parseFinalActionToolCall accepts resolve_mechanics payloads", () => {
   assert.equal(parsed.success, true);
 });
 
+test("parseFinalActionToolCall rejects invalid dynamic approach ids", () => {
+  const parsed = aiProviderTestUtils.parseFinalActionToolCall(
+    {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Hold the bluff"],
+      checkIntent: {
+        type: "challenge",
+        reason: "Keep your footing in the negotiation",
+        approachId: "force",
+      },
+      mutations: [
+        {
+          type: "advance_time",
+          durationMinutes: 5,
+        },
+      ],
+    },
+    ["sway", "scan"],
+  );
+
+  assert.equal(parsed.success, false);
+});
+
 test("parseFinalActionToolCall accepts execute_fast_forward payloads", () => {
   const parsed = aiProviderTestUtils.parseFinalActionToolCall({
     type: "execute_fast_forward",
