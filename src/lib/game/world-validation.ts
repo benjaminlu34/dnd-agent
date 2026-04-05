@@ -142,6 +142,12 @@ function hasTextualEconomicIdentity(location: GeneratedWorldModule["locations"][
   );
 }
 
+function hasSomeExternallyReachableKnowledge(
+  information: Array<{ accessibility: "public" | "guarded" | "secret" }>,
+) {
+  return information.some((entry) => entry.accessibility !== "secret");
+}
+
 export function validateWorldBible(
   bible: GeneratedWorldBible,
   options: WorldBibleValidationOptions = {},
@@ -378,20 +384,17 @@ export function validateKnowledgeEconomy(
 ): ValidationReport {
   const issues: string[] = [];
 
-  const accessibleInfoRatio =
-    knowledgeEconomy.information.length === 0
-      ? 1
-      : knowledgeEconomy.information.filter((information) => information.accessibility === "public").length /
-        knowledgeEconomy.information.length;
-
-  if (accessibleInfoRatio < 0.3) {
-    issues.push("At least 30% of information should be publicly accessible.");
-  }
-
   for (const identity of knowledgeEconomy.locationTradeIdentity) {
     if (!expectedLocationIds.includes(identity.locationId)) {
       issues.push(`Location trade identity references unknown location ${identity.locationId}.`);
     }
+  }
+
+  if (
+    knowledgeEconomy.information.length > 0
+    && !hasSomeExternallyReachableKnowledge(knowledgeEconomy.information)
+  ) {
+    issues.push("Knowledge economy should expose at least some non-secret knowledge surfaces.");
   }
 
   return {
@@ -641,14 +644,8 @@ export function validateWorldModulePlayability(module: GeneratedWorldModule): Va
   const issues: string[] = [];
   const adjacency = buildAdjacency(module);
 
-  const accessibleInfoRatio =
-    module.information.length === 0
-      ? 1
-      : module.information.filter((information) => information.accessibility === "public").length /
-        module.information.length;
-
-  if (accessibleInfoRatio < 0.3) {
-    issues.push("At least 30% of information should be publicly accessible.");
+  if (module.information.length > 0 && !hasSomeExternallyReachableKnowledge(module.information)) {
+    issues.push("The world should expose at least some non-secret knowledge surfaces.");
   }
 
   const npcConcentration = new Map<string, number>();

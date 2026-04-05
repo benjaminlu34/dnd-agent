@@ -9,6 +9,7 @@ import {
   generatedWorldModuleSchema,
   normalizeCustomResolvedLaunchEntryDraft,
   openWorldGenerationArtifactsSchema,
+  promptIntentProfileSchema,
   validateResolvedLaunchEntryAgainstWorld,
 } from "./session-zero";
 import type { GeneratedWorldModule } from "./types";
@@ -507,6 +508,57 @@ test("artifact knowledgeEconomy schema defaults missing pressure seeds to empty"
   assert.equal(parsed.success, true);
   if (parsed.success) {
     assert.deepEqual(parsed.data.pressureSeeds, []);
+  }
+});
+
+test("prompt intent profile schema accepts representative prompt textures", () => {
+  const examples = [
+    {
+      primaryTextureModes: ["mythic"],
+      primaryCausalLogic: "mythic",
+      magicIntegration: "spectacular",
+      socialEmphasis: "mixed",
+      confidence: "high",
+    },
+    {
+      primaryTextureModes: ["magical_everyday", "institutional"],
+      primaryCausalLogic: "mixed",
+      magicIntegration: "integrated",
+      socialEmphasis: "public_systems",
+      confidence: "high",
+    },
+    {
+      primaryTextureModes: ["courtly_status"],
+      primaryCausalLogic: "mixed",
+      magicIntegration: "subdued",
+      socialEmphasis: "private_networks",
+      confidence: "high",
+    },
+    {
+      primaryTextureModes: ["institutional"],
+      primaryCausalLogic: "material",
+      magicIntegration: "subdued",
+      socialEmphasis: "public_systems",
+      confidence: "high",
+    },
+    {
+      primaryTextureModes: ["ritual_ceremonial"],
+      primaryCausalLogic: "ritual",
+      magicIntegration: "integrated",
+      socialEmphasis: "mixed",
+      confidence: "high",
+    },
+    {
+      primaryTextureModes: ["surreal"],
+      primaryCausalLogic: "surreal",
+      magicIntegration: "spectacular",
+      socialEmphasis: "private_networks",
+      confidence: "medium",
+    },
+  ];
+
+  for (const example of examples) {
+    assert.equal(promptIntentProfileSchema.safeParse(example).success, true);
   }
 });
 

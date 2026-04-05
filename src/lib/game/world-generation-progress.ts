@@ -26,6 +26,7 @@ export type WorldGenerationProgressUpdate = {
 const STALE_PROGRESS_MS = 1000 * 60 * 60;
 
 export const WORLD_GENERATION_PROGRESS_STAGES: WorldGenerationStageName[] = [
+  "prompt_intent",
   "world_bible",
   "world_spine",
   "regional_life",
@@ -37,9 +38,13 @@ export const WORLD_GENERATION_PROGRESS_STAGES: WorldGenerationStageName[] = [
 ];
 
 const STAGE_COPY: Record<WorldGenerationStageName, { label: string; running: string }> = {
+  prompt_intent: {
+    label: "Reading the Prompt",
+    running: "Identifying the setting's intended texture, causal logic, and social feel.",
+  },
   world_bible: {
     label: "Shaping the Setting",
-    running: "Defining the world, its tone, and the forces that shape everyday life.",
+    running: "Defining the world, its tone, and the lived logic the prompt is asking for.",
   },
   world_spine: {
     label: "Placing Factions and Landmarks",
@@ -47,23 +52,23 @@ const STAGE_COPY: Record<WorldGenerationStageName, { label: string; running: str
   },
   regional_life: {
     label: "Adding Daily Life",
-    running: "Filling each location with routine pressures, hazards, and ordinary texture.",
+    running: "Filling each location with ordinary texture, habits, tensions, and public life.",
   },
   social_cast: {
     label: "Introducing Locals",
-    running: "Creating the people you are most likely to deal with early on.",
+    running: "Creating the people you are most likely to deal with through the world's ordinary interfaces.",
   },
   knowledge_web: {
     label: "Weaving Rumors and Leads",
-    running: "Connecting clues, rumors, and practical leads players can act on.",
+    running: "Connecting clues, rumors, etiquette, routines, and leads players can act on.",
   },
   knowledge_threads: {
     label: "Linking Hidden Tensions",
     running: "Tying public beliefs, hidden truths, and pressure points back into the playable world.",
   },
   economy_material_life: {
-    label: "Setting Trade and Scarcity",
-    running: "Working out what people buy, hoard, tax, and struggle to get.",
+    label: "Setting Material Life",
+    running: "Working out what people rely on, prize, maintain, display, and struggle to get.",
   },
   entry_contexts: {
     label: "Preparing Starting Situations",

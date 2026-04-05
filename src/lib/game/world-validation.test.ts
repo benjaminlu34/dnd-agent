@@ -998,6 +998,72 @@ test("knowledge economy validation does not require public leads at every locati
   assert.deepEqual(report.issues, []);
 });
 
+test("knowledge economy validation allows fully guarded knowledge if it is not all secret", () => {
+  const knowledgeEconomy = {
+    information: [
+      {
+        id: "info_1",
+        title: "Court etiquette",
+        summary: "The third bell opens the chamber.",
+        content: "The third bell opens the chamber.",
+        truthfulness: "true" as const,
+        accessibility: "guarded" as const,
+        locationId: "loc_market",
+        factionId: null,
+        sourceNpcId: null,
+      },
+      {
+        id: "info_2",
+        title: "Archive cloths",
+        summary: "Only dry cloths enter the archive.",
+        content: "Only dry cloths enter the archive.",
+        truthfulness: "true" as const,
+        accessibility: "guarded" as const,
+        locationId: "loc_archive",
+        factionId: null,
+        sourceNpcId: null,
+      },
+    ],
+    informationLinks: [],
+    knowledgeNetworks: [],
+    pressureSeeds: [],
+    commodities: [{ id: "com_1", name: "Bell Glass", baseValue: 4, tags: ["ritual"] }],
+    marketPrices: [],
+    locationTradeIdentity: [
+      {
+        locationId: "loc_market",
+        signatureGoods: ["bell glass"],
+        supplyConditions: "The count decides access.",
+        materialLife: "Wax and cloth define each day.",
+      },
+      {
+        locationId: "loc_archive",
+        signatureGoods: ["dry paper"],
+        supplyConditions: "Shelved space is tightly managed.",
+        materialLife: "Paper and polish mark every routine.",
+      },
+    ],
+  };
+
+  const report = validateKnowledgeEconomy(knowledgeEconomy, ["loc_market", "loc_archive"]);
+
+  assert.equal(report.ok, true);
+  assert.deepEqual(report.issues, []);
+});
+
+test("world playability no longer requires a fixed public-information ratio", () => {
+  const world = createWorld();
+  world.information = world.information.map((information) => ({
+    ...information,
+    accessibility: "guarded",
+  }));
+
+  const report = validateWorldModulePlayability(world);
+
+  assert.equal(report.ok, true);
+  assert.doesNotMatch(report.issues.join("\n"), /30%|publicly accessible/);
+});
+
 test("entry contexts allow connected worlds with longer overall travel diameter", () => {
   const longWorld = createWorld();
   longWorld.locations.push(

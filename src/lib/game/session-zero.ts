@@ -625,6 +625,29 @@ export const generatedWorldBibleSchema = z.preprocess(
   generatedWorldBibleSchemaBase,
 );
 
+export const promptTextureModeSchema = z.enum([
+  "institutional",
+  "magical_everyday",
+  "ritual_ceremonial",
+  "courtly_status",
+  "domestic_intimate",
+  "frontier_survival",
+  "mercantile_exchange",
+  "occult_scholastic",
+  "criminal_shadow",
+  "pastoral_seasonal",
+  "surreal",
+  "mythic",
+]);
+
+export const promptIntentProfileSchema = z.object({
+  primaryTextureModes: z.array(promptTextureModeSchema).min(1).max(4),
+  primaryCausalLogic: z.enum(["material", "mixed", "mythic", "ritual", "surreal"]),
+  magicIntegration: z.enum(["subdued", "integrated", "spectacular"]),
+  socialEmphasis: z.enum(["public_systems", "mixed", "private_networks"]),
+  confidence: z.enum(["low", "medium", "high"]),
+});
+
 const worldSpineKeySchema = z
   .string()
   .trim()
@@ -1168,6 +1191,8 @@ export const openWorldGenerationArtifactsSchema = z.object({
   createdAt: z.string().trim().min(1),
   scaleTier: worldScaleTierSchema.default("regional"),
   scalePlan: scalePlanSchema.optional(),
+  promptIntentProfile: promptIntentProfileSchema.optional(),
+  promptArchitectureVersion: z.number().int().positive().optional(),
   worldBible: generatedWorldBibleSchema,
   worldSpine: generatedWorldSpineSchema,
   regionalLife: generatedRegionalLifeSchema,
@@ -1218,6 +1243,7 @@ export const openWorldGenerationArtifactsSchema = z.object({
   attempts: z.array(
     z.object({
       stage: z.enum([
+        "prompt_intent",
         "world_bible",
         "world_spine",
         "regional_life",
@@ -1236,6 +1262,7 @@ export const openWorldGenerationArtifactsSchema = z.object({
   validationReports: z.array(
     z.object({
       stage: z.enum([
+        "prompt_intent",
         "world_bible",
         "world_spine",
         "regional_life",
@@ -1265,6 +1292,13 @@ export const openWorldGenerationArtifactsSchema = z.object({
 }).transform((artifacts) => ({
   ...artifacts,
   scalePlan: artifacts.scalePlan ?? buildWorldGenerationScalePlan(artifacts.scaleTier),
+  promptIntentProfile: artifacts.promptIntentProfile ?? {
+    primaryTextureModes: ["institutional"],
+    primaryCausalLogic: "mixed",
+    magicIntegration: "subdued",
+    socialEmphasis: "mixed",
+    confidence: "low",
+  },
 }));
 
 export const generatedCampaignOpeningSchema = z.object({

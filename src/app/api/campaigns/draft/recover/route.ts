@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import type {
+  PromptIntentProfile,
   OpenWorldGenerationArtifacts,
   OpenWorldGenerationCheckpoint,
   GeneratedKnowledgeNetworkStage,
@@ -7,6 +8,14 @@ import type {
 import { findRecoverableDraftGenerationCheckpoint } from "@/lib/game/world-generation-progress";
 
 export const runtime = "nodejs";
+
+const FALLBACK_PROMPT_INTENT_PROFILE: PromptIntentProfile = {
+  primaryTextureModes: ["institutional"],
+  primaryCausalLogic: "mixed",
+  magicIntegration: "subdued",
+  socialEmphasis: "mixed",
+  confidence: "low",
+};
 
 function buildArtifactsFromCheckpoint(
   checkpoint: OpenWorldGenerationCheckpoint,
@@ -39,6 +48,11 @@ function buildArtifactsFromCheckpoint(
     createdAt: checkpoint.createdAt,
     scaleTier: checkpoint.scaleTier,
     scalePlan: checkpoint.scalePlan,
+    promptIntentProfile:
+      checkpoint.promptIntentProfile
+      ?? checkpoint.stageArtifacts.prompt_intent
+      ?? FALLBACK_PROMPT_INTENT_PROFILE,
+    promptArchitectureVersion: checkpoint.promptArchitectureVersion,
     worldBible,
     worldSpine,
     regionalLife,

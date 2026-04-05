@@ -448,6 +448,7 @@ export type ResolvedLaunchEntry = OpenWorldEntryPoint & {
 };
 
 export type WorldGenerationStageName =
+  | "prompt_intent"
   | "world_bible"
   | "world_spine"
   | "regional_life"
@@ -457,6 +458,28 @@ export type WorldGenerationStageName =
   | "economy_material_life"
   | "entry_contexts"
   | "final_world";
+
+export type PromptTextureMode =
+  | "institutional"
+  | "magical_everyday"
+  | "ritual_ceremonial"
+  | "courtly_status"
+  | "domestic_intimate"
+  | "frontier_survival"
+  | "mercantile_exchange"
+  | "occult_scholastic"
+  | "criminal_shadow"
+  | "pastoral_seasonal"
+  | "surreal"
+  | "mythic";
+
+export type PromptIntentProfile = {
+  primaryTextureModes: PromptTextureMode[];
+  primaryCausalLogic: "material" | "mixed" | "mythic" | "ritual" | "surreal";
+  magicIntegration: "subdued" | "integrated" | "spectacular";
+  socialEmphasis: "public_systems" | "mixed" | "private_networks";
+  confidence: "low" | "medium" | "high";
+};
 
 export type WorldScaleTier = "settlement" | "regional" | "world";
 export type LaunchBlockReason =
@@ -708,6 +731,8 @@ export type OpenWorldGenerationArtifacts = {
   createdAt: string;
   scaleTier: WorldScaleTier;
   scalePlan: WorldGenerationScalePlan;
+  promptIntentProfile: PromptIntentProfile;
+  promptArchitectureVersion?: number;
   worldBible: GeneratedWorldBible;
   worldSpine: GeneratedWorldSpine;
   regionalLife: GeneratedRegionalLife;
@@ -767,6 +792,7 @@ export type GeneratedEconomyMaterialLifeStage = {
 };
 
 export type WorldGenerationStageArtifacts = {
+  prompt_intent: PromptIntentProfile;
   world_bible: GeneratedWorldBible;
   world_spine: GeneratedWorldSpine;
   regional_life: GeneratedRegionalLife;
@@ -787,6 +813,8 @@ export type OpenWorldGenerationCheckpoint = {
   createdAt: string;
   scaleTier: WorldScaleTier;
   scalePlan: WorldGenerationScalePlan;
+  promptIntentProfile?: PromptIntentProfile;
+  promptArchitectureVersion?: number;
   generationStatus: WorldGenerationCheckpointStatus;
   failedStage: CheckpointableWorldGenerationStageName | null;
   completedStages: CheckpointableWorldGenerationStageName[];
