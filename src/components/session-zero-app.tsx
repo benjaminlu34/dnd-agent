@@ -15,6 +15,14 @@ import {
   type DraftGenerationProgress,
 } from "@/lib/game/world-generation-progress";
 
+const DRAFT_PROGRESS_STORAGE_KEY = "session-zero:draft-progress";
+
+type StoredDraftProgressState = {
+  progressId: string;
+  prompt: string;
+  scaleTier: WorldScaleTier;
+};
+
 function fieldClassName(multiline = false) {
   return [
     "w-full rounded-2xl border border-zinc-800 bg-black px-4 py-3 text-sm text-zinc-100 outline-none transition-colors",
@@ -38,6 +46,15 @@ function FieldShell({
   );
 }
 
+function stepSectionClassName(isActive: boolean) {
+  return [
+    "rounded-xl border p-8 transition-colors",
+    isActive
+      ? "border-zinc-700 bg-zinc-950/50 shadow-[0_0_30px_rgba(255,255,255,0.02)]"
+      : "border-zinc-800 bg-zinc-950/20",
+  ].join(" ");
+}
+
 export function SessionZeroApp() {
   const router = useRouter();
   const [prompt, setPrompt] = useState("");
@@ -53,6 +70,7 @@ export function SessionZeroApp() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [draftProgressId, setDraftProgressId] = useState<string | null>(null);
+  const [draftProgressStreamRevision, setDraftProgressStreamRevision] = useState(0);
   const [draftProgress, setDraftProgress] = useState<DraftGenerationProgress | null>(null);
   const progressStreamRef = useRef<EventSource | null>(null);
 
@@ -67,6 +85,54 @@ export function SessionZeroApp() {
       : getWorldGenerationStageStep(draftProgress?.stage ?? null);
   const generationProgressPercent =
     totalGenerationStages > 0 ? (currentGenerationStage / totalGenerationStages) * 100 : 0;
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const raw = window.sessionStorage.getItem(DRAFT_PROGRESS_STORAGE_KEY);
+    if (!raw) {
+      return;
+    }
+
+    try {
+      const stored = JSON.parse(raw) as Partial<StoredDraftProgressState>;
+      if (typeof stored.progressId === "string" && stored.progressId.length > 0) {
+        setDraftProgressId(stored.progressId);
+      }
+      if (typeof stored.prompt === "string") {
+        setPrompt(stored.prompt);
+      }
+      if (
+        stored.scaleTier === "settlement"
+        || stored.scaleTier === "regional"
+        || stored.scaleTier === "world"
+      ) {
+        setScaleTier(stored.scaleTier);
+      }
+    } catch {
+      window.sessionStorage.removeItem(DRAFT_PROGRESS_STORAGE_KEY);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    if (!draftProgressId) {
+      window.sessionStorage.removeItem(DRAFT_PROGRESS_STORAGE_KEY);
+      return;
+    }
+
+    const payload: StoredDraftProgressState = {
+      progressId: draftProgressId,
+      prompt,
+      scaleTier,
+    };
+    window.sessionStorage.setItem(DRAFT_PROGRESS_STORAGE_KEY, JSON.stringify(payload));
+  }, [draftProgressId, prompt, scaleTier]);
 
   useEffect(() => {
     let active = true;
@@ -168,17 +234,73 @@ export function SessionZeroApp() {
         progressStreamRef.current = null;
       }
     };
-  }, [draftProgressId]);
+  }, [draftProgressId, draftProgressStreamRevision]);
+
+  useEffect(() => {
+    if (!draftProgressId || draft || draftProgress?.status !== "complete") {
+      return;
+    }
+
+    let cancelled = false;
+    const progressId = draftProgressId;
+
+    async function recoverCompletedDraft() {
+      try {
+        const response = await fetch(
+          `/api/campaigns/draft/recover?progressId=${encodeURIComponent(progressId)}`,
+        );
+
+        const data = (await response.json()) as {
+          progressId?: string;
+          draft?: GeneratedWorldModule;
+          artifacts?: OpenWorldGenerationArtifacts;
+          error?: string;
+        };
+
+        if (!response.ok || !data.draft) {
+          throw new Error(data.error ?? "Failed to recover completed draft.");
+        }
+
+        if (cancelled) {
+          return;
+        }
+
+        setDraft(data.draft);
+        setDraftArtifacts(data.artifacts ?? null);
+        setError(null);
+      } catch (recoveryError) {
+        if (cancelled) {
+          return;
+        }
+
+        setError(
+          recoveryError instanceof Error
+            ? recoveryError.message
+            : "Failed to recover completed draft.",
+        );
+      }
+    }
+
+    void recoverCompletedDraft();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [draftProgressId, draftProgress?.status, draft]);
 
   async function generateDraft() {
     if (!prompt.trim() || drafting) {
       return;
     }
 
-    const progressId = crypto.randomUUID();
+    const progressId =
+      draftProgress?.status === "error" && draftProgressId
+        ? draftProgressId
+        : crypto.randomUUID();
     setDrafting(true);
     setError(null);
     setDraftProgressId(progressId);
+    setDraftProgressStreamRevision((current) => current + 1);
     setDraftProgress({
       id: progressId,
       status: "queued",
@@ -248,8 +370,6 @@ export function SessionZeroApp() {
           : current,
       );
     } finally {
-      progressStreamRef.current?.close();
-      progressStreamRef.current = null;
       setDrafting(false);
     }
   }
@@ -275,16 +395,30 @@ export function SessionZeroApp() {
         moduleId?: string;
         module?: AdventureModuleSummary;
         error?: string;
+        details?: {
+          formErrors?: string[];
+          fieldErrors?: Record<string, string[] | undefined>;
+        };
       };
 
       if (!response.ok || !data.moduleId || !data.module) {
-        throw new Error(data.error ?? "Failed to save module.");
+        const detailedError =
+          data.details?.formErrors?.[0]
+          ?? Object.values(data.details?.fieldErrors ?? {})
+            .flat()
+            .find((message): message is string => typeof message === "string" && message.length > 0);
+        throw new Error(detailedError ?? data.error ?? "Failed to save module.");
       }
 
       setModules((current) => [data.module!, ...current.filter((entry) => entry.id !== data.moduleId)]);
       setSelectedModuleId(data.moduleId);
       setDraft(null);
       setDraftArtifacts(null);
+      setDraftProgress(null);
+      setDraftProgressId(null);
+      if (typeof window !== "undefined") {
+        window.sessionStorage.removeItem(DRAFT_PROGRESS_STORAGE_KEY);
+      }
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Failed to save module.");
     } finally {
@@ -330,12 +464,7 @@ export function SessionZeroApp() {
         {error ? <p className="mb-6 text-sm text-red-400">{error}</p> : null}
 
         <section
-          className={[
-            "mb-6 rounded-xl p-8",
-            activeStep === 1
-              ? "border border-zinc-700 bg-zinc-950/50 shadow-[0_0_30px_rgba(255,255,255,0.02)]"
-              : "border border-zinc-800/50 opacity-50",
-          ].join(" ")}
+          className={`mb-6 ${stepSectionClassName(activeStep === 1)}`}
         >
           <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-500">
             Step 1
@@ -419,7 +548,13 @@ export function SessionZeroApp() {
                 onClick={() => void generateDraft()}
                 disabled={drafting}
               >
-                {drafting ? "Generating..." : draft ? "Regenerate Draft" : "Generate Draft"}
+                {drafting
+                  ? "Generating..."
+                  : draftProgress?.status === "error"
+                    ? "Retry Draft"
+                    : draft
+                      ? "Regenerate Draft"
+                      : "Generate Draft"}
               </button>
               {draft ? (
                 <button
@@ -507,12 +642,7 @@ export function SessionZeroApp() {
         </section>
 
         <section
-          className={[
-            "mb-6 rounded-xl p-8",
-            activeStep === 2
-              ? "border border-zinc-700 bg-zinc-950/50 shadow-[0_0_30px_rgba(255,255,255,0.02)]"
-              : "border border-zinc-800/50 opacity-50",
-          ].join(" ")}
+          className={`mb-6 ${stepSectionClassName(activeStep === 2)}`}
         >
           <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-500">
             Step 2
@@ -559,12 +689,7 @@ export function SessionZeroApp() {
         </section>
 
         <section
-          className={[
-            "rounded-xl p-8",
-            activeStep === 3
-              ? "border border-zinc-700 bg-zinc-950/50 shadow-[0_0_30px_rgba(255,255,255,0.02)]"
-              : "border border-zinc-800/50 opacity-50",
-          ].join(" ")}
+          className={stepSectionClassName(activeStep === 3)}
         >
           <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-500">
             Step 3

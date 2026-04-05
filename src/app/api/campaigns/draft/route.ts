@@ -3,10 +3,12 @@ import { dmClient } from "@/lib/ai/provider";
 import { campaignDraftRequestSchema } from "@/lib/game/session-zero";
 import {
   completeDraftGenerationProgress,
-  createDraftGenerationProgress,
+  beginDraftGenerationProgress,
   failDraftGenerationProgress,
+  getDraftGenerationCheckpoint,
   getDraftGenerationProgress,
   markDraftGenerationStage,
+  setDraftGenerationCheckpoint,
 } from "@/lib/game/world-generation-progress";
 
 export const runtime = "nodejs";
@@ -26,13 +28,21 @@ export async function POST(request: Request) {
 
   try {
     if (payload.data.progressId) {
-      createDraftGenerationProgress(payload.data.progressId);
+      beginDraftGenerationProgress(payload.data.progressId);
     }
 
     const result = await dmClient.generateWorldModule({
       prompt: payload.data.prompt,
       scaleTier: payload.data.scaleTier,
       previousDraft: payload.data.previousDraft,
+      resumeCheckpoint: payload.data.progressId
+        ? getDraftGenerationCheckpoint(payload.data.progressId)
+        : null,
+      onCheckpoint: payload.data.progressId
+        ? (checkpoint) => {
+            setDraftGenerationCheckpoint(payload.data.progressId!, checkpoint);
+          }
+        : undefined,
       onProgress: payload.data.progressId
         ? (update) => {
             markDraftGenerationStage(payload.data.progressId!, update);

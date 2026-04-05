@@ -527,6 +527,7 @@ export type GeneratedWorldSpineLocation = {
   type: string;
   summary: string;
   description: string;
+  usageProfile: "everyday" | "special";
   state: string;
   controlStatus: "controlled" | "contested" | "independent";
   controllingFactionKey: string | null;
@@ -659,8 +660,8 @@ export type GeneratedKnowledgeEconomy = {
   locationTradeIdentity: Array<{
     locationId: string;
     signatureGoods: string[];
-    scarcityNotes: string;
-    streetLevelEconomy: string;
+    supplyConditions: string;
+    materialLife: string;
   }>;
 };
 
@@ -717,6 +718,84 @@ export type OpenWorldGenerationArtifacts = {
   validationReports: WorldGenerationValidationReport[];
   idMaps: OpenWorldGenerationIdMap;
   stageSummaries: Partial<Record<WorldGenerationStageName, string>>;
+};
+
+export type GeneratedKnowledgeWebStage = {
+  information: GeneratedKnowledgeNode[];
+  informationLinks: GeneratedKnowledgeLink[];
+};
+
+export type GeneratedKnowledgeNetworkStage = {
+  theme: string;
+  publicBeliefs: string[];
+  hiddenTruth: string;
+  linkedInformationKeys: string[];
+  contradictionThemes: string[];
+};
+
+export type GeneratedKnowledgeThreadsStage = {
+  knowledgeNetworks: GeneratedKnowledgeNetworkStage[];
+  pressureSeeds: GeneratedPressureSeed[];
+};
+
+export type GeneratedEconomyMaterialLifeStage = {
+  commodities: Array<{
+    key: string;
+    name: string;
+    baseValue: number;
+    tags: string[];
+    everydayUse: string;
+    scarcityDriver: string;
+    profitFactionIds: string[];
+  }>;
+  marketPrices: Array<{
+    commodityKey: string;
+    locationId: string;
+    vendorNpcId: string | null;
+    factionId: string | null;
+    modifier: number;
+    stock: number;
+    legalStatus: "legal" | "restricted" | "contraband";
+    whyHere: string;
+  }>;
+  locationTradeIdentity: Array<{
+    locationId: string;
+    signatureGoods: string[];
+    supplyConditions: string;
+    materialLife: string;
+  }>;
+};
+
+export type WorldGenerationStageArtifacts = {
+  world_bible: GeneratedWorldBible;
+  world_spine: GeneratedWorldSpine;
+  regional_life: GeneratedRegionalLife;
+  social_cast: GeneratedSocialLayer;
+  knowledge_web: GeneratedKnowledgeWebStage;
+  knowledge_threads: GeneratedKnowledgeThreadsStage;
+  economy_material_life: GeneratedEconomyMaterialLifeStage;
+  final_world: GeneratedWorldModule;
+};
+
+export type CheckpointableWorldGenerationStageName = keyof WorldGenerationStageArtifacts;
+
+export type WorldGenerationCheckpointStatus = "running" | "failed" | "ready";
+
+export type OpenWorldGenerationCheckpoint = {
+  prompt: string;
+  model: string;
+  createdAt: string;
+  scaleTier: WorldScaleTier;
+  scalePlan: WorldGenerationScalePlan;
+  generationStatus: WorldGenerationCheckpointStatus;
+  failedStage: CheckpointableWorldGenerationStageName | null;
+  completedStages: CheckpointableWorldGenerationStageName[];
+  lastGenerationError: string | null;
+  stageArtifacts: Partial<WorldGenerationStageArtifacts>;
+  attempts: WorldGenerationAttempt[];
+  validationReports: WorldGenerationValidationReport[];
+  idMaps: OpenWorldGenerationIdMap;
+  stageSummaries: Partial<Record<CheckpointableWorldGenerationStageName, string>>;
 };
 
 export type GeneratedWorldModule = {

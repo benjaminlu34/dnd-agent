@@ -32,10 +32,15 @@ import type {
   CharacterTemplateDraft,
   GeneratedDailySchedule,
   GeneratedCampaignOpening,
+  CheckpointableWorldGenerationStageName,
+  GeneratedEconomyMaterialLifeStage,
+  GeneratedKnowledgeThreadsStage,
+  GeneratedKnowledgeWebStage,
   GeneratedWorldModuleDraft,
   GeneratedWorldModule,
   ForbiddenDetailMode,
   LocalTextureSummary,
+  OpenWorldGenerationCheckpoint,
   OpenWorldGenerationArtifacts,
   PromotedNpcHydrationDraft,
   PromptContextProfile,
@@ -819,7 +824,11 @@ type StageValidation = {
   correctionNotes?: string[];
 };
 
-const MAX_WORLD_STAGE_ATTEMPTS = 3;
+const DEFAULT_MAX_WORLD_STAGE_ATTEMPTS = 3;
+const WORLD_STAGE_MAX_ATTEMPTS: Partial<Record<WorldGenerationStageName, number>> = {
+  world_bible: 5,
+  world_spine: 5,
+};
 const MAX_TURN_ATTEMPTS = 3;
 const MAX_ROUTER_ATTEMPTS = 2;
 const WORLD_SPINE_LOCATION_BATCH_SIZE = 3;
@@ -831,6 +840,67 @@ const WORLD_GEN_MAX_INFORMATION_NODES = 22;
 const WORLD_GEN_MAX_INFORMATION_LINKS = 28;
 const WORLD_GEN_TARGET_COMMODITIES = 8;
 const WORLD_GEN_MAX_MARKET_PRICES = 10;
+
+function getMaxWorldStageAttempts(stage: WorldGenerationStageName) {
+  return WORLD_STAGE_MAX_ATTEMPTS[stage] ?? DEFAULT_MAX_WORLD_STAGE_ATTEMPTS;
+}
+
+const WORLD_GENERATION_STAGE_ORDER: CheckpointableWorldGenerationStageName[] = [
+  "world_bible",
+  "world_spine",
+  "regional_life",
+  "social_cast",
+  "knowledge_web",
+  "knowledge_threads",
+  "economy_material_life",
+  "final_world",
+];
+
+const WORLD_GENERATION_STAGE_DIRECT_DEPENDENTS: Record<
+  CheckpointableWorldGenerationStageName,
+  CheckpointableWorldGenerationStageName[]
+> = {
+  world_bible: [
+    "world_spine",
+    "regional_life",
+    "social_cast",
+    "knowledge_web",
+    "knowledge_threads",
+    "economy_material_life",
+    "final_world",
+  ],
+  world_spine: [
+    "regional_life",
+    "social_cast",
+    "knowledge_web",
+    "knowledge_threads",
+    "economy_material_life",
+    "final_world",
+  ],
+  regional_life: ["social_cast", "knowledge_web", "economy_material_life", "final_world"],
+  social_cast: ["knowledge_web", "economy_material_life", "final_world"],
+  knowledge_web: ["knowledge_threads", "final_world"],
+  knowledge_threads: ["final_world"],
+  economy_material_life: ["final_world"],
+  final_world: [],
+};
+
+function getWorldGenerationDependentStages(stage: CheckpointableWorldGenerationStageName) {
+  const visited = new Set<CheckpointableWorldGenerationStageName>();
+  const stack = [...WORLD_GENERATION_STAGE_DIRECT_DEPENDENTS[stage]];
+
+  while (stack.length > 0) {
+    const nextStage = stack.pop();
+    if (!nextStage || visited.has(nextStage)) {
+      continue;
+    }
+
+    visited.add(nextStage);
+    stack.push(...WORLD_GENERATION_STAGE_DIRECT_DEPENDENTS[nextStage]);
+  }
+
+  return [...visited];
+}
 
 type WorldBibleContextScope =
   | "world_spine"
@@ -881,18 +951,136 @@ function buildScaleProfilePromptLines(profile: ScaleProfile) {
   ].filter((line): line is string => Boolean(line));
 }
 
+function buildScaleTextureBalanceLines(scaleTier: WorldScaleTier) {
+  switch (scaleTier) {
+    case "settlement":
+      return [
+        "Do not define the entire settlement only through coercion, shortage, decay, or surveillance.",
+        "Let some texture come from pride, craft, food, ceremony, neighborhood habit, hospitality, beauty, local prestige, or ordinary competence.",
+      ];
+    case "regional":
+      return [
+        "Do not define the entire region only through tolls, checkpoints, quotas, shortages, or breakdown.",
+        "Across the region, allow some places to matter because they are prosperous, fertile, ceremonially central, socially magnetic, craft-proud, or reliably connective, not only because they are stressed.",
+      ];
+    case "world":
+      return [
+        "Do not define the whole world only through civilizational crisis, decay, or coercive infrastructure.",
+        "At world scale, let some connective texture come from abundance, prestige, ritual centrality, admired craft, stable exchange, agricultural reliability, or shared public rhythm, not only from hazard and shortage.",
+      ];
+  }
+}
+
+function buildWorldSpineTextureBalanceLines(scaleTier: WorldScaleTier) {
+  switch (scaleTier) {
+    case "settlement":
+      return [
+        "Across the full settlement spine, keep a mix of civic, commercial, residential, ceremonial, workmanlike, and pressure-heavy places rather than making every node feel distressed.",
+        "Some settlement nodes should matter because they are socially central, prosperous, festive, prestigious, or habitually busy, not only because they are dangerous or collapsing.",
+      ];
+    case "regional":
+      return [
+        "Across the full regional spine, keep a mix of stable market towns, fertile or reliable belts, ritual centers, commercially connective corridors, contested borderlands, and genuinely dangerous frontiers.",
+        "Some regional nodes should matter because they are prosperous, ceremonially central, craft-famous, agriculturally dependable, or politically prestigious, not only because they are under acute burden.",
+      ];
+    case "world":
+      return [
+        "Across the full world spine, keep a mix of stability profiles: some prosperous or orderly core regions, some sacred or ritual-central geographies, some commercially flourishing corridors, some contested borderlands, and some dangerous or collapsing frontiers.",
+        "Some world-scale locations should be important because they are prosperous, orderly, fertile, ritually central, commercially dominant, or legally prestigious, even if they still contain tensions.",
+        "Distinctiveness at world scale can come from abundance, ritual centrality, legal prestige, agricultural reliability, trade density, or strategic centrality, not only from hazard or collapse.",
+      ];
+  }
+}
+
+function buildRegionalLifeTextureBalanceLines(scaleTier: WorldScaleTier) {
+  switch (scaleTier) {
+    case "settlement":
+      return [
+        "Use everydayTexture, gossip, ordinaryKnowledge, and reasonsToLinger to show habits, craft, humor, hospitality, leisure, beauty, or social rhythm alongside pressure.",
+        "Not every entry needs a looming shortage, raid, or administrative burden; some should simply show how local life works when people are competent, proud, or enjoying a routine.",
+      ];
+    case "regional":
+      return [
+        "Use everydayTexture, gossip, ordinaryKnowledge, and reasonsToLinger to show foodways, forest or river custom, seasonal rhythm, local pride, ceremonial life, and craft identity alongside pressure.",
+        "Not every entry needs a looming shortage, toll dispute, or failure mode; some should simply show how regional life works when roads hold, fairs gather, crews know their work, or local custom is functioning.",
+      ];
+    case "world":
+      return [
+        "At world scale, use region-level routines, customs, admired practices, seasonal rhythms, and public prestige to keep the lived texture broader than pure crisis reporting.",
+        "Not every entry needs a looming shortage or breakdown; some should simply show how world-scale public life works when systems, rituals, or exchange networks are functioning as intended.",
+      ];
+  }
+}
+
+function buildSocialCastTextureBalanceLines(scaleTier: WorldScaleTier) {
+  switch (scaleTier) {
+    case "settlement":
+      return [
+        "Not every NPC should read as a clerk, inspector, or enforcer; include artisans, hosts, ferrymen, shrine workers, teachers, healers, performers, signal keepers, and other public-facing locals when the setting supports them.",
+        "Not every NPC's concern needs to be a crisis, debt, or threat; some can be about keeping a routine going, preparing a fair, defending a craft standard, or maintaining hospitality and reputation.",
+      ];
+    case "regional":
+      return [
+        "Not every NPC should read as a clerk, inspector, or enforcer; include ferrymen, sawyers, shrine stewards, caravan hands, innkeepers of major staging posts, healers, brokers, signal keepers, ritual workers, and other public-facing regional roles when the setting supports them.",
+        "Not every NPC's concern needs to be a crisis, inspection, or bottleneck; some can be about seasonal preparation, public ceremony, route reputation, teaching, hosting, or preserving a local standard of work.",
+      ];
+    case "world":
+      return [
+        "Not every NPC should read as a registrar or checkpoint official; include navigators, ritual marshals, market conveners, convoy organizers, heralds, archivists, and other public-facing macro-regional roles when the setting supports them.",
+        "Not every NPC's concern needs to be a crisis, quota, or emergency; some can be about keeping large public systems dignified, reliable, ceremonial, or widely trusted.",
+      ];
+  }
+}
+
+function buildKnowledgeTextureBalanceLines(scaleTier: WorldScaleTier) {
+  switch (scaleTier) {
+    case "settlement":
+      return [
+        "Not every information node should expose failure, scandal, or threat; some can reveal admired local practice, useful custom, seasonal opportunity, neighborhood reputation, or practical know-how.",
+        "Some information should simply teach how the place works, who does reliable work, what custom outsiders misunderstand, or where ordinary people go when they need help.",
+      ];
+    case "regional":
+      return [
+        "Not every information node should expose failure, scandal, or threat; some can reveal valued routes, regional custom, food or craft prestige, seasonal opportunity, or admired local competence.",
+        "Some information should simply teach how the region works: which crossings are dependable, which fairs matter, which rituals create temporary peace, who keeps good weights, or what work people trust.",
+      ];
+    case "world":
+      return [
+        "Not every information node should expose failure, scandal, or collapse; some can reveal prized exchange systems, revered routes, public ritual knowledge, famous craft, or world-spanning habits people rely on.",
+        "Some information should simply teach how the wider world works: what institutions are trusted, what routes are dependable, what practices people admire, and what public systems keep life moving.",
+      ];
+  }
+}
+
+function buildEconomyTextureBalanceLines(scaleTier: WorldScaleTier) {
+  switch (scaleTier) {
+    case "settlement":
+      return [
+        "Let some commodities and trade identities signal abundance, local pride, everyday comfort, or craft specialization, not only scarcity and illicit pressure.",
+      ];
+    case "regional":
+      return [
+        "Let some commodities and trade identities signal staple abundance, valued regional craft, seasonal fairs, or reliable exchange, not only scarcity, monopoly, and contraband.",
+      ];
+    case "world":
+      return [
+        "Let some commodities and trade identities signal world-spanning staple reliability, admired craft traditions, festival demand, or prestigious exchange, not only scarcity, monopoly, and illicit trade.",
+      ];
+  }
+}
+
 function worldBibleScaleInstructions(scaleTier: WorldScaleTier) {
   switch (scaleTier) {
     case "settlement":
       return [
-        "This is settlement scale. Focus on local chokepoints, ward pressure, fees, permits, inspections, repairs, neighborhood decay, and immediately legible civic reality.",
+        "This is settlement scale. Focus on local systems, routines, civic friction, neighborhood custom, and immediately legible street-level reality.",
         "groundLevelReality must describe objective street, district, or neighborhood truth, not a traveler arriving from outside.",
         "widespreadBurdens should stay local to the settlement's systems and institutions rather than broad civilizational claims.",
         "sharedRealities should be recurring local habits, signage, smells, queue systems, rites, currencies, or neighborhood-level routines.",
       ];
     case "regional":
       return [
-        "This is regional scale. Focus on routes, borders, checkpoints, monopolies, weather exposure, territorial friction, and public systems repeated across towns or frontier hubs.",
+        "This is regional scale. Focus on routes, borders, repeated public systems, territorial custom, exchange patterns, weather exposure, and shared realities across towns or frontier hubs.",
         "groundLevelReality must describe territory-level material truth through roads, crossings, ports, borders, fields, weather, and trade flow.",
         "widespreadBurdens should describe pressures people feel across multiple settlements or routes in the region.",
         "sharedRealities should capture systems and habits repeated across the region rather than only one city block.",
@@ -1052,13 +1240,16 @@ async function critiqueWorldSpineScaleWithModel(input: {
         "You are a strict structured critique pass for regional-scale world spine locations.",
         "Judge semantic scale, not vibe.",
         "A valid regional-scale spine location should read like a city, frontier, pass, basin, coast, corridor, marches, stronghold-territory, or other territorial place people travel between across a region.",
-        "Flag locations that read like a single room, single business, tiny neighborhood fragment, or conversely like a whole world, total cosmology, or full civilizational sphere.",
+        "Do not penalize a location merely for being prosperous, ceremonially important, fertile, stable, or socially central rather than crisis-driven.",
+        "If a concept begins as one notable site, institution, ruin, ceremonial focus, industrial facility, or military installation, it is valid only when widened into the broader district, belt, corridor, marches, hinterland, or managed territory organized around that site.",
+        "Flag locations that read like a single room, single business, tiny neighborhood fragment, isolated compound, or conversely like a whole world, total cosmology, or full civilizational sphere.",
         "Do not invent new locations. Evaluate only the provided ones.",
       ],
       world: [
         "You are a strict structured critique pass for world-scale world spine locations.",
         "Judge semantic scale, not vibe.",
         "A valid world-scale spine location should read like a macro container: a region, civilization, frontier, dominion, archipelago, corridor world, basin-region, marches, sacred geography, pilgrimage belt, maritime world, or macro-polity.",
+        "Do not penalize a location merely for being prosperous, ceremonially important, fertile, stable, or socially central rather than crisis-driven.",
         "Flag locations that read like a single site, encounter area, scenic sub-zone, one-off hazard pocket, or adventure destination rather than a macro container people can inhabit, cross, trade through, ritualize, or organize life around.",
         "Do not invent new locations. Evaluate only the provided ones.",
       ],
@@ -1072,7 +1263,7 @@ async function critiqueWorldSpineScaleWithModel(input: {
       ],
       regional: [
         "Return accept if every location reads like a valid city, frontier, route zone, pass, basin, coast, corridor, or regional territory.",
-        "Return revise if any location reads like a room, business, street fragment, or a whole world/civilization rather than a regional map container.",
+        "Return revise if any location still reads like a room, business, street fragment, isolated compound, or one notable site rather than a regional map container people travel through or govern across.",
         "For each flagged location, explain the scale problem concretely.",
         "Correction notes should tell the generator how to widen or narrow the location into a proper regional container without discarding its core concept.",
       ],
@@ -1145,21 +1336,27 @@ async function critiqueSocialCastScaleWithModel(input: {
         "You are a strict structured critique pass for settlement-scale social cast batches.",
         "Judge semantic anchoring, not prose flair.",
         "At settlement scale, NPCs should be anchored to public-facing local systems such as ward offices, gatehouses, shrine queues, permit desks, market counters, harbor checkpoints, granary lines, or repair crews.",
+        "Do not penalize an NPC merely for being anchored through hospitality, craft, ceremony, ferrying, healing, or teaching rather than coercive administration.",
         "Flag NPCs that drift into purely private rooms, decorative scene furniture, or implausibly world-spanning public roles.",
+        "Also flag batches that collapse too heavily into clerks, inspectors, registrars, or checkpoint officials and neglect other plausible public-facing roles the setting supports.",
         "Do not invent new NPCs. Evaluate only the provided ones.",
       ],
       regional: [
         "You are a strict structured critique pass for regional-scale social cast batches.",
         "Judge semantic anchoring, not prose flair.",
         "At regional scale, NPCs should be anchored to territorial public systems such as customs lines, caravan depots, relay stations, border inspections, ferry offices, tax circuits, or route-maintenance bodies.",
+        "Do not penalize an NPC merely for being anchored through hospitality, craft, ceremony, transport, brokerage, or public ritual rather than coercive administration.",
         "Flag NPCs that drift into tiny local-address detail or that claim whole-world authority unrelated to the provided regional locations.",
+        "Also flag batches that collapse too heavily into clerks, inspectors, registrars, or checkpoint officials and neglect other plausible public-facing regional roles the setting supports.",
         "Do not invent new NPCs. Evaluate only the provided ones.",
       ],
       world: [
         "You are a strict structured critique pass for world-scale social cast batches.",
         "Judge semantic anchoring, not prose flair.",
         "At world scale, NPCs should be anchored to macro regions or civilizations and should meet the public through macro-regional offices, checkpoints, registries, shrines, ports, ration systems, or trade interfaces.",
+        "Do not penalize an NPC merely for being anchored through ceremony, convoy organization, navigation, heraldry, archiving, or exchange rather than coercive administration.",
         "Flag NPCs that drift into taverns, rooms, alleys, stalls, shops, or other unmapped local-address detail.",
+        "Also flag batches that collapse too heavily into registrars, inspectors, checkpoint officials, or other administrative gatekeepers and neglect other plausible public-facing macro-regional roles the setting supports.",
         "Do not invent new NPCs. Evaluate only the provided ones.",
       ],
     };
@@ -1167,18 +1364,21 @@ async function critiqueSocialCastScaleWithModel(input: {
       settlement: [
         "Return accept if every NPC remains plausibly anchored to a settlement-scale public system.",
         "Return revise if any NPC description, current concern, or public contact surface implies only a private room, decorative prop, or scale-mismatched grand institution instead of a usable local public interface.",
+        "Return revise as well if the batch becomes monotonous because too many NPCs repeat the same administrative gatekeeping role shape when the setting should support more varied public-facing work.",
         "For each flagged NPC, explain the drift concretely.",
         "Correction notes should tell the generator how to keep the same NPC role while anchoring it to the right local public system.",
       ],
       regional: [
         "Return accept if every NPC remains plausibly anchored to a regional public system or territorial route network.",
         "Return revise if any NPC description, current concern, or public contact surface implies only a tiny local address or an implausibly whole-world institution instead of a regional public interface.",
+        "Return revise as well if the batch becomes monotonous because too many NPCs repeat the same administrative gatekeeping role shape when the setting should support more varied public-facing regional work.",
         "For each flagged NPC, explain the drift concretely.",
         "Correction notes should tell the generator how to keep the same NPC role while anchoring it to the right regional public system.",
       ],
       world: [
         "Return accept if every NPC remains plausibly anchored at world scale.",
         "Return revise if any NPC description, current concern, or public contact surface implies a local address, small business, room, alley, or other micro-geography instead of a macro-regional public system.",
+        "Return revise as well if the batch becomes monotonous because too many NPCs repeat the same registrar, inspector, or checkpoint-official shape when the setting should support more varied macro-regional public roles.",
         "For each flagged NPC, explain the drift concretely.",
         "Correction notes should tell the generator how to keep the same NPC role while widening the public interface to a region-scale institution or system.",
       ],
@@ -1222,6 +1422,208 @@ async function critiqueSocialCastScaleWithModel(input: {
       message: error instanceof Error ? error.message : String(error),
     });
     return fallbackSocialCastCritique();
+  }
+}
+
+async function critiqueRegionalLifeWithModel(input: {
+  scaleTier: WorldScaleTier;
+  locations: RegionalLifeDraft["locations"];
+}): Promise<StageValidation> {
+  const critiqueModel = env.openRouterPlannerModel.trim() || env.openRouterModel;
+  if (!critiqueModel) {
+    return { category: "immersion", issues: [] };
+  }
+
+  try {
+    const response = await runCompletion({
+      model: critiqueModel,
+      temperature: 0.1,
+      maxTokens: 900,
+      system: [
+        "You are a strict structured critique pass for regional-life batches.",
+        "Judge whether the outputs preserve varied lived texture at the requested scale instead of collapsing into one administrative scarcity house style.",
+        "Do not penalize concrete pressure when it is appropriate; only flag flattening, repetition, or loss of social texture.",
+      ].join("\n"),
+      user: [
+        formatPromptBlock("scale_tier", input.scaleTier),
+        formatPromptBlock("locations", input.locations),
+        formatFinalInstruction([
+          "Return revise only if several entries lean too heavily on the same toll/checkpoint/quota/debt/inspection texture and neglect custom, pride, hospitality, foodways, ceremony, beauty, humor, or ordinary social rhythm.",
+          "Flag only clear over-concentration or flattening, not isolated examples of pressure.",
+        ]),
+      ].join("\n\n"),
+      tools: [regionalLifeCritiqueTool],
+    });
+
+    const parsed = regionalLifeCritiqueSchema.safeParse(response?.input);
+    if (!parsed.success || parsed.data.verdict === "accept") {
+      return { category: "immersion", issues: [] };
+    }
+
+    return {
+      category: "immersion",
+      issues: parsed.data.fieldIssues.map(
+        (issue) => `${scaleLabel(input.scaleTier)} regional life ${issue.locationId} ${issue.issue}.`,
+      ),
+      correctionNotes: parsed.data.correctionNotes,
+    };
+  } catch (error) {
+    logOpenRouterResponse("regional_life.critique_error", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return { category: "immersion", issues: [] };
+  }
+}
+
+async function critiqueKnowledgeWebWithModel(input: {
+  scaleTier: WorldScaleTier;
+  information: z.infer<typeof generatedKnowledgeWebInputSchema>["information"];
+}): Promise<StageValidation> {
+  const critiqueModel = env.openRouterPlannerModel.trim() || env.openRouterModel;
+  if (!critiqueModel) {
+    return { category: "immersion", issues: [] };
+  }
+
+  try {
+    const response = await runCompletion({
+      model: critiqueModel,
+      temperature: 0.1,
+      maxTokens: 900,
+      system: [
+        "You are a strict structured critique pass for knowledge-web batches.",
+        "Judge whether the information layer preserves varied lived texture instead of turning every node into scandal, failure, administrative friction, or threat.",
+        "Actionable knowledge can be observational, participatory, or socially useful; it does not need to be alarming, transactional, or crisis-driven to count.",
+      ].join("\n"),
+      user: [
+        formatPromptBlock("scale_tier", input.scaleTier),
+        formatPromptBlock("information", input.information),
+        formatFinalInstruction([
+          "Return revise only for clear flattening into the same failure/scandal/administrative pattern.",
+          "Do not penalize actionable leads; penalize sameness, excessive threat stacking, or missing socially textured knowledge.",
+          "Flag batches where too many discoverHow paths rely only on payment, filing, contracting, or guarded access instead of observation, attendance, participation, service, repeated presence, or shared routine.",
+        ]),
+      ].join("\n\n"),
+      tools: [knowledgeWebCritiqueTool],
+    });
+
+    const parsed = knowledgeWebCritiqueSchema.safeParse(response?.input);
+    if (!parsed.success || parsed.data.verdict === "accept") {
+      return { category: "immersion", issues: [] };
+    }
+
+    return {
+      category: "immersion",
+      issues: parsed.data.fieldIssues.map(
+        (issue) => `${scaleLabel(input.scaleTier)} information '${issue.title}' ${issue.issue}.`,
+      ),
+      correctionNotes: parsed.data.correctionNotes,
+    };
+  } catch (error) {
+    logOpenRouterResponse("knowledge_web.critique_error", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return { category: "immersion", issues: [] };
+  }
+}
+
+async function critiqueKnowledgeThreadsWithModel(input: {
+  scaleTier: WorldScaleTier;
+  knowledgeNetworks: z.infer<typeof generatedKnowledgeThreadsInputSchema>["knowledgeNetworks"];
+  pressureSeeds: z.infer<typeof generatedKnowledgeThreadsInputSchema>["pressureSeeds"];
+}): Promise<StageValidation> {
+  const critiqueModel = env.openRouterPlannerModel.trim() || env.openRouterModel;
+  if (!critiqueModel) {
+    return { category: "immersion", issues: [] };
+  }
+
+  try {
+    const response = await runCompletion({
+      model: critiqueModel,
+      temperature: 0.1,
+      maxTokens: 900,
+      system: [
+        "You are a strict structured critique pass for knowledge-thread batches.",
+        "Judge whether the worldview layer preserves contested beliefs, explanations, rumors, doctrine, or social meaning rather than collapsing only into pressure.",
+      ].join("\n"),
+      user: [
+        formatPromptBlock("scale_tier", input.scaleTier),
+        formatPromptBlock("knowledge_networks", input.knowledgeNetworks),
+        formatPromptBlock("pressure_seeds", input.pressureSeeds),
+        formatFinalInstruction([
+          "Return revise only if the worldview layer feels flattened into pressure-only output or if pressure seeds overwhelm the belief and explanation layer.",
+        ]),
+      ].join("\n\n"),
+      tools: [knowledgeThreadsCritiqueTool],
+    });
+
+    const parsed = knowledgeThreadsCritiqueSchema.safeParse(response?.input);
+    if (!parsed.success || parsed.data.verdict === "accept") {
+      return { category: "immersion", issues: [] };
+    }
+
+    return {
+      category: "immersion",
+      issues: parsed.data.fieldIssues.map(
+        (issue) => `${scaleLabel(input.scaleTier)} ${issue.field} ${issue.issue}.`,
+      ),
+      correctionNotes: parsed.data.correctionNotes,
+    };
+  } catch (error) {
+    logOpenRouterResponse("knowledge_threads.critique_error", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return { category: "immersion", issues: [] };
+  }
+}
+
+async function critiqueEconomyMaterialLifeWithModel(input: {
+  scaleTier: WorldScaleTier;
+  locationTradeIdentity: z.infer<typeof generatedEconomyMaterialLifeInputSchema>["locationTradeIdentity"];
+  commodities: z.infer<typeof generatedEconomyMaterialLifeInputSchema>["commodities"];
+}): Promise<StageValidation> {
+  const critiqueModel = env.openRouterPlannerModel.trim() || env.openRouterModel;
+  if (!critiqueModel) {
+    return { category: "immersion", issues: [] };
+  }
+
+  try {
+    const response = await runCompletion({
+      model: critiqueModel,
+      temperature: 0.1,
+      maxTokens: 900,
+      system: [
+        "You are a strict structured critique pass for economy-and-material-life batches.",
+        "Judge whether the output preserves varied material texture instead of making every place feel defined only by scarcity, contraband, monopoly, or collapse.",
+      ].join("\n"),
+      user: [
+        formatPromptBlock("scale_tier", input.scaleTier),
+        formatPromptBlock("location_trade_identity", input.locationTradeIdentity),
+        formatPromptBlock("commodities", input.commodities),
+        formatFinalInstruction([
+          "Return revise only for clear flattening into scarcity/contraband language or scale-mismatched localism.",
+          "Do not penalize real pressure; penalize monotony and contradiction with the requested scale.",
+        ]),
+      ].join("\n\n"),
+      tools: [economyMaterialLifeCritiqueTool],
+    });
+
+    const parsed = economyMaterialLifeCritiqueSchema.safeParse(response?.input);
+    if (!parsed.success || parsed.data.verdict === "accept") {
+      return { category: "immersion", issues: [] };
+    }
+
+    return {
+      category: "immersion",
+      issues: parsed.data.fieldIssues.map(
+        (issue) => `${scaleLabel(input.scaleTier)} trade identity ${issue.locationId} ${issue.issue}.`,
+      ),
+      correctionNotes: parsed.data.correctionNotes,
+    };
+  } catch (error) {
+    logOpenRouterResponse("economy_material_life.critique_error", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return { category: "immersion", issues: [] };
   }
 }
 
@@ -1409,56 +1811,9 @@ function summarizeRegionalLifeForPrompt(
 }
 
 function isEverydayUseWorldSpineLocation(location: {
-  name: string;
-  type: string;
-  summary?: string;
-  description?: string;
-  tags?: string[];
+  usageProfile?: "everyday" | "special";
 }) {
-  const haystack = [
-    location.name,
-    location.type,
-    location.summary ?? "",
-    location.description ?? "",
-    ...(location.tags ?? []),
-  ]
-    .join(" ")
-    .toLowerCase();
-
-  const everydaySignals = [
-    "market",
-    "farm",
-    "coop",
-    "dock",
-    "port",
-    "harbor",
-    "outpost",
-    "checkpoint",
-    "customs",
-    "yard",
-    "workshop",
-    "forge",
-    "guild",
-    "camp",
-    "settlement",
-    "village",
-    "town",
-    "city",
-    "platform",
-    "station",
-    "tower",
-    "trade",
-    "civic",
-    "naval",
-    "salvage",
-    "anchor",
-    "lamp",
-    "tax",
-    "route",
-    "chokepoint",
-  ];
-
-  return everydaySignals.some((signal) => haystack.includes(signal));
+  return location.usageProfile === "everyday";
 }
 
 function renderPromptValue(value: unknown, indent = 0): string {
@@ -1812,14 +2167,15 @@ function summarizeSocialGravityRefs(
 
 const WORLD_GEN_PRINCIPLES = [
   "You are constructing an objective, simulation-first world that can later support many different characters and campaign perspectives.",
-  "Prioritize concrete survival, work, trade, territory, debt, weather, and social obligations over abstract lore.",
-  "Prefer political, economic, environmental, and territorial pressure over cosmic destiny.",
+  "Prioritize concrete survival, work, trade, territory, weather, social obligations, public custom, and lived routine over abstract lore.",
+  "Prefer political, economic, environmental, and territorial reality over cosmic destiny, but do not reduce every place to the same scarcity or checkpoint logic.",
   "When the setting includes unusual infrastructure, ecology, or magic, define the upkeep, intake, repair burden, and failure modes only insofar as they shape daily life.",
   "Make every major detail usable at the table by tying it to a place, institution, job, route, resource, or conflict.",
-  "Tie grand history, myth, and doctrine to present-day tolls, shortages, debts, hazards, monopolies, or chokepoints people actually live under.",
+  "Tie grand history, myth, and doctrine to present-day tolls, shortages, debts, hazards, monopolies, routines, ceremonies, admired practices, or shared systems people actually live under.",
   "Give factions dependencies, internal strain, and vulnerabilities so no group feels perfectly unified or theatrically pure.",
   "Leave procedural gaps for play: mysteries should reveal the next clue, leverage point, or practical advantage, not a total authorial answer.",
   "Be concise but not bloodless. Favor vivid, specific detail as long as each sentence still implies a playable cost, risk, opportunity, contact, or obstacle.",
+  "Let texture also come from competence, abundance, beauty, prestige, craft, celebration, hospitality, foodways, humor, ritual, and ordinary social rhythm rather than only burden and decay.",
   "Preserve the prompt's distinctive nouns, imagery, and social texture instead of replacing them with generic genre substitutes.",
   "Reuse exact nouns or noun phrases from the prompt whenever possible instead of renaming the setting into a new generic brand.",
 ];
@@ -1843,6 +2199,7 @@ const WORLD_GEN_ANTI_PATTERNS = [
   "Do not present factions as morally monolithic or internally unanimous.",
   "Do not over-explain mysteries into dead canon when uncertainty would create stronger actionable leads.",
   "Translate the prompt into concrete systemic pressures; if it implies magic, myth, technology, or politics, express those through lived constraints, hazards, institutions, shortages, and conflicts rather than forcing a genre-mismatched trope layer.",
+  "Do not collapse every place, faction, or NPC into the same administrative, scarcity, or checkpoint genre when the prompt supports a broader social texture.",
 ];
 
 function buildWorldGenSystemPrompt(lines: string[]) {
@@ -1884,14 +2241,26 @@ async function critiqueWorldBibleWithModel(input: {
   const fallbackWorldBibleCritique = (): StageValidation => {
     const issues: string[] = [];
     const correctionNotes: string[] = [];
+    const scaleDescriptorByTier: Record<WorldScaleTier, string> = {
+      settlement: "settlement-scale",
+      regional: "regional-scale",
+      world: "world-scale",
+    };
+    const scaleDescriptor = scaleDescriptorByTier[input.scaleTier];
 
     const detailedBurdens = input.worldBible.widespreadBurdens.filter(
       (entry) => entry.trim().split(/\s+/).filter(Boolean).length >= 6,
     ).length;
     if (detailedBurdens < 4) {
-      issues.push("Too many widespreadBurdens are still terse abstractions instead of world-spanning lived burdens.");
+      issues.push(
+        `Too many widespreadBurdens are still terse abstractions instead of ${scaleDescriptor} lived burdens.`,
+      );
       correctionNotes.push(
-        "Rewrite widespreadBurdens as concrete burdens tied to routes, offices, materials, climates, laws, or infrastructures that multiple regions actually feel.",
+        input.scaleTier === "world"
+          ? "Rewrite widespreadBurdens as concrete burdens tied to routes, offices, materials, climates, laws, or infrastructures that multiple regions actually feel."
+          : input.scaleTier === "regional"
+            ? "Rewrite widespreadBurdens as concrete burdens tied to routes, crossings, checkpoints, weather exposure, monopolies, or territorial systems that multiple settlements in the region actually feel."
+            : "Rewrite widespreadBurdens as concrete burdens tied to local offices, permits, repairs, queues, rents, patrols, or neighborhood systems residents actually feel.",
       );
     }
 
@@ -1899,9 +2268,15 @@ async function critiqueWorldBibleWithModel(input: {
       (entry) => entry.trim().split(/\s+/).filter(Boolean).length >= 4,
     ).length;
     if (socialDetails < 2) {
-      issues.push("sharedRealities needs more cross-regional social or infrastructural texture.");
+      issues.push(
+        `sharedRealities needs more ${input.scaleTier === "world" ? "cross-regional" : scaleDescriptor} social or infrastructural texture.`,
+      );
       correctionNotes.push(
-        "Add more sharedRealities that show repeated public habits, worn systems, trade rituals, maintenance burdens, queues, or visible infrastructure people encounter across the world.",
+        input.scaleTier === "world"
+          ? "Add more sharedRealities that show repeated public habits, worn systems, trade rituals, maintenance burdens, queues, or visible infrastructure people encounter across the world."
+          : input.scaleTier === "regional"
+            ? "Add more sharedRealities that show repeated customs, route habits, border routines, market practices, or public systems people encounter across the region."
+            : "Add more sharedRealities that show recurring local habits, neighborhood rituals, visible infrastructure, queue systems, or street-level routines people encounter across the settlement.",
       );
     }
 
@@ -1946,6 +2321,7 @@ async function critiqueWorldBibleWithModel(input: {
         "You are a strict structured critique pass for generated world-bible payloads.",
         "Do not evaluate by overall vibe. Extract concrete signs of abstraction or generic sourcebook language.",
         "Look for abstract nouns standing in for lived burdens, generic titles standing in for local institutions or powers, and explanation threads that feel mechanically manufactured rather than genuinely contested.",
+        "Also look for payloads that collapse too many fields into the same administrative scarcity mode while neglecting custom, pride, craft, celebration, hospitality, or ordinary social rhythm.",
         "If the payload is already specific and grounded, return accept with empty arrays.",
       ].join("\n"),
       user: [
@@ -1957,8 +2333,11 @@ async function critiqueWorldBibleWithModel(input: {
           "Extract generic capitalized titles from presentScars or everydayLife.institutions when they read like placeholder powers rather than specific local institutions.",
           "If scale_tier is world, flag street-level or tavern-level detail in groundLevelReality, widespreadBurdens, presentScars, or sharedRealities as local-detail bleed.",
           "Flag any widespreadBurdens or presentScars that read like a waiting-for-a-hero plot hook instead of a static systemic state.",
+          "Flag when too much of the payload uses the same toll/inspection/quota/debt/checkpoint texture and leaves little room for other lived texture.",
           "Flag explanationThreads only when they feel slot-filled or mechanically templated instead of arising from the world's own tensions, or when they seem invented solely to satisfy the schema.",
-          "Return revise only for clear material problems, and include targeted correctionNotes.",
+          "Return revise only for clear material problems that make the payload noticeably narrow or generic overall, not for one otherwise isolated weak spot.",
+          "A single weak explanationThreads entry should not by itself force revise if the rest of the payload is strong.",
+          "Include targeted correctionNotes when you return revise.",
         ]),
       ].join("\n\n"),
       tools: [worldBibleCritiqueTool],
@@ -1976,13 +2355,30 @@ async function critiqueWorldBibleWithModel(input: {
       };
     }
 
+    const nonExplanationFieldIssues = parsed.data.fieldIssues.filter(
+      (entry) => entry.field !== "explanationThreads",
+    );
+    if (
+      parsed.data.abstractTerms.length === 0 &&
+      parsed.data.genericTitles.length === 0 &&
+      nonExplanationFieldIssues.length === 0
+    ) {
+      return {
+        category: "immersion",
+        issues: [],
+      };
+    }
+
+    const fieldIssueFields = new Set(parsed.data.fieldIssues.map((entry) => entry.field));
     const extractedIssues = [
-      ...parsed.data.abstractTerms.map(
-        (entry) => `${entry.field} uses abstract term '${entry.term}'.`,
-      ),
-      ...parsed.data.genericTitles.map(
-        (entry) => `${entry.field} uses generic title '${entry.title}'.`,
-      ),
+      ...parsed.data.abstractTerms
+        .filter((entry) => !fieldIssueFields.has(entry.field))
+        .map((entry) => `${entry.field} uses abstract term '${entry.term}'.`),
+      ...(parsed.data.genericTitles.length >= 4
+        ? [
+            `${parsed.data.genericTitles[0]?.field ?? "everydayLife.institutions"} uses too many generic institution titles.`,
+          ]
+        : []),
       ...parsed.data.fieldIssues.map(
         (entry) => `${entry.field}: ${entry.issue} (${entry.offendingText})`,
       ),
@@ -2019,7 +2415,7 @@ function buildWorldBibleOutputBudget(
     presentScars:
       `at least ${minimums.scars} short sentences; name an old rupture and the visible present scar it left behind at the chosen scale`,
     sharedRealities:
-      `at least ${minimums.sharedRealities} short anchors; recurring social, infrastructural, monetary, ritual, or material realities people encounter at the chosen scale`,
+      `at least ${minimums.sharedRealities} short anchors; recurring social, infrastructural, monetary, ritual, material, celebratory, or craft realities people encounter at the chosen scale`,
     explanationThreads: {
       count:
         minimumExplanationThreads > 0
@@ -2035,7 +2431,7 @@ function buildWorldBibleOutputBudget(
         "at least 4 specific local organizations, offices, rituals, or public systems; 2 to 8 words each",
       fears: "at least 3 concrete routine dangers or anxieties; 2 to 6 words each",
       wants: "at least 3 concrete wants, comforts, or leverage points; 2 to 6 words each",
-      trade: "at least 3 concrete goods, services, or chokepoints people depend on; 2 to 8 words each",
+      trade: "at least 3 concrete goods, services, craft specialisms, or recurring material dependencies people rely on; 2 to 8 words each",
       gossip: "at least 3 short sentences; each should name or imply a person, place, or institution",
     },
   };
@@ -2308,12 +2704,13 @@ async function runStructuredStage<T>({
   normalizeInput?: (input: unknown) => unknown;
 }): Promise<T> {
   let correctionNotes: string | null = null;
+  const maxAttempts = getMaxWorldStageAttempts(stage);
 
-  for (let attempt = 1; attempt <= MAX_WORLD_STAGE_ATTEMPTS; attempt += 1) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     logOpenRouterResponse(`${stage}.attempt`, {
       stage,
       attempt,
-      maxAttempts: MAX_WORLD_STAGE_ATTEMPTS,
+      maxAttempts,
       correctionNotes,
     });
 
@@ -2376,7 +2773,7 @@ async function runStructuredStage<T>({
         issues,
       });
 
-      if (attempt === MAX_WORLD_STAGE_ATTEMPTS) {
+      if (attempt === maxAttempts) {
         throw new Error(`${stage} response was truncated before the structured payload completed.`);
       }
 
@@ -2408,7 +2805,7 @@ async function runStructuredStage<T>({
         inputPreview: toPreview(normalizedInput),
       });
 
-      if (attempt === MAX_WORLD_STAGE_ATTEMPTS) {
+      if (attempt === maxAttempts) {
         throw new Error(`${stage} returned invalid structured data: ${parsed.error.message}`);
       }
 
@@ -2446,7 +2843,7 @@ async function runStructuredStage<T>({
     }
 
     if (failedValidation) {
-      if (attempt === MAX_WORLD_STAGE_ATTEMPTS) {
+      if (attempt === maxAttempts) {
         throw new Error(
           `${stage} ${failedValidation.category} failed: ${failedValidation.issues.join("; ")}`,
         );
@@ -2506,8 +2903,8 @@ function appendLocationTradeIdentity(
   return [
     description,
     `Trade identity: ${signatureGoods}.`,
-    `Scarcity: ${tradeIdentity.scarcityNotes.toLowerCase()}.`,
-    `Street economy: ${tradeIdentity.streetLevelEconomy.toLowerCase()}.`,
+    `Supply conditions: ${tradeIdentity.supplyConditions.toLowerCase()}.`,
+    `Material life: ${tradeIdentity.materialLife.toLowerCase()}.`,
   ].join(" ");
 }
 
@@ -2623,6 +3020,54 @@ const socialCastScaleCritiqueSchema = z.object({
   correctionNotes: z.array(z.string().trim().min(1)).max(6),
 });
 
+const regionalLifeCritiqueSchema = z.object({
+  verdict: z.enum(["accept", "revise"]),
+  fieldIssues: z.array(
+    z.object({
+      locationId: z.string().trim().min(1),
+      issue: z.string().trim().min(1),
+      offendingText: z.string().trim().min(1),
+    }),
+  ).max(8),
+  correctionNotes: z.array(z.string().trim().min(1)).max(6),
+});
+
+const knowledgeWebCritiqueSchema = z.object({
+  verdict: z.enum(["accept", "revise"]),
+  fieldIssues: z.array(
+    z.object({
+      title: z.string().trim().min(1),
+      issue: z.string().trim().min(1),
+      offendingText: z.string().trim().min(1),
+    }),
+  ).max(10),
+  correctionNotes: z.array(z.string().trim().min(1)).max(6),
+});
+
+const knowledgeThreadsCritiqueSchema = z.object({
+  verdict: z.enum(["accept", "revise"]),
+  fieldIssues: z.array(
+    z.object({
+      field: z.enum(["knowledgeNetworks", "pressureSeeds"]),
+      issue: z.string().trim().min(1),
+      offendingText: z.string().trim().min(1),
+    }),
+  ).max(8),
+  correctionNotes: z.array(z.string().trim().min(1)).max(6),
+});
+
+const economyMaterialLifeCritiqueSchema = z.object({
+  verdict: z.enum(["accept", "revise"]),
+  fieldIssues: z.array(
+    z.object({
+      locationId: z.string().trim().min(1),
+      issue: z.string().trim().min(1),
+      offendingText: z.string().trim().min(1),
+    }),
+  ).max(10),
+  correctionNotes: z.array(z.string().trim().min(1)).max(6),
+});
+
 const worldSpineFactionsSchema = z.object({
   factions: generatedWorldSpineSchema.shape.factions,
 });
@@ -2722,6 +3167,30 @@ const socialCastScaleCritiqueTool = createStructuredTool(
   "critique_social_cast_scale",
   "Critique whether world-scale social cast NPCs stay anchored to macro-regional public systems rather than local addresses.",
   socialCastScaleCritiqueSchema,
+);
+
+const regionalLifeCritiqueTool = createStructuredTool(
+  "critique_regional_life_texture",
+  "Critique whether regional life outputs are varied and lived-in rather than collapsing into one scarcity-administration house style.",
+  regionalLifeCritiqueSchema,
+);
+
+const knowledgeWebCritiqueTool = createStructuredTool(
+  "critique_knowledge_web_texture",
+  "Critique whether information nodes preserve varied lived texture instead of only failure, scandal, and administrative pressure.",
+  knowledgeWebCritiqueSchema,
+);
+
+const knowledgeThreadsCritiqueTool = createStructuredTool(
+  "critique_knowledge_threads_texture",
+  "Critique whether worldview clusters preserve contested beliefs and social meaning rather than collapsing only into pressure.",
+  knowledgeThreadsCritiqueSchema,
+);
+
+const economyMaterialLifeCritiqueTool = createStructuredTool(
+  "critique_economy_material_life_texture",
+  "Critique whether economy and trade identity outputs preserve varied material texture instead of only scarcity and contraband pressure.",
+  economyMaterialLifeCritiqueSchema,
 );
 
 const regionalLifeTool = createStructuredTool(
@@ -5236,30 +5705,189 @@ class DungeonMasterClient {
     prompt: string;
     scaleTier: WorldScaleTier;
     previousDraft?: GeneratedWorldModule;
+    resumeCheckpoint?: OpenWorldGenerationCheckpoint | null;
+    onCheckpoint?: (checkpoint: OpenWorldGenerationCheckpoint) => void;
     onProgress?: (update: WorldGenerationProgressUpdate) => void;
   }): Promise<GeneratedWorldModuleDraft> {
     startWorldGenerationLog();
+    let currentStage: WorldGenerationStageName | null = null;
+    let persistCheckpointForFailure:
+      | ((
+        status: OpenWorldGenerationCheckpoint["generationStatus"],
+        failedStage: OpenWorldGenerationCheckpoint["failedStage"],
+        lastGenerationError: string | null,
+      ) => void)
+      | null = null;
 
     try {
+      const createEmptyIdMaps = (): OpenWorldGenerationArtifacts["idMaps"] => ({
+        factions: {},
+        locations: {},
+        edges: {},
+        factionRelations: {},
+        npcs: {},
+        information: {},
+        commodities: {},
+      });
+
+      const createFreshCheckpoint = (): OpenWorldGenerationCheckpoint => ({
+        prompt: input.prompt,
+        model: env.openRouterModel,
+        createdAt: new Date().toISOString(),
+        scaleTier: input.scaleTier,
+        scalePlan: buildWorldGenerationScalePlan(input.scaleTier),
+        generationStatus: "running",
+        failedStage: null,
+        completedStages: [],
+        lastGenerationError: null,
+        stageArtifacts: {},
+        attempts: [],
+        validationReports: [],
+        idMaps: createEmptyIdMaps(),
+        stageSummaries: {},
+      });
+
+      const invalidateCheckpointFromStage = (
+        checkpoint: OpenWorldGenerationCheckpoint,
+        stage: CheckpointableWorldGenerationStageName,
+      ) => {
+        for (const dependentStage of [stage, ...getWorldGenerationDependentStages(stage)]) {
+          delete checkpoint.stageArtifacts[dependentStage];
+          delete checkpoint.stageSummaries[dependentStage];
+        }
+      };
+
+      const normalizeResumeCheckpoint = (
+        resumeCheckpoint: OpenWorldGenerationCheckpoint | null | undefined,
+      ) => {
+        if (!resumeCheckpoint) {
+          return createFreshCheckpoint();
+        }
+
+        if (
+          resumeCheckpoint.prompt !== input.prompt
+          || resumeCheckpoint.scaleTier !== input.scaleTier
+        ) {
+          return createFreshCheckpoint();
+        }
+
+        const checkpoint = structuredClone(resumeCheckpoint);
+        checkpoint.scalePlan = buildWorldGenerationScalePlan(checkpoint.scaleTier);
+        checkpoint.idMaps = checkpoint.idMaps ?? createEmptyIdMaps();
+        checkpoint.stageSummaries = checkpoint.stageSummaries ?? {};
+        checkpoint.attempts = checkpoint.attempts ?? [];
+        checkpoint.validationReports = checkpoint.validationReports ?? [];
+        checkpoint.stageArtifacts = checkpoint.stageArtifacts ?? {};
+
+        let firstMissingStage: CheckpointableWorldGenerationStageName | null = null;
+        for (const stage of WORLD_GENERATION_STAGE_ORDER) {
+          const hasArtifact = checkpoint.stageArtifacts[stage] !== undefined;
+          if (!hasArtifact && !firstMissingStage) {
+            firstMissingStage = stage;
+          }
+          if (hasArtifact && firstMissingStage) {
+            invalidateCheckpointFromStage(checkpoint, stage);
+          }
+        }
+
+        checkpoint.completedStages = WORLD_GENERATION_STAGE_ORDER.filter(
+          (stage) => checkpoint.stageArtifacts[stage] !== undefined,
+        );
+        checkpoint.failedStage =
+          checkpoint.generationStatus === "failed"
+            ? checkpoint.failedStage ?? firstMissingStage
+            : null;
+        return checkpoint;
+      };
+
+      const checkpoint = normalizeResumeCheckpoint(input.resumeCheckpoint);
       const scalePlan = buildWorldGenerationScalePlan(input.scaleTier);
-      const attempts: OpenWorldGenerationArtifacts["attempts"] = [];
-      const validationReports: OpenWorldGenerationArtifacts["validationReports"] = [];
-      const stageSummaries: OpenWorldGenerationArtifacts["stageSummaries"] = {};
+      const attempts: OpenWorldGenerationArtifacts["attempts"] = checkpoint.attempts.slice();
+      const validationReports: OpenWorldGenerationArtifacts["validationReports"] = checkpoint.validationReports.slice();
+      const stageSummaries: OpenWorldGenerationArtifacts["stageSummaries"] = {
+        ...checkpoint.stageSummaries,
+      };
+      const idMaps: OpenWorldGenerationArtifacts["idMaps"] = {
+        factions: { ...checkpoint.idMaps.factions },
+        locations: { ...checkpoint.idMaps.locations },
+        edges: { ...checkpoint.idMaps.edges },
+        factionRelations: { ...checkpoint.idMaps.factionRelations },
+        npcs: { ...checkpoint.idMaps.npcs },
+        information: { ...checkpoint.idMaps.information },
+        commodities: { ...checkpoint.idMaps.commodities },
+      };
       const notifyProgress = (update: WorldGenerationProgressUpdate) => {
+        if (update.status === "running") {
+          currentStage = update.stage;
+        }
         logWorldGenerationProgress(update);
         input.onProgress?.(update);
       };
 
-      notifyProgress({
-        stage: "world_bible",
-        status: "running",
-        message: getWorldGenerationStageRunningMessage("world_bible"),
-      });
-      const worldBible = await runStructuredStage({
+      const persistCheckpoint = (
+        status: OpenWorldGenerationCheckpoint["generationStatus"],
+        failedStage: OpenWorldGenerationCheckpoint["failedStage"],
+        lastGenerationError: string | null,
+      ) => {
+        checkpoint.generationStatus = status;
+        checkpoint.failedStage = failedStage;
+        checkpoint.lastGenerationError = lastGenerationError;
+        checkpoint.scalePlan = scalePlan;
+        checkpoint.attempts = attempts.slice();
+        checkpoint.validationReports = validationReports.slice();
+        checkpoint.idMaps = {
+          factions: { ...idMaps.factions },
+          locations: { ...idMaps.locations },
+          edges: { ...idMaps.edges },
+          factionRelations: { ...idMaps.factionRelations },
+          npcs: { ...idMaps.npcs },
+          information: { ...idMaps.information },
+          commodities: { ...idMaps.commodities },
+        };
+        checkpoint.stageSummaries = { ...stageSummaries };
+        checkpoint.completedStages = WORLD_GENERATION_STAGE_ORDER.filter(
+          (stage) => checkpoint.stageArtifacts[stage] !== undefined,
+        );
+        input.onCheckpoint?.(structuredClone(checkpoint));
+      };
+      persistCheckpointForFailure = persistCheckpoint;
+      persistCheckpoint("running", null, null);
+
+      const markStageCompleted = <TStage extends CheckpointableWorldGenerationStageName>(
+        stage: TStage,
+        artifact: OpenWorldGenerationCheckpoint["stageArtifacts"][TStage],
+      ) => {
+        checkpoint.stageArtifacts[stage] = artifact;
+        persistCheckpoint("running", null, null);
+      };
+
+      const markResumedStageComplete = (
+        stage: CheckpointableWorldGenerationStageName,
+        message: string,
+      ) => {
+        stageSummaries[stage] = message;
+        notifyProgress({ stage, status: "complete", message });
+      };
+
+      let worldBible = checkpoint.stageArtifacts.world_bible;
+      if (worldBible) {
+        markResumedStageComplete(
+          "world_bible",
+          stageSummaries.world_bible
+            ?? `${worldBible.title}: ${worldBible.widespreadBurdens.length} widespread burdens, ${worldBible.explanationThreads.length} explanation threads.`,
+        );
+      } else {
+        notifyProgress({
+          stage: "world_bible",
+          status: "running",
+          message: getWorldGenerationStageRunningMessage("world_bible"),
+        });
+        worldBible = await runStructuredStage({
         stage: "world_bible",
         system: buildWorldGenSystemPrompt([
           ...buildScaleProfilePromptLines(scalePlan.worldBibleScale),
           ...worldBibleScaleInstructions(input.scaleTier),
+          ...buildScaleTextureBalanceLines(input.scaleTier),
           "Define the physical, economic, and social reality of the requested container objectively, without assuming a protagonist or arrival setup.",
           `Cover the required burdens, scars, shared realities, and competing explanations, but add more only when each addition introduces genuinely new texture, conflict, contradiction, or scale.`,
           "Do not enumerate all geography, continents, or subregions just to prove scale. Leave map expansion to downstream stages.",
@@ -5273,13 +5901,22 @@ class DungeonMasterClient {
           "Let explanationThreads adopt the prompt's own vocabulary, institutions, and technological register; do not force folkloric, mythic, or speculative scaffolding that the prompt did not ask for.",
           "When a phenomenon genuinely attracts multiple explanations, let them feel in tension with one another rather than like a tidy explanatory template.",
           "If the setting is primarily mundane political, economic, territorial, or survival pressure without unresolved contested phenomena, explanationThreads may be empty.",
+          "If the best explanationThreads candidate feels generic or templated, omit explanationThreads rather than forcing one.",
           "Each explanationThreads entry should name a phenomenon, show several prevailing theories, and point to an actionable secret.",
           "An actionable secret should open a next investigation step, bargaining edge, route, cache, ledger, witness, or practical advantage instead of fully solving the setting's deepest mystery.",
           "Everyday life must explain how ordinary people get food, water, safety, and social protection.",
+          "Name everydayLife institutions as specific local bodies, courts, companies, shrines, fraternities, customs, or offices with some regional character, not just bare role labels.",
+          ...(input.scaleTier === "regional"
+            ? [
+                "For regional worlds, make at least one burden and one institution draw on local custom, craft, festival, kin obligation, hospitality, or ritual duty rather than only tolls, taxes, or formal offices.",
+              ]
+            : []),
           "Gossip should sound like something residents might actually repeat about a person, place, office, shipment, shrine, patrol, or public embarrassment.",
           "groundLevelReality should describe objective sensory, physical, and atmospheric truth rather than framing an arrival or an assumed traveler.",
+          "Use sharedRealities, gossip, and everydayLife to preserve pride, ceremony, beauty, hospitality, humor, admired craft, and ordinary social rhythm alongside burdens and scars.",
+          "Do not make every burden, scar, or institution cash out as a toll, tithe, charter dispute, permit fight, or extraction bottleneck; some should reveal kinship obligation, craft decline, seasonal strain, contested ritual, hospitality pressure, or local prestige.",
           "Keep list fields terse, but allow groundLevelReality, survival, and actionableSecret enough room to feel evocative within the stated output budget.",
-          "Avoid decorative filler; spend prose budget on usable atmosphere and concrete pressure.",
+          "Avoid decorative filler; spend prose budget on usable atmosphere, concrete pressure, and socially legible texture.",
           "setting may be brief geographic or material shorthand if it helps orient downstream stages.",
           "tone is optional UI-facing shorthand and should never be a generic genre label like grimdark fantasy, cyberpunk dystopia, or epic adventure.",
           "Do not genericize the setting title, premise nouns, or signature images from the prompt.",
@@ -5328,12 +5965,14 @@ class DungeonMasterClient {
         ],
         summarize: (parsed) =>
           `${parsed.title}: ${parsed.widespreadBurdens.length} widespread burdens, ${parsed.explanationThreads.length} explanation threads.`,
-      });
-      notifyProgress({
-        stage: "world_bible",
-        status: "complete",
-        message: stageSummaries.world_bible,
-      });
+        });
+        markStageCompleted("world_bible", worldBible);
+        notifyProgress({
+          stage: "world_bible",
+          status: "complete",
+          message: stageSummaries.world_bible,
+        });
+      }
 
       const worldSpineScaleProfile = scalePlan.worldSpineScale;
       const regionalLifeScaleProfile = scalePlan.regionalLifeScale;
@@ -5346,12 +5985,20 @@ class DungeonMasterClient {
       const knowledgeThreadsWorldContext = summarizeWorldBibleForPrompt(worldBible, "knowledge_threads");
       const economyWorldContext = summarizeWorldBibleForPrompt(worldBible, "economy_material_life");
 
-      notifyProgress({
-        stage: "world_spine",
-        status: "running",
-        message: getWorldGenerationStageRunningMessage("world_spine"),
-      });
-      const worldSpineFactions = await runStructuredStage({
+      let worldSpine = checkpoint.stageArtifacts.world_spine;
+      if (worldSpine) {
+        markResumedStageComplete(
+          "world_spine",
+          stageSummaries.world_spine
+            ?? `${worldSpine.locations.length} locations, ${worldSpine.factions.length} factions, ${worldSpine.edges.length} routes.`,
+        );
+      } else {
+        notifyProgress({
+          stage: "world_spine",
+          status: "running",
+          message: getWorldGenerationStageRunningMessage("world_spine"),
+        });
+        const worldSpineFactions = await runStructuredStage({
         stage: "world_spine",
         system: buildWorldGenSystemPrompt([
           ...buildScaleProfilePromptLines(worldSpineScaleProfile),
@@ -5475,16 +6122,16 @@ class DungeonMasterClient {
           system: buildWorldGenSystemPrompt([
             ...buildScaleProfilePromptLines(worldSpineScaleProfile),
             "Generate locations only for this batch.",
-            "Locations must feel distinct because of work, terrain, law, trade, hazard, or ritual, not vague grandeur.",
+            "Locations must feel distinct because of work, terrain, law, trade, hazard, ritual, custom, prestige, abundance, or public life, not vague grandeur.",
+            ...buildWorldSpineTextureBalanceLines(input.scaleTier),
+            "Not every location needs an active failure mode, looming danger, or collapsing system to be important; some can be legible because they are trusted, prosperous, ceremonially central, well-run, or habitually busy.",
             "For unusual settlements or sites, imply what keeps the place supplied, repaired, guarded, or habitable and what breaks when that system slips.",
             "Use only the provided faction keys when naming a controlling faction.",
             "Each controlled location must visibly express who profits, patrols, or governs there.",
             `This world should finish with ${worldSpineLocationTarget} total locations, returned in batches of ${WORLD_SPINE_LOCATION_BATCH_SIZE}.`,
             "Every generated key must be 40 characters or fewer.",
+            "Set usageProfile to everyday for routine public/work/travel nodes residents regularly rely on, or special for ceremonial, remote, risky, prestigious, or otherwise non-routine destinations.",
             "At least half the final location set should be work sites, civic hubs, chokepoints, or settlements ordinary people actually use day to day.",
-            input.scaleTier === "world"
-              ? "Across the full world spine, keep a mix of stability profiles: some prosperous or orderly core regions, some sacred or ritual-central geographies, some commercially flourishing corridors, some contested borderlands, and some dangerous or collapsing frontiers."
-              : "The rest should lean toward dangerous routes, sacred sites, remote hazards, vaults, monster territory, extraction zones, or other special-purpose places people approach for a reason rather than daily routine.",
             "Do not make every location a work site, civic hub, chokepoint, or settlement.",
             "Preserve the prompt's specific imagery and avoid generic city, ruin, or temple reskins.",
             input.scaleTier === "world"
@@ -5494,10 +6141,13 @@ class DungeonMasterClient {
                   "If a concept is mainly a scar, weather system, landmark, chokepoint, hazard, or route, do not output the phenomenon by itself; output the larger marches, basin, coast, corridor world, ritual belt, borderlands, or region organized around living with, crossing, exploiting, or revering it.",
                   "Avoid naming world-scale nodes as a single pass, road, route, stair, gate, bridge, or shrine unless the node is explicitly framed as the larger belt, corridor, highlands, marches, or region surrounding that feature.",
                   "Do not make every world-scale location a crisis zone, extraction frontier, or decaying chokepoint.",
-                  "Some world-scale locations should be important because they are prosperous, orderly, fertile, ritually central, commercially dominant, or legally prestigious, even if they still contain tensions.",
-                  "Distinctiveness at world scale can come from abundance, ritual centrality, legal prestige, agricultural reliability, trade density, or strategic centrality, not only from hazard or collapse.",
                 ].join(" ")
-              : "Stay appropriate to the chosen scale; do not collapse into single-room or single-business micro geography unless the stage scale allows it.",
+              : input.scaleTier === "regional"
+                ? [
+                    "At regional scale, if a concept starts as one notable site, institution, ceremonial focus, ruin, industrial facility, or military installation, widen it into the broader district, belt, corridor, marches, hinterland, or managed territory that has grown around it.",
+                    "Do not output a single compound, shrine, grove, yard, camp, court, archive, mint, barracks, or isolated ruin as a top-level regional spine node unless it is clearly framed as the larger surrounding territory people travel through, maintain, contest, or govern across.",
+                  ].join(" ")
+                : "Stay appropriate to the chosen scale; do not collapse into single-room or single-business micro geography unless the stage scale allows it.",
             "Keep descriptions concise enough for structured output, but leave room for a distinctive sensory or systemic detail when it makes the location more memorable.",
           ]),
           buildUser: (correctionNotes) =>
@@ -5554,8 +6204,8 @@ class DungeonMasterClient {
                 `Ensure at least ${minimumEverydayNeededThisBatch} of this batch's locations are work sites, civic hubs, chokepoints, or settlements ordinary people actually use day to day.`,
                 "Generate major world locations, not individual businesses, ordinary rooms, or routine storefronts.",
                 suggestedNonEverydaySlotsThisBatch > 0
-                  ? `Use the remaining ${suggestedNonEverydaySlotsThisBatch} slot(s) for dangerous, sacred, remote, hidden, or otherwise special-purpose locations people do not use in everyday routine.`
-                  : "If this batch is forced to be fully everyday-use by the composition tracker, keep later batches available for stranger or more dangerous special-purpose sites.",
+                  ? `Use the remaining ${suggestedNonEverydaySlotsThisBatch} slot(s) for ceremonial, prestigious, hidden, remote, risky, ecologically strange, or otherwise non-routine locations people approach for a specific reason.`
+                  : "If this batch is forced to be fully everyday-use by the composition tracker, keep later batches available for ceremonial, prestigious, strange, or more dangerous non-routine sites.",
               ]),
             ]
               .filter(Boolean)
@@ -5677,7 +6327,7 @@ class DungeonMasterClient {
         attempts,
         validationReports,
         stageSummaries,
-        validate: (parsed) => {
+        validate: async (parsed) => {
           const issues = findDuplicateStrings(parsed.edges.map((edge) => edge.key)).map(
             (key) => `Edge key ${key} is duplicated.`,
           );
@@ -5795,7 +6445,7 @@ class DungeonMasterClient {
         validationReports,
         stageSummaries,
         normalizeInput: (input) => normalizeWorldSpineRelationsInput(input, maxWorldSpineRelations),
-        validate: (parsed) => {
+        validate: async (parsed) => {
           const issues = findDuplicateStrings(parsed.factionRelations.map((relation) => relation.key)).map(
             (key) => `Faction relation key ${key} is duplicated.`,
           );
@@ -5812,67 +6462,65 @@ class DungeonMasterClient {
         summarize: (parsed) => `${parsed.factionRelations.length} faction relations.`,
       });
 
-      const worldSpine = {
-        locations: worldSpineLocations.locations,
-        edges: worldSpineEdges.edges,
-        factions: worldSpineFactions.factions,
-        factionRelations: worldSpineRelations.factionRelations,
-      };
+        const worldSpineDraft = {
+          locations: worldSpineLocations.locations,
+          edges: worldSpineEdges.edges,
+          factions: worldSpineFactions.factions,
+          factionRelations: worldSpineRelations.factionRelations,
+        };
 
-      const worldSpineParsed = generatedWorldSpineSchema.safeParse(worldSpine);
-      if (!worldSpineParsed.success) {
-        throw new Error(`world_spine returned invalid structured data: ${worldSpineParsed.error.message}`);
+        const worldSpineParsed = generatedWorldSpineSchema.safeParse(worldSpineDraft);
+        if (!worldSpineParsed.success) {
+          throw new Error(`world_spine returned invalid structured data: ${worldSpineParsed.error.message}`);
+        }
+
+        const worldSpineValidation = validateWorldSpine(worldSpineParsed.data, {
+          scaleTier: input.scaleTier,
+        });
+        validationReports.push({
+          stage: "world_spine",
+          attempt: attempts.filter((attempt) => attempt.stage === "world_spine").length,
+          ok: worldSpineValidation.ok,
+          category: "coherence",
+          issues: worldSpineValidation.issues,
+        });
+        if (!worldSpineValidation.ok) {
+          throw new Error(`world_spine coherence failed: ${worldSpineValidation.issues.join("; ")}`);
+        }
+        const worldSpineScaleValidation = await critiqueWorldSpineScaleWithModel({
+          scaleTier: input.scaleTier,
+          locations: worldSpineParsed.data.locations,
+        });
+        validationReports.push({
+          stage: "world_spine",
+          attempt: attempts.filter((attempt) => attempt.stage === "world_spine").length,
+          ok: worldSpineScaleValidation.issues.length === 0,
+          category: worldSpineScaleValidation.category,
+          issues: worldSpineScaleValidation.issues,
+        });
+        if (worldSpineScaleValidation.issues.length > 0) {
+          throw new Error(`world_spine scale-aware validation failed: ${worldSpineScaleValidation.issues.join("; ")}`);
+        }
+        worldSpine = worldSpineParsed.data;
+        stageSummaries.world_spine =
+          `${worldSpine.locations.length} locations, ${worldSpine.factions.length} factions, ${worldSpine.edges.length} routes.`;
+        markStageCompleted("world_spine", worldSpine);
+        notifyProgress({
+          stage: "world_spine",
+          status: "complete",
+          message: stageSummaries.world_spine,
+        });
       }
 
-      const worldSpineValidation = validateWorldSpine(worldSpineParsed.data, {
-        scaleTier: input.scaleTier,
-      });
-      validationReports.push({
-        stage: "world_spine",
-        attempt: attempts.filter((attempt) => attempt.stage === "world_spine").length,
-        ok: worldSpineValidation.ok,
-        category: "coherence",
-        issues: worldSpineValidation.issues,
-      });
-      if (!worldSpineValidation.ok) {
-        throw new Error(`world_spine coherence failed: ${worldSpineValidation.issues.join("; ")}`);
-      }
-      const worldSpineScaleValidation = await critiqueWorldSpineScaleWithModel({
-        scaleTier: input.scaleTier,
-        locations: worldSpineParsed.data.locations,
-      });
-      validationReports.push({
-        stage: "world_spine",
-        attempt: attempts.filter((attempt) => attempt.stage === "world_spine").length,
-        ok: worldSpineScaleValidation.issues.length === 0,
-        category: worldSpineScaleValidation.category,
-        issues: worldSpineScaleValidation.issues,
-      });
-      if (worldSpineScaleValidation.issues.length > 0) {
-        throw new Error(`world_spine scale-aware validation failed: ${worldSpineScaleValidation.issues.join("; ")}`);
-      }
-      stageSummaries.world_spine =
-        `${worldSpineParsed.data.locations.length} locations, ${worldSpineParsed.data.factions.length} factions, ${worldSpineParsed.data.edges.length} routes.`;
-      notifyProgress({
-        stage: "world_spine",
-        status: "complete",
-        message: stageSummaries.world_spine,
-      });
+      idMaps.factions = assignCanonicalIds(worldSpine.factions.map((faction) => faction.key), "fac");
+      idMaps.locations = assignCanonicalIds(worldSpine.locations.map((location) => location.key), "loc");
+      idMaps.edges = assignCanonicalIds(worldSpine.edges.map((edge) => edge.key), "edge");
+      idMaps.factionRelations = assignCanonicalIds(
+        worldSpine.factionRelations.map((relation) => relation.key),
+        "rel",
+      );
 
-      const idMaps: OpenWorldGenerationArtifacts["idMaps"] = {
-        factions: assignCanonicalIds(worldSpineParsed.data.factions.map((faction) => faction.key), "fac"),
-        locations: assignCanonicalIds(worldSpineParsed.data.locations.map((location) => location.key), "loc"),
-        edges: assignCanonicalIds(worldSpineParsed.data.edges.map((edge) => edge.key), "edge"),
-        factionRelations: assignCanonicalIds(
-          worldSpineParsed.data.factionRelations.map((relation) => relation.key),
-          "rel",
-        ),
-        npcs: {},
-        information: {},
-        commodities: {},
-      };
-
-      const lockedLocations = worldSpineParsed.data.locations.map((location) => ({
+      const lockedLocations = worldSpine.locations.map((location) => ({
         key: location.key,
         id: idMaps.locations[location.key],
         name: location.name,
@@ -5881,7 +6529,7 @@ class DungeonMasterClient {
         localIdentity: location.localIdentity,
         controlStatus: location.controlStatus,
       }));
-      const lockedFactions = worldSpineParsed.data.factions.map((faction) => ({
+      const lockedFactions = worldSpine.factions.map((faction) => ({
         key: faction.key,
         id: idMaps.factions[faction.key],
         name: faction.name,
@@ -5890,15 +6538,23 @@ class DungeonMasterClient {
         publicFootprint: faction.publicFootprint,
       }));
 
-      notifyProgress({
-        stage: "regional_life",
-        status: "running",
-        message: getWorldGenerationStageRunningMessage("regional_life"),
-      });
-      const regionalLifeBatches = chunkArray(lockedLocations, REGIONAL_LIFE_BATCH_SIZE);
-      const regionalLifeBatchResults: RegionalLifeDraft["locations"][] = [];
+      let regionalLife = checkpoint.stageArtifacts.regional_life;
+      if (regionalLife) {
+        markResumedStageComplete(
+          "regional_life",
+          stageSummaries.regional_life
+            ?? `${regionalLife.locations.length} regional life profiles.`,
+        );
+      } else {
+        notifyProgress({
+          stage: "regional_life",
+          status: "running",
+          message: getWorldGenerationStageRunningMessage("regional_life"),
+        });
+        const regionalLifeBatches = chunkArray(lockedLocations, REGIONAL_LIFE_BATCH_SIZE);
+        const regionalLifeBatchResults: RegionalLifeDraft["locations"][] = [];
 
-      for (const [batchIndex, locationBatch] of regionalLifeBatches.entries()) {
+        for (const [batchIndex, locationBatch] of regionalLifeBatches.entries()) {
         const regionalLifeBatchSchema = generatedRegionalLifeSchema.extend({
           locations: generatedRegionalLifeSchema.shape.locations.length(locationBatch.length),
         });
@@ -5914,8 +6570,9 @@ class DungeonMasterClient {
             ...buildScaleProfilePromptLines(regionalLifeScaleProfile),
             "Generate the lived-in regional layer for each locked location in this batch.",
             "Each location needs public activity, local pressure, everyday texture, hazards, ordinary knowledge, and reasons a resident stays or leaves.",
-            "Focus on workers, routines, institutions, rot, shortages, tolls, patrols, weather exposure, quotas, and upkeep burdens.",
+            "Focus on workers, routines, institutions, local custom, foodways, hospitality, ceremony, pride, beauty, and maintenance as well as strain, tolls, patrols, weather exposure, quotas, and upkeep burdens.",
             "If the world has grand history or myth, cash it out here as something residents pay, dodge, repair, fear, exploit, or gossip about today.",
+            ...buildRegionalLifeTextureBalanceLines(input.scaleTier),
             input.scaleTier === "world"
               ? "At world scale, each locked location is a macro-region or civilization. Describe region-level public life, not taverns, rooms, or street-corner interiors."
               : "Match the locked location's scale and do not shrink it into room-level detail.",
@@ -5948,54 +6605,67 @@ class DungeonMasterClient {
           validationReports,
           stageSummaries,
           normalizeInput: (input) => normalizeRegionalLifeInput(input, locationBatch.length),
-          validate: (parsed) => [
+          validate: async (parsed) => [
             {
               category: "immersion",
               issues: validateRegionalLife(parsed, locationBatch.map((location) => location.id)).issues,
             },
+            await critiqueRegionalLifeWithModel({
+              scaleTier: input.scaleTier,
+              locations: parsed.locations,
+            }),
           ],
           summarize: (parsed) =>
             `Batch ${batchIndex + 1}/${regionalLifeBatches.length}: ${parsed.locations.length} regional life profiles.`,
         });
 
-        regionalLifeBatchResults.push(regionalLifeBatch.locations);
+          regionalLifeBatchResults.push(regionalLifeBatch.locations);
+        }
+
+        regionalLife = {
+          locations: regionalLifeBatchResults.flat(),
+        };
+        const regionalLifeValidation = validateRegionalLife(
+          regionalLife,
+          lockedLocations.map((location) => location.id),
+        );
+        validationReports.push({
+          stage: "regional_life",
+          attempt: attempts.filter((attempt) => attempt.stage === "regional_life").length,
+          ok: regionalLifeValidation.ok,
+          category: "immersion",
+          issues: regionalLifeValidation.issues,
+        });
+        if (!regionalLifeValidation.ok) {
+          throw new Error(`regional_life immersion failed: ${regionalLifeValidation.issues.join("; ")}`);
+        }
+        stageSummaries.regional_life =
+          `${regionalLife.locations.length} regional life profiles across ${regionalLifeBatches.length} batches.`;
+        markStageCompleted("regional_life", regionalLife);
+        notifyProgress({
+          stage: "regional_life",
+          status: "complete",
+          message: stageSummaries.regional_life,
+        });
       }
 
-      const regionalLife: RegionalLifeDraft = {
-        locations: regionalLifeBatchResults.flat(),
-      };
-      const regionalLifeValidation = validateRegionalLife(
-        regionalLife,
-        lockedLocations.map((location) => location.id),
-      );
-      validationReports.push({
-        stage: "regional_life",
-        attempt: attempts.filter((attempt) => attempt.stage === "regional_life").length,
-        ok: regionalLifeValidation.ok,
-        category: "immersion",
-        issues: regionalLifeValidation.issues,
-      });
-      if (!regionalLifeValidation.ok) {
-        throw new Error(`regional_life immersion failed: ${regionalLifeValidation.issues.join("; ")}`);
-      }
-      stageSummaries.regional_life =
-        `${regionalLife.locations.length} regional life profiles across ${regionalLifeBatches.length} batches.`;
-      notifyProgress({
-        stage: "regional_life",
-        status: "complete",
-        message: stageSummaries.regional_life,
-      });
+      let socialLayer = checkpoint.stageArtifacts.social_cast;
+      if (socialLayer) {
+        markResumedStageComplete(
+          "social_cast",
+          stageSummaries.social_cast ?? `${socialLayer.npcs.length} NPCs.`,
+        );
+      } else {
+        notifyProgress({
+          stage: "social_cast",
+          status: "running",
+          message: getWorldGenerationStageRunningMessage("social_cast"),
+        });
+        const socialCastBatches = chunkArray(lockedLocations, SOCIAL_CAST_BATCH_SIZE);
+        const socialCastBatchResults: z.infer<typeof generatedSocialLayerInputSchema>["npcs"][] = [];
+        const regionalLifeDigest = summarizeRegionalLifeForPrompt(regionalLife);
 
-      notifyProgress({
-        stage: "social_cast",
-        status: "running",
-        message: getWorldGenerationStageRunningMessage("social_cast"),
-      });
-      const socialCastBatches = chunkArray(lockedLocations, SOCIAL_CAST_BATCH_SIZE);
-      const socialCastBatchResults: z.infer<typeof generatedSocialLayerInputSchema>["npcs"][] = [];
-      const regionalLifeDigest = summarizeRegionalLifeForPrompt(regionalLife);
-
-      for (const [batchIndex, locationBatch] of socialCastBatches.entries()) {
+        for (const [batchIndex, locationBatch] of socialCastBatches.entries()) {
         const socialBatchSchema = generatedSocialLayerInputSchema.extend({
           npcs: generatedSocialLayerInputSchema.shape.npcs.length(locationBatch.length),
         });
@@ -6032,12 +6702,14 @@ class DungeonMasterClient {
           system: buildWorldGenSystemPrompt([
             ...buildScaleProfilePromptLines(socialCastScaleProfile),
             "Generate systemic NPCs for this world map batch.",
-            "Every NPC must have a mundane routine, a current concern tied to a local hazard, faction pressure, or commodity shortage, and a public-facing role in an ongoing system.",
-            "Current concerns should usually arise from a dependency, bottleneck, debt, quota, inspection, repair burden, permit, or local rivalry instead of free-floating angst.",
+            "Every NPC must have a mundane routine, a current concern tied to a local obligation, opportunity, hazard, relationship, faction pressure, or material dependency, and a public-facing role in an ongoing system.",
+            "Current concerns should usually arise from a dependency, bottleneck, debt, quota, inspection, repair burden, permit, timing problem, family obligation, craft standard, reputation pressure, social expectation, seasonal demand, or local rivalry instead of free-floating angst.",
             "Favor workers, pilots, wardens, clerks, brokers, crew leads, and other routine social roles over colorful eccentrics.",
+            ...buildSocialCastTextureBalanceLines(input.scaleTier),
+            "Let some NPCs be anchors of competence, hospitality, ritual continuity, or trusted local practice instead of making every public-facing role a pressure valve for failure.",
             "Use highly varied first-name sounds and syllable patterns so the cast does not cluster around a few repeated drowned-world name shapes.",
             "Every NPC's first name must be unique across the whole world.",
-            "publicContactSurface should name the mundane bureaucratic, commercial, ritual, or infrastructural interface where the public encounters this NPC, such as a toll desk, permit line, shrine queue, ration counter, registry desk, customs gate, or market stall.",
+            "publicContactSurface should name the mundane bureaucratic, commercial, ritual, infrastructural, hospitality-facing, or craft-facing interface where the public encounters this NPC, such as a toll desk, ferry landing, permit line, shrine queue, ration counter, registry desk, customs gate, hiring board, market stall, workshop counter, or communal service point.",
             "Use only the exact provided ids in factionId, currentLocationId, ties.locationIds, bridgeLocationIds, and bridgeFactionIds; never use faction keys, location keys, or names in those fields.",
             "Every factionId and bridgeFactionId must match a provided fac_* id exactly.",
             input.scaleTier === "world"
@@ -6176,67 +6848,69 @@ class DungeonMasterClient {
             `Batch ${batchIndex + 1}/${socialCastBatches.length}: ${parsed.npcs.length} anchored NPCs.`,
         });
 
-        socialCastBatchResults.push(socialBatch.npcs);
-      }
+          socialCastBatchResults.push(socialBatch.npcs);
+        }
 
-      const socialCastInput: z.infer<typeof generatedSocialLayerInputSchema> = {
-        npcs: socialCastBatchResults.flat(),
-      };
-      stageSummaries.social_cast =
-        `${socialCastInput.npcs.length} NPCs across ${socialCastBatches.length} batches.`;
-      notifyProgress({
-        stage: "social_cast",
-        status: "complete",
-        message: stageSummaries.social_cast,
-      });
+        const socialCastInput: z.infer<typeof generatedSocialLayerInputSchema> = {
+          npcs: socialCastBatchResults.flat(),
+        };
 
-      const socialNpcIds = assignIndexedIds(
-        socialCastInput.npcs,
-        "npc",
-        (npc, index) => `${npc.name}_${npc.role}_${index + 1}`,
-      );
+        const socialNpcIds = assignIndexedIds(
+          socialCastInput.npcs,
+          "npc",
+          (npc, index) => `${npc.name}_${npc.role}_${index + 1}`,
+        );
 
-      idMaps.npcs = Object.fromEntries(
-        socialCastInput.npcs.map((npc, index) => [`npc_${index + 1}`, socialNpcIds[index]]),
-      );
+        idMaps.npcs = Object.fromEntries(
+          socialCastInput.npcs.map((npc, index) => [`npc_${index + 1}`, socialNpcIds[index]]),
+        );
 
-      const socialLayer: OpenWorldGenerationArtifacts["socialLayer"] = {
-        npcs: socialCastInput.npcs.map((npc, index) => ({
-          id: socialNpcIds[index],
-          name: npc.name,
-          role: npc.role,
-          tags: npc.tags,
-          summary: npc.summary,
-          description: npc.description,
-          factionId: npc.factionId,
-          currentLocationId: npc.currentLocationId,
-          approval: npc.approval,
-          isCompanion: npc.isCompanion,
-          currentConcern: npc.currentConcern,
-          publicContactSurface: npc.publicContactSurface,
-        })),
-        socialGravity: socialCastInput.npcs.map((npc, index) => ({
-          npcId: socialNpcIds[index],
-          importance: npc.importance,
-          bridgeLocationIds: npc.bridgeLocationIds,
-          bridgeFactionIds: npc.bridgeFactionIds,
-        })),
-      };
+        socialLayer = {
+          npcs: socialCastInput.npcs.map((npc, index) => ({
+            id: socialNpcIds[index],
+            name: npc.name,
+            role: npc.role,
+            tags: npc.tags,
+            summary: npc.summary,
+            description: npc.description,
+            factionId: npc.factionId,
+            currentLocationId: npc.currentLocationId,
+            approval: npc.approval,
+            isCompanion: npc.isCompanion,
+            currentConcern: npc.currentConcern,
+            publicContactSurface: npc.publicContactSurface,
+          })),
+          socialGravity: socialCastInput.npcs.map((npc, index) => ({
+            npcId: socialNpcIds[index],
+            importance: npc.importance,
+            bridgeLocationIds: npc.bridgeLocationIds,
+            bridgeFactionIds: npc.bridgeFactionIds,
+          })),
+        };
 
-      const socialValidation = validateSocialLayer(
-        socialLayer,
-        lockedLocations.map((location) => location.id),
-        { scaleTier: input.scaleTier },
-      );
-      validationReports.push({
-        stage: "social_cast",
-        attempt: attempts.filter((attempt) => attempt.stage === "social_cast").length,
-        ok: socialValidation.ok,
-        category: "immersion",
-        issues: socialValidation.issues,
-      });
-      if (!socialValidation.ok) {
-        throw new Error(`social_cast immersion failed: ${socialValidation.issues.join("; ")}`);
+        const socialValidation = validateSocialLayer(
+          socialLayer,
+          lockedLocations.map((location) => location.id),
+          { scaleTier: input.scaleTier },
+        );
+        validationReports.push({
+          stage: "social_cast",
+          attempt: attempts.filter((attempt) => attempt.stage === "social_cast").length,
+          ok: socialValidation.ok,
+          category: "immersion",
+          issues: socialValidation.issues,
+        });
+        if (!socialValidation.ok) {
+          throw new Error(`social_cast immersion failed: ${socialValidation.issues.join("; ")}`);
+        }
+        stageSummaries.social_cast =
+          `${socialCastInput.npcs.length} NPCs across ${socialCastBatches.length} batches.`;
+        markStageCompleted("social_cast", socialLayer);
+        notifyProgress({
+          stage: "social_cast",
+          status: "complete",
+          message: stageSummaries.social_cast,
+        });
       }
 
       const lockedNpcs = socialLayer.npcs.map((npc) => ({
@@ -6266,27 +6940,40 @@ class DungeonMasterClient {
         (faction) => !initiallyAnchoredFactionIds.has(faction.id),
       );
 
-      notifyProgress({
-        stage: "knowledge_web",
-        status: "running",
-        message: getWorldGenerationStageRunningMessage("knowledge_web"),
-      });
-      const knowledgeWebInput = await runStructuredStage({
+      let knowledgeWebInput: GeneratedKnowledgeWebStage = checkpoint.stageArtifacts.knowledge_web
+        ?? { information: [], informationLinks: [] };
+      if (checkpoint.stageArtifacts.knowledge_web) {
+        markResumedStageComplete(
+          "knowledge_web",
+          stageSummaries.knowledge_web
+            ?? `${knowledgeWebInput.information.length} information nodes with ${knowledgeWebInput.informationLinks.length} links.`,
+        );
+      } else {
+        notifyProgress({
+          stage: "knowledge_web",
+          status: "running",
+          message: getWorldGenerationStageRunningMessage("knowledge_web"),
+        });
+        knowledgeWebInput = await runStructuredStage({
         stage: "knowledge_web",
         system: buildWorldGenSystemPrompt([
           ...buildScaleProfilePromptLines(knowledgeScaleProfile),
-          "Generate the playable information web for the locked world.",
-          "Tie every information node to a present-day cost, hazard, dependency, witness, route, record, object, or local dispute rather than remote lore for its own sake.",
-          "Public information must provide a physical location, route, object, document, or NPC lead.",
-          "Guarded information must imply what leverage, payment, status, or relationship is required to obtain it.",
+          "Generate the actionable information ecology for the locked world.",
+          "Tie every information node to a present-day witness, route, record, object, custom, service, practice, opportunity, dependency, or dispute rather than remote lore for its own sake.",
+          ...buildKnowledgeTextureBalanceLines(input.scaleTier),
+          "Not every information node needs a shortage, threat, deadline, scandal, or institutional failure; many should simply reveal how a place works, what people trust, what they admire, how they gather, or what practical routine outsiders can learn from.",
+          "Keep each node focused. If a node includes pressure, choose one main pressure rather than stacking multiple disasters, shortages, and deadlines into the same entry.",
+          "Public information must provide a physical location, route, object, document, routine, event, or NPC lead.",
+          "Guarded information should imply what relationship, status, repeated presence, service, craft familiarity, leverage, or payment is required to obtain it; do not default every access path to a transaction.",
           "Secrets should resolve to concrete places, ledgers, caches, devices, routes, or hidden actors rather than pure metaphysics.",
-          "actionLead and discoverHow should move play to the next clue or leverage point, not deliver a complete final answer.",
+          "actionLead and discoverHow should move play to the next clue, contact, routine, vantage point, participation point, or leverage point, not deliver a complete final answer.",
+          "discoverHow may involve watching a shift change, attending a rite, joining a queue, helping with work, waiting through a public routine, returning at the right hour, sharing a meal, or proving familiarity with a local custom.",
           "Keep every field concise: title, summary, content, actionLead, and discoverHow should all be short phrases or one tight sentence at most.",
           "Return at least one actionable information node for each locked location.",
           "Some locations may surface public leads while others rely on guarded leads; choose what fits the place instead of forcing the same access level everywhere.",
           `Keep the network legible: cover every location, build a genuinely connected web, and stay within schema limits of ${WORLD_GEN_MAX_INFORMATION_NODES} information nodes and ${WORLD_GEN_MAX_INFORMATION_LINKS} information links.`,
           "Prefer one information node per location unless an extra node adds real investigative or social texture.",
-          "If any factions are listed as currently unanchored, use information nodes to give them a visible public role, dispute, permit system, repair burden, ritual presence, market function, or territorial pressure in the world.",
+          "If any factions are listed as currently unanchored, use information nodes to give them a visible public role, dispute, permit system, repair burden, ritual presence, market function, admired service, or territorial pressure in the world.",
         ]),
         buildUser: (correctionNotes) =>
           [
@@ -6343,7 +7030,7 @@ class DungeonMasterClient {
         attempts,
         validationReports,
         stageSummaries,
-        validate: (parsed) => {
+        validate: async (parsed) => {
           const issues: string[] = [];
           const locationIds = new Set(lockedLocations.map((location) => location.id));
           const factionIds = new Set(lockedFactions.map((faction) => faction.id));
@@ -6477,38 +7164,51 @@ class DungeonMasterClient {
               category: "immersion",
               issues: validateFactionFootprints(provisionalModule).issues,
             },
+            await critiqueKnowledgeWebWithModel({
+              scaleTier: input.scaleTier,
+              information: parsed.information,
+            }),
           ];
         },
         summarize: (parsed) =>
           `${parsed.information.length} information nodes with ${parsed.informationLinks.length} links.`,
-      });
-      notifyProgress({
-        stage: "knowledge_web",
-        status: "complete",
-        message: stageSummaries.knowledge_web,
-      });
+        });
+        markStageCompleted("knowledge_web", knowledgeWebInput);
+        notifyProgress({
+          stage: "knowledge_web",
+          status: "complete",
+          message: stageSummaries.knowledge_web,
+        });
+      }
 
-      notifyProgress({
-        stage: "knowledge_threads",
-        status: "running",
-        message: getWorldGenerationStageRunningMessage("knowledge_threads"),
-      });
-      const knowledgeThreadsInput = await runStructuredStage({
+      let knowledgeThreadsInput: GeneratedKnowledgeThreadsStage = checkpoint.stageArtifacts.knowledge_threads
+        ?? { knowledgeNetworks: [], pressureSeeds: [] };
+      if (checkpoint.stageArtifacts.knowledge_threads) {
+        markResumedStageComplete(
+          "knowledge_threads",
+          stageSummaries.knowledge_threads
+            ?? `${knowledgeThreadsInput.knowledgeNetworks.length} worldview clusters and ${knowledgeThreadsInput.pressureSeeds.length} pressure seeds.`,
+        );
+      } else {
+        notifyProgress({
+          stage: "knowledge_threads",
+          status: "running",
+          message: getWorldGenerationStageRunningMessage("knowledge_threads"),
+        });
+        knowledgeThreadsInput = await runStructuredStage({
         stage: "knowledge_threads",
         system: buildWorldGenSystemPrompt([
           ...buildScaleProfilePromptLines(knowledgeScaleProfile),
-          "Generate a compact worldview-and-pressure layer using the existing information web.",
+          "Generate a compact worldview layer, with optional pressure seeds, using the existing information web.",
+          "Do not reduce every cluster to institutional breakdown; some may organize around custom, prestige, admired craft, ritual timing, shared memory, or contested public identity.",
           "Use knowledgeNetworks for compact clusters of public beliefs, competing explanations, rumors, doctrines, theories, or myths that connect back to the existing information web instead of inventing new lore objects.",
           "For linkedInformationKeys, copy only exact information_web keys; never use human-readable titles or world-bible explanation labels.",
-          "Pressure seeds should name a locked location or faction and describe a near-term pressure that can move play.",
+          "Pressure seeds may be omitted when the worldview layer is already strong; when present, they should name a locked location or faction and describe a near-term pressure that can move play.",
           "Keep hiddenTruths partial enough to preserve uncertainty; they should sharpen direction and stakes without mathematically closing the world's deepest mysteries.",
           "Keep hiddenTruth and pressure text to one tight sentence each.",
           "Keep it compact. Return only the major worldview clusters and the most actionable near-term pressures; do not pad.",
         ]),
         buildUser: (correctionNotes) => {
-          const { competingExplanations: _competingExplanations, ...knowledgeThreadsPromptContext } =
-            knowledgeThreadsWorldContext;
-
           return [
             buildWorldGenerationBasePrompt({
               prompt: input.prompt,
@@ -6517,7 +7217,7 @@ class DungeonMasterClient {
               previousDraft: input.previousDraft,
               correctionNotes,
             }),
-            formatPromptBlock("world_context", knowledgeThreadsPromptContext),
+            formatPromptBlock("world_context", knowledgeThreadsWorldContext),
             formatPromptBlock("stage_scale_profile", describeScaleProfile(knowledgeScaleProfile, "knowledge_threads")),
             formatPromptBlock(
               "locked_locations",
@@ -6536,7 +7236,7 @@ class DungeonMasterClient {
               "Do not use capitalized titles, and do not use keys from world-context competing explanations or myths.",
               "Use only existing information keys and the provided location and faction ids.",
               "Use knowledgeNetworks for belief, rumor, doctrine, theory, or myth clusters as appropriate to the setting.",
-              "Return only as many knowledgeNetworks and pressureSeeds as the world genuinely needs while staying compact and within schema bounds.",
+              "Return only as many knowledgeNetworks and pressureSeeds as the world genuinely needs while staying compact and within schema bounds. It is valid to return zero pressureSeeds if the worldview layer is stronger without them.",
             ]),
           ].join("\n\n");
         },
@@ -6545,7 +7245,7 @@ class DungeonMasterClient {
         attempts,
         validationReports,
         stageSummaries,
-        validate: (parsed) => {
+        validate: async (parsed) => {
           const issues: string[] = [];
           const informationKeys = new Set(knowledgeWebInput.information.map((information) => information.key));
           const locationIds = new Set(lockedLocations.map((location) => location.id));
@@ -6578,16 +7278,25 @@ class DungeonMasterClient {
             }
           }
 
-          return [{ category: "playability", issues }];
+          return [
+            { category: "playability", issues },
+            await critiqueKnowledgeThreadsWithModel({
+              scaleTier: input.scaleTier,
+              knowledgeNetworks: parsed.knowledgeNetworks,
+              pressureSeeds: parsed.pressureSeeds,
+            }),
+          ];
         },
         summarize: (parsed) =>
           `${parsed.knowledgeNetworks.length} worldview clusters and ${parsed.pressureSeeds.length} pressure seeds.`,
-      });
-      notifyProgress({
-        stage: "knowledge_threads",
-        status: "complete",
-        message: stageSummaries.knowledge_threads,
-      });
+        });
+        markStageCompleted("knowledge_threads", knowledgeThreadsInput);
+        notifyProgress({
+          stage: "knowledge_threads",
+          status: "complete",
+          message: stageSummaries.knowledge_threads,
+        });
+      }
 
       idMaps.information = assignCanonicalIds(
         knowledgeWebInput.information.map((information) => information.key),
@@ -6697,99 +7406,121 @@ class DungeonMasterClient {
         entryPoints: [],
       };
 
-      notifyProgress({
-        stage: "economy_material_life",
-        status: "running",
-        message: getWorldGenerationStageRunningMessage("economy_material_life"),
-      });
       const targetCommodityCount = Math.min(
         WORLD_GEN_TARGET_COMMODITIES,
         Math.max(6, Math.ceil(lockedLocations.length / 2)),
       );
       const targetMarketPriceCount = Math.min(WORLD_GEN_MAX_MARKET_PRICES, lockedLocations.length);
-      const economyMaterialLifeInput = await runStructuredStage({
-        stage: "economy_material_life",
-        system: buildWorldGenSystemPrompt([
-          ...buildScaleProfilePromptLines(knowledgeScaleProfile),
-          "Generate commodities, market prices, and location-level material life for the locked world.",
-          `Keep the economy compact: no more than ${targetCommodityCount} commodities and no more than ${targetMarketPriceCount} market prices.`,
-          `Return one locationTradeIdentity entry for every locked location (${lockedLocations.length} total).`,
-          "Include staple goods, raw materials, and at least one controlled or illicit trade pressure.",
-          "No generic treasure filler or ornamental adventuring gear; focus on bulk goods, infrastructure, consumables, and daily necessities.",
-          "Every commodity should imply scarcity, transport strain, monopoly pressure, hazard, spoilage, upkeep demand, or harvest quota.",
-          "Let market presence reveal who maintains critical systems, who pays the hidden costs, and where supply lines are brittle.",
-          "Every major location should have a trade identity or a deliberate reason for lacking one.",
-          "Keep every field terse: one short sentence or short phrase, not a paragraph.",
-        ]),
-        buildUser: (correctionNotes) =>
-          [
-            buildWorldGenerationBasePrompt({
-              prompt: input.prompt,
-              scaleTier: input.scaleTier,
-              scalePlan,
-              previousDraft: input.previousDraft,
-              correctionNotes,
-            }),
-            formatPromptBlock("world_context", economyWorldContext),
-            formatPromptBlock("stage_scale_profile", describeScaleProfile(knowledgeScaleProfile, "economy_material_life")),
-            formatPromptBlock(
-              "locked_locations",
-              summarizeLocationRefs(lockedLocations, { includeKey: false }),
-            ),
-            formatPromptBlock(
-              "locked_factions",
-              summarizeFactionRefs(lockedFactions, { includeKey: false }),
-            ),
-            formatPromptBlock("locked_npcs", summarizeNpcRefs(lockedNpcs)),
-            formatPromptBlock("regional_life_digest", summarizeRegionalLifeRefs(regionalLife)),
-            formatFinalInstruction(
-              `Use only the provided location ids, faction ids, and NPC ids. Use unique commodity keys. Return one locationTradeIdentity entry per locked location, and keep the total no higher than ${targetCommodityCount} commodities and ${targetMarketPriceCount} marketPrices.`,
-            ),
-          ].join("\n\n"),
-        schema: generatedEconomyMaterialLifeInputSchema,
-        tool: economyMaterialLifeTool,
-        attempts,
-        validationReports,
-        stageSummaries,
-        normalizeInput: (input) =>
-          normalizeEconomyMaterialLifeInput(input, targetCommodityCount, targetMarketPriceCount),
-        validate: (parsed) => {
-          const issues: string[] = [];
-          const locationIds = new Set(lockedLocations.map((location) => location.id));
-          const factionIds = new Set(lockedFactions.map((faction) => faction.id));
-          const npcIds = new Set(lockedNpcs.map((npc) => npc.id));
+      let economyMaterialLifeInput: GeneratedEconomyMaterialLifeStage = checkpoint.stageArtifacts.economy_material_life
+        ?? { commodities: [], marketPrices: [], locationTradeIdentity: [] };
+      if (checkpoint.stageArtifacts.economy_material_life) {
+        markResumedStageComplete(
+          "economy_material_life",
+          stageSummaries.economy_material_life
+            ?? `${economyMaterialLifeInput.commodities.length} commodities and ${economyMaterialLifeInput.marketPrices.length} market prices.`,
+        );
+      } else {
+        notifyProgress({
+          stage: "economy_material_life",
+          status: "running",
+          message: getWorldGenerationStageRunningMessage("economy_material_life"),
+        });
+        economyMaterialLifeInput = await runStructuredStage({
+          stage: "economy_material_life",
+          system: buildWorldGenSystemPrompt([
+            ...buildScaleProfilePromptLines(knowledgeScaleProfile),
+            "Generate commodities, market prices, and location-level material life for the locked world.",
+            `Keep the economy compact: no more than ${targetCommodityCount} commodities and no more than ${targetMarketPriceCount} market prices.`,
+            `Return one locationTradeIdentity entry for every locked location (${lockedLocations.length} total).`,
+            "Include staple goods and raw materials. Add controlled or illicit trade pressure only where the setting genuinely supports it.",
+            ...buildEconomyTextureBalanceLines(input.scaleTier),
+            "No generic treasure filler or ornamental adventuring gear; focus on bulk goods, infrastructure, consumables, and daily necessities.",
+            "Every commodity should imply either scarcity, transport strain, upkeep demand, seasonality, social prestige, ritual use, staple reliability, or market leverage.",
+            "Let market presence reveal who maintains critical systems, who pays hidden costs, where supply lines are brittle, and which goods or crafts are locally admired or dependable.",
+            input.scaleTier === "world"
+              ? "At world scale, locationTradeIdentity should describe regional material life and supply conditions at macro scale, not literal street-corner commerce."
+              : "At settlement or regional scale, locationTradeIdentity may describe street-level, market, dockside, roadside, or neighborhood-facing material life where appropriate.",
+            "Every major location should have a trade identity or a deliberate reason for lacking one.",
+            "Keep every field terse: one short sentence or short phrase, not a paragraph.",
+          ]),
+          buildUser: (correctionNotes) =>
+            [
+              buildWorldGenerationBasePrompt({
+                prompt: input.prompt,
+                scaleTier: input.scaleTier,
+                scalePlan,
+                previousDraft: input.previousDraft,
+                correctionNotes,
+              }),
+              formatPromptBlock("world_context", economyWorldContext),
+              formatPromptBlock("stage_scale_profile", describeScaleProfile(knowledgeScaleProfile, "economy_material_life")),
+              formatPromptBlock(
+                "locked_locations",
+                summarizeLocationRefs(lockedLocations, { includeKey: false }),
+              ),
+              formatPromptBlock(
+                "locked_factions",
+                summarizeFactionRefs(lockedFactions, { includeKey: false }),
+              ),
+              formatPromptBlock("locked_npcs", summarizeNpcRefs(lockedNpcs)),
+              formatPromptBlock("regional_life_digest", summarizeRegionalLifeRefs(regionalLife)),
+              formatFinalInstruction(
+                `Use only the provided location ids, faction ids, and NPC ids. Use unique commodity keys. Return one locationTradeIdentity entry per locked location, and keep the total no higher than ${targetCommodityCount} commodities and ${targetMarketPriceCount} marketPrices.`,
+              ),
+            ].join("\n\n"),
+          schema: generatedEconomyMaterialLifeInputSchema,
+          tool: economyMaterialLifeTool,
+          attempts,
+          validationReports,
+          stageSummaries,
+          normalizeInput: (input) =>
+            normalizeEconomyMaterialLifeInput(input, targetCommodityCount, targetMarketPriceCount),
+          validate: async (parsed) => {
+            const issues: string[] = [];
+            const locationIds = new Set(lockedLocations.map((location) => location.id));
+            const factionIds = new Set(lockedFactions.map((faction) => faction.id));
+            const npcIds = new Set(lockedNpcs.map((npc) => npc.id));
 
-          for (const commodity of parsed.commodities) {
-            for (const factionId of commodity.profitFactionIds) {
-              if (!factionIds.has(factionId)) {
-                issues.push(`Commodity ${commodity.name} references unknown profit faction ${factionId}.`);
+            for (const commodity of parsed.commodities) {
+              for (const factionId of commodity.profitFactionIds) {
+                if (!factionIds.has(factionId)) {
+                  issues.push(`Commodity ${commodity.name} references unknown profit faction ${factionId}.`);
+                }
               }
             }
-          }
 
-          for (const price of parsed.marketPrices) {
-            if (!locationIds.has(price.locationId)) {
-              issues.push(`Market price for ${price.commodityKey} uses unknown location ${price.locationId}.`);
+            for (const price of parsed.marketPrices) {
+              if (!locationIds.has(price.locationId)) {
+                issues.push(`Market price for ${price.commodityKey} uses unknown location ${price.locationId}.`);
+              }
+              if (price.factionId && !factionIds.has(price.factionId)) {
+                issues.push(`Market price for ${price.commodityKey} uses unknown faction ${price.factionId}.`);
+              }
+              if (price.vendorNpcId && !npcIds.has(price.vendorNpcId)) {
+                issues.push(`Market price for ${price.commodityKey} uses unknown vendor ${price.vendorNpcId}.`);
+              }
             }
-            if (price.factionId && !factionIds.has(price.factionId)) {
-              issues.push(`Market price for ${price.commodityKey} uses unknown faction ${price.factionId}.`);
-            }
-            if (price.vendorNpcId && !npcIds.has(price.vendorNpcId)) {
-              issues.push(`Market price for ${price.commodityKey} uses unknown vendor ${price.vendorNpcId}.`);
-            }
-          }
 
-          for (const location of lockedLocations) {
-            if (!parsed.locationTradeIdentity.some((identity) => identity.locationId === location.id)) {
-              issues.push(`Location ${location.name} needs a trade identity entry.`);
+            for (const location of lockedLocations) {
+              if (!parsed.locationTradeIdentity.some((identity) => identity.locationId === location.id)) {
+                issues.push(`Location ${location.name} needs a trade identity entry.`);
+              }
             }
-          }
 
-          return [{ category: "immersion", issues }];
-        },
-        summarize: (parsed) =>
-          `${parsed.commodities.length} commodities and ${parsed.marketPrices.length} market prices.`,
-      });
+            return [
+              { category: "immersion", issues },
+              await critiqueEconomyMaterialLifeWithModel({
+                scaleTier: input.scaleTier,
+                locationTradeIdentity: parsed.locationTradeIdentity,
+                commodities: parsed.commodities,
+              }),
+            ];
+          },
+          summarize: (parsed) =>
+            `${parsed.commodities.length} commodities and ${parsed.marketPrices.length} market prices.`,
+        });
+        markStageCompleted("economy_material_life", economyMaterialLifeInput);
+      }
 
       idMaps.commodities = assignCanonicalIds(
         economyMaterialLifeInput.commodities.map((commodity) => commodity.key),
@@ -6923,10 +7654,13 @@ class DungeonMasterClient {
         );
       }
 
+      stageSummaries.final_world = `${draft.locations.length} places, ${draft.npcs.length} NPCs, and ${draft.information.length} information surfaces are ready.`;
+      checkpoint.stageArtifacts.final_world = draft;
+      persistCheckpoint("ready", null, null);
       notifyProgress({
         stage: "final_world",
         status: "complete",
-        message: `${draft.locations.length} places, ${draft.npcs.length} NPCs, and ${draft.information.length} information surfaces are ready.`,
+        message: stageSummaries.final_world,
       });
 
       const artifacts: OpenWorldGenerationArtifacts = {
@@ -6951,10 +7685,20 @@ class DungeonMasterClient {
         artifacts,
       };
     } catch (error) {
+      const message = error instanceof Error ? error.message : "World generation failed.";
+      persistCheckpointForFailure?.(
+        "failed",
+        currentStage && WORLD_GENERATION_STAGE_ORDER.includes(
+          currentStage as CheckpointableWorldGenerationStageName,
+        )
+          ? (currentStage as CheckpointableWorldGenerationStageName)
+          : null,
+        message,
+      );
       logOpenRouterResponse("world.error", {
         message: error instanceof Error ? error.message : String(error),
       });
-      throw new Error(error instanceof Error ? error.message : "World generation failed.");
+      throw new Error(message);
     } finally {
       stopWorldGenerationLog();
     }

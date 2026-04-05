@@ -8,6 +8,7 @@ import {
   generatedWorldBibleSchema,
   generatedWorldModuleSchema,
   normalizeCustomResolvedLaunchEntryDraft,
+  openWorldGenerationArtifactsSchema,
   validateResolvedLaunchEntryAgainstWorld,
 } from "./session-zero";
 import type { GeneratedWorldModule } from "./types";
@@ -367,6 +368,146 @@ test("generatedWorldBibleSchema accepts legacy field names and normalizes them",
     "Tar-black rain capes",
     "Bell arguments at dusk",
   ]);
+});
+
+test("artifact knowledgeEconomy schema defaults missing pressure seeds to empty", () => {
+  const knowledgeEconomySchema = (openWorldGenerationArtifactsSchema as unknown as {
+    _def: {
+      in: {
+        shape: {
+          knowledgeEconomy: {
+            safeParse: (
+              input: unknown,
+            ) =>
+              | { success: true; data: { pressureSeeds: unknown[] } }
+              | { success: false };
+          };
+        };
+      };
+    };
+  })._def.in.shape.knowledgeEconomy;
+  const parsed = knowledgeEconomySchema.safeParse({
+    information: [
+      {
+        id: "info_1",
+        title: "Harbor queues begin before dawn",
+        summary: "Workers gather early for berth assignments.",
+        content: "Workers gather early for berth assignments.",
+        truthfulness: "true",
+        accessibility: "public",
+        locationId: "loc_gate",
+        factionId: null,
+        sourceNpcId: null,
+      },
+      {
+        id: "info_2",
+        title: "Registry bells mark wage changes",
+        summary: "Bell patterns announce new rates.",
+        content: "Bell patterns announce new rates.",
+        truthfulness: "true",
+        accessibility: "public",
+        locationId: "loc_market",
+        factionId: "fac_guild",
+        sourceNpcId: "npc_2",
+      },
+      {
+        id: "info_3",
+        title: "Flood crews rotate by district",
+        summary: "Crews move according to storm markers.",
+        content: "Crews move according to storm markers.",
+        truthfulness: "partial",
+        accessibility: "guarded",
+        locationId: "loc_docks",
+        factionId: "fac_watch",
+        sourceNpcId: "npc_1",
+      },
+      {
+        id: "info_4",
+        title: "Old chain law still shapes tolls",
+        summary: "A rusted harbor law still affects pricing.",
+        content: "A rusted harbor law still affects pricing.",
+        truthfulness: "outdated",
+        accessibility: "secret",
+        locationId: "loc_keep",
+        factionId: null,
+        sourceNpcId: null,
+      },
+    ],
+    informationLinks: [
+      {
+        id: "link_1",
+        sourceId: "info_1",
+        targetId: "info_2",
+        linkType: "supports",
+      },
+    ],
+    knowledgeNetworks: [
+      {
+        theme: "Harbor timing",
+        publicBeliefs: ["The bells favor the prepared."],
+        hiddenTruth: "Guild rate shifts are negotiated overnight.",
+        linkedInformationIds: ["info_1", "info_2"],
+        contradictionThemes: ["Whether the bells announce truth or theater"],
+      },
+    ],
+    commodities: [
+      { id: "com_1", name: "Lamp Oil", baseValue: 4, tags: ["fuel"] },
+      { id: "com_2", name: "Salt Fish", baseValue: 3, tags: ["food"] },
+    ],
+    marketPrices: [
+      {
+        id: "price_1",
+        commodityId: "com_1",
+        locationId: "loc_market",
+        vendorNpcId: "npc_2",
+        factionId: "fac_guild",
+        modifier: 1,
+        stock: 5,
+        legalStatus: "legal",
+      },
+      {
+        id: "price_2",
+        commodityId: "com_2",
+        locationId: "loc_docks",
+        vendorNpcId: null,
+        factionId: null,
+        modifier: 0.5,
+        stock: 8,
+        legalStatus: "legal",
+      },
+    ],
+    locationTradeIdentity: [
+      {
+        locationId: "loc_gate",
+        signatureGoods: ["queue tokens"],
+        supplyConditions: "Token blanks arrive steadily from the guild quarter.",
+        materialLife: "Gate runners trade dry gloves and chalk under the awnings.",
+      },
+      {
+        locationId: "loc_market",
+        signatureGoods: ["lamp oil"],
+        supplyConditions: "Fuel boats are late but still predictable.",
+        materialLife: "Vendors hedge with bulk tins and shared wick bundles.",
+      },
+      {
+        locationId: "loc_docks",
+        signatureGoods: ["salt fish"],
+        supplyConditions: "Storm delays raise spoilage risk before noon.",
+        materialLife: "Dockhands trade fast meals and waxed cord near the cranes.",
+      },
+      {
+        locationId: "loc_keep",
+        signatureGoods: ["storm ledgers"],
+        supplyConditions: "Archive copies move only after the watch seal clears.",
+        materialLife: "Clerks barter dry shelf space and lamp time after dusk.",
+      },
+    ],
+  });
+
+  assert.equal(parsed.success, true);
+  if (parsed.success) {
+    assert.deepEqual(parsed.data.pressureSeeds, []);
+  }
 });
 
 test("generatedWorldModuleSchema rejects market prices with unknown factionId", () => {

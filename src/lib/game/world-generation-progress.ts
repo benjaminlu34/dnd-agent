@@ -1,4 +1,7 @@
-import type { WorldGenerationStageName } from "@/lib/game/types";
+import type {
+  OpenWorldGenerationCheckpoint,
+  WorldGenerationStageName,
+} from "@/lib/game/types";
 
 export type DraftGenerationProgressStatus = "queued" | "running" | "complete" | "error";
 
@@ -75,6 +78,7 @@ const STAGE_COPY: Record<WorldGenerationStageName, { label: string; running: str
 function getProgressStore() {
   const globalState = globalThis as typeof globalThis & {
     __draftGenerationProgress__?: Map<string, DraftGenerationProgress>;
+    __draftGenerationCheckpoint__?: Map<string, OpenWorldGenerationCheckpoint>;
     __draftGenerationProgressListeners__?: Map<string, Set<(progress: DraftGenerationProgress) => void>>;
   };
 
@@ -90,6 +94,18 @@ function getProgressStore() {
   }
 
   return globalState.__draftGenerationProgress__;
+}
+
+function getCheckpointStore() {
+  const globalState = globalThis as typeof globalThis & {
+    __draftGenerationCheckpoint__?: Map<string, OpenWorldGenerationCheckpoint>;
+  };
+
+  if (!globalState.__draftGenerationCheckpoint__) {
+    globalState.__draftGenerationCheckpoint__ = new Map<string, OpenWorldGenerationCheckpoint>();
+  }
+
+  return globalState.__draftGenerationCheckpoint__;
 }
 
 function getProgressListenerStore() {
@@ -115,6 +131,7 @@ function cleanupStaleProgressEntries() {
   for (const [id, progress] of store.entries()) {
     if (new Date(progress.updatedAt).getTime() < cutoff) {
       store.delete(id);
+      getCheckpointStore().delete(id);
       listeners.delete(id);
     }
   }
@@ -149,25 +166,40 @@ export function getWorldGenerationStageStep(stage: WorldGenerationStageName | nu
   return index >= 0 ? index + 1 : 0;
 }
 
-export function createDraftGenerationProgress(id: string) {
+export function beginDraftGenerationProgress(id: string) {
   cleanupStaleProgressEntries();
 
   const now = new Date().toISOString();
-  const progress: DraftGenerationProgress = {
-    id,
-    status: "queued",
-    stage: null,
-    label: "Starting Your Draft",
-    message: "Getting the world generation process ready.",
-    startedAt: now,
-    updatedAt: now,
-    completedAt: null,
-    error: null,
-  };
+  const existing = getProgressStore().get(id);
+  const progress: DraftGenerationProgress = existing
+    ? {
+        ...existing,
+        status: "queued",
+        label: "Resuming Your Draft",
+        message: "Picking up from the latest completed stage.",
+        completedAt: null,
+        error: null,
+        updatedAt: now,
+      }
+    : {
+        id,
+        status: "queued",
+        stage: null,
+        label: "Starting Your Draft",
+        message: "Getting the world generation process ready.",
+        startedAt: now,
+        updatedAt: now,
+        completedAt: null,
+        error: null,
+      };
 
   getProgressStore().set(id, progress);
   publishDraftGenerationProgress(progress);
   return progress;
+}
+
+export function createDraftGenerationProgress(id: string) {
+  return beginDraftGenerationProgress(id);
 }
 
 export function updateDraftGenerationProgress(id: string, update: Partial<DraftGenerationProgress>) {
@@ -224,6 +256,70 @@ export function failDraftGenerationProgress(id: string, error: string) {
 export function getDraftGenerationProgress(id: string) {
   cleanupStaleProgressEntries();
   return getProgressStore().get(id) ?? null;
+}
+
+export function setDraftGenerationCheckpoint(id: string, checkpoint: OpenWorldGenerationCheckpoint) {
+  cleanupStaleProgressEntries();
+  getCheckpointStore().set(id, checkpoint);
+}
+
+export function getDraftGenerationCheckpoint(id: string) {
+  cleanupStaleProgressEntries();
+  return getCheckpointStore().get(id) ?? null;
+}
+
+export function findRecoverableDraftGenerationCheckpoint(progressId?: string | null) {
+  cleanupStaleProgressEntries();
+
+  if (progressId) {
+    const checkpoint = getCheckpointStore().get(progressId) ?? null;
+    const progress = getProgressStore().get(progressId) ?? null;
+
+    if (
+      checkpoint
+      && checkpoint.generationStatus === "ready"
+      && checkpoint.stageArtifacts.final_world
+    ) {
+      return { id: progressId, checkpoint, progress };
+    }
+
+    return null;
+  }
+
+  let latest: {
+    id: string;
+    checkpoint: OpenWorldGenerationCheckpoint;
+    progress: DraftGenerationProgress | null;
+    updatedAt: number;
+  } | null = null;
+
+  for (const [id, checkpoint] of getCheckpointStore().entries()) {
+    if (
+      checkpoint.generationStatus !== "ready"
+      || !checkpoint.stageArtifacts.final_world
+    ) {
+      continue;
+    }
+
+    const progress = getProgressStore().get(id) ?? null;
+    const updatedAt = progress
+      ? new Date(progress.updatedAt).getTime()
+      : new Date(checkpoint.createdAt).getTime();
+
+    if (!latest || updatedAt > latest.updatedAt) {
+      latest = { id, checkpoint, progress, updatedAt };
+    }
+  }
+
+  if (!latest) {
+    return null;
+  }
+
+  return {
+    id: latest.id,
+    checkpoint: latest.checkpoint,
+    progress: latest.progress,
+  };
 }
 
 export function subscribeToDraftGenerationProgress(

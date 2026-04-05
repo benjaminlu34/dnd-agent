@@ -638,6 +638,7 @@ export const worldSpineLocationSchema = z.object({
   type: z.string().trim().min(1),
   summary: z.string().trim().min(1),
   description: z.string().trim().min(1),
+  usageProfile: z.enum(["everyday", "special"]).default("everyday"),
   state: z.string().trim().min(1),
   controlStatus: z.enum(["controlled", "contested", "independent"]),
   controllingFactionKey: z.string().trim().min(1).nullable(),
@@ -878,7 +879,7 @@ export const generatedKnowledgeWebInputSchema = z
 export const generatedKnowledgeThreadsInputSchema = z
   .object({
     knowledgeNetworks: z.array(knowledgeNetworkInputSchema).min(1).max(4),
-    pressureSeeds: z.array(pressureSeedSchema).min(2).max(8),
+    pressureSeeds: z.array(pressureSeedSchema).max(8).default([]),
   });
 
 const economyCommoditySchema = z.object({
@@ -902,12 +903,27 @@ const economyMarketPriceSchema = z.object({
   whyHere: z.string().trim().min(1),
 });
 
-const locationTradeIdentitySchema = z.object({
+const locationTradeIdentitySchema = z.preprocess((input) => {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return input;
+  }
+
+  const draft = input as Record<string, unknown>;
+  return {
+    ...draft,
+    supplyConditions:
+      draft.supplyConditions
+      ?? draft.scarcityNotes,
+    materialLife:
+      draft.materialLife
+      ?? draft.streetLevelEconomy,
+  };
+}, z.object({
   locationId: z.string().trim().min(1),
   signatureGoods: z.array(z.string().trim().min(1)).min(1),
-  scarcityNotes: z.string().trim().min(1),
-  streetLevelEconomy: z.string().trim().min(1),
-});
+  supplyConditions: z.string().trim().min(1),
+  materialLife: z.string().trim().min(1),
+}));
 
 export const generatedEconomyMaterialLifeInputSchema = z
   .object({
@@ -1183,7 +1199,7 @@ export const openWorldGenerationArtifactsSchema = z.object({
         contradictionThemes: z.array(z.string().trim().min(1)),
       }),
     ),
-    pressureSeeds: z.array(pressureSeedSchema).min(2),
+    pressureSeeds: z.array(pressureSeedSchema).max(8).default([]),
     commodities: z.array(commoditySchema).min(2),
     marketPrices: z.array(marketPriceSchema).min(2),
     locationTradeIdentity: z.array(locationTradeIdentitySchema).min(4),
