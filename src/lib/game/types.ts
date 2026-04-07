@@ -901,7 +901,7 @@ export type WorldGenerationStageArtifacts = {
 
 export type CheckpointableWorldGenerationStageName = keyof WorldGenerationStageArtifacts;
 
-export type WorldGenerationCheckpointStatus = "running" | "failed" | "ready";
+export type WorldGenerationCheckpointStatus = "running" | "failed" | "stopped" | "ready";
 
 export type OpenWorldGenerationCheckpoint = {
   prompt: string;

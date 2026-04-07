@@ -1730,12 +1730,24 @@ export async function createCharacterTemplate(input: CharacterTemplateDraft) {
   }
 
   const frameworkValues = compiledFramework.valuesSchema.parse(input.frameworkValues);
+  const sourceConceptId = input.sourceConceptId?.trim() || null;
+
+  if (sourceConceptId) {
+    const concept = await prisma.characterConcept.findFirst({
+      where: { id: sourceConceptId, userId: user.id },
+      select: { id: true },
+    });
+
+    if (!concept) {
+      throw new Error("Selected source concept was not found.");
+    }
+  }
 
   return prisma.characterTemplate.create({
     data: {
       userId: user.id,
       moduleId: input.moduleId,
-      sourceConceptId: input.sourceConceptId ?? null,
+      sourceConceptId,
       frameworkVersion: input.frameworkVersion,
       frameworkValues: frameworkValues as Prisma.InputJsonValue,
       name: input.name,
@@ -1776,11 +1788,23 @@ export async function updateCharacterTemplateForUser(
   }
 
   const frameworkValues = compiledFramework.valuesSchema.parse(input.frameworkValues);
+  const sourceConceptId = input.sourceConceptId?.trim() || null;
+
+  if (sourceConceptId) {
+    const concept = await prisma.characterConcept.findFirst({
+      where: { id: sourceConceptId, userId: user.id },
+      select: { id: true },
+    });
+
+    if (!concept) {
+      throw new Error("Selected source concept was not found.");
+    }
+  }
 
   return prisma.characterTemplate.update({
     where: { id: template.id },
     data: {
-      sourceConceptId: input.sourceConceptId ?? null,
+      sourceConceptId,
       frameworkVersion: input.frameworkVersion,
       frameworkValues: frameworkValues as Prisma.InputJsonValue,
       name: input.name,
@@ -1915,6 +1939,29 @@ export async function getAdventureModuleWorldForUser(moduleId: string): Promise<
   }
 
   return resolveModuleWorld(adventureModule);
+}
+
+export async function updateAdventureModuleFrameworkForUser(
+  moduleId: string,
+  framework: GeneratedWorldModule["characterFramework"],
+): Promise<AdventureModuleDetail | null> {
+  const user = await ensureLocalUser();
+  const adventureModule = await prisma.adventureModule.findFirst({
+    where: { id: moduleId, userId: user.id },
+  });
+
+  if (!adventureModule) {
+    return null;
+  }
+
+  await prisma.adventureModule.update({
+    where: { id: moduleId },
+    data: {
+      characterFrameworkJson: framework as Prisma.InputJsonValue,
+    },
+  });
+
+  return getAdventureModuleForUser(moduleId);
 }
 
 export async function resolveCustomEntryPointForUser(input: {

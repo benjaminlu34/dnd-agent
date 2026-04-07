@@ -16,28 +16,11 @@ import type {
   ItemInstance,
 } from "@/lib/game/types";
 
-const nullableTrimmedString = z
-  .union([z.string(), z.null(), z.undefined()])
-  .transform((value) => {
-    if (typeof value !== "string") {
-      return null;
-    }
-
-    const trimmed = value.trim();
-    return trimmed.length ? trimmed : null;
-  });
+const nullableTrimmedString = z.union([z.string().trim().min(1), z.literal(null)]);
 
 const requiredTrimmedString = z.string().trim().min(1);
 
-const starterItemsSchema = z
-  .array(z.string())
-  .optional()
-  .default([])
-  .transform((value) => normalizeItemNameList(value))
-  .refine(
-    (value) => value.length <= MAX_STARTER_ITEMS,
-    `No more than ${MAX_STARTER_ITEMS} starter items are allowed.`,
-  );
+const starterItemsSchema = z.array(z.string().trim().min(1)).refine((value) => value.length <= MAX_STARTER_ITEMS, `No more than ${MAX_STARTER_ITEMS} starter items are allowed.`);
 
 export const characterConceptDraftSchema: z.ZodType<CharacterConceptDraft> = z.object({
   name: requiredTrimmedString,
@@ -62,14 +45,14 @@ export const characterTemplateGenerateRequestSchema = z.object({
 
 const characterTemplateNarrativeSchema = z.object({
   moduleId: requiredTrimmedString,
-  sourceConceptId: z.string().trim().min(1).nullable().optional(),
+  sourceConceptId: requiredTrimmedString.optional().nullable(),
   frameworkVersion: requiredTrimmedString,
   name: requiredTrimmedString,
   appearance: nullableTrimmedString,
   backstory: requiredTrimmedString,
   drivingGoal: requiredTrimmedString,
   vitality: z.coerce.number().int().positive().max(999),
-  starterItems: starterItemsSchema,
+  starterItems: z.array(z.string().trim().min(1)).max(MAX_STARTER_ITEMS, `No more than ${MAX_STARTER_ITEMS} starter items are allowed.`),
 });
 
 export function buildCharacterTemplateDraftSchema(

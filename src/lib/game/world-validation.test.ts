@@ -659,6 +659,24 @@ test("world immersion validation accepts a textual faction footprint", () => {
   assert.doesNotMatch(report.issues.join("\n"), /Whimsical Creature Clans needs a visible mark on the world/);
 });
 
+test("world immersion validation accepts deliberately independent locations", () => {
+  const world = createWorld();
+  world.locations[1] = {
+    ...world.locations[1],
+    controllingFactionId: null,
+    tags: ["independent"],
+  };
+  world.npcs = world.npcs.map((npc) =>
+    npc.currentLocationId === "loc_market"
+      ? { ...npc, factionId: null }
+      : npc,
+  );
+
+  const report = validateWorldModuleImmersion(world);
+
+  assert.doesNotMatch(report.issues.join("\n"), /Location Market should show a faction footprint or deliberate independence/);
+});
+
 test("faction footprint validation rejects factions with no visible presence", () => {
   const world = createWorld();
   world.factions.push({

@@ -41,6 +41,12 @@ type ModuleResponse = {
   error?: string;
 };
 
+type ModuleFrameworkRegenerateResponse = {
+  module?: AdventureModuleDetail;
+  source?: "openrouter";
+  error?: string;
+};
+
 type TemplateSaveResponse = {
   templateId?: string;
   error?: string;
@@ -64,18 +70,18 @@ const emptyConceptDraft: CharacterConceptDraft = {
 
 function fieldClassName(multiline = false) {
   return [
-    "w-full rounded-2xl border border-zinc-800 bg-black px-4 py-3 text-sm text-zinc-100 outline-none transition-colors",
-    "placeholder:text-zinc-600 focus:border-zinc-700 focus:bg-zinc-950",
-    multiline ? "min-h-32 resize-y leading-7" : "",
+    "w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 outline-none transition-colors",
+    "placeholder:text-zinc-600 focus:border-zinc-600 focus:bg-black",
+    multiline ? "min-h-32 resize-y leading-6" : "",
   ].join(" ");
 }
 
 function sectionClassName(emphasis = false) {
   return [
-    "rounded-[28px] border p-6",
+    "border p-5 md:p-6",
     emphasis
-      ? "border-amber-300/20 bg-gradient-to-br from-amber-300/10 via-zinc-950 to-zinc-950"
-      : "border-zinc-800 bg-zinc-950/60",
+      ? "border-zinc-700 bg-zinc-950"
+      : "border-zinc-900 bg-zinc-950/80",
   ].join(" ");
 }
 
@@ -106,6 +112,12 @@ function starterItemsText(items: string[]) {
   return items.join("\n");
 }
 
+function modeLabel(mode: BuilderSurfaceMode) {
+  if (mode === "concept") return "Standalone concept";
+  if (mode === "adapt") return "Adapt concept";
+  return "Direct template";
+}
+
 function BuilderField({
   label,
   hint,
@@ -118,7 +130,7 @@ function BuilderField({
   return (
     <label className="block space-y-2">
       <div className="space-y-1">
-        <span className="text-[0.68rem] uppercase tracking-[0.24em] text-zinc-500">{label}</span>
+        <span className="text-sm font-medium text-zinc-200">{label}</span>
         {hint ? <p className="text-xs leading-relaxed text-zinc-500">{hint}</p> : null}
       </div>
       {children}
@@ -135,7 +147,7 @@ function createTemplateDraft(
     moduleId: module.id,
     sourceConceptId: seed?.sourceConceptId ?? null,
     frameworkVersion: compiled.framework.frameworkVersion,
-    frameworkValues: structuredClone(seed?.frameworkValues ?? compiled.blankValues),
+    frameworkValues: structuredClone(seed?.frameworkValues ?? {}),
     name: seed?.name ?? "",
     appearance: seed?.appearance ?? null,
     backstory: seed?.backstory ?? null,
@@ -190,10 +202,12 @@ export function CharacterBuilderApp({
   const [loadingModule, setLoadingModule] = useState(false);
   const [loadingConcept, setLoadingConcept] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [regeneratingFramework, setRegeneratingFramework] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [generationSource, setGenerationSource] = useState<"openrouter" | null>(null);
+  const [frameworkPrompt, setFrameworkPrompt] = useState("");
 
   const compiledFramework = useMemo(
     () => (selectedModule?.characterFramework ? compileCharacterFramework(selectedModule.characterFramework) : null),
@@ -207,6 +221,18 @@ export function CharacterBuilderApp({
     setBuilderMode("template");
     setSelectedModuleId(initialCharacter.moduleId ?? "");
   }, [initialCharacter]);
+
+  useEffect(() => {
+    if (builderMode === "adapt") {
+      return;
+    }
+
+    setTemplateDraft((current) => (
+      current?.sourceConceptId
+        ? { ...current, sourceConceptId: null }
+        : current
+    ));
+  }, [builderMode]);
 
   useEffect(() => {
     let active = true;
@@ -408,6 +434,22 @@ export function CharacterBuilderApp({
     });
   }
 
+  function clearFrameworkValue(fieldId: string) {
+    setTemplateDraft((current) => {
+      if (!current) {
+        return current;
+      }
+
+      const nextValues = { ...(current.frameworkValues ?? {}) };
+      delete nextValues[fieldId];
+
+      return {
+        ...current,
+        frameworkValues: nextValues,
+      };
+    });
+  }
+
   async function handleGenerate() {
     if (!generationPrompt.trim() || generating) {
       return;
@@ -461,7 +503,15 @@ export function CharacterBuilderApp({
         throw new Error(data.error ?? "Failed to generate a playable character.");
       }
 
-      setTemplateDraft(generatedTemplate);
+      setTemplateDraft({
+        ...generatedTemplate,
+        moduleId: selectedModuleId,
+        sourceConceptId:
+          builderMode === "adapt"
+            ? (generatedTemplate.sourceConceptId ?? (selectedConceptId || null))
+            : null,
+        frameworkVersion: compiledFramework?.framework.frameworkVersion ?? generatedTemplate.frameworkVersion,
+      });
       setGenerationSource(data.source ?? null);
     } catch (generationError) {
       setGenerationSource(null);
@@ -473,7 +523,40 @@ export function CharacterBuilderApp({
     }
   }
 
-  async function handleSave() {
+  async function handleRegenerateFramework() {
+    if (!selectedModuleId || !frameworkPrompt.trim() || regeneratingFramework) {
+      return;
+    }
+
+    setRegeneratingFramework(true);
+    setError(null);
+    setNotice(null);
+
+    try {
+      const response = await fetch(`/api/modules/${selectedModuleId}/framework`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: frameworkPrompt }),
+      });
+      const data = (await response.json()) as ModuleFrameworkRegenerateResponse;
+
+      if (!response.ok || !data.module) {
+        throw new Error(data.error ?? "Failed to regenerate module framework.");
+      }
+
+      setSelectedModule(data.module);
+      setTemplateDraft((current) => createTemplateDraft(data.module!, current ?? undefined));
+      setNotice("Module framework regenerated. Review the updated fields before saving a template.");
+    } catch (frameworkError) {
+      setError(
+        frameworkError instanceof Error ? frameworkError.message : "Failed to regenerate module framework.",
+      );
+    } finally {
+      setRegeneratingFramework(false);
+    }
+  }
+
+async function handleSave() {
     if (saving) {
       return;
     }
@@ -512,18 +595,51 @@ export function CharacterBuilderApp({
         throw new Error("Choose a module before saving this playable character.");
       }
 
-      const endpoint = mode === "edit" && initialCharacter
-        ? `/api/characters/${initialCharacter.id}`
-        : "/api/characters/create";
-      const response = await fetch(endpoint, {
-        method: mode === "edit" && initialCharacter ? "PATCH" : "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(templateDraft),
-      });
-      const data = (await response.json()) as TemplateSaveResponse;
+      let response: Response;
+      let data: TemplateSaveResponse | null = null;
 
-      if (!response.ok || !data.templateId) {
-        throw new Error(data.error ?? "Failed to save character.");
+      if (mode === "edit" && initialCharacter) {
+        response = await fetch(`/api/characters/${initialCharacter.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(templateDraft),
+        });
+        data = await response.json().catch(() => null) as TemplateSaveResponse | null;
+      } else {
+        const createEndpoints = ["/api/characters", "/api/characters/create"];
+        let lastErrorMessage = "Failed to save character.";
+        let resolved = false;
+
+        response = new Response(null, { status: 500 });
+
+        for (const endpoint of createEndpoints) {
+          response = await fetch(endpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(templateDraft),
+          });
+          data = await response.json().catch(() => null) as TemplateSaveResponse | null;
+
+          if (response.ok && data?.templateId) {
+            resolved = true;
+            break;
+          }
+
+          if (response.status !== 404) {
+            lastErrorMessage = data?.error ?? `Failed to save character (${response.status}).`;
+            break;
+          }
+
+          lastErrorMessage = data?.error ?? `Character create endpoint not found at ${endpoint}.`;
+        }
+
+        if (!resolved && (!response.ok || !data?.templateId)) {
+          throw new Error(lastErrorMessage);
+        }
+      }
+
+      if (!response.ok || !data?.templateId) {
+        throw new Error(data?.error ?? `Failed to save character (${response.status}).`);
       }
 
       router.push("/characters");
@@ -540,7 +656,7 @@ export function CharacterBuilderApp({
     }
 
     return compiledFramework.uiFields.map((field) => {
-      const currentValue = templateDraft.frameworkValues?.[field.id] ?? field.defaultValue;
+      const currentValue = templateDraft.frameworkValues?.[field.id];
 
       if (field.type === "numeric") {
         return (
@@ -553,8 +669,15 @@ export function CharacterBuilderApp({
               type="number"
               min={field.min}
               max={field.max}
-              value={typeof currentValue === "number" ? currentValue : Number(field.defaultValue ?? field.min ?? 0)}
-              onChange={(event) => setFrameworkValue(field.id, Number(event.target.value))}
+              value={typeof currentValue === "number" ? currentValue : ""}
+              onChange={(event) => {
+                if (event.target.value === "") {
+                  clearFrameworkValue(field.id);
+                  return;
+                }
+
+                setFrameworkValue(field.id, Number(event.target.value));
+              }}
               className={fieldClassName()}
             />
           </BuilderField>
@@ -570,9 +693,17 @@ export function CharacterBuilderApp({
           >
             <select
               value={typeof currentValue === "string" ? currentValue : ""}
-              onChange={(event) => setFrameworkValue(field.id, event.target.value)}
+              onChange={(event) => {
+                if (!event.target.value) {
+                  clearFrameworkValue(field.id);
+                  return;
+                }
+
+                setFrameworkValue(field.id, event.target.value);
+              }}
               className={fieldClassName()}
             >
+              <option value="">Select an option</option>
               {field.options?.map((option) => (
                 <option key={option.id} value={option.id}>
                   {option.label}
@@ -591,7 +722,7 @@ export function CharacterBuilderApp({
             label={field.label}
             hint={field.description}
           >
-            <div className="space-y-2 rounded-2xl border border-zinc-800 bg-black/60 p-4">
+            <div className="space-y-2 border border-zinc-900 bg-black px-4 py-4">
               {field.options?.map((option) => {
                 const checked = selectedValues.includes(option.id);
                 return (
@@ -630,14 +761,28 @@ export function CharacterBuilderApp({
           {field.multiline ? (
             <textarea
               value={typeof currentValue === "string" ? currentValue : ""}
-              onChange={(event) => setFrameworkValue(field.id, event.target.value)}
+              onChange={(event) => {
+                if (!event.target.value) {
+                  clearFrameworkValue(field.id);
+                  return;
+                }
+
+                setFrameworkValue(field.id, event.target.value);
+              }}
               className={fieldClassName(true)}
             />
           ) : (
             <input
               type="text"
               value={typeof currentValue === "string" ? currentValue : ""}
-              onChange={(event) => setFrameworkValue(field.id, event.target.value)}
+              onChange={(event) => {
+                if (!event.target.value) {
+                  clearFrameworkValue(field.id);
+                  return;
+                }
+
+                setFrameworkValue(field.id, event.target.value);
+              }}
               className={fieldClassName()}
             />
           )}
@@ -671,24 +816,19 @@ export function CharacterBuilderApp({
         : "Save Template";
 
   return (
-    <main className="app-shell">
-      <div className="app-frame max-w-6xl">
-        <header className="app-hero p-8">
-          <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-500">
-            Character Studio
-          </p>
-          <div className="mt-4 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-            <div>
-              <h1 className="text-4xl font-medium tracking-tight text-zinc-100 md:text-5xl">
+    <main className="min-h-screen bg-black text-zinc-100">
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-6 px-4 py-6 md:px-6 md:py-8">
+        <header className="border-b border-zinc-900 pb-4">
+          <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+            <div className="max-w-3xl">
+              <h1 className="text-2xl font-medium tracking-tight text-zinc-50 md:text-3xl">
                 {pageTitle}
               </h1>
-              <p className="mt-3 max-w-3xl text-sm leading-relaxed text-zinc-400">
-                {pageCopy}
-              </p>
+              <p className="mt-2 text-sm leading-6 text-zinc-400">{pageCopy}</p>
             </div>
             <button
               type="button"
-              className="button-press rounded-md border border-zinc-800 px-4 py-2 text-sm font-medium text-zinc-300 transition-colors hover:bg-zinc-900 hover:text-white"
+              className="button-press rounded-lg border border-zinc-800 px-4 py-2 text-sm text-zinc-300 transition-colors hover:border-zinc-700 hover:bg-zinc-950 hover:text-zinc-100"
               onClick={() => backOrPush(router, "/characters", "/characters")}
             >
               Back to Library
@@ -697,7 +837,7 @@ export function CharacterBuilderApp({
         </header>
 
         {mode === "create" ? (
-          <section className="mt-8 flex flex-wrap gap-3">
+          <section className="flex flex-wrap gap-2 border-b border-zinc-900 pb-4">
             {([
               ["template", "Direct Template"],
               ["adapt", "Adapt Concept"],
@@ -712,10 +852,10 @@ export function CharacterBuilderApp({
                   setNotice(null);
                 }}
                 className={[
-                  "rounded-full border px-4 py-2 text-sm transition-colors",
+                  "rounded-lg border px-3.5 py-2 text-sm transition-colors",
                   builderMode === value
-                    ? "border-white bg-white text-black"
-                    : "border-zinc-800 bg-zinc-950/70 text-zinc-300 hover:border-zinc-700 hover:text-white",
+                    ? "border-zinc-100 bg-zinc-100 text-black"
+                    : "border-zinc-800 bg-transparent text-zinc-400 hover:border-zinc-700 hover:bg-zinc-950 hover:text-zinc-100",
                 ].join(" ")}
               >
                 {label}
@@ -724,19 +864,21 @@ export function CharacterBuilderApp({
           </section>
         ) : null}
 
-        {error ? <p className="mt-6 text-sm text-red-400">{error}</p> : null}
-        {notice ? <p className="mt-6 text-sm text-emerald-300">{notice}</p> : null}
+        {error ? (
+          <p className="border border-red-950 bg-red-950/30 px-4 py-3 text-sm text-red-300">{error}</p>
+        ) : null}
+        {notice ? (
+          <p className="border border-zinc-800 bg-zinc-950 px-4 py-3 text-sm text-zinc-300">{notice}</p>
+        ) : null}
 
-        <section className="mt-8 grid gap-6 xl:grid-cols-[1.1fr_1.6fr]">
+        <section className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
           <div className="space-y-6">
             <section className={sectionClassName(true)}>
-              <p className="text-[10px] uppercase tracking-[0.24em] text-amber-200/70">
-                Guided Drafting
-              </p>
-              <h2 className="mt-3 text-2xl font-medium tracking-tight text-zinc-100">
-                Start with a prompt.
-              </h2>
-              <p className="mt-2 text-sm leading-relaxed text-zinc-400">
+              <div className="flex items-center justify-between gap-4 border-b border-zinc-900 pb-3">
+                <h2 className="text-base font-medium text-zinc-100">Prompt draft</h2>
+                <span className="text-xs text-zinc-500">{modeLabel(builderMode)}</span>
+              </div>
+              <p className="mt-4 text-sm leading-6 text-zinc-400">
                 {builderMode === "concept"
                   ? "Describe the person, pressure, and shape of their life. The result stays narrative-only."
                   : builderMode === "adapt"
@@ -755,25 +897,25 @@ export function CharacterBuilderApp({
                 }
                 className={fieldClassName(true)}
               />
-              <button
-                type="button"
-                disabled={generating || !generationPrompt.trim()}
-                onClick={() => void handleGenerate()}
-                className="button-press mt-4 rounded-full bg-white px-5 py-3 text-sm font-semibold text-black transition-colors hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {generating ? "Generating..." : "Generate Draft"}
-              </button>
-              {generationSource ? (
-                <p className="mt-3 text-xs uppercase tracking-[0.2em] text-zinc-500">
-                  Source: {generationSource}
-                </p>
-              ) : null}
+              <div className="mt-4 flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  disabled={generating || !generationPrompt.trim()}
+                  onClick={() => void handleGenerate()}
+                  className="button-press rounded-lg bg-zinc-100 px-4 py-2.5 text-sm font-medium text-black transition-colors hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {generating ? "Generating..." : "Generate Draft"}
+                </button>
+                {generationSource ? (
+                  <span className="text-xs text-zinc-500">Source: {generationSource}</span>
+                ) : null}
+              </div>
             </section>
 
             <section className={sectionClassName()}>
-              <p className="text-[10px] uppercase tracking-[0.24em] text-zinc-500">
-                Inputs
-              </p>
+              <div className="border-b border-zinc-900 pb-3">
+                <h2 className="text-base font-medium text-zinc-100">Setup</h2>
+              </div>
               <div className="mt-4 space-y-5">
                 {builderMode !== "concept" ? (
                   <BuilderField
@@ -818,22 +960,42 @@ export function CharacterBuilderApp({
                 ) : null}
 
                 {compiledFramework ? (
-                  <div className="rounded-2xl border border-zinc-800 bg-black/50 p-4 text-sm text-zinc-300">
-                    <p className="text-[10px] uppercase tracking-[0.22em] text-zinc-500">
-                      Active Framework
-                    </p>
-                    <p className="mt-2 font-medium text-zinc-100">
+                  <div className="border border-zinc-900 bg-black px-4 py-4 text-sm text-zinc-300">
+                    <p className="font-medium text-zinc-100">
                       {compiledFramework.framework.presentationProfile.templateLabel}
                     </p>
                     <p className="mt-2 text-xs leading-relaxed text-zinc-400">
-                      Version `{compiledFramework.framework.frameworkVersion}`. {compiledFramework.framework.presentationProfile.approachLabel}s:
-                      {" "}
+                      Version `{compiledFramework.framework.frameworkVersion}`. {compiledFramework.framework.presentationProfile.approachLabel}s:{" "}
                       {compiledFramework.approaches.map((approach) => approach.label).join(", ")}.
                     </p>
                     <p className="mt-2 text-xs leading-relaxed text-zinc-500">
                       Currency label: {compiledFramework.framework.currencyProfile.unitLabel} ({compiledFramework.framework.currencyProfile.shortLabel})
                     </p>
                   </div>
+                ) : null}
+
+                {builderMode !== "concept" && selectedModuleId ? (
+                  <BuilderField
+                    label="Framework Prompt"
+                    hint="Describe how this module's character framework should feel. Use this to regenerate the active framework with your own direction."
+                  >
+                    <div className="space-y-3">
+                      <textarea
+                        value={frameworkPrompt}
+                        onChange={(event) => setFrameworkPrompt(event.target.value)}
+                        placeholder="Aether should be central. Include affinity, lineage pressure, and how characters channel, resist, or are marked by the setting's core forces."
+                        className={fieldClassName(true)}
+                      />
+                      <button
+                        type="button"
+                        disabled={loadingModule || regeneratingFramework || !frameworkPrompt.trim()}
+                        onClick={() => void handleRegenerateFramework()}
+                        className="button-press rounded-lg border border-zinc-700 px-4 py-2.5 text-sm text-zinc-200 transition-colors hover:border-zinc-500 hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {regeneratingFramework ? "Regenerating Framework..." : "Regenerate Framework"}
+                      </button>
+                    </div>
+                  </BuilderField>
                 ) : null}
 
                 {builderMode === "adapt" && concepts.length === 0 && !loadingCollections ? (
@@ -848,9 +1010,9 @@ export function CharacterBuilderApp({
           <div className="space-y-6">
             {builderMode === "concept" ? (
               <section className={sectionClassName()}>
-                <p className="text-[10px] uppercase tracking-[0.24em] text-zinc-500">
-                  Narrative Blueprint
-                </p>
+                <div className="border-b border-zinc-900 pb-3">
+                  <h2 className="text-base font-medium text-zinc-100">Narrative blueprint</h2>
+                </div>
                 <div className="mt-5 grid gap-5 md:grid-cols-2">
                   <BuilderField label="Name">
                     <input
@@ -908,9 +1070,9 @@ export function CharacterBuilderApp({
               </section>
             ) : (
               <section className={sectionClassName()}>
-                <p className="text-[10px] uppercase tracking-[0.24em] text-zinc-500">
-                  Playable Template
-                </p>
+                <div className="border-b border-zinc-900 pb-3">
+                  <h2 className="text-base font-medium text-zinc-100">Playable template</h2>
+                </div>
                 {loadingModule ? (
                   <p className="mt-4 text-sm text-zinc-400">Loading module framework...</p>
                 ) : !templateDraft ? (
@@ -999,7 +1161,7 @@ export function CharacterBuilderApp({
                   || (builderMode === "adapt" && !selectedConceptId)
                 }
                 onClick={() => void handleSave()}
-                className="button-press rounded-full bg-white px-5 py-3 text-sm font-semibold text-black transition-colors hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
+                className="button-press rounded-lg bg-zinc-100 px-4 py-2.5 text-sm font-medium text-black transition-colors hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {saveLabel}
               </button>

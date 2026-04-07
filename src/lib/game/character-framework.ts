@@ -13,16 +13,7 @@ import type {
   CurrencyProfile,
 } from "@/lib/game/types";
 
-const optionalTrimmedStringSchema = z
-  .union([z.string(), z.null(), z.undefined()])
-  .transform((value) => {
-    if (typeof value !== "string") {
-      return null;
-    }
-
-    const trimmed = value.trim();
-    return trimmed.length ? trimmed : null;
-  });
+const optionalTrimmedStringSchema = z.union([z.string().trim().min(1), z.literal(null)]);
 
 const choiceOptionSchema = z.object({
   id: z.string().trim().min(1),
@@ -280,10 +271,13 @@ function buildFieldValueSchema(field: CharacterFrameworkFieldDefinition) {
       );
     case "choice_multi":
       return z.array(z.string().trim().min(1))
-        .transform((values) => Array.from(new Set(values)))
         .refine(
           (values) => values.every((value) => field.options.some((option) => option.id === value)),
           "Every value must match one of the defined option ids.",
+        )
+        .refine(
+          (values) => new Set(values).size === values.length,
+          "Values must be unique.",
         )
         .refine(
           (values) => values.length >= (field.minSelections ?? 0),
@@ -295,7 +289,10 @@ function buildFieldValueSchema(field: CharacterFrameworkFieldDefinition) {
         );
     case "text":
       return z.string()
-        .transform((value) => value.trim())
+        .refine(
+          (value) => value.trim() === value,
+          "Value must not have leading or trailing whitespace.",
+        )
         .refine(
           (value) => value.length >= (field.minLength ?? 0),
           `Enter at least ${field.minLength ?? 0} characters.`,

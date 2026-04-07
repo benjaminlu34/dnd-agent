@@ -36,8 +36,16 @@ export async function POST(request: Request) {
       prompt: payload.data.prompt,
       module,
     });
-    return NextResponse.json(result);
+    return NextResponse.json({
+      character: {
+        ...result.character,
+        moduleId: payload.data.moduleId,
+        frameworkVersion: module.characterFramework!.frameworkVersion,
+      },
+      source: result.source,
+    });
   } catch (error) {
+    console.error("[characters/generate] Error:", error);
     return NextResponse.json(
       {
         error: error instanceof Error ? error.message : "Failed to generate character.",

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { compileCharacterFramework } from "./character-framework";
-import { characterTemplateDraftSchema, toCampaignCharacter } from "./characters";
+import { buildCharacterTemplateDraftSchema, characterTemplateDraftSchema, toCampaignCharacter } from "./characters";
 import type { CharacterInstance, CharacterTemplate } from "./types";
 
-test("characterTemplateDraftSchema normalizes starter items", () => {
+test("characterTemplateDraftSchema trims starter items", () => {
   const parsed = characterTemplateDraftSchema.parse({
     name: "Rowan Vale",
     archetype: "Waymarked Wanderer",
@@ -20,11 +20,14 @@ test("characterTemplateDraftSchema normalizes starter items", () => {
       " weathered map case ",
       "camp knife",
       "Weathered   Map   Case",
-      "",
     ],
   });
 
-  assert.deepEqual(parsed.starterItems, ["weathered map case", "camp knife"]);
+  assert.deepEqual(parsed.starterItems, [
+    "weathered map case",
+    "camp knife",
+    "Weathered   Map   Case",
+  ]);
 });
 
 test("characterTemplateDraftSchema rejects more than four unique starter items", () => {
@@ -46,6 +49,48 @@ test("characterTemplateDraftSchema rejects more than four unique starter items",
       "flint kit",
       "chalk bundle",
     ],
+  });
+
+  assert.equal(parsed.success, false);
+});
+
+test("module-bound character template draft rejects blank sourceConceptId", () => {
+  const framework = compileCharacterFramework({
+    frameworkVersion: "salvage-crew-v1",
+    fields: [
+      { id: "grit", label: "Grit", type: "numeric", min: -2, max: 3, defaultValue: 0, maxModifier: 3 },
+    ],
+    approaches: [
+      { id: "brace", label: "Brace", fieldId: "grit" },
+    ],
+    baseVitality: 10,
+    vitalityLabel: "Vitality",
+    currencyProfile: {
+      unitName: "script",
+      unitLabel: "Dock Script",
+      shortLabel: "ds",
+      precision: 0,
+    },
+    presentationProfile: {
+      vitalityLabel: "Vitality",
+      approachLabel: "Approach",
+      conceptLabel: "Concept",
+      templateLabel: "Playable Character",
+    },
+  });
+
+  const schema = buildCharacterTemplateDraftSchema(framework);
+  const parsed = schema.safeParse({
+    moduleId: "mod_1",
+    sourceConceptId: "   ",
+    frameworkVersion: "salvage-crew-v1",
+    frameworkValues: { grit: 1 },
+    name: "Sable",
+    appearance: null,
+    backstory: "Former deck runner.",
+    drivingGoal: "Pay off a dockside debt.",
+    vitality: 12,
+    starterItems: ["hook knife"],
   });
 
   assert.equal(parsed.success, false);
