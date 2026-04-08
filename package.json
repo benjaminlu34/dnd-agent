@@ -9,13 +9,15 @@
     "test": "node --import tsx --test src/lib/game/*.test.ts",
     "lint": "eslint .",
     "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
     "prisma:push": "prisma db push",
     "prisma:seed": "tsx prisma/seed.ts",
     "backfill-scene-summaries": "tsx scripts/backfill-scene-summaries.ts",
     "contract-harness": "tsx scripts/contract-harness.ts",
     "narration-harness": "tsx scripts/narration-quality-harness.ts",
     "prompt-context-harness": "tsx scripts/prompt-context-harness.ts",
-    "regenerate-module-frameworks": "tsx scripts/regenerate-module-frameworks.ts"
+    "regenerate-module-frameworks": "tsx scripts/regenerate-module-frameworks.ts",
+    "export-module": "tsx scripts/export-module-review.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

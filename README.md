@@ -35,7 +35,7 @@ The app uses a structured world model and deterministic state commits. The DM mo
 npm install
 cp .env.example .env
 npm run prisma:generate
-npm run prisma:push
+npm run prisma:migrate
 npm run prisma:seed
 npm run dev
 ```
@@ -112,6 +112,7 @@ npm run start
 npm run test
 npm run lint
 npm run prisma:generate
+npm run prisma:migrate
 npm run prisma:push
 npm run prisma:seed
 npm run backfill-scene-summaries
@@ -125,4 +126,3 @@ npm run prompt-context-harness
 - `npm test`: pass (76/76)
 - `npm run build`: pass
 - `npm run lint`: pass with warnings (unused vars)
-
