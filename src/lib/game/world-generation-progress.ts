@@ -3,7 +3,7 @@ import type {
   WorldGenerationStageName,
 } from "@/lib/game/types";
 
-export type DraftGenerationProgressStatus = "queued" | "running" | "complete" | "error";
+export type DraftGenerationProgressStatus = "queued" | "running" | "complete" | "error" | "stopped";
 
 export type DraftGenerationProgress = {
   id: string;
@@ -15,6 +15,7 @@ export type DraftGenerationProgress = {
   updatedAt: string;
   completedAt: string | null;
   error: string | null;
+  stopRequested: boolean;
 };
 
 export type WorldGenerationProgressUpdate = {
@@ -85,6 +86,7 @@ function getProgressStore() {
     __draftGenerationProgress__?: Map<string, DraftGenerationProgress>;
     __draftGenerationCheckpoint__?: Map<string, OpenWorldGenerationCheckpoint>;
     __draftGenerationProgressListeners__?: Map<string, Set<(progress: DraftGenerationProgress) => void>>;
+    __draftGenerationStopRequests__?: Set<string>;
   };
 
   if (!globalState.__draftGenerationProgress__) {
@@ -113,6 +115,18 @@ function getCheckpointStore() {
   return globalState.__draftGenerationCheckpoint__;
 }
 
+function getStopRequestStore() {
+  const globalState = globalThis as typeof globalThis & {
+    __draftGenerationStopRequests__?: Set<string>;
+  };
+
+  if (!globalState.__draftGenerationStopRequests__) {
+    globalState.__draftGenerationStopRequests__ = new Set<string>();
+  }
+
+  return globalState.__draftGenerationStopRequests__;
+}
+
 function getProgressListenerStore() {
   const globalState = globalThis as typeof globalThis & {
     __draftGenerationProgressListeners__?: Map<string, Set<(progress: DraftGenerationProgress) => void>>;
@@ -131,6 +145,7 @@ function getProgressListenerStore() {
 function cleanupStaleProgressEntries() {
   const store = getProgressStore();
   const listeners = getProgressListenerStore();
+  const stopRequests = getStopRequestStore();
   const cutoff = Date.now() - STALE_PROGRESS_MS;
 
   for (const [id, progress] of store.entries()) {
@@ -138,6 +153,7 @@ function cleanupStaleProgressEntries() {
       store.delete(id);
       getCheckpointStore().delete(id);
       listeners.delete(id);
+      stopRequests.delete(id);
     }
   }
 }
@@ -173,6 +189,7 @@ export function getWorldGenerationStageStep(stage: WorldGenerationStageName | nu
 
 export function beginDraftGenerationProgress(id: string) {
   cleanupStaleProgressEntries();
+  getStopRequestStore().delete(id);
 
   const now = new Date().toISOString();
   const existing = getProgressStore().get(id);
@@ -184,6 +201,7 @@ export function beginDraftGenerationProgress(id: string) {
         message: "Picking up from the latest completed stage.",
         completedAt: null,
         error: null,
+        stopRequested: false,
         updatedAt: now,
       }
     : {
@@ -196,6 +214,7 @@ export function beginDraftGenerationProgress(id: string) {
         updatedAt: now,
         completedAt: null,
         error: null,
+        stopRequested: false,
       };
 
   getProgressStore().set(id, progress);
@@ -238,6 +257,7 @@ export function markDraftGenerationStage(id: string, update: WorldGenerationProg
 }
 
 export function completeDraftGenerationProgress(id: string, message = "Your campaign draft is ready.") {
+  getStopRequestStore().delete(id);
   return updateDraftGenerationProgress(id, {
     status: "complete",
     stage: "final_world",
@@ -245,16 +265,62 @@ export function completeDraftGenerationProgress(id: string, message = "Your camp
     message,
     completedAt: new Date().toISOString(),
     error: null,
+    stopRequested: false,
   });
 }
 
 export function failDraftGenerationProgress(id: string, error: string) {
+  getStopRequestStore().delete(id);
   return updateDraftGenerationProgress(id, {
     status: "error",
     label: "Generation Failed",
     message: error,
     completedAt: new Date().toISOString(),
     error,
+    stopRequested: false,
+  });
+}
+
+export function requestDraftGenerationStop(
+  id: string,
+  message = "Stopping after the current model response finishes.",
+) {
+  const existing = getDraftGenerationProgress(id);
+  if (!existing) {
+    return null;
+  }
+
+  if (existing.status === "complete" || existing.status === "error" || existing.status === "stopped") {
+    return existing;
+  }
+
+  getStopRequestStore().add(id);
+  return updateDraftGenerationProgress(id, {
+    label: "Stopping Generation",
+    message,
+    completedAt: null,
+    error: null,
+    stopRequested: true,
+  });
+}
+
+export function isDraftGenerationStopRequested(id: string) {
+  cleanupStaleProgressEntries();
+  return getStopRequestStore().has(id);
+}
+
+export function stopDraftGenerationProgress(
+  id: string,
+  message = "Generation stopped. You can resume from the latest checkpoint whenever you want.",
+) {
+  getStopRequestStore().delete(id);
+  return updateDraftGenerationProgress(id, {
+    status: "stopped",
+    label: "Generation Stopped",
+    message,
+    completedAt: new Date().toISOString(),
+    error: null,
+    stopRequested: false,
   });
 }
 

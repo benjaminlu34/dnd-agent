@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
-import { characterTemplateDraftSchema } from "@/lib/game/characters";
+import { buildCharacterTemplateDraftSchema } from "@/lib/game/characters";
 import {
   deleteCharacterTemplateForUser,
+  getAdventureModuleWorldForUser,
   getCharacterTemplateForUser,
   updateCharacterTemplateForUser,
 } from "@/lib/game/repository";
@@ -38,7 +39,25 @@ export async function GET(_: Request, context: Context) {
 
 export async function PATCH(request: Request, context: Context) {
   const { id } = await context.params;
-  const payload = characterTemplateDraftSchema.safeParse(await request.json().catch(() => null));
+  const existing = await getCharacterTemplateForUser(id);
+  if (!existing) {
+    return NextResponse.json(
+      { error: "Character template not found." },
+      { status: 404 },
+    );
+  }
+
+  const module = await getAdventureModuleWorldForUser(existing.moduleId!);
+  if (!module) {
+    return NextResponse.json(
+      { error: "Selected module was not found." },
+      { status: 404 },
+    );
+  }
+
+  const payload = buildCharacterTemplateDraftSchema(module.characterFramework!).safeParse(
+    await request.json().catch(() => null),
+  );
 
   if (!payload.success) {
     return NextResponse.json(
@@ -52,7 +71,6 @@ export async function PATCH(request: Request, context: Context) {
 
   try {
     const character = await updateCharacterTemplateForUser(id, payload.data);
-
     if (!character) {
       return NextResponse.json(
         { error: "Character template not found." },

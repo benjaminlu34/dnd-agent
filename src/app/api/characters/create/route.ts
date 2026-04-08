@@ -1,23 +1,40 @@
 import { NextResponse } from "next/server";
-import { characterTemplateDraftSchema } from "@/lib/game/characters";
-import { createCharacterTemplate } from "@/lib/game/repository";
+import { buildCharacterTemplateDraftSchema } from "@/lib/game/characters";
+import {
+  createCharacterTemplate,
+  getAdventureModuleWorldForUser,
+} from "@/lib/game/repository";
 
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
-  const payload = characterTemplateDraftSchema.safeParse(await request.json().catch(() => null));
-
-  if (!payload.success) {
+  const body = await request.json().catch(() => null) as { moduleId?: string } | null;
+  if (!body?.moduleId) {
     return NextResponse.json(
       {
-        error: "Invalid character creation request.",
-        details: payload.error.flatten(),
+        error: "Module-bound character templates require a moduleId.",
       },
       { status: 400 },
     );
   }
 
   try {
+    const module = await getAdventureModuleWorldForUser(body.moduleId);
+    if (!module) {
+      return NextResponse.json({ error: "Selected module was not found." }, { status: 404 });
+    }
+
+    const payload = buildCharacterTemplateDraftSchema(module.characterFramework!).safeParse(body);
+    if (!payload.success) {
+      return NextResponse.json(
+        {
+          error: "Invalid character creation request.",
+          details: payload.error.flatten(),
+        },
+        { status: 400 },
+      );
+    }
+
     const template = await createCharacterTemplate(payload.data);
     return NextResponse.json({ templateId: template.id });
   } catch (error) {

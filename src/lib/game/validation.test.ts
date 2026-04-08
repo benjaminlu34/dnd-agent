@@ -357,6 +357,51 @@ test("validateTurnCommand derives pending challenge checks from checkIntent", ()
   assert.equal(validated.checkResult, undefined);
 });
 
+test("validateTurnCommand resolves custom framework modifiers from frameworkValues instead of legacy stats", () => {
+  const snapshot = createSnapshot();
+  snapshot.character.approaches = [
+    { id: "sway", label: "Sway", fieldId: "presence" },
+  ];
+  snapshot.character.frameworkValues = {
+    presence: 2,
+  };
+  snapshot.character.stats = {
+    sway: 99,
+  };
+
+  const validated = validateTurnCommand({
+    snapshot,
+    command: {
+      type: "resolve_mechanics",
+      timeMode: "exploration",
+      suggestedActions: ["Work the room"],
+      checkIntent: {
+        type: "challenge",
+        reason: "Win over the onlookers",
+        approachId: "sway",
+      },
+      mutations: [
+        {
+          type: "advance_time",
+          durationMinutes: 5,
+        },
+        {
+          type: "adjust_relationship",
+          npcId: "npc_guard",
+          delta: 1,
+          reason: "The room warms to you.",
+          phase: "conditional",
+        },
+      ],
+    },
+  });
+
+  assert.equal(validated.type, "resolve_mechanics");
+  assert.equal(validated.pendingCheck?.approachId, "sway");
+  assert.equal(validated.pendingCheck?.stat, "sway");
+  assert.equal(validated.pendingCheck?.modifier, 2);
+});
+
 test("validateTurnCommand suppresses checks that have no success-gated stakes", () => {
   const validated = validateTurnCommand({
     snapshot: createSnapshot(),

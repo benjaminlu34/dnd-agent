@@ -72,19 +72,44 @@ export function SessionZeroApp() {
   const [draftProgressId, setDraftProgressId] = useState<string | null>(null);
   const [draftProgressStreamRevision, setDraftProgressStreamRevision] = useState(0);
   const [draftProgress, setDraftProgress] = useState<DraftGenerationProgress | null>(null);
+  const [stoppingDraft, setStoppingDraft] = useState(false);
   const progressStreamRef = useRef<EventSource | null>(null);
 
   const selectedModule = modules.find((module) => module.id === selectedModuleId) ?? null;
+  const compatibleCharacters = selectedModuleId
+    ? characters.filter((character) => character.moduleId === selectedModuleId)
+    : characters;
   const selectedCharacter =
-    characters.find((character) => character.id === selectedTemplateId) ?? null;
+    compatibleCharacters.find((character) => character.id === selectedTemplateId) ?? null;
   const activeStep = !selectedModuleId ? 1 : !selectedTemplateId ? 2 : 3;
   const totalGenerationStages = WORLD_GENERATION_PROGRESS_STAGES.length;
+  const isGenerationActive =
+    draftProgress?.status === "queued" || draftProgress?.status === "running";
   const currentGenerationStage =
     draftProgress?.status === "complete"
       ? totalGenerationStages
       : getWorldGenerationStageStep(draftProgress?.stage ?? null);
   const generationProgressPercent =
     totalGenerationStages > 0 ? (currentGenerationStage / totalGenerationStages) * 100 : 0;
+
+  async function recoverDraftFromCheckpoint(progressId: string) {
+    const response = await fetch(
+      `/api/campaigns/draft/recover?progressId=${encodeURIComponent(progressId)}`,
+    );
+
+    const data = (await response.json()) as {
+      progressId?: string;
+      draft?: GeneratedWorldModule;
+      artifacts?: OpenWorldGenerationArtifacts;
+      error?: string;
+    };
+
+    if (!response.ok || !data.draft) {
+      throw new Error(data.error ?? "Failed to recover completed draft.");
+    }
+
+    return data;
+  }
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -190,6 +215,16 @@ export function SessionZeroApp() {
   }, []);
 
   useEffect(() => {
+    if (
+      draftProgress?.status === "complete"
+      || draftProgress?.status === "error"
+      || draftProgress?.status === "stopped"
+    ) {
+      setStoppingDraft(false);
+    }
+  }, [draftProgress?.status]);
+
+  useEffect(() => {
     if (!draftProgressId) {
       return;
     }
@@ -209,7 +244,11 @@ export function SessionZeroApp() {
         if (payload.type === "progress") {
           setDraftProgress(payload.progress);
 
-          if (payload.progress.status === "complete" || payload.progress.status === "error") {
+          if (
+            payload.progress.status === "complete"
+            || payload.progress.status === "error"
+            || payload.progress.status === "stopped"
+          ) {
             stream.close();
             if (progressStreamRef.current === stream) {
               progressStreamRef.current = null;
@@ -237,7 +276,15 @@ export function SessionZeroApp() {
   }, [draftProgressId, draftProgressStreamRevision]);
 
   useEffect(() => {
-    if (!draftProgressId || draft || draftProgress?.status !== "complete") {
+    if (
+      !draftProgressId
+      || draft
+      || (
+        draftProgress?.status !== "complete"
+        && draftProgress?.status !== "error"
+        && draftProgress?.status !== "stopped"
+      )
+    ) {
       return;
     }
 
@@ -246,28 +293,30 @@ export function SessionZeroApp() {
 
     async function recoverCompletedDraft() {
       try {
-        const response = await fetch(
-          `/api/campaigns/draft/recover?progressId=${encodeURIComponent(progressId)}`,
-        );
-
-        const data = (await response.json()) as {
-          progressId?: string;
-          draft?: GeneratedWorldModule;
-          artifacts?: OpenWorldGenerationArtifacts;
-          error?: string;
-        };
-
-        if (!response.ok || !data.draft) {
-          throw new Error(data.error ?? "Failed to recover completed draft.");
-        }
+        const data = await recoverDraftFromCheckpoint(progressId);
 
         if (cancelled) {
           return;
         }
 
-        setDraft(data.draft);
+        setDraft(data.draft ?? null);
         setDraftArtifacts(data.artifacts ?? null);
         setError(null);
+        setDraftProgress((current) =>
+          current
+            ? {
+                ...current,
+                status: "complete",
+                stage: "final_world",
+                label: "Draft Ready",
+                message: "Your campaign draft is ready to review.",
+                updatedAt: new Date().toISOString(),
+                completedAt: current.completedAt ?? new Date().toISOString(),
+                error: null,
+                stopRequested: false,
+              }
+            : current,
+        );
       } catch (recoveryError) {
         if (cancelled) {
           return;
@@ -288,16 +337,29 @@ export function SessionZeroApp() {
     };
   }, [draftProgressId, draftProgress?.status, draft]);
 
+  useEffect(() => {
+    if (!selectedModuleId) {
+      return;
+    }
+
+    if (selectedTemplateId && compatibleCharacters.some((character) => character.id === selectedTemplateId)) {
+      return;
+    }
+
+    setSelectedTemplateId(compatibleCharacters[0]?.id ?? null);
+  }, [compatibleCharacters, selectedModuleId, selectedTemplateId]);
+
   async function generateDraft() {
-    if (!prompt.trim() || drafting) {
+    if (!prompt.trim() || drafting || isGenerationActive) {
       return;
     }
 
     const progressId =
-      draftProgress?.status === "error" && draftProgressId
+      (draftProgress?.status === "error" || draftProgress?.status === "stopped") && draftProgressId
         ? draftProgressId
         : crypto.randomUUID();
     setDrafting(true);
+    setStoppingDraft(false);
     setError(null);
     setDraftProgressId(progressId);
     setDraftProgressStreamRevision((current) => current + 1);
@@ -311,6 +373,7 @@ export function SessionZeroApp() {
       updatedAt: new Date().toISOString(),
       completedAt: null,
       error: null,
+      stopRequested: false,
     });
 
     try {
@@ -330,8 +393,28 @@ export function SessionZeroApp() {
       const data = (await response.json()) as {
         draft?: GeneratedWorldModule;
         artifacts?: OpenWorldGenerationArtifacts;
+        stopped?: boolean;
         error?: string;
       };
+
+      if (data.stopped) {
+        setError(null);
+        setDraftProgress((current) =>
+          current
+            ? {
+                ...current,
+                status: "stopped",
+                label: "Generation Stopped",
+                message: "Generation stopped. You can resume from the latest checkpoint whenever you want.",
+                updatedAt: new Date().toISOString(),
+                completedAt: new Date().toISOString(),
+                error: null,
+                stopRequested: false,
+              }
+            : current,
+        );
+        return;
+      }
 
       if (!response.ok || !data.draft) {
         throw new Error(data.error ?? "Failed to generate module draft.");
@@ -353,24 +436,102 @@ export function SessionZeroApp() {
           : current,
       );
     } catch (draftError) {
-      setError(draftError instanceof Error ? draftError.message : "Failed to generate module draft.");
+      const message = draftError instanceof Error ? draftError.message : "Failed to generate module draft.";
+
+      if (progressId) {
+        try {
+          const recovered = await recoverDraftFromCheckpoint(progressId);
+          setDraft(recovered.draft ?? null);
+          setDraftArtifacts(recovered.artifacts ?? null);
+          setError(null);
+          setDraftProgress((current) =>
+            current
+              ? {
+                  ...current,
+                  status: "complete",
+                  stage: "final_world",
+                  label: "Draft Ready",
+                  message: "Your campaign draft is ready to review.",
+                  updatedAt: new Date().toISOString(),
+                  completedAt: new Date().toISOString(),
+                  error: null,
+                  stopRequested: false,
+                }
+              : current,
+          );
+          return;
+        } catch {
+          // Fall through to surface the original generation error when no ready checkpoint exists.
+        }
+      }
+
+      setError(message);
       setDraftProgress((current) =>
         current
           ? {
               ...current,
               status: "error",
               label: "Generation Failed",
-              message:
-                draftError instanceof Error ? draftError.message : "Failed to generate module draft.",
+              message,
               updatedAt: new Date().toISOString(),
               completedAt: new Date().toISOString(),
-              error:
-                draftError instanceof Error ? draftError.message : "Failed to generate module draft.",
+              error: message,
             }
           : current,
       );
     } finally {
       setDrafting(false);
+    }
+  }
+
+  async function stopDraftGeneration() {
+    if (!draftProgressId || !isGenerationActive || stoppingDraft) {
+      return;
+    }
+
+    setStoppingDraft(true);
+    setError(null);
+    setDraftProgress((current) =>
+      current
+        ? {
+            ...current,
+            label: "Stopping Generation",
+            message: "Stopping after the current model response finishes.",
+            stopRequested: true,
+            updatedAt: new Date().toISOString(),
+          }
+        : current,
+    );
+
+    try {
+      const response = await fetch("/api/campaigns/draft/stop", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          progressId: draftProgressId,
+        }),
+      });
+
+      const data = (await response.json()) as {
+        error?: string;
+      };
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "Failed to stop draft generation.");
+      }
+    } catch (stopError) {
+      setStoppingDraft(false);
+      setError(stopError instanceof Error ? stopError.message : "Failed to stop draft generation.");
+      setDraftProgress((current) =>
+        current
+          ? {
+              ...current,
+              stopRequested: false,
+            }
+          : current,
+      );
     }
   }
 
@@ -502,6 +663,8 @@ export function SessionZeroApp() {
                     <p className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-500">
                       {draftProgress.status === "complete"
                         ? "Ready"
+                        : draftProgress.status === "stopped"
+                          ? "Stopped"
                         : draftProgress.status === "error"
                           ? "Issue"
                           : "In Progress"}
@@ -513,6 +676,8 @@ export function SessionZeroApp() {
                       "h-2.5 w-2.5 rounded-full",
                       draftProgress.status === "error"
                         ? "bg-red-400"
+                        : draftProgress.status === "stopped"
+                          ? "bg-zinc-500"
                         : draftProgress.status === "complete"
                           ? "bg-emerald-400"
                           : "bg-amber-300",
@@ -531,6 +696,8 @@ export function SessionZeroApp() {
                       "h-full rounded-full transition-[width] duration-500",
                       draftProgress.status === "error"
                         ? "bg-red-400"
+                        : draftProgress.status === "stopped"
+                          ? "bg-zinc-500"
                         : draftProgress.status === "complete"
                           ? "bg-emerald-400"
                           : "bg-zinc-200",
@@ -546,16 +713,26 @@ export function SessionZeroApp() {
                 type="button"
                 className="button-press rounded-full bg-white px-5 py-3 text-sm font-semibold text-black transition-colors hover:bg-zinc-200 disabled:opacity-60"
                 onClick={() => void generateDraft()}
-                disabled={drafting}
+                disabled={drafting || isGenerationActive}
               >
-                {drafting
+                {drafting || isGenerationActive
                   ? "Generating..."
-                  : draftProgress?.status === "error"
-                    ? "Retry Draft"
+                  : draftProgress?.status === "error" || draftProgress?.status === "stopped"
+                    ? "Resume Draft"
                     : draft
                       ? "Regenerate Draft"
                       : "Generate Draft"}
               </button>
+              {draftProgressId && isGenerationActive ? (
+                <button
+                  type="button"
+                  className="button-press rounded-full border border-zinc-800 px-5 py-3 text-sm font-semibold text-zinc-300 transition-colors hover:bg-zinc-900 hover:text-white disabled:opacity-60"
+                  onClick={() => void stopDraftGeneration()}
+                  disabled={stoppingDraft || Boolean(draftProgress?.stopRequested)}
+                >
+                  {stoppingDraft || draftProgress?.stopRequested ? "Stopping..." : "Stop Generating"}
+                </button>
+              ) : null}
               {draft ? (
                 <button
                   type="button"
@@ -653,9 +830,9 @@ export function SessionZeroApp() {
 
           {loading ? (
             <p className="mt-4 text-sm leading-relaxed text-zinc-400">Loading characters...</p>
-          ) : characters.length ? (
+          ) : compatibleCharacters.length ? (
             <div className="mt-6 space-y-3">
-              {characters.map((character) => (
+              {compatibleCharacters.map((character) => (
                 <button
                   key={character.id}
                   type="button"
@@ -672,18 +849,18 @@ export function SessionZeroApp() {
                       {character.name}
                     </h3>
                     <p className="mt-1 text-[10px] font-medium uppercase tracking-widest text-zinc-500">
-                      {character.archetype}
+                      {character.drivingGoal ?? "Playable template"}
                     </p>
                   </div>
                   <span className="text-[10px] font-medium uppercase tracking-widest text-zinc-500">
-                    Max HP {character.maxHealth}
+                    VIT {character.vitality ?? character.maxHealth}
                   </span>
                 </button>
               ))}
             </div>
           ) : (
             <p className="mt-4 text-sm italic leading-relaxed text-zinc-600">
-              Create a character template first.
+              Create or adapt a module-bound character template for this module first.
             </p>
           )}
         </section>

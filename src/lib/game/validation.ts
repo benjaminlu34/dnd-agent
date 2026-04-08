@@ -2,7 +2,6 @@ import { flattenCurrencyToCp } from "@/lib/game/currency";
 import { canonicalizeNpcIdAgainstCandidates } from "@/lib/game/npc-identity";
 import type {
   CampaignSnapshot,
-  ChallengeApproach,
   ExecuteFastForwardCommand,
   MechanicsMutation,
   PendingCheck,
@@ -136,8 +135,61 @@ function deriveTimeElapsed(command: ResolveMechanicsResponse, snapshot: Campaign
   return minutes;
 }
 
-function statForChallengeApproach(challengeApproach: ChallengeApproach) {
-  switch (challengeApproach) {
+function configuredApproachIds(snapshot: CampaignSnapshot) {
+  const configuredApproaches = snapshot.character.approaches
+    ?.map((approach) => approach.id.trim())
+    .filter(Boolean);
+
+  return configuredApproaches ?? [];
+}
+
+function defaultApproachId(snapshot: CampaignSnapshot) {
+  return configuredApproachIds(snapshot)[0] ?? "force";
+}
+
+function normalizeCheckIntentApproachId(
+  checkIntent: ResolveMechanicsResponse["checkIntent"],
+  snapshot: CampaignSnapshot,
+) {
+  if (!checkIntent) {
+    return null;
+  }
+
+  const validApproachIds = configuredApproachIds(snapshot);
+
+  if (typeof checkIntent.approachId === "string" && checkIntent.approachId.trim()) {
+    const approachId = checkIntent.approachId.trim();
+    return validApproachIds.length === 0 || validApproachIds.includes(approachId)
+      ? approachId
+      : null;
+  }
+
+  if (checkIntent.type === "challenge" && typeof checkIntent.challengeApproach === "string") {
+    const challengeApproach = checkIntent.challengeApproach.trim();
+    return validApproachIds.length === 0 || validApproachIds.includes(challengeApproach)
+      ? challengeApproach
+      : null;
+  }
+
+  if (checkIntent.type === "combat") {
+    if (validApproachIds.length === 0) {
+      if (checkIntent.approach === "assassinate") {
+        return "finesse";
+      }
+      if (checkIntent.approach === "attack" || checkIntent.approach === "subdue") {
+        return "force";
+      }
+    }
+    if (typeof checkIntent.approach === "string" && validApproachIds.includes(checkIntent.approach)) {
+      return checkIntent.approach;
+    }
+  }
+
+  return null;
+}
+
+function legacyStatForApproachId(approachId: string) {
+  switch (approachId) {
     case "force":
       return "strength";
     case "finesse":
@@ -150,7 +202,32 @@ function statForChallengeApproach(challengeApproach: ChallengeApproach) {
       return "wisdom";
     case "influence":
       return "charisma";
+    default:
+      return approachId;
   }
+}
+
+function resolveCheckModifier(snapshot: CampaignSnapshot, approachId: string) {
+  const fieldId = snapshot.character.approaches?.find((approach) => approach.id === approachId)?.fieldId;
+  if (fieldId) {
+    const value = snapshot.character.frameworkValues?.[fieldId];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return Math.trunc(value);
+    }
+  }
+
+  const directStat = snapshot.character.stats?.[approachId];
+  if (typeof directStat === "number" && Number.isFinite(directStat)) {
+    return Math.trunc(directStat);
+  }
+
+  const legacyStat = snapshot.character.approaches?.length
+    ? approachId
+    : legacyStatForApproachId(approachId);
+  const legacyValue = snapshot.character.stats?.[legacyStat];
+  return typeof legacyValue === "number" && Number.isFinite(legacyValue)
+    ? Math.trunc(legacyValue)
+    : 0;
 }
 
 function findFetchedNpc(
@@ -483,13 +560,21 @@ function canAutoPromoteMutationForInvestigativeCheck(mutation: MechanicsMutation
   );
 }
 
-function normalizeMutationsForPendingCheck(command: ResolveMechanicsResponse) {
+function normalizeMutationsForPendingCheck(
+  snapshot: CampaignSnapshot,
+  command: ResolveMechanicsResponse,
+) {
   const checkIntent = command.checkIntent;
   if (!checkIntent || checkIntent.type !== "challenge") {
     return command.mutations;
   }
 
-  if (checkIntent.challengeApproach !== "notice" && checkIntent.challengeApproach !== "analyze") {
+  if ((snapshot.character.approaches ?? []).length > 0) {
+    return command.mutations;
+  }
+
+  const approachId = normalizeCheckIntentApproachId(checkIntent, snapshot);
+  if (approachId !== "notice" && approachId !== "analyze") {
     return command.mutations;
   }
 
@@ -533,14 +618,15 @@ function derivePendingCheck(
     const target =
       findPresentNpc(snapshot, checkIntent.targetNpcId)
       ?? findFetchedNpc(fetchedFacts, checkIntent.targetNpcId);
-    const stat = checkIntent.approach === "assassinate" ? "dexterity" : "strength";
+    const approachId = normalizeCheckIntentApproachId(checkIntent, snapshot) ?? defaultApproachId(snapshot);
     const dc = 7 + Math.max(1, target?.threatLevel ?? 2);
 
     return {
-      stat,
+      approachId,
+      stat: snapshot.character.approaches?.length ? approachId : legacyStatForApproachId(approachId),
       mode: checkIntent.mode ?? "normal",
       reason: checkIntent.reason,
-      modifier: snapshot.character.stats[stat],
+      modifier: resolveCheckModifier(snapshot, approachId),
       dc,
     };
   }
@@ -553,16 +639,15 @@ function derivePendingCheck(
       ? 7 + Math.max(1, citedNpc.threatLevel)
       : command.timeMode === "combat"
         ? 9
-        : checkIntent.challengeApproach === "analyze" || checkIntent.challengeApproach === "notice"
-          ? 8
-          : 7;
+        : 7;
 
-  const stat = statForChallengeApproach(checkIntent.challengeApproach);
+  const approachId = normalizeCheckIntentApproachId(checkIntent, snapshot) ?? defaultApproachId(snapshot);
   return {
-    stat,
+    approachId,
+    stat: snapshot.character.approaches?.length ? approachId : legacyStatForApproachId(approachId),
     mode: checkIntent.mode ?? "normal",
     reason: checkIntent.reason,
-    modifier: snapshot.character.stats[stat],
+    modifier: resolveCheckModifier(snapshot, approachId),
     dc,
   };
 }
@@ -787,7 +872,7 @@ export function validateTurnCommand(input: {
     );
     return false;
   });
-  const mutations = normalizeMutationsForPendingCheck({
+  const mutations = normalizeMutationsForPendingCheck(snapshot, {
     ...command,
     checkIntent: normalizedCheckIntent,
     mutations: filteredMutations,

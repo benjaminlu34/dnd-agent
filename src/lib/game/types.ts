@@ -1,13 +1,4 @@
-export const STATS = [
-  "strength",
-  "dexterity",
-  "constitution",
-  "intelligence",
-  "wisdom",
-  "charisma",
-] as const;
-
-export type Stat = (typeof STATS)[number];
+export type ApproachId = string;
 export type CheckMode = "normal" | "advantage" | "disadvantage";
 export type CheckOutcome = "success" | "partial" | "failure";
 export type TimeMode = "combat" | "exploration" | "travel" | "rest" | "downtime";
@@ -48,7 +39,7 @@ export const SOCIAL_OUTCOMES = [
 export type SocialOutcome = (typeof SOCIAL_OUTCOMES)[number];
 export type RelationshipMove = "worsen" | "slip" | "steady" | "warm" | "bond";
 export type DiscoveryIntent = "none" | "surface" | "focused" | "deep";
-export type ChallengeApproach = "force" | "finesse" | "endure" | "analyze" | "notice" | "influence";
+export type ChallengeApproach = string;
 export type MemoryKind =
   | "conflict"
   | "promise"
@@ -137,39 +128,137 @@ export type TurnCausalityCodeName =
   | "SCHEDULE_BUFFER_ROLLED"
   | "INVALIDATED_EVENT";
 
-export const STAT_LABELS: Record<Stat, string> = {
-  strength: "Strength",
-  dexterity: "Dexterity",
-  constitution: "Constitution",
-  intelligence: "Intelligence",
-  wisdom: "Wisdom",
-  charisma: "Charisma",
+export type CharacterFrameworkFieldType = "numeric" | "choice_single" | "choice_multi" | "text";
+
+export type CharacterFrameworkNumericFieldDefinition = {
+  id: string;
+  label: string;
+  type: "numeric";
+  description?: string | null;
+  min: number;
+  max: number;
+  defaultValue?: number;
+  maxModifier: number;
 };
 
-export const STAT_ABBREVIATIONS: Record<Stat, string> = {
-  strength: "STR",
-  dexterity: "DEX",
-  constitution: "CON",
-  intelligence: "INT",
-  wisdom: "WIS",
-  charisma: "CHA",
+export type CharacterFrameworkChoiceOption = {
+  id: string;
+  label: string;
+  description?: string | null;
 };
 
-export function isStat(value: unknown): value is Stat {
-  return typeof value === "string" && STATS.includes(value as Stat);
-}
+export type CharacterFrameworkChoiceSingleFieldDefinition = {
+  id: string;
+  label: string;
+  type: "choice_single";
+  description?: string | null;
+  options: CharacterFrameworkChoiceOption[];
+  defaultValue?: string | null;
+};
+
+export type CharacterFrameworkChoiceMultiFieldDefinition = {
+  id: string;
+  label: string;
+  type: "choice_multi";
+  description?: string | null;
+  options: CharacterFrameworkChoiceOption[];
+  minSelections?: number;
+  maxSelections?: number;
+  defaultValue?: string[];
+};
+
+export type CharacterFrameworkTextFieldDefinition = {
+  id: string;
+  label: string;
+  type: "text";
+  description?: string | null;
+  minLength?: number;
+  maxLength?: number;
+  multiline?: boolean;
+  defaultValue?: string | null;
+};
+
+export type CharacterFrameworkFieldDefinition =
+  | CharacterFrameworkNumericFieldDefinition
+  | CharacterFrameworkChoiceSingleFieldDefinition
+  | CharacterFrameworkChoiceMultiFieldDefinition
+  | CharacterFrameworkTextFieldDefinition;
+
+export type CharacterFrameworkApproach = {
+  id: string;
+  label: string;
+  description?: string | null;
+  fieldId: string;
+};
+
+export type CurrencyProfile = {
+  unitName: string;
+  unitLabel: string;
+  shortLabel: string;
+  precision?: number;
+};
+
+export type PresentationProfile = {
+  vitalityLabel: string;
+  approachLabel: string;
+  conceptLabel: string;
+  templateLabel: string;
+};
+
+export type CharacterFramework = {
+  frameworkVersion: string;
+  fields: CharacterFrameworkFieldDefinition[];
+  approaches: CharacterFrameworkApproach[];
+  baseVitality: number;
+  vitalityLabel: string;
+  currencyProfile: CurrencyProfile;
+  presentationProfile: PresentationProfile;
+};
+
+export type CharacterFrameworkValue = number | string | string[] | null;
+export type CharacterFrameworkValues = Record<string, CharacterFrameworkValue>;
+export type LegacyCurrencyDenominations = {
+  cp?: number;
+  sp?: number;
+  gp?: number;
+  pp?: number;
+};
+
+export type CharacterConceptDraft = {
+  name: string;
+  appearance: string | null;
+  backstory: string | null;
+  drivingGoal: string | null;
+  starterItems: string[];
+};
+
+export type CharacterConcept = CharacterConceptDraft & {
+  id: string;
+};
+
+export type CharacterConceptSummary = Omit<CharacterConcept, "starterItems"> & {
+  createdAt: string;
+  updatedAt: string;
+};
 
 export type CharacterTemplateDraft = {
+  moduleId?: string;
+  sourceConceptId?: string | null;
+  frameworkVersion?: string;
+  frameworkValues?: CharacterFrameworkValues;
   name: string;
-  archetype: string;
-  strength: number;
-  dexterity: number;
-  constitution: number;
-  intelligence: number;
-  wisdom: number;
-  charisma: number;
-  maxHealth: number;
-  backstory: string | null;
+  appearance?: string | null;
+  backstory?: string | null;
+  drivingGoal?: string | null;
+  vitality?: number;
+  archetype?: string | null;
+  maxHealth?: number;
+  strength?: number;
+  dexterity?: number;
+  constitution?: number;
+  intelligence?: number;
+  wisdom?: number;
+  charisma?: number;
   starterItems: string[];
 };
 
@@ -177,7 +266,7 @@ export type CharacterTemplate = CharacterTemplateDraft & {
   id: string;
 };
 
-export type CharacterTemplateSummary = Omit<CharacterTemplate, "starterItems"> & {
+export type CharacterTemplateSummary = Omit<CharacterTemplate, "starterItems" | "frameworkValues"> & {
   createdAt: string;
   updatedAt: string;
 };
@@ -263,6 +352,7 @@ export type CharacterInstance = {
   templateId: string;
   health: number;
   currencyCp: number;
+  frameworkValues: CharacterFrameworkValues;
   inventory: ItemInstance[];
   commodityStacks: CharacterCommodityStack[];
 };
@@ -270,7 +360,12 @@ export type CharacterInstance = {
 export type CampaignCharacter = CharacterTemplate & {
   instanceId: string;
   templateId: string;
-  stats: Record<Stat, number>;
+  frameworkValues?: CharacterFrameworkValues;
+  maxVitality?: number;
+  approaches?: CharacterFrameworkApproach[];
+  currencyProfile?: CurrencyProfile;
+  presentationProfile?: PresentationProfile;
+  stats?: Record<string, number>;
   health: number;
   currencyCp: number;
   inventory: ItemInstance[];
@@ -311,6 +406,7 @@ export type AdventureModuleDetail = {
   launchableDirectly: boolean;
   launchBlockReason: LaunchBlockReason;
   schemaVersion: number;
+  characterFramework?: CharacterFramework;
   entryPoints: ModuleEntryPointSummary[];
   createdAt: string;
   updatedAt: string;
@@ -805,7 +901,7 @@ export type WorldGenerationStageArtifacts = {
 
 export type CheckpointableWorldGenerationStageName = keyof WorldGenerationStageArtifacts;
 
-export type WorldGenerationCheckpointStatus = "running" | "failed" | "ready";
+export type WorldGenerationCheckpointStatus = "running" | "failed" | "stopped" | "ready";
 
 export type OpenWorldGenerationCheckpoint = {
   prompt: string;
@@ -831,6 +927,7 @@ export type GeneratedWorldModule = {
   premise: string;
   tone: string;
   setting: string;
+  characterFramework?: CharacterFramework;
   locations: GeneratedLocationNode[];
   edges: GeneratedLocationEdge[];
   factions: GeneratedFaction[];
@@ -880,6 +977,7 @@ export type CampaignRuntimeState = {
   characterState: {
     conditions: string[];
     activeCompanions: string[];
+    maxVitality?: number | null;
   };
   sceneFocus: {
     key: string;
@@ -1298,16 +1396,12 @@ export type PromptInventoryItem = {
   stateTags?: string[];
 };
 
-export type CurrencyDenominations = {
-  cp?: number;
-  sp?: number;
-  gp?: number;
-  pp?: number;
-};
-
 export type PromptCurrencySummary = {
-  totalCp: number;
+  totalBaseUnits?: number;
   formatted: string;
+  unitLabel?: string;
+  shortLabel?: string;
+  totalCp?: number;
 };
 
 export type SpatialPromptContext = {
@@ -1326,6 +1420,9 @@ export type SpatialPromptContext = {
   activeThreads: ActiveThreadSummary[];
   inventory: PromptInventoryItem[];
   currency?: PromptCurrencySummary;
+  approaches?: CharacterFrameworkApproach[];
+  currencyProfile?: CurrencyProfile;
+  presentationProfile?: PresentationProfile;
   worldObjects: PromptWorldObject[];
   sceneAspects: CampaignRuntimeState["sceneAspects"];
   localTexture: LocalTextureSummary | null;
@@ -1385,6 +1482,9 @@ export type TurnRouterContext = Pick<
   | "discoveredInformation"
   | "activePressures"
   | "activeThreads"
+  | "approaches"
+  | "currencyProfile"
+  | "presentationProfile"
 > & {
   inventory: RouterInventorySummary[];
   worldObjects: RouterWorldObjectSummary[];
@@ -1498,10 +1598,13 @@ export type RouterDecision = {
 };
 
 export type CheckResult = {
-  stat: Stat;
+  approachId?: string;
+  stat?: string;
   mode: CheckMode;
   reason: string;
-  rolls: [number, number];
+  rolls?: [number, number];
+  rollPairs?: Array<[number, number]>;
+  selectedRollPairIndex?: number;
   modifier: number;
   total: number;
   dc?: number;
@@ -1510,7 +1613,8 @@ export type CheckResult = {
 };
 
 export type PendingCheck = {
-  stat: Stat;
+  approachId?: string;
+  stat?: string;
   mode: CheckMode;
   reason: string;
   modifier: number;
@@ -1706,7 +1810,8 @@ export type CheckIntent =
   | {
       type: "challenge";
       reason: string;
-      challengeApproach: ChallengeApproach;
+      approachId?: string;
+      challengeApproach?: string;
       citedNpcId?: string;
       mode?: CheckMode;
     }
@@ -1714,7 +1819,8 @@ export type CheckIntent =
       type: "combat";
       reason: string;
       targetNpcId: string;
-      approach: CombatApproach;
+      approachId?: string;
+      approach?: string;
       mode?: CheckMode;
     };
 
@@ -1760,7 +1866,7 @@ export type MechanicsMutation =
     }
   | {
       type: "adjust_currency";
-      delta: CurrencyDenominations;
+      delta: number | LegacyCurrencyDenominations;
       reason: string;
       phase?: MutationPhase;
     }
@@ -1850,7 +1956,7 @@ export type MechanicsMutation =
       type: "transfer_assets";
       source: AssetHolderRef;
       destination: AssetHolderRef;
-      currencyAmount?: CurrencyDenominations;
+      currencyAmount?: number | LegacyCurrencyDenominations;
       itemInstanceIds?: string[];
       worldObjectIds?: string[];
       templateTransfers?: Array<{

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { buildDefaultCharacterFramework, characterFrameworkSchema } from "@/lib/game/character-framework";
 import { buildWorldGenerationScalePlan } from "@/lib/game/world-scale";
 import {
   buildAdjacency,
@@ -990,6 +991,7 @@ export const generatedWorldModuleSchema = z
     premise: z.string().trim().min(1),
     tone: z.string().trim().min(1),
     setting: z.string().trim().min(1),
+    characterFramework: characterFrameworkSchema.optional(),
     locations: z.array(locationSchema).min(4),
     edges: z.array(edgeSchema).min(4),
     factions: z.array(factionSchema).min(2),
@@ -1183,7 +1185,13 @@ export const generatedWorldModuleSchema = z
         ["entryPoints", index],
       );
     });
-  });
+  })
+  .transform((draft) => ({
+    ...draft,
+    characterFramework: draft.characterFramework ?? buildDefaultCharacterFramework(
+      draft.title.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "module",
+    ),
+  }));
 
 export const openWorldGenerationArtifactsSchema = z.object({
   prompt: z.string().trim().min(1),

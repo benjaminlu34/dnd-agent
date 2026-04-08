@@ -142,6 +142,10 @@ function hasTextualEconomicIdentity(location: GeneratedWorldModule["locations"][
   );
 }
 
+function hasDeliberateIndependence(location: GeneratedWorldModule["locations"][number]) {
+  return location.tags.some((tag) => tag.toLowerCase() === "independent");
+}
+
 function hasSomeExternallyReachableKnowledge(
   information: Array<{ accessibility: "public" | "guarded" | "secret" }>,
 ) {
@@ -719,6 +723,7 @@ export function validateWorldModuleImmersion(module: GeneratedWorldModule): Vali
       hasTextualEconomicIdentity(location);
     const hasFactionFootprint =
       location.controllingFactionId != null ||
+      hasDeliberateIndependence(location) ||
       module.npcs.some((npc) => npc.currentLocationId === location.id && npc.factionId != null);
 
     if (!hasNpc || !hasInformation) {

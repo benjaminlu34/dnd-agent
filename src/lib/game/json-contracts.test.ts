@@ -155,6 +155,7 @@ test("parseCampaignRuntimeStateJson normalizes legacy scene object state into pe
   assert.deepEqual(parsed.characterState, {
     conditions: [],
     activeCompanions: [],
+    maxVitality: null,
   });
 });
 

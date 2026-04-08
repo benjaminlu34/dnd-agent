@@ -1,7 +1,15 @@
-import type { CampaignCharacter, CheckMode, CheckOutcome, CheckResult, Stat } from "@/lib/game/types";
+import type { CheckMode, CheckOutcome, CheckResult } from "@/lib/game/types";
 
-function roll2d6() {
-  return Math.ceil(Math.random() * 6) + Math.ceil(Math.random() * 6);
+function rollDie() {
+  return Math.ceil(Math.random() * 6);
+}
+
+function rollPair(): [number, number] {
+  return [rollDie(), rollDie()];
+}
+
+function pairTotal(pair: [number, number]) {
+  return pair[0] + pair[1];
 }
 
 function outcomeForTotal(total: number): CheckOutcome {
@@ -17,23 +25,24 @@ function outcomeForTotal(total: number): CheckOutcome {
 }
 
 export function buildCheckResult(input: {
-  stat: Stat;
+  approachId: string;
   mode: CheckMode;
   reason: string;
   modifier: number;
-  rolls: [number, number];
+  rollPairs: Array<[number, number]>;
   dc?: number;
 }): CheckResult {
-  const [first, second] = input.rolls;
-  let chosen = first;
+  const [firstPair, secondPair] = input.rollPairs;
+  let selectedRollPairIndex = 0;
 
-  if (input.mode === "advantage") {
-    chosen = Math.max(first, second);
-  } else if (input.mode === "disadvantage") {
-    chosen = Math.min(first, second);
+  if (input.mode === "advantage" && secondPair && pairTotal(secondPair) > pairTotal(firstPair)) {
+    selectedRollPairIndex = 1;
+  } else if (input.mode === "disadvantage" && secondPair && pairTotal(secondPair) < pairTotal(firstPair)) {
+    selectedRollPairIndex = 1;
   }
 
-  const total = chosen + input.modifier;
+  const selectedTotal = pairTotal(input.rollPairs[selectedRollPairIndex]!);
+  const total = selectedTotal + input.modifier;
   const dc = input.dc;
   const outcome =
     typeof dc === "number"
@@ -45,10 +54,13 @@ export function buildCheckResult(input: {
       : outcomeForTotal(total);
 
   return {
-    stat: input.stat,
+    approachId: input.approachId,
+    stat: input.approachId,
     mode: input.mode,
     reason: input.reason,
-    rolls: input.rolls,
+    rolls: input.rollPairs[selectedRollPairIndex],
+    rollPairs: input.rollPairs,
+    selectedRollPairIndex,
     modifier: input.modifier,
     total,
     dc,
@@ -63,20 +75,23 @@ export function buildCheckResult(input: {
 }
 
 export function rollCheck(input: {
-  stat: Stat;
+  approachId: string;
   mode: CheckMode;
   reason: string;
-  character: CampaignCharacter;
+  modifier: number;
   dc?: number;
 }): CheckResult {
-  const first = roll2d6();
-  const second = roll2d6();
+  const rollPairs =
+    input.mode === "normal"
+      ? [rollPair()]
+      : [rollPair(), rollPair()];
+
   return buildCheckResult({
-    stat: input.stat,
+    approachId: input.approachId,
     mode: input.mode,
     reason: input.reason,
-    modifier: input.character.stats[input.stat],
-    rolls: [first, second],
+    modifier: input.modifier,
+    rollPairs,
     dc: input.dc,
   });
 }

@@ -54,10 +54,15 @@ export async function GET(request: Request) {
         send({ type: "progress", progress: existing });
       }
 
-      const unsubscribe = subscribeToDraftGenerationProgress(progressId, (progress) => {
+      let unsubscribe = () => {};
+      unsubscribe = subscribeToDraftGenerationProgress(progressId, (progress) => {
         send({ type: "progress", progress });
 
-        if (progress.status === "complete" || progress.status === "error") {
+        if (
+          progress.status === "complete"
+          || progress.status === "error"
+          || progress.status === "stopped"
+        ) {
           unsubscribe();
           closeStream();
         }

@@ -311,6 +311,50 @@ test("world spine location instructions emphasize inhabited present-tense life w
   assert.doesNotMatch(instructions, /being managed/i);
 });
 
+test("world spine location instructions enforce container-shaped places across tiers", () => {
+  const settlementInstructions = aiProviderTestUtils.buildWorldSpineLocationSuccessLines({
+    scaleTier: "settlement",
+    worldSpineScaleProfile: {
+      sourceScale: "settlement",
+      targetSemanticScale: "local",
+      detailMode: "street_level",
+      forbiddenDetailModes: ["single_room"],
+      launchableOutput: false,
+      expectsChildDescent: false,
+    },
+    worldSpineLocationTarget: 12,
+  }).join("\n");
+  const regionalInstructions = aiProviderTestUtils.buildWorldSpineLocationSuccessLines({
+    scaleTier: "regional",
+    worldSpineScaleProfile: {
+      sourceScale: "regional",
+      targetSemanticScale: "regional",
+      detailMode: "territorial",
+      forbiddenDetailModes: ["single_room"],
+      launchableOutput: false,
+      expectsChildDescent: false,
+    },
+    worldSpineLocationTarget: 12,
+  }).join("\n");
+  const worldInstructions = aiProviderTestUtils.buildWorldSpineLocationSuccessLines({
+    scaleTier: "world",
+    worldSpineScaleProfile: {
+      sourceScale: "world",
+      targetSemanticScale: "civilizational",
+      detailMode: "civilizational",
+      forbiddenDetailModes: ["single_room"],
+      launchableOutput: false,
+      expectsChildDescent: false,
+    },
+    worldSpineLocationTarget: 12,
+  }).join("\n");
+
+  assert.match(settlementInstructions, /Apply the container test before finalizing any location/i);
+  assert.match(settlementInstructions, /At settlement scale, avoid naming a node after one hall, hostel, inn, temple/i);
+  assert.match(regionalInstructions, /At regional scale, avoid naming a node after one hall, enclave, market building, ritual site/i);
+  assert.match(worldInstructions, /At world scale, avoid naming a node after one landmark, one route segment, one shrine, one ruin/i);
+});
+
 test("world spine batch instructions stay scale-aware outside world tier", () => {
   const regionalLines = aiProviderTestUtils.buildWorldSpineBatchFinalInstructionLines({
     scaleTier: "regional",
@@ -325,13 +369,17 @@ test("world spine batch instructions stay scale-aware outside world tier", () =>
 
   assert.match(regionalLines, /Generate major regional locations/i);
   assert.doesNotMatch(regionalLines, /Generate major world locations/i);
+  assert.match(regionalLines, /keep them as valid current-scale containers rather than event slots, queue-scenes, rotating markets, single landmarks, compounds, sanctuaries, or one-incident aftermaths/i);
   assert.match(settlementLines, /Generate major local locations/i);
   assert.doesNotMatch(settlementLines, /Generate major world locations/i);
+  assert.match(settlementLines, /If a location is special because of an auction, queue, bell, ritual, archive, ruin, sanctuary, or market-night/i);
 });
 
 test("critique instruction helpers include the new inertness, role-shell, and static-fact checks", () => {
   const worldBibleCritique = aiProviderTestUtils.buildWorldBibleCritiqueInstructions();
   const worldSpineCritique = aiProviderTestUtils.buildWorldSpineScaleCritiqueInstructions("regional");
+  const settlementWorldSpineCritique = aiProviderTestUtils.buildWorldSpineScaleCritiqueInstructions("settlement");
+  const worldScaleWorldSpineCritique = aiProviderTestUtils.buildWorldSpineScaleCritiqueInstructions("world");
   const socialCritique = aiProviderTestUtils.buildSocialCastScaleCritiqueInstructions("settlement");
   const knowledgeCritique = aiProviderTestUtils.buildKnowledgeWebCritiqueInstructions();
 
@@ -339,7 +387,11 @@ test("critique instruction helpers include the new inertness, role-shell, and st
   assert.match(worldBibleCritique.finalInstruction.join("\n"), /do not require overt drama, emergencies, or scripted events/i);
 
   assert.match(worldSpineCritique.finalInstruction.join("\n"), /postcard-like locations/i);
+  assert.match(worldSpineCritique.finalInstruction.join("\n"), /timed event, recurring queue, rotating market, single ceremony, one-off incident aftermath, or one special venue/i);
   assert.match(worldSpineCritique.finalInstruction.join("\n"), /Do not penalize a location merely for being stable, prosperous, ceremonially important, fertile, quiet, or socially central/i);
+  assert.match(settlementWorldSpineCritique.system.join("\n"), /single building, hall, hostel, temple, chamber, tower, compound/i);
+  assert.match(settlementWorldSpineCritique.system.join("\n"), /queue, market-night, auction ground, ritual time window, sanctuary compound, single-community enclave, single-function corridor, or single-incident site/i);
+  assert.match(worldScaleWorldSpineCritique.system.join("\n"), /single landmark, route segment, wonder, crater, shrine, ruin, island, or hazard pocket/i);
 
   assert.match(socialCritique.finalInstruction.join("\n"), /job shell/i);
   assert.match(socialCritique.finalInstruction.join("\n"), /private stake/i);
@@ -362,9 +414,20 @@ test("scale fallback correction notes stay on the requested tier", () => {
   const settlementSocialFallback = aiProviderTestUtils.buildSocialCastScaleFallbackCorrectionNotes(
     "settlement",
   ).join("\n");
+  const settlementWorldSpineFallback = aiProviderTestUtils.buildWorldSpineScaleFallbackCorrectionNotes(
+    "settlement",
+    [
+      {
+        name: "Council Hall Silver Doors",
+      } as Parameters<typeof aiProviderTestUtils.buildWorldSpineScaleFallbackCorrectionNotes>[1][number],
+    ],
+  ).join("\n");
 
   assert.match(regionalWorldSpineFallback, /regional scale/i);
   assert.doesNotMatch(regionalWorldSpineFallback, /world scale/i);
+  assert.match(regionalWorldSpineFallback, /If the current name reads like a building, enclave, hall, facility, or isolated site/i);
+  assert.match(settlementWorldSpineFallback, /If the current concept is mainly a queue, auction, market-night, bell, sanctuary, one recurring ritual, one special venue, or the aftermath of one incident/i);
+  assert.match(settlementWorldSpineFallback, /If the current name reads like a hall, hostel, temple, pump house, chamber, tower, office, or single establishment/i);
   assert.match(settlementSocialFallback, /settlement scale/i);
   assert.doesNotMatch(settlementSocialFallback, /At world scale/i);
 });
@@ -398,6 +461,18 @@ test("regional life and knowledge threads schemas allow calmer optional arrays",
   assert.equal(knowledgeThreadsParsed.success, true);
 });
 
+test("regional life helpers push for varied organizing logics instead of one pressure pattern", () => {
+  const settlementLines = aiProviderTestUtils.buildRegionalLifeTextureBalanceLines("settlement").join("\n");
+  const critiqueInstructions = aiProviderTestUtils.buildRegionalLifeCritiqueInstructions();
+  const fallbackNotes = aiProviderTestUtils.buildRegionalLifeFallbackCorrectionNotes().join("\n");
+
+  assert.match(settlementLines, /vary what daily life is organized around/i);
+  assert.match(critiqueInstructions.system.join("\n"), /Judge batch-level variety in organizing logic and lived texture/i);
+  assert.match(critiqueInstructions.finalInstruction.join("\n"), /all read primarily like inspection points, extraction zones, ration systems, checkpoint corridors, containment sites, or failure-response systems/i);
+  assert.match(fallbackNotes, /Diversify the organizing logic across the batch/i);
+  assert.match(fallbackNotes, /let some locations be primarily legible through trade, craft, hospitality, devotion, prestige, leisure, neighborhood routine, beauty, or ordinary service/i);
+});
+
 test("knowledge-web truncation recovery no longer forces one node per location", () => {
   const issues = aiProviderTestUtils.buildStageTruncationRecoveryIssues("knowledge_web").join("\n");
 
@@ -410,12 +485,18 @@ test("prompt-intent system prompt does not seed intent guardrails before inferen
     stage: "prompt_intent",
     scaleTier: "world",
     userPrompt: "A masked court drifting through impossible mirrors.",
-    successLines: ["Infer only the prompt's generation intent."],
+    successLines: [
+      "Infer only the prompt's generation intent.",
+      ...aiProviderTestUtils.buildPromptIntentInferenceRubricLines(),
+    ],
   });
 
   assert.doesNotMatch(systemPrompt, /Prompt intent guardrails:/);
-  assert.doesNotMatch(systemPrompt, /institutional/);
+  assert.doesNotMatch(systemPrompt, /Preserve the prompt's dominant texture modes:/);
   assert.match(systemPrompt, /Current stage: prompt_intent\./);
+  assert.match(systemPrompt, /Texture mode examples: magical_everyday = magic embedded in routine labor/i);
+  assert.match(systemPrompt, /Do not choose domestic_intimate merely because a prompt asks for everyday life/i);
+  assert.match(systemPrompt, /For socialEmphasis, choose public_systems when civic order, institutions, markets, or formal public interfaces dominate/i);
 });
 
 test("resume invalidation restarts worldgen from prompt_intent when prompt architecture version is stale", () => {
@@ -580,6 +661,89 @@ test("resume invalidation restarts worldgen from prompt_intent when prompt archi
   assert.equal(normalized.generationStatus, "running");
   assert.deepEqual(normalized.attempts, []);
   assert.deepEqual(normalized.validationReports, []);
+});
+
+test("normalizeWorldGenerationResumeCheckpoint preserves the failed stage for a stopped checkpoint", () => {
+  const stoppedCheckpoint: OpenWorldGenerationCheckpoint = {
+    prompt: "A crossroads city held together by old warding bells.",
+    model: "openrouter/test",
+    createdAt: "2026-04-07T00:00:00.000Z",
+    scaleTier: "regional",
+    scalePlan: {} as OpenWorldGenerationCheckpoint["scalePlan"],
+    promptArchitectureVersion: aiProviderTestUtils.CURRENT_PROMPT_ARCHITECTURE_VERSION,
+    promptIntentProfile: {
+      primaryTextureModes: ["institutional"],
+      primaryCausalLogic: "mixed",
+      magicIntegration: "integrated",
+      socialEmphasis: "public_systems",
+      confidence: "medium",
+    },
+    generationStatus: "stopped",
+    failedStage: "regional_life",
+    completedStages: ["prompt_intent", "world_bible", "world_spine"],
+    lastGenerationError: "World generation stopped by user request.",
+    stageArtifacts: {
+      prompt_intent: {
+        primaryTextureModes: ["institutional"],
+        primaryCausalLogic: "mixed",
+        magicIntegration: "integrated",
+        socialEmphasis: "public_systems",
+        confidence: "medium",
+      },
+      world_bible: {
+        title: "Bellward",
+        premise: "A ward-city waits for the next toll.",
+        tone: "Measured",
+        setting: "A ritual trade corridor",
+        groundLevelReality: "The bells order work, travel, and public speech.",
+        widespreadBurdens: ["Ward timing is never optional."],
+        presentScars: ["Old bell towers still show blast scoring."],
+        sharedRealities: ["Everyone watches the tower lights before crossing districts."],
+        explanationThreads: [],
+        everydayLife: {
+          survival: "Work follows the bells.",
+          institutions: ["Tower wardens"],
+          fears: ["Mistimed crossings"],
+          wants: ["Reliable routes"],
+          trade: ["Bell metal"],
+          gossip: ["The south bell skips a breath before storms."],
+        },
+      },
+      world_spine: {
+        locations: [],
+        edges: [],
+        factions: [],
+        factionRelations: [],
+      },
+    },
+    attempts: [],
+    validationReports: [],
+    idMaps: {
+      factions: {},
+      locations: {},
+      edges: {},
+      factionRelations: {},
+      npcs: {},
+      information: {},
+      commodities: {},
+    },
+    stageSummaries: {
+      prompt_intent: "Intent locked.",
+      world_bible: "Bellward set.",
+      world_spine: "Core map set.",
+    },
+  };
+
+  const normalized = aiProviderTestUtils.normalizeWorldGenerationResumeCheckpoint({
+    resumeCheckpoint: stoppedCheckpoint,
+    prompt: stoppedCheckpoint.prompt,
+    scaleTier: stoppedCheckpoint.scaleTier,
+    model: stoppedCheckpoint.model,
+  });
+
+  assert.equal(normalized.failedStage, "regional_life");
+  assert.equal(normalized.generationStatus, "stopped");
+  assert.deepEqual(normalized.completedStages, ["prompt_intent", "world_bible", "world_spine"]);
 });
 
 test("knowledge-web validation allows guarded ceremonial knowledge without public-action quotas", () => {

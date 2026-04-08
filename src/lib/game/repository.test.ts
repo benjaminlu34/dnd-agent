@@ -243,6 +243,7 @@ test("toRouterInventorySummary aggregates quantity and omits removed inventory e
     templateId: "char_1",
     health: 12,
     currencyCp: 300,
+    frameworkValues: {},
     commodityStacks: [],
     inventory: [
       {
@@ -356,6 +357,7 @@ test("deriveDiscoveryScope includes the destination parent region while travelin
         templateId: "char_1",
         health: 12,
         currencyCp: 0,
+        frameworkValues: {},
         commodityStacks: [],
         inventory: [],
       } satisfies CharacterInstance,

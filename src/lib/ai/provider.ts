@@ -4,12 +4,14 @@ import OpenAI from "openai";
 import { z } from "zod";
 import { env } from "@/lib/env";
 import {
-  COPPER_PER_GOLD,
-  COPPER_PER_PLATINUM,
-  COPPER_PER_SILVER,
   currencyDenominationsSchema,
 } from "@/lib/game/currency";
-import { characterTemplateDraftSchema } from "@/lib/game/characters";
+import { characterFrameworkSchema, compileCharacterFramework } from "@/lib/game/character-framework";
+import {
+  buildCharacterTemplateDraftSchema,
+  characterConceptDraftSchema,
+  characterTemplateDraftSchema,
+} from "@/lib/game/characters";
 import { MAX_STARTER_ITEMS, normalizeItemNameList } from "@/lib/game/item-utils";
 import { canonicalizeNpcIdAgainstCandidates } from "@/lib/game/npc-identity";
 import {
@@ -29,8 +31,10 @@ import {
 import type {
   CampaignCharacter,
   CheckResult,
+  CharacterFramework,
   CharacterTemplate,
   CharacterTemplateDraft,
+  CharacterConceptDraft,
   GeneratedDailySchedule,
   GeneratedCampaignOpening,
   CheckpointableWorldGenerationStageName,
@@ -1052,7 +1056,7 @@ function normalizeWorldGenerationResumeCheckpoint(input: {
     (stage) => checkpoint.stageArtifacts[stage] !== undefined,
   );
   checkpoint.failedStage =
-    checkpoint.generationStatus === "failed"
+    checkpoint.generationStatus === "failed" || checkpoint.generationStatus === "stopped"
       ? checkpoint.failedStage ?? firstMissingStage
       : null;
 
@@ -1175,18 +1179,50 @@ function buildRegionalLifeTextureBalanceLines(scaleTier: WorldScaleTier) {
       return [
         "Use everydayTexture, gossip, ordinaryKnowledge, and reasonsToLinger to show habits, craft, humor, hospitality, leisure, beauty, or social rhythm alongside pressure.",
         "Not every entry needs a looming shortage, raid, or administrative burden; some should simply show how local life works when people are competent, proud, or enjoying a routine.",
+        "Across a batch, vary what daily life is organized around: some places may center exchange, craft, devotion, prestige, service, neighborhood habit, or ordinary sociability rather than every location revolving around inspection, extraction, rationing, checkpointing, or institutional failure.",
       ];
     case "regional":
       return [
         "Use everydayTexture, gossip, ordinaryKnowledge, and reasonsToLinger to show foodways, forest or river custom, seasonal rhythm, local pride, ceremonial life, and craft identity alongside pressure.",
         "Not every entry needs a looming shortage, toll dispute, or failure mode; some should simply show how regional life works when roads hold, fairs gather, crews know their work, or local custom is functioning.",
+        "Across a batch, vary what daily life is organized around: some places may center exchange, hospitality, ritual, craft production, teaching, prestige, or seasonal custom rather than every location revolving around enforcement, extraction, or systemic strain.",
       ];
     case "world":
       return [
         "At world scale, use region-level routines, customs, admired practices, seasonal rhythms, and public prestige to keep the lived texture broader than pure crisis reporting.",
         "Not every entry needs a looming shortage or breakdown; some should simply show how world-scale public life works when systems, rituals, or exchange networks are functioning as intended.",
+        "Across a batch, vary what public life is organized around: some entries may be most legible through trade, pilgrimage, ceremony, learning, abundance, or prestige rather than every region reading like administration under stress.",
       ];
   }
+}
+
+function buildRegionalLifeCritiqueInstructions() {
+  return {
+    system: [
+      "You are a strict structured critique pass for regional-life batches.",
+      "Judge batch-level variety in organizing logic and lived texture, not prose flair alone.",
+      "Distinct locations can be shaped by trade, craft, hospitality, devotion, prestige, leisure, domestic routine, hazard adaptation, neighborhood custom, public service, learning, or pressure.",
+      "Do not penalize danger, ritual, administration, or scarcity when appropriate; only flag them when they monopolize what daily life is for several entries or erase other meaningful reasons people gather, linger, work, trade, celebrate, or take pride there.",
+    ],
+    finalInstruction: [
+      "Return revise only if several entries flatten away from the prompt's intended texture into the same narrow house style.",
+      "Flag only clear over-concentration, scale drift, or texture loss, not isolated examples of pressure or ceremony.",
+      "Prefer accept when locations differ meaningfully in what organizes daily life, even if several still contain danger, ritual, or institutional pressure.",
+      "Flag when multiple entries in the batch all read primarily like inspection points, extraction zones, ration systems, checkpoint corridors, containment sites, or failure-response systems despite different nouns.",
+      "Flag when a location's publicActivity, localPressure, everydayTexture, reasonsToLinger, and routineSeeds all orbit the same single burden with little evidence of commerce, craft, sociability, devotion, hospitality, beauty, learning, neighborhood custom, or another distinct social logic.",
+      "Correction notes should tell the generator how to diversify organizing logics across the batch without discarding prompt-native pressure.",
+    ],
+  };
+}
+
+function buildRegionalLifeFallbackCorrectionNotes() {
+  return [
+    "Diversify the organizing logic across the batch instead of rewriting every location around the same kind of inspection, extraction, rationing, checkpoint, containment, or institutional failure pattern.",
+    "Keep prompt-native pressure, but let some locations be primarily legible through trade, craft, hospitality, devotion, prestige, leisure, neighborhood routine, beauty, or ordinary service rather than pure crisis administration.",
+    "For each flagged location, ask what residents would still notice, do, buy, repair, celebrate, avoid, or take pride in on an ordinary day even if the current pressure eased, then make that part of the entry's core identity.",
+    "Use localPressure as one dimension rather than the whole identity; everydayTexture, reasonsToLinger, gossip, and routineSeeds should reveal at least one meaningful non-pressure social rhythm.",
+    "Across the batch, vary what organizes life so the locations do not all feel like versions of the same bureaucracy, ritual enforcement loop, hazard-processing site, or resource triage system.",
+  ];
 }
 
 function buildSocialCastTextureBalanceLines(scaleTier: WorldScaleTier) {
@@ -1272,11 +1308,15 @@ function buildWorldSpineLocationSuccessLines(input: {
     "Each controlled location must visibly express who profits, patronizes, governs, reveres, guards, organizes life there, or depends on it.",
     `This world should finish with ${input.worldSpineLocationTarget} total locations, returned in batches of ${WORLD_SPINE_LOCATION_BATCH_SIZE}.`,
     "Every generated key must be 40 characters or fewer.",
+    "Apply the container test before finalizing any location: it must name and describe a map-usable place people can move through, return to, orient by, and organize activity around at the current scale, not just the most famous building, room, business, landmark, institution, or scenic focal point inside it.",
+    "If a concept begins with a hall, hostel, council chamber, embassy, market building, temple, pump house, archive, inn, gate, tower, fort, compound, ruin, or other named site, widen the output to the surrounding ward, quarter, district, harbor edge, corridor, frontier, basin, marches, or other larger container that daily life spills across.",
+    "Name locations as containers first. Favor names that read like districts, wards, quarters, corridors, harbors, basins, frontiers, belts, marches, precincts, or other place-containers over names that read like a single hall, house, shop, chamber, court, shrine, tower, office, or compound.",
     "Set usageProfile to everyday for routine public/work/travel nodes residents regularly rely on, or special for ceremonial, remote, risky, prestigious, private, or otherwise non-routine destinations.",
     "Use usageProfile as composition guidance, not a quota target.",
     "Preserve the prompt's specific imagery and avoid generic city, ruin, or temple reskins.",
     input.scaleTier === "world"
       ? [
+          "At world scale, avoid naming a node after one landmark, one route segment, one shrine, one ruin, one island, or one hazard pocket. Name and describe the larger macro-region, corridor world, sacred geography, maritime sphere, frontier expanse, or polity that contains and lives with that focal point.",
           "At world scale, locations must be macro containers such as regions, civilizations, frontier expanses, oceanic corridors, pilgrimage belts, sacred geographies, maritime worlds, or macro-polities rather than taverns, streets, or single buildings.",
           "Use this container test: every world-scale location must be something large populations can inhabit, cross, administer, tax, defend, ritualize, trade through, or otherwise organize life around at continental scale.",
           "If a concept is mainly a scar, weather system, landmark, chokepoint, hazard, route, shrine, court, or wonder, output the larger marches, basin, coast, corridor world, ritual belt, dominion, or region organized around living with, crossing, exploiting, revering, or adapting to it.",
@@ -1284,10 +1324,14 @@ function buildWorldSpineLocationSuccessLines(input: {
         ].join(" ")
       : input.scaleTier === "regional"
         ? [
+            "At regional scale, avoid naming a node after one hall, enclave, market building, ritual site, embassy compound, archive, mine, or fort unless the name clearly refers to the wider territory people cross and depend on.",
             "At regional scale, if a concept starts as one notable site, institution, ceremonial focus, ruin, industrial facility, court, archive, or military installation, widen it into the broader district, belt, corridor, marches, hinterland, or surrounding territory around it.",
             "Do not output a single compound, shrine, grove, yard, camp, court, archive, mint, barracks, or isolated ruin as a top-level regional spine node unless it is clearly framed as the larger surrounding territory people travel through, maintain, contest, inhabit, or govern across.",
           ].join(" ")
-        : "Stay appropriate to the chosen scale; do not collapse into single-room or single-business micro geography unless the stage scale allows it.",
+        : [
+            "At settlement scale, avoid naming a node after one hall, hostel, inn, temple, council chamber, tower, embassy building, pump house, guild office, or market stall unless the name clearly refers to the broader ward, quarter, precinct, plaza network, harbor edge, bridgehead, or civic zone around it.",
+            "A valid settlement node should still function as a local map container: a district, ward, quarter, harbor edge, bazaar belt, gate approach, civic precinct, rooftop neighborhood, or other local area people can navigate across rather than just enter.",
+          ].join(" "),
     "Keep descriptions concise enough for structured output, but leave room for a distinctive sensory, social, ritual, ecological, or systemic detail when it makes the location more memorable.",
   ];
 }
@@ -1321,6 +1365,7 @@ function buildWorldSpineScaleCritiqueInstructions(scaleTier: WorldScaleTier) {
     "Do not penalize a location merely for being stable, prosperous, ceremonially important, fertile, quiet, or socially central rather than crisis-driven.",
     "Flag postcard-like locations that feel inert, scenic, or static overall instead of inhabited, used, or organized around an ongoing public reality at the stated scale.",
     "Do not require event hooks, emergencies, or dramatic situations to make a location count as active.",
+    "Flag locations whose main identity is still a timed event, recurring queue, rotating market, single ceremony, one-off incident aftermath, or one special venue rather than the broader place organized around it.",
   ];
 
   switch (scaleTier) {
@@ -1330,7 +1375,9 @@ function buildWorldSpineScaleCritiqueInstructions(scaleTier: WorldScaleTier) {
           "You are a strict structured critique pass for settlement-scale world spine locations.",
           "Judge semantic scale and lived present-tense inhabitation, not prose flair.",
           "A valid settlement-scale spine location should read like a district, ward, quarter, harbor, civic hub, chokepoint, or other major urban/local sub-place people navigate between.",
+          "Reject locations whose name or framing still centers a single building, hall, hostel, temple, chamber, tower, compound, or standalone establishment instead of the broader local container around it.",
           "Flag locations that read like a single room, single business, private interior, stall, counter, scene prop, or scenic postcard with no ongoing public use or local adaptation.",
+          "Flag locations whose primary shape is still a queue, market-night, auction ground, ritual time window, sanctuary compound, single-community enclave, single-function corridor, or single-incident site rather than a mixed or clearly navigable local container.",
           "Do not invent new locations. Evaluate only the provided ones.",
         ],
         finalInstruction: [
@@ -1347,8 +1394,10 @@ function buildWorldSpineScaleCritiqueInstructions(scaleTier: WorldScaleTier) {
           "You are a strict structured critique pass for regional-scale world spine locations.",
           "Judge semantic scale and lived present-tense inhabitation, not prose flair.",
           "A valid regional-scale spine location should read like a city, frontier, pass, basin, coast, corridor, marches, stronghold-territory, or other territorial place people travel between across a region.",
+          "Reject locations whose name or framing still centers a single building, enclave, embassy, market hall, archive, ritual site, industrial facility, or isolated compound instead of the wider territorial container around it.",
           "If a concept begins as one notable site, institution, ruin, ceremonial focus, industrial facility, or military installation, it is valid only when widened into the broader district, belt, corridor, marches, hinterland, or surrounding territory organized around that site.",
           "Flag locations that read like a single room, single business, tiny neighborhood fragment, isolated compound, scenic postcard, or conversely like a whole world, total cosmology, or full civilizational sphere.",
+          "Flag locations whose primary shape is still a timed event zone, single ceremonial venue, isolated research camp, one special enclave, or one-incident scar rather than a territorial container people repeatedly cross, inhabit, maintain, or contest.",
           "Do not invent new locations. Evaluate only the provided ones.",
         ],
         finalInstruction: [
@@ -1365,7 +1414,9 @@ function buildWorldSpineScaleCritiqueInstructions(scaleTier: WorldScaleTier) {
           "You are a strict structured critique pass for world-scale world spine locations.",
           "Judge semantic scale and lived present-tense inhabitation, not prose flair.",
           "A valid world-scale spine location should read like a macro container: a region, civilization, frontier, dominion, archipelago, corridor world, basin-region, marches, sacred geography, pilgrimage belt, maritime world, or macro-polity.",
+          "Reject locations whose name or framing still centers a single landmark, route segment, wonder, crater, shrine, ruin, island, or hazard pocket instead of the wider macro container around it.",
           "Flag locations that read like a single site, encounter area, scenic sub-zone, one-off hazard pocket, postcard wonder, or adventure destination rather than a macro container people can inhabit, cross, trade through, ritualize, or organize life around.",
+          "Flag locations whose primary shape is still a timed pilgrimage stop, single ceremonial venue, one ruin complex, or one special enclave rather than the larger macro geography organized around it.",
           "Do not invent new locations. Evaluate only the provided ones.",
         ],
         finalInstruction: [
@@ -1476,7 +1527,8 @@ function buildWorldSpineBatchFinalInstructionLines(input: {
       : input.scaleTier === "regional"
         ? "Generate major regional locations, not individual businesses, ordinary rooms, or routine storefronts."
         : "Generate major local locations, not individual businesses, ordinary rooms, or routine storefronts.",
-    "If recent batches skew too routine, use this batch to introduce ceremonial, prestigious, hidden, remote, risky, ecologically strange, or otherwise non-routine locations people approach for a specific reason.",
+    "If recent batches skew too routine, use this batch to introduce ceremonial, prestigious, hidden, remote, risky, ecologically strange, or otherwise non-routine locations people approach for a specific reason, but keep them as valid current-scale containers rather than event slots, queue-scenes, rotating markets, single landmarks, compounds, sanctuaries, or one-incident aftermaths.",
+    "If a location is special because of an auction, queue, bell, ritual, archive, ruin, sanctuary, or market-night, name the broader ward, quarter, corridor, harbor edge, district, territory, or macro-region organized around that recurring activity rather than the timed activity or landmark by itself.",
     "If recent batches skew too exceptional, use this batch to restore some routine public, work, travel, or socially central anchors.",
   ];
 }
@@ -1607,6 +1659,7 @@ function buildWorldSpineScaleFallbackCorrectionNotes(
         ? `Revise these locations so they become proper regional containers instead of isolated sites or tiny fragments: ${quotedNames}.`
         : "Revise any flagged locations so they become proper regional containers instead of isolated sites or tiny fragments.",
       "Keep the core concept, but widen or right-size it into the broader district, belt, corridor, marches, hinterland, route zone, or surrounding territory organized around that place.",
+      "If the current name reads like a building, enclave, hall, facility, or isolated site, rename it to the larger container people actually traverse and orient by.",
       "Do not output a single room, business, compound, shrine, grove, mint, barracks, archive, scenic backdrop, or tiny neighborhood fragment as a top-level regional spine node.",
     ];
   }
@@ -1617,7 +1670,9 @@ function buildWorldSpineScaleFallbackCorrectionNotes(
       ? `Revise these locations so they become usable settlement-scale places instead of rooms, stalls, or tiny scene fragments: ${quotedNames}.`
       : "Revise any flagged locations so they become usable settlement-scale places instead of rooms, stalls, or tiny scene fragments.",
     "Keep the core concept, but widen or right-size it into a district, ward, market front, harbor edge, civic yard, or other local place with ongoing public use.",
-    "Do not output a private interior, single counter, single shop stall, or decorative vignette as a top-level settlement spine node.",
+    "If the current concept is mainly a queue, auction, market-night, bell, sanctuary, one recurring ritual, one special venue, or the aftermath of one incident, rename and rewrite it as the surrounding neighborhood, precinct, quarter, or corridor people navigate through every day.",
+    "If the current name reads like a hall, hostel, temple, pump house, chamber, tower, office, or single establishment, rename it to the surrounding ward, quarter, precinct, approach, or neighborhood that contains it.",
+    "Do not output a private interior, single counter, single shop stall, decorative vignette, single-community compound, or event-shaped scene as a top-level settlement spine node.",
   ];
 }
 
@@ -1831,22 +1886,16 @@ async function critiqueRegionalLifeWithModel(input: {
   }
 
   try {
+    const instructions = buildRegionalLifeCritiqueInstructions();
     const response = await runCompletion({
       model: critiqueModel,
       temperature: 0.1,
       maxTokens: 900,
-      system: [
-        "You are a strict structured critique pass for regional-life batches.",
-        "Judge whether the outputs preserve varied lived texture at the requested scale instead of collapsing into one administrative scarcity house style.",
-        "Do not penalize concrete pressure when it is appropriate; only flag flattening, repetition, or loss of social texture.",
-      ].join("\n"),
+      system: instructions.system.join("\n"),
       user: [
         ...buildCritiqueContextBlocks(input),
         formatPromptBlock("locations", input.locations),
-        formatFinalInstruction([
-          "Return revise only if several entries flatten away from the prompt's intended texture into the same narrow house style.",
-          "Flag only clear over-concentration, scale drift, or texture loss, not isolated examples of pressure or ceremony.",
-        ]),
+        formatFinalInstruction(instructions.finalInstruction),
       ].join("\n\n"),
       tools: [regionalLifeCritiqueTool],
     });
@@ -1861,7 +1910,9 @@ async function critiqueRegionalLifeWithModel(input: {
       issues: parsed.data.fieldIssues.map(
         (issue) => `${scaleLabel(input.scaleTier)} regional life ${issue.locationId} ${issue.issue}.`,
       ),
-      correctionNotes: parsed.data.correctionNotes,
+      correctionNotes: parsed.data.correctionNotes.length
+        ? parsed.data.correctionNotes
+        : buildRegionalLifeFallbackCorrectionNotes(),
     };
   } catch (error) {
     logOpenRouterResponse("regional_life.critique_error", {
@@ -2027,11 +2078,16 @@ function createStructuredTool(
   description: string,
   schema: z.ZodTypeAny,
 ): StructuredTool {
-  return {
-    name,
-    description,
-    input_schema: z.toJSONSchema(schema),
-  };
+  try {
+    return {
+      name,
+      description,
+      input_schema: z.toJSONSchema(schema),
+    };
+  } catch (error) {
+    console.error(`Failed to create JSON schema for tool ${name}:`, error);
+    throw error;
+  }
 }
 
 function slugify(value: string, maxLength = 40) {
@@ -2805,6 +2861,29 @@ function buildWorldGenSystemPrompt(input: {
   ].join("\n");
 }
 
+function buildPromptIntentInferenceRubricLines() {
+  return [
+    "Texture mode examples: institutional = councils, ministries, registries, courts, guilds, bureaucracy, public procedure, or formal administration.",
+    "Texture mode examples: magical_everyday = magic embedded in routine labor, transport, trade, agriculture, utilities, maintenance, medicine, public safety, or ordinary adaptation.",
+    "Texture mode examples: ritual_ceremonial = repeated rites, festivals, processions, oath forms, observances, sacred timing, formal offerings, or publicly legible symbolic practice.",
+    "Texture mode examples: courtly_status = rank display, etiquette, patronage, regalia, audience ritual, prestige anxiety, succession manners, or status competition.",
+    "Texture mode examples: domestic_intimate = households, kinship, caregiving, courtship, family obligations, cohabitation, hearth routines, or private emotional dependency.",
+    "Texture mode examples: mercantile_exchange = trade routes, bargaining, tariffs, markets, contracts, merchant rivalry, logistics, debt, or commercial interdependence.",
+    "Texture mode examples: criminal_shadow = smuggling, illicit brokerage, hidden coercion, black markets, extortion, covert violence, underworld favors, or deniable operations.",
+    "Texture mode examples: occult_scholastic = archives, forbidden study, interpreters, scholars, translators, codices, esoteric investigation, or learned secrecy.",
+    "Texture mode examples: frontier_survival = scarce shelter, exposure, extraction risk, rough logistics, contested margins, improvised safety, or harsh environmental adaptation.",
+    "Texture mode examples: pastoral_seasonal = herding, planting, harvest rhythms, weather dependence, local husbandry, village custom, or seasonal subsistence patterns.",
+    "Texture mode examples: mythic = legendary causality, divine precedent, heroic inheritance, sacred fate, or reality interpreted through mythic exemplars.",
+    "Texture mode examples: surreal = dream logic, unstable identity, impossible space, uncanny transformation, or reality behaving with deliberate strangeness.",
+    "Do not choose domestic_intimate merely because a prompt asks for everyday life, ordinary routines, or a lived-in setting; reserve it for prompts where household, kinship, intimacy, or private domestic obligations are central.",
+    "Prefer magical_everyday when magic operates as routine infrastructure or ordinary practice rather than isolated spectacle.",
+    "Prefer ritual_ceremonial when public formality, observance, procession, oath, or symbolic timing is one of the prompt's strongest surface textures.",
+    "Prefer courtly_status when hierarchy, etiquette, patronage, regalia, or prestige display drives the social feel.",
+    "For socialEmphasis, choose public_systems when civic order, institutions, markets, or formal public interfaces dominate; choose private_networks when family, household, patronage, secrecy, or personal ties dominate; choose mixed when both clearly matter.",
+    "For magicIntegration, choose subdued when magic is rare or peripheral, integrated when it shapes normal life and institutions, and spectacular when it dominates the prompt's visible scale and awe.",
+  ];
+}
+
 function buildWorldGenerationBasePrompt(input: {
   prompt: string;
   promptIntentProfile?: PromptIntentProfile;
@@ -3260,6 +3339,17 @@ function formatReservedNamesBlock(
   return formatPromptBlock(tag, `${label}: ${reserved.join(", ")}`);
 }
 
+class WorldGenerationStoppedError extends Error {
+  constructor(message = "World generation stopped by user request.") {
+    super(message);
+    this.name = "WorldGenerationStoppedError";
+  }
+}
+
+export function isWorldGenerationStoppedError(error: unknown): error is Error {
+  return error instanceof WorldGenerationStoppedError;
+}
+
 async function runStructuredStage<T>({
   stage,
   system,
@@ -3274,6 +3364,7 @@ async function runStructuredStage<T>({
   validate,
   summarize,
   normalizeInput,
+  shouldStop,
 }: {
   stage: WorldGenerationStageName;
   system: string;
@@ -3288,6 +3379,7 @@ async function runStructuredStage<T>({
   validate?: (parsed: T) => StageValidation[] | Promise<StageValidation[]>;
   summarize?: (parsed: T) => string;
   normalizeInput?: (input: unknown) => unknown;
+  shouldStop?: () => boolean;
 }): Promise<T> {
   let correctionNotes: string | null = null;
   const maxAttempts = getMaxWorldStageAttempts(stage);
@@ -3295,6 +3387,10 @@ async function runStructuredStage<T>({
   const resolvedPromptIntentProfile = promptIntentProfile ?? DEFAULT_PROMPT_INTENT_PROFILE;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    if (shouldStop?.()) {
+      throw new WorldGenerationStoppedError();
+    }
+
     logOpenRouterResponse(`${stage}.attempt`, {
       stage,
       attempt,
@@ -3315,6 +3411,10 @@ async function runStructuredStage<T>({
       correctionNotes,
       completedAt: new Date().toISOString(),
     });
+
+    if (shouldStop?.()) {
+      throw new WorldGenerationStoppedError();
+    }
 
     logOpenRouterResponse(`${stage}.raw_input`, {
       attempt,
@@ -4034,22 +4134,70 @@ const routerDecisionSchema = z.object({
   attention: routerAttentionSchema,
 });
 
-const checkIntentSchema = z.discriminatedUnion("type", [
-  z.object({
-    type: z.literal("challenge"),
-    reason: z.string().trim().min(1).max(240),
-    challengeApproach: z.enum(["force", "finesse", "endure", "analyze", "notice", "influence"]),
-    citedNpcId: z.string().trim().min(1).optional(),
-    mode: z.enum(["normal", "advantage", "disadvantage"]).optional(),
-  }),
-  z.object({
-    type: z.literal("combat"),
-    reason: z.string().trim().min(1).max(240),
-    targetNpcId: z.string().trim().min(1),
-    approach: z.enum(["attack", "subdue", "assassinate"]),
-    mode: z.enum(["normal", "advantage", "disadvantage"]).optional(),
-  }),
-]);
+const LEGACY_APPROACH_IDS = [
+  "force",
+  "finesse",
+  "endure",
+  "analyze",
+  "notice",
+  "influence",
+] as const;
+
+function buildApproachIdSchema(approachIds?: string[]) {
+  const ids = Array.from(new Set(
+    (approachIds?.length ? approachIds : [...LEGACY_APPROACH_IDS])
+      .map((value) => value.trim())
+      .filter(Boolean),
+  ));
+
+  if (ids.length === 0) {
+    return z.string().trim().min(1);
+  }
+
+  const [firstId, ...restIds] = ids;
+  return z.enum([firstId, ...restIds]);
+}
+
+function buildCheckIntentSchema(approachIds?: string[]) {
+  const approachIdSchema = buildApproachIdSchema(approachIds);
+  if (approachIds?.length) {
+    return z.discriminatedUnion("type", [
+      z.object({
+        type: z.literal("challenge"),
+        reason: z.string().trim().min(1).max(240),
+        approachId: approachIdSchema,
+        citedNpcId: z.string().trim().min(1).optional(),
+        mode: z.enum(["normal", "advantage", "disadvantage"]).optional(),
+      }),
+      z.object({
+        type: z.literal("combat"),
+        reason: z.string().trim().min(1).max(240),
+        targetNpcId: z.string().trim().min(1),
+        approachId: approachIdSchema,
+        mode: z.enum(["normal", "advantage", "disadvantage"]).optional(),
+      }),
+    ]);
+  }
+
+  return z.discriminatedUnion("type", [
+    z.object({
+      type: z.literal("challenge"),
+      reason: z.string().trim().min(1).max(240),
+      approachId: approachIdSchema.optional(),
+      challengeApproach: buildApproachIdSchema().optional(),
+      citedNpcId: z.string().trim().min(1).optional(),
+      mode: z.enum(["normal", "advantage", "disadvantage"]).optional(),
+    }),
+    z.object({
+      type: z.literal("combat"),
+      reason: z.string().trim().min(1).max(240),
+      targetNpcId: z.string().trim().min(1),
+      approachId: approachIdSchema.optional(),
+      approach: z.enum(["attack", "subdue", "assassinate"]).optional(),
+      mode: z.enum(["normal", "advantage", "disadvantage"]).optional(),
+    }),
+  ]);
+}
 
 const assetHolderSchema = z.discriminatedUnion("kind", [
   z.object({
@@ -4329,18 +4477,20 @@ const mechanicsMutationSchema = z.discriminatedUnion("type", [
   }),
 ]);
 
-const resolveMechanicsSchema = z.object({
-  type: z.literal("resolve_mechanics"),
-  timeMode: z.enum(["combat", "exploration", "travel", "rest", "downtime"]),
-  durationMagnitude: z.enum(["instant", "brief", "standard", "extended", "long"]).optional(),
-  suggestedActions: z.array(z.string().trim().min(1)).max(4).default([]),
-  memorySummary: z.string().trim().min(1).max(240).optional(),
-  checkIntent: z.preprocess(
-    (value) => (value === null ? undefined : value),
-    checkIntentSchema.optional(),
-  ),
-  mutations: z.array(mechanicsMutationSchema).max(8).default([]),
-});
+function buildResolveMechanicsSchema(approachIds?: string[]) {
+  return z.object({
+    type: z.literal("resolve_mechanics"),
+    timeMode: z.enum(["combat", "exploration", "travel", "rest", "downtime"]),
+    durationMagnitude: z.enum(["instant", "brief", "standard", "extended", "long"]).optional(),
+    suggestedActions: z.array(z.string().trim().min(1)).max(4).default([]),
+    memorySummary: z.string().trim().min(1).max(240).optional(),
+    checkIntent: z.preprocess(
+      (value) => (value === null ? undefined : value),
+      buildCheckIntentSchema(approachIds).optional(),
+    ),
+    mutations: z.array(mechanicsMutationSchema).max(8).default([]),
+  });
+}
 
 const executeFastForwardSchema = z.object({
   type: z.literal("execute_fast_forward"),
@@ -4359,17 +4509,29 @@ const executeFastForwardSchema = z.object({
   memorySummary: z.string().trim().min(1).max(240).optional(),
 });
 
-const turnActionToolCallSchema = z.discriminatedUnion("type", [
-  requestClarificationSchema,
-  resolveMechanicsSchema,
-  executeFastForwardSchema,
-]);
+function buildTurnActionSchemas(approachIds?: string[]) {
+  const resolveMechanicsSchema = buildResolveMechanicsSchema(approachIds);
+  const turnActionToolCallSchema = z.discriminatedUnion("type", [
+    requestClarificationSchema,
+    resolveMechanicsSchema,
+    executeFastForwardSchema,
+  ]);
 
-const resolveMechanicsTool = createStructuredTool(
-  "resolve_mechanics",
-  "Return the bounded mechanical plan for this turn using only engine-validated mutations.",
-  resolveMechanicsSchema.omit({ type: true }),
-);
+  return {
+    resolveMechanicsSchema,
+    turnActionToolCallSchema,
+    resolveMechanicsTool: createStructuredTool(
+      "resolve_mechanics",
+      "Return the bounded mechanical plan for this turn using only engine-validated mutations.",
+      resolveMechanicsSchema.omit({ type: true }),
+    ),
+  };
+}
+
+const defaultTurnActionSchemas = buildTurnActionSchemas();
+const resolveMechanicsSchema = defaultTurnActionSchemas.resolveMechanicsSchema;
+const turnActionToolCallSchema = defaultTurnActionSchemas.turnActionToolCallSchema;
+const resolveMechanicsTool = defaultTurnActionSchemas.resolveMechanicsTool;
 
 const executeFastForwardTool = createStructuredTool(
   "execute_fast_forward",
@@ -4841,6 +5003,15 @@ function compactPromptText(value: string | null | undefined, maxLength = 120) {
   return value.replace(/\s+/g, " ").trim().slice(0, maxLength);
 }
 
+function formatApproachSummary(approaches: SpatialPromptContext["approaches"] | TurnRouterContext["approaches"]) {
+  return (approaches ?? []).map((approach) => ({
+    id: approach.id,
+    label: approach.label,
+    fieldId: approach.fieldId,
+    description: approach.description ?? null,
+  }));
+}
+
 function formatRouterSceneActorLine(actor: TurnRouterContext["sceneActors"][number]) {
   const label = compactPromptText(actor.displayLabel, 80) || "Unknown actor";
   const role = compactPromptText(actor.role, 60);
@@ -4930,6 +5101,11 @@ function formatRouterContextForModel(context: TurnRouterContext) {
       : `You are in ${currentLocationLabel}.`,
     currentLocation: currentLocationSummary,
     currency: context.currency,
+    mechanicsProfile: {
+      approaches: formatApproachSummary(context.approaches),
+      currencyProfile: context.currencyProfile ?? null,
+      presentationProfile: context.presentationProfile ?? null,
+    },
     authoritativeState: {
       sceneActors: context.sceneActors.slice(0, 8).map(formatRouterSceneActorLine),
       knownNearbyNpcs: (context.knownNearbyNpcs ?? []).slice(0, 8).map(formatRouterKnownNpcLine),
@@ -5096,14 +5272,36 @@ function normalizeFinalActionToolCallInput(command: unknown): unknown {
   };
 }
 
-function parseFinalActionToolCall(command: unknown) {
-  return turnActionToolCallSchema.safeParse(normalizeFinalActionToolCallInput(command));
+function parseFinalActionToolCall(command: unknown, approachIds?: string[]) {
+  return buildTurnActionSchemas(approachIds).turnActionToolCallSchema.safeParse(
+    normalizeFinalActionToolCallInput(command),
+  );
 }
 
 function extractToolInput(response: OpenAI.Chat.Completions.ChatCompletion) {
-  const toolCall = response.choices[0]?.message?.tool_calls?.[0];
-  const content = extractMessageText(response.choices[0]?.message?.content ?? "");
-  const finishReason = response.choices[0]?.finish_reason ?? null;
+  const firstChoice = Array.isArray(response?.choices) ? response.choices[0] : undefined;
+
+  if (!firstChoice) {
+    logOpenRouterResponse("raw_completion", {
+      hasToolCall: false,
+      finishReason: null,
+      likelyTruncated: false,
+      toolName: null,
+      rawToolArgumentsPreview: null,
+      messageContentPreview: null,
+      choiceCount: Array.isArray(response?.choices) ? response.choices.length : null,
+      responseKeys:
+        response && typeof response === "object"
+          ? Object.keys(response as unknown as Record<string, unknown>)
+          : null,
+    });
+
+    throw new Error("OpenRouter completion returned no choices.");
+  }
+
+  const toolCall = firstChoice.message?.tool_calls?.[0];
+  const content = extractMessageText(firstChoice.message?.content ?? "");
+  const finishReason = firstChoice.finish_reason ?? null;
   const rawToolArguments = toolCall?.type === "function" ? toolCall.function.arguments : null;
   const likelyTruncated = finishReason === "length"
     || isLikelyTruncatedStructuredPayload(rawToolArguments)
@@ -5190,6 +5388,7 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "If the player implies a plausible local detail that is not yet grounded, prefer bounded manifestation over rejection.",
         "If the action is purely atmospheric, stay in FLAVOR and do not escalate it into mechanics.",
         "Use only bounded mutations. The engine will validate, filter, and commit them.",
+        "When checkIntent is present, use approachId exactly as listed in mechanicsProfile.approaches. Do not invent legacy challengeApproach labels or combat-only aliases when module approaches are provided.",
         "Mark resource costs, fees, and other upfront expenditures as phase immediate.",
         "Mark success-only rewards or outcomes as phase conditional.",
         "Advance the scene or world only through passive observation or waiting.",
@@ -5229,8 +5428,8 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "Default manifestation pattern: plausible generic nearby people become spawn_temporary_actor such as stablehand, customer, porter, or watch patrol.",
         "Default manifestation pattern: intra-location repositioning becomes set_player_scene_focus.",
         "Self-directed downtime work may use adjust_inventory, spawn_environmental_item, and spawn_scene_aspect for grounded byproducts, consumed materials, and scene conditions.",
-        `The currency system uses cp, sp, gp, and pp. ${COPPER_PER_SILVER} cp = 1 sp, ${COPPER_PER_GOLD} cp = 1 gp, and ${COPPER_PER_PLATINUM} cp = 1 pp.`,
-        "Use adjust_currency for incidental payments, rewards, bribes, tips, fees, and other non-market currency movement; express the delta with denomination fields rather than flattened copper arithmetic.",
+        "Currency uses signed base-unit deltas. Read naming and display cues from mechanicsProfile.currencyProfile when present, but encode adjust_currency.delta as a single integer base-unit change.",
+        "Use adjust_currency for incidental payments, rewards, bribes, tips, fees, and other non-market currency movement.",
         "If economy_light is active and a bespoke trade is actually agreed upon, resolve it immediately with composed asset mutations such as adjust_currency plus spawn_fiat_item and/or transfer_assets. Do not rely on record_actor_interaction or record_npc_interaction alone to finalize the trade.",
         "If an offer is still on the table but not yet accepted, you may track it with a scene-duration spawn_scene_aspect such as pending_trade_offer instead of finalizing the exchange early.",
         "Use transfer_assets for non-market stashing, dropping, storing, retrieving, feeding, lending, or handing over items, commodities, or currency between the player, world objects, scenes, temporary actors, and willing NPCs.",
@@ -5305,12 +5504,13 @@ function buildTurnSystemPrompt(turnMode: TurnMode) {
         "checkIntent is a top-level field on resolve_mechanics, not a mutation. Never put an entry with type checkIntent inside mutations.",
         "If a check is needed, set top-level checkIntent and list only the success-state mutations. The engine will reject them automatically on failure or partial success.",
         "Only set citedNpcId when the player is directly engaging that NPC on-screen this turn.",
+        "When checkIntent is present, use approachId exactly as listed in mechanicsProfile.approaches. Do not invent legacy challengeApproach labels or combat-only aliases when module approaches are provided.",
         "For notice/analyze/search/listen turns that use checkIntent, any newly noticed actor, clue, item, or scene detail must be phase conditional so the roll gates whether it appears.",
         "Never use placeholder ids like none, null, unknown, or n/a for citedNpcId, targetNpcId, localEntityId, or spawn references. Omit the field instead when there is no real id.",
         "Mark resource costs, fees, and other upfront expenditures as phase immediate.",
         "Mark success-only rewards or outcomes as phase conditional.",
         "Use commit_market_trade only for strict commodity trade backed by fetched market prices.",
-        `The currency system uses cp, sp, gp, and pp. ${COPPER_PER_SILVER} cp = 1 sp, ${COPPER_PER_GOLD} cp = 1 gp, and ${COPPER_PER_PLATINUM} cp = 1 pp.`,
+        "Currency uses signed base-unit deltas. Read naming and display cues from mechanicsProfile.currencyProfile when present, but encode adjust_currency.delta as a single integer base-unit change.",
         "Use adjust_currency for incidental payments, rewards, bribes, tips, fees, or other non-market currency movement.",
         "Use start_journey for ordinary physical route travel to a known adjacent location.",
         "Use move_player only for teleportation, magical portals, trap relocation, or forced transport.",
@@ -5547,6 +5747,11 @@ function formatSpatialPromptContext(context: SpatialPromptContext) {
       ? `You are in ${currentLocationLabel}. Your current focus/position is: ${sceneFocusLabel}.`
       : `You are in ${currentLocationLabel}.`,
     promptRequestId: context.promptRequestId ?? null,
+    mechanicsProfile: {
+      approaches: formatApproachSummary(context.approaches),
+      currencyProfile: context.currencyProfile ?? null,
+      presentationProfile: context.presentationProfile ?? null,
+    },
     authoritativeState: {
       currentLocation: context.currentLocation,
       sceneFocus: context.sceneFocus,
@@ -5589,8 +5794,19 @@ function buildTurnUserPrompt(input: {
     formatPromptBlock("context", formatSpatialPromptContext(input.promptContext)),
     formatPromptBlock("character", {
       name: input.character.name,
-      archetype: input.character.archetype,
-      stats: input.character.stats,
+      drivingGoal: input.character.drivingGoal ?? null,
+      vitality: {
+        current: input.character.health,
+        max: input.character.maxVitality ?? input.character.maxHealth ?? input.character.health,
+        label: input.character.presentationProfile?.vitalityLabel ?? "Vitality",
+      },
+      approaches: formatApproachSummary(input.character.approaches),
+      approachModifiers: input.character.stats,
+      frameworkValues: input.character.frameworkValues,
+      currency: {
+        totalBaseUnits: input.character.currencyCp,
+        profile: input.character.currencyProfile ?? null,
+      },
     }),
     formatPromptBlock("fetched_facts", input.fetchedFacts),
   ].join("\n\n");
@@ -5958,6 +6174,45 @@ async function runCompletion(options: {
 
   const selectedModel = options.model?.trim() || env.openRouterModel;
 
+  function normalizeResponseError(response: unknown) {
+    if (!response || typeof response !== "object") {
+      return null;
+    }
+
+    const responseRecord = response as Record<string, unknown>;
+    const errorValue = responseRecord.error;
+    if (!errorValue || typeof errorValue !== "object") {
+      return null;
+    }
+
+    const errorRecord = errorValue as Record<string, unknown>;
+    const message =
+      typeof errorRecord.message === "string"
+        ? errorRecord.message
+        : "OpenRouter returned an error payload without choices.";
+    const status =
+      typeof errorRecord.status_code === "number"
+        ? errorRecord.status_code
+        : typeof errorRecord.code === "number"
+          ? errorRecord.code
+          : null;
+    const error = new Error(message) as Error & {
+      status?: number;
+      code?: string | number;
+      type?: string;
+    };
+    if (status != null) {
+      error.status = status;
+    }
+    if (typeof errorRecord.code === "string" || typeof errorRecord.code === "number") {
+      error.code = errorRecord.code;
+    }
+    if (typeof errorRecord.type === "string") {
+      error.type = errorRecord.type;
+    }
+    return error;
+  }
+
   for (const [attemptIndex, { apiKey, keyIndex }] of orderedApiKeys.entries()) {
     const client = createClient(apiKey);
 
@@ -5983,6 +6238,11 @@ async function runCompletion(options: {
         },
         options.signal ? { signal: options.signal } : undefined,
       );
+
+      const normalizedResponseError = normalizeResponseError(response);
+      if (normalizedResponseError) {
+        throw normalizedResponseError;
+      }
 
       preferredOpenRouterKeyIndex = keyIndex;
 
@@ -6291,6 +6551,160 @@ class DungeonMasterClient {
     }
   }
 
+  async generateCharacterConcept(prompt: string): Promise<{ concept: CharacterConceptDraft; source: "openrouter" }> {
+    const conceptTool = createStructuredTool(
+      "generate_character_concept",
+      "Generate one narrative-only character concept with no mechanics, no stats, and no module assumptions.",
+      characterConceptDraftSchema,
+    );
+
+    try {
+
+      const response = await runCompletion({
+        system: [
+          "You create standalone solo-RPG character concepts.",
+          "Return only narrative fields. Do not invent mechanics, framework values, approaches, or vitality numbers.",
+          `starterItems must contain at most ${MAX_STARTER_ITEMS} specific, mundane items.`,
+        ].join("\n"),
+        user: prompt,
+        tools: [conceptTool],
+      });
+
+      const parsed = characterConceptDraftSchema.safeParse(response?.input);
+      if (!parsed.success) {
+        throw new Error(`Character concept generation returned invalid structured data: ${parsed.error.message}`);
+      }
+
+      return { concept: parsed.data, source: "openrouter" };
+    } catch (error) {
+      throw new Error(error instanceof Error ? error.message : "Character concept generation failed.");
+    }
+  }
+
+  async generateModuleCharacterTemplate(input: {
+    prompt: string;
+    module: GeneratedWorldModule;
+    sourceConcept?: CharacterConceptDraft | null;
+  }): Promise<{ character: CharacterTemplateDraft; source: "openrouter" }> {
+    const compiledFramework = compileCharacterFramework(input.module.characterFramework!);
+    const templateSchema = buildCharacterTemplateDraftSchema(compiledFramework);
+    const templateTool = createStructuredTool(
+      "generate_module_character_template",
+      "Generate one playable module-bound character template that strictly matches the provided framework.",
+      templateSchema,
+    );
+
+    try {
+      const response = await runCompletion({
+        system: [
+          "You create playable solo-RPG protagonists bound to a specific module framework.",
+          "Always return frameworkVersion exactly as provided.",
+          "frameworkValues must strictly satisfy the provided field ids and allowed values.",
+          "Do not invent extra framework fields or rename ids.",
+          "Keep the character grounded in the module's tone and setting.",
+        ].join("\n"),
+        user: [
+          formatPromptBlock("prompt", input.prompt),
+          formatPromptBlock("module", {
+            title: input.module.title,
+            premise: input.module.premise,
+            tone: input.module.tone,
+            setting: input.module.setting,
+          }),
+          formatPromptBlock("character_framework", compiledFramework.framework),
+          formatPromptBlock("source_concept", input.sourceConcept ?? null),
+        ].join("\n\n"),
+        tools: [templateTool],
+      });
+
+      const parsed = templateSchema.safeParse(response?.input);
+      if (!parsed.success) {
+        throw new Error(`Module character generation returned invalid structured data: ${parsed.error.message}`);
+      }
+
+      return { character: parsed.data, source: "openrouter" };
+    } catch (error) {
+      throw new Error(error instanceof Error ? error.message : "Module character generation failed.");
+    }
+  }
+
+  async generateCharacterFrameworkForModule(input: {
+    module: GeneratedWorldModule;
+    guidance?: string | null;
+  }): Promise<{ framework: CharacterFramework; source: "openrouter" }> {
+    const frameworkTool = createStructuredTool(
+      "generate_character_framework",
+      "Generate one module-native character framework for a solo RPG module.",
+      characterFrameworkSchema,
+    );
+
+    try {
+      const response = await runCompletion({
+        system: [
+          "You design character creation frameworks for reusable solo-RPG modules.",
+          "Return exactly one characterFramework object.",
+          "The framework must feel native to the module's setting, pressures, and daily life instead of falling back to generic fantasy stats.",
+          "Use stable ids and concise player-facing labels.",
+          "Include a small set of approaches mapped directly to numeric fields.",
+          "Numeric fields should represent the module's actual style of action, survival, trade, social leverage, perception, craft, ritual, or movement as appropriate.",
+          "Choice and text fields are allowed when they materially improve character creation, but keep the framework compact and practical.",
+          "baseVitality, vitalityLabel, currencyProfile, and presentationProfile must match the module's tone and economy.",
+          "Do not use the legacy fallback labels Force, Finesse, Endure, Analyze, Notice, or Influence unless the module genuinely demands that exact vocabulary.",
+        ].join("\n"),
+        user: [
+          formatPromptBlock("module_summary", summarizeWorld(input.module)),
+          formatPromptBlock("module_details", {
+            locations: input.module.locations.map((location) => ({
+              id: location.id,
+              name: location.name,
+              type: location.type,
+              summary: location.summary,
+              state: location.state,
+            })),
+            factions: input.module.factions.map((faction) => ({
+              id: faction.id,
+              name: faction.name,
+              type: faction.type,
+              summary: faction.summary,
+              agenda: faction.agenda,
+            })),
+            npcs: input.module.npcs.map((npc) => ({
+              id: npc.id,
+              name: npc.name,
+              role: npc.role,
+              summary: npc.summary,
+            })),
+            commodities: input.module.commodities.map((commodity) => ({
+              id: commodity.id,
+              name: commodity.name,
+              baseValue: commodity.baseValue,
+              tags: commodity.tags,
+            })),
+            entryPoints: input.module.entryPoints,
+          }),
+          formatPromptBlock("framework_guidance", input.guidance?.trim() || null),
+          formatFinalInstruction([
+            "Build a framework players can use to create protagonists who make sense in this world immediately.",
+            "Prefer module-native approach labels over generic RPG stat names.",
+            "Use frameworkVersion as a stable slug-like version string for this module framework.",
+            "Keep approach ids and field ids machine-stable and lowercase snake_case or lowercase words.",
+            "If the module has a core metaphysical, magical, social, or economic substrate that shapes ordinary life, the framework must represent it directly instead of burying it inside generic utility labels.",
+          ]),
+        ].join("\n\n"),
+        tools: [frameworkTool],
+      });
+
+      const parsed = characterFrameworkSchema.safeParse(response?.input);
+      if (!parsed.success) {
+        throw new Error(`Character framework generation returned invalid structured data: ${parsed.error.message}`);
+      }
+
+      return { framework: parsed.data, source: "openrouter" };
+    } catch (error) {
+      throw new Error(error instanceof Error ? error.message : "Character framework generation failed.");
+    }
+  }
+
   async generateWorldModule(input: {
     prompt: string;
     scaleTier: WorldScaleTier;
@@ -6298,6 +6712,7 @@ class DungeonMasterClient {
     resumeCheckpoint?: OpenWorldGenerationCheckpoint | null;
     onCheckpoint?: (checkpoint: OpenWorldGenerationCheckpoint) => void;
     onProgress?: (update: WorldGenerationProgressUpdate) => void;
+    shouldStop?: () => boolean;
   }): Promise<GeneratedWorldModuleDraft> {
     startWorldGenerationLog();
     let currentStage: WorldGenerationStageName | null = null;
@@ -6338,6 +6753,11 @@ class DungeonMasterClient {
         logWorldGenerationProgress(update);
         input.onProgress?.(update);
       };
+      const throwIfStopRequested = () => {
+        if (input.shouldStop?.()) {
+          throw new WorldGenerationStoppedError();
+        }
+      };
 
       const persistCheckpoint = (
         status: OpenWorldGenerationCheckpoint["generationStatus"],
@@ -6369,6 +6789,7 @@ class DungeonMasterClient {
       };
       persistCheckpointForFailure = persistCheckpoint;
       persistCheckpoint("running", null, null);
+      throwIfStopRequested();
 
       const markStageCompleted = <TStage extends CheckpointableWorldGenerationStageName>(
         stage: TStage,
@@ -6415,6 +6836,7 @@ class DungeonMasterClient {
               "Set confidence to low when the prompt could support multiple readings or when the causal logic is unclear.",
               "Low confidence means neutral craft scaffolding and prompt noun preservation, not guessing a stronger worldview.",
               "Do not invent extra setting lore, factions, geography, or conflicts.",
+              ...buildPromptIntentInferenceRubricLines(),
             ],
           }),
           buildUser: (correctionNotes) =>
@@ -6438,6 +6860,7 @@ class DungeonMasterClient {
           validationReports,
           stageSummaries,
           prompt: input.prompt,
+          shouldStop: input.shouldStop,
           summarize: (parsed) =>
             `Intent locked: ${parsed.primaryTextureModes.join(", ")} texture with ${parsed.primaryCausalLogic} causal logic.`,
         });
@@ -6529,6 +6952,7 @@ class DungeonMasterClient {
         stageSummaries,
         prompt: input.prompt,
         promptIntentProfile,
+        shouldStop: input.shouldStop,
         validate: async (parsed) => [
           {
             category: "immersion",
@@ -6621,6 +7045,7 @@ class DungeonMasterClient {
         stageSummaries,
         prompt: input.prompt,
         promptIntentProfile,
+        shouldStop: input.shouldStop,
         validate: (parsed) => [
           {
             category: "coherence",
@@ -6681,6 +7106,7 @@ class DungeonMasterClient {
         prompt: input.prompt,
         promptIntentProfile,
         normalizeInput: normalizeWorldSpineLocationPlanInput,
+        shouldStop: input.shouldStop,
         summarize: (parsed) => `${parsed.locationCount} planned world spine locations.`,
       });
 
@@ -6784,6 +7210,7 @@ class DungeonMasterClient {
           stageSummaries,
           prompt: input.prompt,
           promptIntentProfile,
+          shouldStop: input.shouldStop,
           validate: async (parsed) => {
             const issues = findDuplicateStrings(parsed.locations.map((location) => location.key)).map(
               (key) => `Location key ${key} is duplicated within this batch.`,
@@ -6887,6 +7314,7 @@ class DungeonMasterClient {
         stageSummaries,
         prompt: input.prompt,
         promptIntentProfile,
+        shouldStop: input.shouldStop,
         validate: async (parsed) => {
           const issues = findDuplicateStrings(parsed.edges.map((edge) => edge.key)).map(
             (key) => `Edge key ${key} is duplicated.`,
@@ -7014,6 +7442,7 @@ class DungeonMasterClient {
         prompt: input.prompt,
         promptIntentProfile,
         normalizeInput: (input) => normalizeWorldSpineRelationsInput(input, maxWorldSpineRelations),
+        shouldStop: input.shouldStop,
         validate: async (parsed) => {
           const issues = findDuplicateStrings(parsed.factionRelations.map((relation) => relation.key)).map(
             (key) => `Faction relation key ${key} is duplicated.`,
@@ -7147,6 +7576,9 @@ class DungeonMasterClient {
               "Generate the lived-in regional layer for each locked location in this batch.",
               "Each location needs public activity, local pressure, everyday texture, hazards, ordinary knowledge, and reasons a resident stays or leaves.",
               "People may revere, celebrate, inherit, enact, enjoy, misunderstand, endure, fear, exploit, or build around the world's structures depending on prompt intent.",
+              "Across the batch, vary the main organizing logic of daily life; do not make every location primarily a checkpoint, extraction site, ration system, inspection loop, containment zone, or institutional failure point.",
+              "Use localPressure as one dimension, not the whole identity. everydayTexture, reasonsToLinger, ordinaryKnowledge, gossip, and routineSeeds should reveal at least one meaningful social rhythm, exchange pattern, craft practice, hospitality pattern, devotional habit, prestige economy, leisure use, or local custom beyond the immediate burden.",
+              "When a location is dangerous or heavily governed, counterbalance with what people still trade, enjoy, maintain, admire, celebrate, teach, repair, or take pride in there.",
               ...buildRegionalLifeTextureBalanceLines(input.scaleTier),
               input.scaleTier === "world"
                 ? "At world scale, each locked location is a macro-region or civilization. Describe region-level public life, not taverns, rooms, or street-corner interiors."
@@ -7185,6 +7617,7 @@ class DungeonMasterClient {
           prompt: input.prompt,
           promptIntentProfile,
           normalizeInput: (input) => normalizeRegionalLifeInput(input, locationBatch.length),
+          shouldStop: input.shouldStop,
           validate: async (parsed) => [
             {
               category: "immersion",
@@ -7358,6 +7791,7 @@ class DungeonMasterClient {
           prompt: input.prompt,
           promptIntentProfile,
           normalizeInput: (input) => normalizeSocialCastInput(input, locationBatch.length),
+          shouldStop: input.shouldStop,
           validate: async (parsed) => {
             const issues: string[] = [];
             const locationIds = new Set(locationBatch.map((location) => location.id));
@@ -7635,6 +8069,7 @@ class DungeonMasterClient {
         stageSummaries,
         prompt: input.prompt,
         promptIntentProfile,
+        shouldStop: input.shouldStop,
         validate: async (parsed) => {
           const issues = validateKnowledgeWebStage({
             information: parsed.information,
@@ -7836,6 +8271,7 @@ class DungeonMasterClient {
         stageSummaries,
         prompt: input.prompt,
         promptIntentProfile,
+        shouldStop: input.shouldStop,
         validate: async (parsed) => {
           const issues: string[] = [];
           const informationKeys = new Set(knowledgeWebInput.information.map((information) => information.key));
@@ -8077,6 +8513,7 @@ class DungeonMasterClient {
           promptIntentProfile,
           normalizeInput: (input) =>
             normalizeEconomyMaterialLifeInput(input, targetCommodityCount, targetMarketPriceCount),
+          shouldStop: input.shouldStop,
           validate: async (parsed) => {
             const issues: string[] = [];
             const locationIds = new Set(lockedLocations.map((location) => location.id));
@@ -8292,8 +8729,10 @@ class DungeonMasterClient {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : "World generation failed.";
+      const checkpointStatus =
+        error instanceof WorldGenerationStoppedError ? "stopped" : "failed";
       persistCheckpointForFailure?.(
-        "failed",
+        checkpointStatus,
         currentStage && WORLD_GENERATION_STAGE_ORDER.includes(
           currentStage as CheckpointableWorldGenerationStageName,
         )
@@ -8304,6 +8743,9 @@ class DungeonMasterClient {
       logOpenRouterResponse("world.error", {
         message: error instanceof Error ? error.message : String(error),
       });
+      if (error instanceof WorldGenerationStoppedError) {
+        throw error;
+      }
       throw new Error(message);
     } finally {
       stopWorldGenerationLog();
@@ -8335,6 +8777,8 @@ class DungeonMasterClient {
       "Immediate pressure may be mundane and local: being late, a shift starting, weather turning, a line forming, a supervisor watching, stock running short, a cart breaking down, or neighbors noticing something off.",
       "If the opening is peaceful or slice-of-life, set activeThreat to null instead of inventing danger.",
       "Do not force a quest-giver, crisis escalation, conspiracy reveal, or dramatic named-NPC confrontation if the launch entry is grounded in ordinary life.",
+      "Do not inflate routine setup into paperwork drama just because the location contains guilds, officials, or formal procedure. Keep attention on bodies, tools, weather, movement, fatigue, nearby people, and actionable local texture unless the entry truly hinges on administration.",
+      "When an entry includes public notices, manifests, queues, ledgers, or formal protocol, treat them as background texture or one practical constraint among others, not automatically the emotional center of the scene.",
       "Avoid prophecy, trailer voiceover, destiny framing, and broad setting-summary prose.",
       "Treat start_location as the authoritative physical setting for the scene.",
       "If the player prompt or custom entry text contains an unsupported place name that conflicts with start_location, ignore the unsupported place name and ground the scene at start_location.name.",
@@ -8584,7 +9028,9 @@ class DungeonMasterClient {
             "Resolve one grounded campaign launch entry for a reusable open-world module.",
             "Choose an honest starting situation supported by the world as written, without assuming a protagonist destiny, quest hook, or cinematic inciting incident.",
             "This is campaign-time launch resolution, not module authoring. The entry should connect a specific character to an existing public surface in the world.",
-            "Prefer mundane bureaucratic, commercial, ritual, labor, travel, or infrastructural interfaces over conspiratorial or heroic setup.",
+            "Prefer grounded lived surfaces over heroic or conspiratorial setup: a shift beginning, a watch changing, goods changing hands, a route opening, a shared meal, a repair underway, a ritual threshold, a public board, a roadside pause, a weather turn, or an ordinary obligation coming due.",
+            "Do not over-prefer clerks, inspectors, permits, manifests, filing windows, or checkpoint procedure when a more human and equally honest opening surface is available in the same place.",
+            "Routine life may be social, physical, atmospheric, or practical, not only administrative.",
             "Use only the provided canonical ids exactly as written.",
             "Do not invent locations, NPCs, factions, information, or new ids.",
             "Do not move NPCs from their authored currentLocationId.",
@@ -8594,7 +9040,7 @@ class DungeonMasterClient {
             "If the best honest opening is solitary or self-directed, presentNpcIds may be empty and both localContactNpcId and localContactTemporaryActorLabel may be null.",
             "public-facing information at the start may include only public or guarded information, never secret information.",
             "Keep title, summary, immediatePressure, publicLead, mundaneActionPath, and evidenceWorldAlreadyMoving concrete, grounded, and locally playable.",
-            "If launch_guidance is absent, choose the most legible routine or public-facing hinge for this character.",
+            "If launch_guidance is absent, choose the most legible ordinary hinge for this character, favoring embodied circumstance over official procedure when both are equally supported.",
             "If launch_guidance is present, treat it as steering, but repair unsupported requests into the nearest honest version the world can support.",
             "Return only the structured launch entry payload.",
           ].join("\n"),
@@ -8981,6 +9427,12 @@ class DungeonMasterClient {
   async runTurn(input: TurnInput): Promise<TurnResolution> {
     try {
       const baseSystem = buildTurnSystemPrompt(input.turnMode);
+      const approachIds = Array.from(new Set(
+        (input.promptContext.approaches ?? input.character.approaches ?? [])
+          .map((approach) => approach.id.trim())
+          .filter(Boolean),
+      ));
+      const dynamicResolveMechanicsTool = buildTurnActionSchemas(approachIds).resolveMechanicsTool;
 
       let correctionNotes: string | null = null;
       let lastFailureSummary: string | null = null;
@@ -9011,7 +9463,7 @@ class DungeonMasterClient {
         const response = await runCompletion({
           system,
           user,
-          tools: [resolveMechanicsTool, executeFastForwardTool, requestClarificationTool],
+          tools: [dynamicResolveMechanicsTool, executeFastForwardTool, requestClarificationTool],
           maxTokens: 1200,
           signal: input.signal,
         });
@@ -9039,7 +9491,7 @@ class DungeonMasterClient {
         });
 
         if (normalized) {
-          const parsedAction = parseFinalActionToolCall(normalized);
+          const parsedAction = parseFinalActionToolCall(normalized, approachIds);
           if (!parsedAction.success) {
             const validationIssues = zodIssuesToText(parsedAction.error.issues);
             lastFailureSummary = response?.likelyTruncated
@@ -9308,6 +9760,10 @@ export const dmClient = new DungeonMasterClient();
 export const aiProviderTestUtils = {
   CURRENT_PROMPT_ARCHITECTURE_VERSION,
   buildPresentTenseScaleGuideLines,
+  buildPromptIntentInferenceRubricLines,
+  buildRegionalLifeTextureBalanceLines,
+  buildRegionalLifeCritiqueInstructions,
+  buildRegionalLifeFallbackCorrectionNotes,
   buildTurnRouterSystemPrompt,
   buildTurnActionCorrectionNotes,
   buildTurnSystemPrompt,

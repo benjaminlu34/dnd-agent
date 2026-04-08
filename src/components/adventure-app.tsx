@@ -1092,7 +1092,7 @@ export function AdventureApp({
                       <p className="text-[0.68rem] uppercase tracking-[0.22em] text-amber-200/70">Roll Required</p>
                       <p className="mt-2 text-sm leading-relaxed text-zinc-100">
                         Roll {pendingCheck.check.mode === "normal" ? "2d6" : "two 2d6 totals"}
-                        {" "}for {pendingCheck.check.stat.toUpperCase()}.
+                        {" "}for {(pendingCheck.check.approachId ?? pendingCheck.check.stat ?? "CHECK").toUpperCase()}.
                         {typeof pendingCheck.check.dc === "number" ? ` DC ${pendingCheck.check.dc}.` : null}
                       </p>
                       <p className="mt-2 text-sm leading-relaxed text-zinc-300">{pendingCheck.check.reason}</p>
@@ -1123,7 +1123,7 @@ export function AdventureApp({
 
                   {latestCheck ? (
                     <p className="mt-4 text-sm leading-relaxed text-zinc-300">
-                      Check: {latestCheck.stat.toUpperCase()} {latestCheck.outcome} ({latestCheck.total})
+                      Check: {(latestCheck.approachId ?? latestCheck.stat ?? "CHECK").toUpperCase()} {latestCheck.outcome} ({latestCheck.total})
                     </p>
                   ) : null}
                 </div>

@@ -16,6 +16,7 @@ model User {
   updatedAt          DateTime            @updatedAt
   adventureModules   AdventureModule[]
   campaigns          Campaign[]
+  characterConcepts  CharacterConcept[]
   characterTemplates CharacterTemplate[]
 }
 
@@ -31,31 +32,52 @@ model AdventureModule {
   isLocked             Boolean     @default(false)
   openWorldTemplateJson Json
   openWorldGenerationArtifactsJson Json?
+  characterFrameworkJson Json
   createdAt            DateTime    @default(now())
   updatedAt            DateTime    @updatedAt
   user                 User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   campaigns            Campaign[]
+  characterTemplates    CharacterTemplate[]
 }
 
-model CharacterTemplate {
+model CharacterConcept {
   id           String              @id @default(cuid())
   userId       String
   name         String
-  archetype    String
-  strength     Int
-  dexterity    Int
-  constitution Int
-  intelligence Int
-  wisdom       Int
-  charisma     Int
-  maxHealth    Int
-  backstory    String?
+  appearance   String?
+  backstory    String
+  drivingGoal  String
   starterItems String[]            @default([])
   createdAt    DateTime            @default(now())
   updatedAt    DateTime            @updatedAt
   user         User                @relation(fields: [userId], references: [id], onDelete: Cascade)
-  campaigns    Campaign[]
-  instances    CharacterInstance[]
+  templates    CharacterTemplate[] @relation("CharacterConceptTemplates")
+}
+
+model CharacterTemplate {
+  id              String              @id @default(cuid())
+  userId          String
+  moduleId        String
+  sourceConceptId String?
+  frameworkVersion String
+  frameworkValues Json
+  name            String
+  appearance      String?
+  backstory       String
+  drivingGoal     String
+  vitality        Int
+  starterItems    String[]            @default([])
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  user            User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sourceConcept   CharacterConcept?   @relation("CharacterConceptTemplates", fields: [sourceConceptId], references: [id], onDelete: SetNull)
+  module          AdventureModule     @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  campaigns       Campaign[]
+  instances       CharacterInstance[]
+
+  @@index([userId, updatedAt])
+  @@index([moduleId, updatedAt])
+  @@index([sourceConceptId])
 }
 
 model Campaign {
@@ -115,6 +137,7 @@ model CharacterInstance {
   templateId String
   health     Int
   currencyCp Int               @default(0)
+  frameworkValues Json
   createdAt  DateTime          @default(now())
   updatedAt  DateTime          @updatedAt
   campaign   Campaign          @relation(fields: [campaignId], references: [id], onDelete: Cascade)

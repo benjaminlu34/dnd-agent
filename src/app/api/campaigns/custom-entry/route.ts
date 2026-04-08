@@ -38,9 +38,11 @@ export async function POST(request: Request) {
           error:
             result.error === "module_not_found"
               ? "Selected adventure module was not found."
-              : "Selected character template was not found.",
+              : result.error === "template_incompatible"
+                ? "Selected character template is not compatible with that module."
+                : "Selected character template was not found.",
         },
-        { status: 404 },
+        { status: result.error === "template_incompatible" ? 409 : 404 },
       );
     }
 
