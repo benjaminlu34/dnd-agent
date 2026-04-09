@@ -16,10 +16,12 @@ import {
 import {
   resolvedLaunchEntrySchema,
   validateResolvedLaunchEntryAgainstWorld,
+  campaignDescentStatusSchema,
   generatedWorldModuleSchema,
   openWorldGenerationArtifactsSchema,
 } from "@/lib/game/session-zero";
 import { instanceWorldForCampaign } from "@/lib/game/world-instancing";
+import { buildRegionSelectionOptions, WorldDescentOrchestrator } from "@/lib/game/world-descent";
 import { buildWorldGenerationScalePlan } from "@/lib/game/world-scale";
 import { env } from "@/lib/env";
 import type {
@@ -28,6 +30,7 @@ import type {
   ActivePressureSummary,
   ActiveThreadSummary,
   ActorSummary,
+  CampaignDescentStatus,
   CampaignListItem,
   CampaignRuntimeState,
   CampaignSnapshot,
@@ -53,6 +56,7 @@ import type {
   LocalTextureSummary,
   LocationSummary,
   LocationLeadSummary,
+  ModuleRegionSelectionOption,
   MarketPriceDetail,
   MemoryRecord,
   MemoryEntityLinkRecord,
@@ -148,6 +152,28 @@ type PrismaActiveJourneyRecord = Prisma.ActiveJourneyGetPayload<{
 
 type SnapshotDbClient = Prisma.TransactionClient | typeof prisma;
 
+async function runQueryBatch<const T extends readonly unknown[]>(
+  tasks: { [K in keyof T]: () => Promise<T[K]> },
+  maxConcurrent: number,
+): Promise<T> {
+  if (maxConcurrent <= 1) {
+    const results: unknown[] = [];
+    for (const task of tasks) {
+      results.push(await task());
+    }
+
+    return results as T;
+  }
+
+  const results: unknown[] = [];
+  for (let index = 0; index < tasks.length; index += maxConcurrent) {
+    const chunk = tasks.slice(index, index + maxConcurrent);
+    results.push(...await Promise.all(chunk.map((task) => task())));
+  }
+
+  return results as T;
+}
+
 function parseWorldTemplate(value: unknown): GeneratedWorldModule {
   return generatedWorldModuleSchema.parse(value);
 }
@@ -198,6 +224,64 @@ function moduleScaleMetadata(artifacts: OpenWorldGenerationArtifacts | null): {
     launchableDirectly: scalePlan.launchableDirectly,
     launchBlockReason: scalePlan.launchBlockReason,
   };
+}
+
+function normalizeCampaignDescentStatus(value: string): CampaignDescentStatus {
+  const parsed = campaignDescentStatusSchema.safeParse(value);
+  return parsed.success ? parsed.data : "descent_failed";
+}
+
+function campaignIsReadyForPlay(descentStatus: CampaignDescentStatus) {
+  return descentStatus === "ready_for_play";
+}
+
+function describeNonPlayableCampaign(
+  descentStatus: CampaignDescentStatus,
+  launchRegionName: string | null,
+) {
+  if (descentStatus === "descent_failed") {
+    return {
+      currentLocationName: launchRegionName ?? "Descent failed",
+      description: launchRegionName
+        ? `Descent into ${launchRegionName} failed. Regenerate the campaign before play.`
+        : "Descent failed. Regenerate the campaign before play.",
+    };
+  }
+
+  return {
+    currentLocationName: launchRegionName ?? "Awaiting settlement descent",
+    description: launchRegionName
+      ? `Region descent complete in ${launchRegionName}. Settlement descent is still required before play.`
+      : "Region descent complete. Settlement descent is still required before play.",
+  };
+}
+
+function launchRegionSemanticKeyFromDescentData(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const worldToRegion = record.worldToRegion;
+  if (!worldToRegion || typeof worldToRegion !== "object" || Array.isArray(worldToRegion)) {
+    return null;
+  }
+
+  const launchRegionSemanticKey = (worldToRegion as Record<string, unknown>).launchRegionSemanticKey;
+  return typeof launchRegionSemanticKey === "string" && launchRegionSemanticKey.trim()
+    ? launchRegionSemanticKey
+    : null;
+}
+
+function moduleRegionSelectionOptions(
+  scaleTier: WorldScaleTier,
+  template: GeneratedWorldModule,
+): ModuleRegionSelectionOption[] {
+  if (scaleTier !== "world") {
+    return [];
+  }
+
+  return buildRegionSelectionOptions(template);
 }
 
 function unscopedResolvedLaunchEntry(entryPoint: ResolvedLaunchEntry): ResolvedLaunchEntry {
@@ -1913,6 +1997,7 @@ export async function getAdventureModuleForUser(moduleId: string): Promise<Adven
     launchBlockReason: scale.launchBlockReason,
     schemaVersion: adventureModule.schemaVersion,
     characterFramework: template.characterFramework,
+    regionSelectionOptions: moduleRegionSelectionOptions(scale.scaleTier, template),
     entryPoints: template.entryPoints.map((entryPoint) => {
       const location = template.locations.find((location) => location.id === entryPoint.startLocationId);
       return {
@@ -1990,6 +2075,7 @@ export async function resolveCustomEntryPointForUser(input: {
   if (template.moduleId !== adventureModule.id || template.frameworkVersion !== moduleFramework.frameworkVersion) {
     return { error: "template_incompatible" as const };
   }
+  const templateRecord = toTemplateRecord(template);
   const generationArtifacts = parseOpenWorldGenerationArtifacts(adventureModule.openWorldGenerationArtifactsJson);
   const scale = moduleScaleMetadata(generationArtifacts);
 
@@ -2000,7 +2086,6 @@ export async function resolveCustomEntryPointForUser(input: {
     };
   }
 
-  const templateRecord = toTemplateRecord(template);
   const interpretedIntent = await dmClient.interpretCustomEntryIntent({
     prompt: input.prompt,
     character: templateRecord,
@@ -2078,7 +2163,7 @@ export async function createAdventureModule(input: {
       setting: sanitizedDraft.setting,
       generationMode: "open_world",
       schemaVersion: 1,
-      openWorldTemplateJson: sanitizedDraft,
+      openWorldTemplateJson: sanitizedDraft as Prisma.InputJsonValue,
       characterFrameworkJson: (sanitizedDraft.characterFramework ?? buildDefaultCharacterFramework(sanitizedDraft.title)) as Prisma.InputJsonValue,
       openWorldGenerationArtifactsJson: input.artifacts ?? Prisma.JsonNull,
     },
@@ -2159,6 +2244,7 @@ export async function generateCampaignOpeningDraftForUser(input: {
   if (template.moduleId !== adventureModule.id || template.frameworkVersion !== moduleFramework.frameworkVersion) {
     return { error: "template_incompatible" as const };
   }
+  const templateRecord = toTemplateRecord(template);
   const generationArtifacts = parseOpenWorldGenerationArtifacts(adventureModule.openWorldGenerationArtifactsJson);
   const scale = moduleScaleMetadata(generationArtifacts);
 
@@ -2343,6 +2429,8 @@ async function createCampaignInTx(
       customEntryPointJson: input.entryPoint.isCustom
         ? toPrismaJsonValue(input.entryPoint)
         : Prisma.JsonNull,
+      descentStatus: "ready_for_play",
+      descentDataJson: Prisma.JsonNull,
       generatedThroughDay: 2,
       stateJson: toCampaignRuntimeStateJson(state),
       characterInstance: {
@@ -2406,6 +2494,9 @@ async function createCampaignInTx(
       data: input.instancedWorld.locations.map((location) => ({
         id: location.id,
         campaignId: campaign.id,
+        semanticKey: stripScopedEntityId(location.id),
+        materializationLevel: "shell",
+        descentDataJson: Prisma.JsonNull,
         name: location.name,
         type: location.type,
         locationKind: location.locationKind,
@@ -2428,8 +2519,13 @@ async function createCampaignInTx(
       data: input.instancedWorld.edges.map((edge) => ({
         id: edge.id,
         campaignId: campaign.id,
+        semanticKey: stripScopedEntityId(edge.id),
+        materializationLevel: "shell",
         sourceId: edge.sourceId,
         targetId: edge.targetId,
+        corridorClass: null,
+        modifiers: [],
+        travelBundleJson: Prisma.JsonNull,
         travelTimeMinutes: edge.travelTimeMinutes,
         dangerLevel: edge.dangerLevel,
         currentStatus: edge.currentStatus,
@@ -2797,6 +2893,7 @@ async function createCampaignInTx(
 export async function createCampaignFromModuleForUser(input: {
   moduleId: string;
   templateId: string;
+  regionSemanticKey?: string;
   entryPointId?: string;
   customEntryPoint?: ResolvedLaunchEntry;
   opening?: GeneratedCampaignOpening;
@@ -2832,17 +2929,48 @@ export async function createCampaignFromModuleForUser(input: {
   if (template.moduleId !== adventureModule.id || template.frameworkVersion !== moduleFramework.frameworkVersion) {
     return { error: "template_incompatible" as const };
   }
+  const templateRecord = toTemplateRecord(template);
   const generationArtifacts = parseOpenWorldGenerationArtifacts(adventureModule.openWorldGenerationArtifactsJson);
   const scale = moduleScaleMetadata(generationArtifacts);
 
   if (!scale.launchableDirectly) {
+    if (scale.launchBlockReason === "requires_world_descent") {
+      if (!input.regionSemanticKey) {
+        return { error: "region_selection_required" as const };
+      }
+
+      const orchestrator = new WorldDescentOrchestrator();
+      const result = await orchestrator.createRegionDescendedCampaign({
+        campaignId: `camp_${randomUUID()}`,
+        userId: user.id,
+        module: adventureModule,
+        template: templateRecord,
+        world,
+        artifacts: generationArtifacts,
+        launchRegionSemanticKey: input.regionSemanticKey,
+      });
+
+      logBackendDiagnostic("campaign.create.world_region_descent.success", {
+        moduleId: input.moduleId,
+        templateId: input.templateId,
+        campaignId: result.campaignId,
+        launchRegionSemanticKey: input.regionSemanticKey,
+        descentStatus: result.descentStatus,
+      });
+
+      return {
+        campaignId: result.campaignId,
+        playable: false,
+        descentStatus: result.descentStatus,
+      };
+    }
+
     return {
       error: "module_requires_descent" as const,
       launchBlockReason: scale.launchBlockReason,
     };
   }
 
-  const templateRecord = toTemplateRecord(template);
   const entryPoint = await resolveCampaignLaunchEntrySelection({
     world,
     artifacts: generationArtifacts,
@@ -2961,76 +3089,126 @@ export async function createCampaignFromModuleForUser(input: {
 }
 
 export async function listCampaigns(): Promise<CampaignListItem[]> {
-   const campaigns = await prisma.campaign.findMany({
-     orderBy: { updatedAt: "desc" },
-     select: {
-       id: true,
-       createdAt: true,
-       updatedAt: true,
-       stateJson: true,
-       module: {
-         select: {
-           title: true,
-           premise: true,
-           setting: true,
-           tone: true,
-         },
-       },
-       template: {
-         select: {
-           name: true,
-           drivingGoal: true,
-         },
-       },
-     },
-   });
+  const user = await ensureLocalUser();
+  const campaigns = await prisma.campaign.findMany({
+    where: { userId: user.id },
+    orderBy: { updatedAt: "desc" },
+    select: {
+      id: true,
+      createdAt: true,
+      updatedAt: true,
+      descentStatus: true,
+      descentDataJson: true,
+      stateJson: true,
+      module: {
+        select: {
+          title: true,
+          premise: true,
+          setting: true,
+          tone: true,
+        },
+      },
+      template: {
+        select: {
+          name: true,
+          drivingGoal: true,
+        },
+      },
+    },
+  });
 
-   if (!campaigns.length) {
-     return [];
-   }
+  if (!campaigns.length) {
+    return [];
+  }
+
+  const currentLocationLookups = campaigns
+    .map((campaign) => {
+      const currentLocationId = parseCampaignRuntimeStateJson(campaign.stateJson).currentLocationId;
+      return currentLocationId
+        ? {
+            campaignId: campaign.id,
+            id: currentLocationId,
+          }
+        : null;
+    })
+    .filter((entry): entry is { campaignId: string; id: string } => entry != null);
+  const launchRegionLookups = campaigns
+    .map((campaign) => {
+      const launchRegionSemanticKey = launchRegionSemanticKeyFromDescentData(campaign.descentDataJson);
+      return launchRegionSemanticKey
+        ? {
+            campaignId: campaign.id,
+            semanticKey: launchRegionSemanticKey,
+          }
+        : null;
+    })
+    .filter((entry): entry is { campaignId: string; semanticKey: string } => entry != null);
 
   const locationRecords = await prisma.locationNode.findMany({
     where: {
-      OR: campaigns
-        .map((campaign) => {
-          const currentLocationId = parseCampaignRuntimeStateJson(campaign.stateJson).currentLocationId;
-          return currentLocationId
-            ? {
-                campaignId: campaign.id,
-                id: currentLocationId,
-              }
-            : null;
-        })
-        .filter((entry): entry is { campaignId: string; id: string } => entry != null),
+      campaignId: {
+        in: campaigns.map((campaign) => campaign.id),
+      },
     },
-     select: {
-       campaignId: true,
-       name: true,
-     },
-   });
-   const currentLocationNameByCampaignId = new Map(
-     locationRecords.map((location) => [location.campaignId, location.name]),
-   );
+    select: {
+      campaignId: true,
+      id: true,
+      semanticKey: true,
+      name: true,
+    },
+  });
+  const currentLocationNameByCampaignId = new Map(
+    currentLocationLookups.map((lookup) => {
+      const location = locationRecords.find(
+        (record) => record.campaignId === lookup.campaignId && record.id === lookup.id,
+      );
+      return [lookup.campaignId, location?.name ?? null] as const;
+    }),
+  );
+  const launchRegionNameByCampaignId = new Map(
+    launchRegionLookups.map((lookup) => {
+      const location = locationRecords.find(
+        (record) => record.campaignId === lookup.campaignId && record.semanticKey === lookup.semanticKey,
+      );
+      return [lookup.campaignId, location?.name ?? null] as const;
+    }),
+  );
 
-    return campaigns.map((campaign) => {
-      const state = parseCampaignRuntimeStateJson(campaign.stateJson) as CampaignRuntimeState & {
-        customTitle?: string;
-      };
-      const title = state.customTitle ?? campaign.module.title;
-      return {
-        id: campaign.id,
-        title,
-        premise: campaign.module.premise,
-        setting: campaign.module.setting,
-        tone: campaign.module.tone,
-        characterName: campaign.template.name,
-        characterArchetype: campaign.template.drivingGoal,
-        currentLocationName: currentLocationNameByCampaignId.get(campaign.id) ?? "Unknown location",
-        updatedAt: campaign.updatedAt.toISOString(),
-        createdAt: campaign.createdAt.toISOString(),
-      };
-    });
- }
+  return campaigns.map((campaign) => {
+    const descentStatus = normalizeCampaignDescentStatus(campaign.descentStatus);
+    const playable = campaignIsReadyForPlay(descentStatus);
+    const state = parseCampaignRuntimeStateJson(campaign.stateJson) as CampaignRuntimeState & {
+      customTitle?: string;
+    };
+    const title = state.customTitle ?? campaign.module.title;
+    const launchRegionName = launchRegionNameByCampaignId.get(campaign.id) ?? null;
+    const currentLocationName = currentLocationNameByCampaignId.get(campaign.id);
+    const nonPlayableSummary = describeNonPlayableCampaign(descentStatus, launchRegionName);
+
+    return {
+      id: campaign.id,
+      title,
+      premise: campaign.module.premise,
+      setting: campaign.module.setting,
+      tone: campaign.module.tone,
+      characterName: campaign.template.name,
+      characterArchetype: campaign.template.drivingGoal,
+      currentLocationName: playable
+        ? currentLocationName ?? "Unknown location"
+        : nonPlayableSummary.currentLocationName,
+      description: playable
+        ? currentLocationName
+          ? `Currently at ${currentLocationName}.`
+          : null
+        : nonPlayableSummary.description,
+      playable,
+      descentStatus,
+      launchRegionName,
+      updatedAt: campaign.updatedAt.toISOString(),
+      createdAt: campaign.createdAt.toISOString(),
+    };
+  });
+}
 
 export async function deleteCampaignForUser(campaignId: string): Promise<{ campaignId: string } | null> {
    const user = await ensureLocalUser();
@@ -3074,6 +3252,30 @@ export async function renameCampaignForUser(campaignId: string, title: string): 
      title: title,
    };
  }
+
+export async function getCampaignRuntimeStatus(campaignId: string) {
+  const user = await ensureLocalUser();
+  const campaign = await prisma.campaign.findFirst({
+    where: { id: campaignId, userId: user.id },
+    select: {
+      id: true,
+      descentStatus: true,
+      descentDataJson: true,
+    },
+  });
+
+  if (!campaign) {
+    return null;
+  }
+
+  const descentStatus = normalizeCampaignDescentStatus(campaign.descentStatus);
+  return {
+    campaignId: campaign.id,
+    playable: campaignIsReadyForPlay(descentStatus),
+    descentStatus,
+    launchRegionSemanticKey: launchRegionSemanticKeyFromDescentData(campaign.descentDataJson),
+  };
+}
 
 function toLocationSummary(
   location: Prisma.LocationNodeGetPayload<Record<string, never>>,
@@ -4396,8 +4598,9 @@ function pickRetrievedMemories(input: {
 }
 
 export async function getCampaignSnapshot(campaignId: string): Promise<CampaignSnapshot | null> {
-  const campaign = await prisma.campaign.findUnique({
-    where: { id: campaignId },
+  const user = await ensureLocalUser();
+  const campaign = await prisma.campaign.findFirst({
+    where: { id: campaignId, userId: user.id },
     include: {
       module: true,
       template: true,
@@ -4751,12 +4954,48 @@ async function getTurnSnapshotFromClient(
   campaignId: string,
   sessionId: string,
 ): Promise<CampaignSnapshot | null> {
+  // Keep snapshot reads conservative on the pooled client path. Large fan-out
+  // bursts previously stressed the PgBouncer session pool.
+  const queryConcurrency = "$transaction" in db ? 2 : 1;
   const campaign = await db.campaign.findUnique({
     where: { id: campaignId },
-    include: {
-      module: true,
-      template: true,
-      characterInstance: {
+    select: {
+      id: true,
+      moduleId: true,
+      templateId: true,
+      selectedEntryPointId: true,
+      stateVersion: true,
+      generatedThroughDay: true,
+      stateJson: true,
+    },
+  });
+
+  if (!campaign) {
+    return null;
+  }
+
+  const state = parseCampaignRuntimeStateJson(campaign.stateJson);
+  const [
+    module,
+    template,
+    characterInstance,
+    session,
+    memoryRecords,
+    resolvedTurns,
+    knownRoutes,
+    activeJourneyRecord,
+  ] = await runQueryBatch([
+    () =>
+      db.adventureModule.findUnique({
+        where: { id: campaign.moduleId },
+      }),
+    () =>
+      db.characterTemplate.findUnique({
+        where: { id: campaign.templateId },
+      }),
+    () =>
+      db.characterInstance.findUnique({
+        where: { campaignId },
         include: {
           inventory: {
             orderBy: { createdAt: "asc" },
@@ -4767,122 +5006,145 @@ async function getTurnSnapshotFromClient(
             include: { commodity: true },
           },
         },
-      },
-      sessions: {
-        where: { id: sessionId },
-        take: 1,
+      }),
+    () =>
+      db.session.findFirst({
+        where: {
+          id: sessionId,
+          campaignId,
+        },
         include: {
           messages: {
             orderBy: { createdAt: "desc" },
             take: 20,
           },
         },
-      },
-      memories: {
+      }),
+    () =>
+      db.memoryEntry.findMany({
+        where: { campaignId },
         orderBy: { createdAt: "desc" },
         take: 32,
         include: {
           entityLinks: true,
         },
-      },
-      turns: {
-        where: { status: "resolved" },
+      }),
+    () =>
+      db.turn.findMany({
+        where: {
+          campaignId,
+          status: "resolved",
+        },
         orderBy: { createdAt: "desc" },
         take: 8,
-      },
-      knownRoutes: true,
-      activeJourney: {
+      }),
+    () =>
+      db.campaignKnownRoute.findMany({
+        where: { campaignId },
+      }),
+    () =>
+      db.activeJourney.findUnique({
+        where: { campaignId },
         include: {
           edge: true,
           originLocation: true,
           destinationLocation: true,
         },
-      },
-    },
-  });
+      }),
+  ] as const, queryConcurrency);
 
-  if (!campaign || !campaign.characterInstance || !campaign.sessions[0]) {
+  if (!module || !template || !characterInstance || !session) {
     return null;
   }
 
-  const [campaignItemInstances, campaignCommodityStacks, campaignWorldObjectRecords] = await Promise.all([
-    db.itemInstance.findMany({
-      where: {
-        template: {
-          campaignId,
-        },
-      },
-      orderBy: { createdAt: "asc" },
-      include: { template: true },
-    }),
-    db.characterCommodityStack.findMany({
-      where: {
-        commodity: {
-          campaignId,
-        },
-      },
-      orderBy: { createdAt: "asc" },
-      include: { commodity: true },
-    }),
-    db.worldObject.findMany({
-      where: { campaignId },
-      orderBy: { createdAt: "asc" },
-    }),
-  ]);
-
-  const state = parseCampaignRuntimeStateJson(campaign.stateJson);
-  const session = campaign.sessions[0];
-
-  const currentLocationRecord = state.currentLocationId
-    ? await db.locationNode.findFirst({
+  const [
+    campaignItemInstances,
+    campaignCommodityStacks,
+    campaignWorldObjectRecords,
+    currentLocationRecord,
+    discoveredInfoRecords,
+  ] = await runQueryBatch([
+    () =>
+      db.itemInstance.findMany({
         where: {
-          campaignId,
-          id: state.currentLocationId,
-        },
-      })
-    : null;
-  const adjacentEdges = currentLocationRecord
-    ? await db.locationEdge.findMany({
-        where: {
-          campaignId,
-          OR: [{ sourceId: currentLocationRecord.id }, { targetId: currentLocationRecord.id }],
+          template: {
+            campaignId,
+          },
         },
         orderBy: { createdAt: "asc" },
-      })
-    : [];
-  const presentNpcRecords = currentLocationRecord
-    ? await db.nPC.findMany({
+        include: { template: true },
+      }),
+    () =>
+      db.characterCommodityStack.findMany({
+        where: {
+          commodity: {
+            campaignId,
+          },
+        },
+        orderBy: { createdAt: "asc" },
+        include: { commodity: true },
+      }),
+    () =>
+      db.worldObject.findMany({
+        where: { campaignId },
+        orderBy: { createdAt: "asc" },
+      }),
+    () =>
+      state.currentLocationId
+        ? db.locationNode.findUnique({
+            where: { id: state.currentLocationId },
+          })
+        : Promise.resolve(null),
+    () =>
+      db.information.findMany({
         where: {
           campaignId,
-          currentLocationId: currentLocationRecord.id,
+          isDiscovered: true,
         },
-        orderBy: { name: "asc" },
-      })
-    : [];
-  const actorRecords = await db.actor.findMany({
-    where: {
-      campaignId,
-      OR: [
-        { profileNpcId: { not: null } },
-        ...(currentLocationRecord ? [{ currentLocationId: currentLocationRecord.id }] : []),
-        { currentLocationId: null },
-      ],
-    },
-    include: {
-      profileNpc: true,
-    },
-    orderBy: [{ lastSeenAtTurn: "desc" }, { lastSeenAtTime: "desc" }, { id: "asc" }],
-    take: 50,
-  });
-  const discoveredInfoRecords = await db.information.findMany({
-    where: {
-      campaignId,
-      isDiscovered: true,
-    },
-    orderBy: { title: "asc" },
-  });
+        orderBy: { title: "asc" },
+      }),
+  ] as const, queryConcurrency);
 
-  const anchorLocationRecord = currentLocationRecord ?? campaign.activeJourney?.destinationLocation ?? null;
+  const [adjacentEdges, presentNpcRecords, actorRecords] = await runQueryBatch([
+    () =>
+      currentLocationRecord
+        ? db.locationEdge.findMany({
+            where: {
+              campaignId,
+              OR: [{ sourceId: currentLocationRecord.id }, { targetId: currentLocationRecord.id }],
+            },
+            orderBy: { createdAt: "asc" },
+          })
+        : Promise.resolve([]),
+    () =>
+      currentLocationRecord
+        ? db.nPC.findMany({
+            where: {
+              campaignId,
+              currentLocationId: currentLocationRecord.id,
+            },
+            orderBy: { name: "asc" },
+          })
+        : Promise.resolve([]),
+    () =>
+      db.actor.findMany({
+        where: {
+          campaignId,
+          OR: [
+            { profileNpcId: { not: null } },
+            ...(currentLocationRecord ? [{ currentLocationId: currentLocationRecord.id }] : []),
+            { currentLocationId: null },
+          ],
+        },
+        include: {
+          profileNpc: true,
+        },
+        orderBy: [{ lastSeenAtTurn: "desc" }, { lastSeenAtTime: "desc" }, { id: "asc" }],
+        take: 50,
+      }),
+  ] as const, queryConcurrency);
+
+  const anchorLocationRecord = currentLocationRecord ?? activeJourneyRecord?.destinationLocation ?? null;
   if (!anchorLocationRecord) {
     return null;
   }
@@ -4901,35 +5163,54 @@ async function getTurnSnapshotFromClient(
     }
   }
 
-  const locationKnowledge = await db.locationKnowledge.findMany({
-    where: {
-      campaignId,
-      locationId: anchorLocationRecord.id,
-    },
-  });
-  const factionKnowledge = baseKnownFactionIds.size
-    ? await db.factionKnowledge.findMany({
+  const sameRegionParentId = anchorLocationRecord.locationKind === "minor"
+    ? anchorLocationRecord.parentLocationId
+    : anchorLocationRecord.id;
+  const [locationKnowledge, factionKnowledge, npcKnowledge, sameRegionLocationIds] = await runQueryBatch([
+    () =>
+      db.locationKnowledge.findMany({
         where: {
           campaignId,
-          factionId: {
-            in: Array.from(baseKnownFactionIds),
-          },
+          locationId: anchorLocationRecord.id,
         },
-      })
-    : [];
-  const npcKnowledge = presentNpcIds.length
-    ? await db.npcKnowledge.findMany({
+      }),
+    () =>
+      baseKnownFactionIds.size
+        ? db.factionKnowledge.findMany({
+            where: {
+              campaignId,
+              factionId: {
+                in: Array.from(baseKnownFactionIds),
+              },
+            },
+          })
+        : Promise.resolve([]),
+    () =>
+      presentNpcIds.length
+        ? db.npcKnowledge.findMany({
+            where: {
+              campaignId,
+              npcId: {
+                in: presentNpcIds,
+              },
+              shareability: {
+                not: "private",
+              },
+            },
+          })
+        : Promise.resolve([]),
+    () =>
+      db.locationNode.findMany({
         where: {
           campaignId,
-          npcId: {
-            in: presentNpcIds,
-          },
-          shareability: {
-            not: "private",
-          },
+          OR: [
+            { parentLocationId: anchorLocationRecord.id },
+            ...(sameRegionParentId ? [{ parentLocationId: sameRegionParentId }] : []),
+          ],
         },
-      })
-    : [];
+        select: { id: true },
+      }),
+  ] as const, queryConcurrency);
 
   const discoveredIds = new Set(discoveredInfoRecords.map((information) => information.id));
   const visibleKnowledgeIds = buildRelevantKnowledgeIds({
@@ -4990,19 +5271,6 @@ async function getTurnSnapshotFromClient(
       ),
     ),
   );
-  const sameRegionParentId = anchorLocationRecord.locationKind === "minor"
-    ? anchorLocationRecord.parentLocationId
-    : anchorLocationRecord.id;
-  const sameRegionLocationIds = await db.locationNode.findMany({
-    where: {
-      campaignId,
-      OR: [
-        { parentLocationId: anchorLocationRecord.id },
-        ...(sameRegionParentId ? [{ parentLocationId: sameRegionParentId }] : []),
-      ],
-    },
-    select: { id: true },
-  });
   const relevantLocationIds = Array.from(new Set([
     anchorLocationRecord.id,
     ...adjacentLocationIds,
@@ -5018,43 +5286,48 @@ async function getTurnSnapshotFromClient(
     ...relevantInformationRecords.flatMap((information) => (information.sourceNpcId ? [information.sourceNpcId] : [])),
   ]));
 
-  const locationRecords = relevantLocationIds.length
-    ? await db.locationNode.findMany({
-        where: {
-          campaignId,
-          id: {
-            in: relevantLocationIds,
-          },
-        },
-      })
-    : [];
-  const factionRecords = relevantFactionIds.length
-    ? await db.faction.findMany({
-        where: {
-          campaignId,
-          id: {
-            in: relevantFactionIds,
-          },
-        },
-        orderBy: { name: "asc" },
-      })
-    : [];
-  const sourceNpcRecords = relevantNpcIds.length
-    ? await db.nPC.findMany({
-        where: {
-          campaignId,
-          id: {
-            in: relevantNpcIds,
-          },
-        },
-        orderBy: { name: "asc" },
-      })
-    : [];
+  const [locationRecords, factionRecords, sourceNpcRecords] = await runQueryBatch([
+    () =>
+      relevantLocationIds.length
+        ? db.locationNode.findMany({
+            where: {
+              campaignId,
+              id: {
+                in: relevantLocationIds,
+              },
+            },
+          })
+        : Promise.resolve([]),
+    () =>
+      relevantFactionIds.length
+        ? db.faction.findMany({
+            where: {
+              campaignId,
+              id: {
+                in: relevantFactionIds,
+              },
+            },
+            orderBy: { name: "asc" },
+          })
+        : Promise.resolve([]),
+    () =>
+      relevantNpcIds.length
+        ? db.nPC.findMany({
+            where: {
+              campaignId,
+              id: {
+                in: relevantNpcIds,
+              },
+            },
+            orderBy: { name: "asc" },
+          })
+        : Promise.resolve([]),
+  ] as const, queryConcurrency);
 
   const currentLocation = currentLocationRecord
     ? toLocationSummary(currentLocationRecord, factionRecords)
     : null;
-  const knownRouteIds = new Set(campaign.knownRoutes.map((route) => route.edgeId));
+  const knownRouteIds = new Set(knownRoutes.map((route) => route.edgeId));
   const adjacentRoutes = currentLocationRecord
     ? adjacentEdges
         .filter((edge) => edge.visibility === "public" || knownRouteIds.has(edge.id))
@@ -5074,7 +5347,7 @@ async function getTurnSnapshotFromClient(
     locations: locationRecords,
     actionableRouteTargetIds: new Set(adjacentRoutes.map((route) => route.targetLocationId)),
   });
-  const activeJourney = campaign.activeJourney ? toActiveJourneySummary(campaign.activeJourney) : null;
+  const activeJourney = activeJourneyRecord ? toActiveJourneySummary(activeJourneyRecord) : null;
 
   const localInformation = relevantInformationRecords
     .filter(
@@ -5108,55 +5381,61 @@ async function getTurnSnapshotFromClient(
     }
   }
 
-  const knownFactionRecords = knownFactionIds.size
-    ? await db.faction.findMany({
+  const [knownFactionRecords, factionRelations, pendingWorldEvents, pendingFactionMoves] = await runQueryBatch([
+    () =>
+      knownFactionIds.size
+        ? db.faction.findMany({
+            where: {
+              campaignId,
+              id: {
+                in: Array.from(knownFactionIds),
+              },
+            },
+            orderBy: { name: "asc" },
+          })
+        : Promise.resolve([]),
+    () =>
+      knownFactionIds.size
+        ? db.factionRelation.findMany({
+            where: {
+              campaignId,
+              factionAId: {
+                in: Array.from(knownFactionIds),
+              },
+              factionBId: {
+                in: Array.from(knownFactionIds),
+              },
+            },
+            orderBy: { createdAt: "asc" },
+          })
+        : Promise.resolve([]),
+    () =>
+      db.worldEvent.findMany({
         where: {
           campaignId,
-          id: {
-            in: Array.from(knownFactionIds),
-          },
-        },
-        orderBy: { name: "asc" },
-      })
-    : [];
-  const factionRelations = knownFactionIds.size
-    ? await db.factionRelation.findMany({
-        where: {
-          campaignId,
-          factionAId: {
-            in: Array.from(knownFactionIds),
-          },
-          factionBId: {
-            in: Array.from(knownFactionIds),
-          },
-        },
-        orderBy: { createdAt: "asc" },
-      })
-    : [];
-  const pendingWorldEvents = await db.worldEvent.findMany({
-    where: {
-      campaignId,
-      locationId: anchorLocationRecord.id,
-      isProcessed: false,
-      isCancelled: false,
-    },
-    orderBy: { triggerTime: "desc" },
-    take: 30,
-  });
-  const pendingFactionMoves = knownFactionIds.size
-    ? await db.factionMove.findMany({
-        where: {
-          campaignId,
-          factionId: {
-            in: Array.from(knownFactionIds),
-          },
-          isExecuted: false,
+          locationId: anchorLocationRecord.id,
+          isProcessed: false,
           isCancelled: false,
         },
-        orderBy: { scheduledAtTime: "asc" },
+        orderBy: { triggerTime: "desc" },
         take: 30,
-      })
-    : [];
+      }),
+    () =>
+      knownFactionIds.size
+        ? db.factionMove.findMany({
+            where: {
+              campaignId,
+              factionId: {
+                in: Array.from(knownFactionIds),
+              },
+              isExecuted: false,
+              isCancelled: false,
+            },
+            orderBy: { scheduledAtTime: "asc" },
+            take: 30,
+          })
+        : Promise.resolve([]),
+  ] as const, queryConcurrency);
 
   const knownFactions = knownFactionRecords.map(toFactionSummary);
   const normalizedFactionRecords = knownFactionRecords.length ? knownFactionRecords : factionRecords;
@@ -5177,24 +5456,24 @@ async function getTurnSnapshotFromClient(
   const presentNpcs = actorViews.presentNpcs;
   const knownNpcLocationIds = actorViews.knownNpcLocationIds;
   const instance: CharacterInstance = {
-    id: campaign.characterInstance.id,
-    templateId: campaign.characterInstance.templateId,
-    health: campaign.characterInstance.health,
-    currencyCp: campaign.characterInstance.currencyCp,
-    frameworkValues: campaign.characterInstance.frameworkValues as CharacterInstance["frameworkValues"],
+    id: characterInstance.id,
+    templateId: characterInstance.templateId,
+    health: characterInstance.health,
+    currencyCp: characterInstance.currencyCp,
+    frameworkValues: characterInstance.frameworkValues as CharacterInstance["frameworkValues"],
     inventory: assetItems.filter(
       (item) =>
-        item.characterInstanceId === campaign.characterInstance?.id
+        item.characterInstanceId === characterInstance.id
         && !isArchivedInventoryProperties(item.properties),
     ),
     commodityStacks: assetCommodityStacks.filter(
-      (stack) => stack.characterInstanceId === campaign.characterInstance?.id,
+      (stack) => stack.characterInstanceId === characterInstance.id,
     ),
   };
   const character = toCampaignCharacter(
-    toTemplateRecord(campaign.template),
+    toTemplateRecord(template),
     instance,
-    resolveModuleCharacterFramework(campaign.module),
+    resolveModuleCharacterFramework(module),
     state.characterState.maxVitality ?? null,
   );
   const activePressures = buildActivePressures({
@@ -5203,14 +5482,14 @@ async function getTurnSnapshotFromClient(
     currentLocation: toLocationSummary(anchorLocationRecord, normalizedFactionRecords),
   });
   const activeThreads = buildActiveThreads({
-    memories: campaign.memories,
+    memories: memoryRecords,
     worldEvents: pendingWorldEvents,
     factionMoves: pendingFactionMoves,
     currentLocationId: anchorLocationRecord.id,
     knownFactionIds,
   });
   const memories: MemoryRecord[] = pickRetrievedMemories({
-    memories: campaign.memories,
+    memories: memoryRecords,
     currentLocationId: anchorLocationRecord.id,
     presentNpcIds: presentNpcs.map((npc) => npc.id),
     knownFactionIds: Array.from(knownFactionIds),
@@ -5219,7 +5498,7 @@ async function getTurnSnapshotFromClient(
     activePressures,
     activeThreads,
   }).map((memory) => toMemoryRecord(memory));
-  const recentWorldShifts = buildRecentWorldShifts(campaign.turns);
+  const recentWorldShifts = buildRecentWorldShifts(resolvedTurns);
   const recentMessages: StoryMessage[] = [...session.messages]
     .reverse()
     .map((message) => ({
@@ -5236,8 +5515,8 @@ async function getTurnSnapshotFromClient(
   const actors = actorViews.actors;
   const temporaryActors = actorViews.temporaryActors;
   const latestRetryableTurnId =
-    env.enableTurnUndo && campaign.turns[0]?.sessionId === session.id
-      ? campaign.turns[0]?.id ?? null
+    env.enableTurnUndo && resolvedTurns[0]?.sessionId === session.id
+      ? resolvedTurns[0]?.id ?? null
       : null;
   const canRetryLatestTurn =
     latestRetryableTurnId != null;
@@ -5250,10 +5529,10 @@ async function getTurnSnapshotFromClient(
     generatedThroughDay: campaign.generatedThroughDay,
     moduleId: campaign.moduleId,
     selectedEntryPointId: campaign.selectedEntryPointId,
-    title: state.customTitle ?? campaign.module.title,
-    premise: campaign.module.premise,
-    tone: campaign.module.tone,
-    setting: campaign.module.setting,
+    title: state.customTitle ?? module.title,
+    premise: module.premise,
+    tone: module.tone,
+    setting: module.setting,
     state,
     promptRequestId: null,
     assetItems,

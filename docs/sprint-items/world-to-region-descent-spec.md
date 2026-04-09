@@ -693,6 +693,57 @@ The next `region -> settlement` spec should be able to assume:
 - preload-horizon logic already identifies which settlements must be materialized first
 - hidden destinations already have semantic identity before local play materializes them
 
+## Minimal Downstream Contract For Future Region -> Settlement Descent
+
+We should not fully spec `region -> settlement` yet.
+That detailed spec should wait until `world -> region` is implemented and validated against real outputs.
+
+However, this spec must still lock the minimum handoff contract so implementation does not paint the next stage into a corner.
+
+### Required handoff outputs
+
+Each materialized `RegionBundle` must provide enough structured output for later settlement descent to consume directly.
+
+At minimum:
+- `regionSemanticKey`
+- settlement manifests with stable `settlementSemanticKey`
+- arrival/egress references from settlement manifests into region-owned travel structure
+- preload relevance metadata for each settlement
+- hidden regional destination manifests that may later become settlement-adjacent or local destinations
+- region-owned discoverability hooks that settlement descent must preserve rather than reinvent
+
+### SettlementManifest minimum downstream contract
+
+Even before settlement shells are implemented, every `SettlementManifest` produced by `world -> region` must include enough information for later hydration.
+
+Minimum required fields:
+- `settlementSemanticKey`
+- `parentRegionSemanticKey`
+- settlement role/type
+- settlement identity summary
+- arrival references
+- egress references
+- downstream shell prerequisites
+- preload priority / materialization priority metadata
+
+### Launchability handoff
+
+This spec must leave campaign/runtime state in a form where settlement descent can continue deterministically.
+
+That means:
+- the campaign is explicitly marked as region-descended but not player-launchable
+- settlement descent can identify which settlement(s) must materialize next
+- no settlement-local assumptions are encoded only in prose or prompt text
+
+### What remains intentionally unspecified for now
+
+The later `region -> settlement` spec should decide, based on real `RegionBundle` outputs:
+- exact settlement shell schema
+- local node/topology rules
+- local discoverability materialization details
+- local NPC/information hydration shape
+- exact prompt budgets for settlement generation
+
 ## Open Decisions To Resolve Early In The Next Implementation Pass
 
 - exact canonical primitive shapes and storage models

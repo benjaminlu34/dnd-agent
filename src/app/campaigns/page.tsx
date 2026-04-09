@@ -6,7 +6,14 @@ import { useEffect, useRef, useState } from "react";
 
 export default function CampaignsPage() {
   const router = useRouter();
-  const [campaigns, setCampaigns] = useState<Array<{ id: string; title: string; description?: string }>>([]);
+  const [campaigns, setCampaigns] = useState<Array<{
+    id: string;
+    title: string;
+    description?: string;
+    playable?: boolean;
+    descentStatus?: string;
+    currentLocationName?: string;
+  }>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
@@ -134,8 +141,13 @@ export default function CampaignsPage() {
               <div key={campaign.id} className="block rounded-xl border border-zinc-800 bg-zinc-950/50 p-4 hover:bg-zinc-900 transition-colors relative">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                   <div
-                    className="min-w-0 flex-1 cursor-pointer"
-                    onClick={() => router.push(`/play/${campaign.id}`)}
+                    className={`min-w-0 flex-1 ${campaign.playable === false ? "cursor-default" : "cursor-pointer"}`}
+                    onClick={() => {
+                      if (campaign.playable === false) {
+                        return;
+                      }
+                      router.push(`/play/${campaign.id}`);
+                    }}
                   >
                     {editingCampaign?.id === campaign.id ? (
                       <div>
@@ -176,6 +188,20 @@ export default function CampaignsPage() {
                     {campaign.description && (
                       <p className="text-sm text-zinc-400 line-clamp-2">{campaign.description}</p>
                     )}
+                    {campaign.playable === false ? (
+                      <p
+                        className={[
+                          "mt-3 text-[11px] uppercase tracking-[0.18em]",
+                          campaign.descentStatus === "descent_failed"
+                            ? "text-red-300"
+                            : "text-amber-300",
+                        ].join(" ")}
+                      >
+                        {campaign.descentStatus === "descent_failed"
+                          ? "Descent Failed"
+                          : "Awaiting Settlement Descent"}
+                      </p>
+                    ) : null}
                   </div>
                   <div className="flex shrink-0 gap-2 self-start" onClick={(e) => e.preventDefault()}>
                     {editingCampaign?.id === campaign.id ? (

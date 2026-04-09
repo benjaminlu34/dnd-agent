@@ -562,6 +562,31 @@ const launchBlockReasonSchema = z.enum([
   "requires_world_descent",
   "requires_region_materialization",
 ]);
+export const campaignDescentStatusSchema = z.enum([
+  "ready_for_play",
+  "awaiting_settlement_descent",
+  "descent_failed",
+]);
+export const materializationLevelSchema = z.enum(["manifest", "bundle", "shell"]);
+export const corridorClassSchema = z.enum([
+  "trivial_transfer",
+  "routine_route",
+  "journey_route",
+  "stranding_risk_route",
+]);
+export const corridorModifierSchema = z.enum([
+  "hidden",
+  "gated",
+  "seasonal",
+  "hostile_control",
+  "hazardous",
+]);
+const semanticKeySchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(200)
+  .regex(/^[a-z0-9_:]+$/, "Semantic keys must be lowercase alphanumeric with underscores and colons.");
 const targetSemanticScaleSchema = z.enum(["local", "regional", "civilizational"]);
 const detailModeSchema = z.enum(["street_level", "territorial", "civilizational"]);
 const forbiddenDetailModeSchema = z.enum([
@@ -1017,7 +1042,8 @@ export const generatedWorldModuleSchema = z
           code: z.ZodIssueCode.custom,
           path: ["edges", index, "sourceId"],
           message: "Edge source must reference a known location.",
-        });
+  });
+
       }
 
       if (!locationIds.has(edge.targetId)) {
@@ -1192,6 +1218,240 @@ export const generatedWorldModuleSchema = z
       draft.title.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "module",
     ),
   }));
+
+const descendedSettlementManifestSchema = z.object({
+  settlementSemanticKey: semanticKeySchema,
+  parentRegionSemanticKey: semanticKeySchema,
+  name: z.string().trim().min(1),
+  type: z.string().trim().min(1),
+  summary: z.string().trim().min(1),
+  description: z.string().trim().min(1),
+  arrivalCorridorSemanticKeys: z.array(semanticKeySchema).max(6),
+  egressCorridorSemanticKeys: z.array(semanticKeySchema).max(6),
+  downstreamShellPrerequisites: z.array(z.string().trim().min(1)).max(8),
+  preloadPriority: z.enum(["critical", "nearby", "distant"]),
+});
+
+const descendedRegionalDestinationManifestSchema = z.object({
+  destinationSemanticKey: semanticKeySchema,
+  parentRegionSemanticKey: semanticKeySchema,
+  name: z.string().trim().min(1),
+  type: z.string().trim().min(1),
+  summary: z.string().trim().min(1),
+  description: z.string().trim().min(1),
+  hidden: z.boolean(),
+  discoverabilityHooks: z.array(z.string().trim().min(1)).max(6),
+});
+
+const descendedCorridorPackSchema = z.object({
+  corridorSemanticKey: semanticKeySchema,
+  sourceSemanticKey: semanticKeySchema,
+  targetSemanticKey: semanticKeySchema,
+  sourceLabel: z.string().trim().min(1),
+  targetLabel: z.string().trim().min(1),
+  baseClass: corridorClassSchema,
+  modifiers: z.array(corridorModifierSchema).max(5),
+  travelTimeMinutes: z.number().int().min(1),
+  dangerLevel: z.number().int().min(0).max(10),
+  currentStatus: z.string().trim().min(1),
+  description: z.string().trim().min(1),
+  pressureSummary: z.string().trim().min(1),
+  interruptionCandidates: z.array(z.string().trim().min(1)).max(4),
+  refugeSummaries: z.array(z.string().trim().min(1)).max(3),
+  hiddenOpportunitySummaries: z.array(z.string().trim().min(1)).max(3),
+  nextAnchorSemanticKey: semanticKeySchema.nullable(),
+  fallbackAnchorSemanticKey: semanticKeySchema.nullable(),
+});
+
+export const descendedRegionManifestSchema = z.object({
+  regionSemanticKey: semanticKeySchema,
+  canonicalWorldLocationId: z.string().trim().min(1),
+  name: z.string().trim().min(1),
+  summary: z.string().trim().min(1),
+  description: z.string().trim().min(1),
+  inheritedWorldReferences: z.array(z.string().trim().min(1)).max(8),
+  preloadEligible: z.boolean(),
+  settlementManifests: z.array(descendedSettlementManifestSchema).min(2).max(8),
+  hiddenDestinationManifests: z.array(descendedRegionalDestinationManifestSchema).max(5),
+  intraRegionCorridorIndex: z.array(
+    z.object({
+      corridorSemanticKey: semanticKeySchema,
+      sourceSemanticKey: semanticKeySchema,
+      targetSemanticKey: semanticKeySchema,
+      baseClass: corridorClassSchema,
+      modifiers: z.array(corridorModifierSchema).max(5),
+    }),
+  ).min(2).max(14),
+}).superRefine((manifest, ctx) => {
+  addDuplicateStringIssues(
+    manifest.settlementManifests.map((entry) => entry.settlementSemanticKey),
+    ctx,
+    ["settlementManifests"],
+    "Settlement semantic keys must be unique within a region manifest.",
+  );
+  addDuplicateStringIssues(
+    manifest.hiddenDestinationManifests.map((entry) => entry.destinationSemanticKey),
+    ctx,
+    ["hiddenDestinationManifests"],
+    "Hidden destination semantic keys must be unique within a region manifest.",
+  );
+  addDuplicateStringIssues(
+    manifest.intraRegionCorridorIndex.map((entry) => entry.corridorSemanticKey),
+    ctx,
+    ["intraRegionCorridorIndex"],
+    "Corridor semantic keys must be unique within a region manifest.",
+  );
+
+  const knownSemanticKeys = new Set<string>([
+    manifest.regionSemanticKey,
+    ...manifest.settlementManifests.map((entry) => entry.settlementSemanticKey),
+    ...manifest.hiddenDestinationManifests.map((entry) => entry.destinationSemanticKey),
+  ]);
+  const corridorKeys = new Set<string>(manifest.intraRegionCorridorIndex.map((entry) => entry.corridorSemanticKey));
+
+  manifest.settlementManifests.forEach((settlement, index) => {
+    if (settlement.parentRegionSemanticKey !== manifest.regionSemanticKey) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["settlementManifests", index, "parentRegionSemanticKey"],
+        message: "Settlement manifests must point at the enclosing regionSemanticKey.",
+      });
+    }
+
+    for (const arrivalKey of settlement.arrivalCorridorSemanticKeys) {
+      if (!corridorKeys.has(arrivalKey)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["settlementManifests", index, "arrivalCorridorSemanticKeys"],
+          message: "Arrival corridor keys must reference the manifest's corridor index.",
+        });
+      }
+    }
+
+    for (const egressKey of settlement.egressCorridorSemanticKeys) {
+      if (!corridorKeys.has(egressKey)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["settlementManifests", index, "egressCorridorSemanticKeys"],
+          message: "Egress corridor keys must reference the manifest's corridor index.",
+        });
+      }
+    }
+  });
+
+  manifest.hiddenDestinationManifests.forEach((destination, index) => {
+    if (destination.parentRegionSemanticKey !== manifest.regionSemanticKey) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["hiddenDestinationManifests", index, "parentRegionSemanticKey"],
+        message: "Hidden destinations must point at the enclosing regionSemanticKey.",
+      });
+    }
+  });
+
+  manifest.intraRegionCorridorIndex.forEach((corridor, index) => {
+    if (!knownSemanticKeys.has(corridor.sourceSemanticKey)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["intraRegionCorridorIndex", index, "sourceSemanticKey"],
+        message: "Corridor sources must reference the region or a known child semantic key.",
+      });
+    }
+
+    if (!knownSemanticKeys.has(corridor.targetSemanticKey)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["intraRegionCorridorIndex", index, "targetSemanticKey"],
+        message: "Corridor targets must reference the region or a known child semantic key.",
+      });
+    }
+  });
+});
+
+export const descendedRegionBundleSchema = descendedRegionManifestSchema.extend({
+  worldPressureSummary: z.string().trim().min(1),
+  regionalDiscoverabilityHooks: z.array(z.string().trim().min(1)).max(8),
+  corridorPacks: z.array(descendedCorridorPackSchema).min(2).max(14),
+  downstreamLaunchability: z.object({
+    settlementManifestCount: z.number().int().min(0),
+    corridorPackCount: z.number().int().min(0),
+    hiddenDestinationCount: z.number().int().min(0),
+    readyForSettlementDescent: z.boolean(),
+  }),
+}).superRefine((bundle, ctx) => {
+  const childSemanticKeys = new Set<string>([
+    bundle.regionSemanticKey,
+    ...bundle.settlementManifests.map((entry) => entry.settlementSemanticKey),
+    ...bundle.hiddenDestinationManifests.map((entry) => entry.destinationSemanticKey),
+  ]);
+  const corridorKeys = new Set(bundle.intraRegionCorridorIndex.map((entry) => entry.corridorSemanticKey));
+
+  addDuplicateStringIssues(
+    bundle.corridorPacks.map((entry) => entry.corridorSemanticKey),
+    ctx,
+    ["corridorPacks"],
+    "Corridor pack semantic keys must be unique within a region bundle.",
+  );
+
+  bundle.corridorPacks.forEach((pack, index) => {
+    if (!childSemanticKeys.has(pack.sourceSemanticKey)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["corridorPacks", index, "sourceSemanticKey"],
+        message: "Corridor pack sourceSemanticKey must reference the region or a known child semantic key.",
+      });
+    }
+
+    if (!childSemanticKeys.has(pack.targetSemanticKey)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["corridorPacks", index, "targetSemanticKey"],
+        message: "Corridor pack targetSemanticKey must reference the region or a known child semantic key.",
+      });
+    }
+
+    if (!corridorKeys.has(pack.corridorSemanticKey)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["corridorPacks", index, "corridorSemanticKey"],
+        message: "Corridor packs must reference a corridorSemanticKey from the corridor index.",
+      });
+    }
+
+    if (pack.nextAnchorSemanticKey && !childSemanticKeys.has(pack.nextAnchorSemanticKey)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["corridorPacks", index, "nextAnchorSemanticKey"],
+        message: "nextAnchorSemanticKey must reference the region or a known child semantic key.",
+      });
+    }
+
+    if (pack.fallbackAnchorSemanticKey && !childSemanticKeys.has(pack.fallbackAnchorSemanticKey)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["corridorPacks", index, "fallbackAnchorSemanticKey"],
+        message: "fallbackAnchorSemanticKey must reference the region or a known child semantic key.",
+      });
+    }
+  });
+});
+
+export const descendedWorldTravelBundleSchema = z.object({
+  corridorSemanticKey: semanticKeySchema,
+  sourceRegionSemanticKey: semanticKeySchema,
+  targetRegionSemanticKey: semanticKeySchema,
+  baseClass: corridorClassSchema,
+  modifiers: z.array(corridorModifierSchema).max(5),
+  travelTimeMinutes: z.number().int().min(1),
+  dangerLevel: z.number().int().min(0).max(10),
+  currentStatus: z.string().trim().min(1),
+  description: z.string().trim().min(1),
+  macroJourneyPressure: z.string().trim().min(1),
+  interruptionCandidates: z.array(z.string().trim().min(1)).max(4),
+  refugeSummaries: z.array(z.string().trim().min(1)).max(3),
+  nextAnchorSemanticKey: semanticKeySchema.nullable(),
+  fallbackAnchorSemanticKey: semanticKeySchema.nullable(),
+});
 
 export const openWorldGenerationArtifactsSchema = z.object({
   prompt: z.string().trim().min(1),
@@ -1390,14 +1650,26 @@ export const campaignOpeningDraftRequestSchema = z.object({
 export const campaignCreateRequestSchema = z.object({
   moduleId: z.string().trim().min(1, "Module selection is required."),
   templateId: z.string().trim().min(1, "Template selection is required."),
+  regionSemanticKey: z.string().trim().min(1, "Region selection is required.").optional(),
   entryPointId: z.string().trim().min(1, "Entry point selection is required.").optional(),
   customEntryPoint: resolvedLaunchEntrySchema.optional(),
   opening: generatedCampaignOpeningSchema.optional(),
   preparedLaunch: preparedCampaignLaunchSchema.optional(),
 }).refine(hasAtMostOneLaunchEntrySelection, {
   message: "Must not provide both entryPointId and customEntryPoint.",
-}).refine((input) => input.preparedLaunch !== undefined || input.opening !== undefined, {
-  message: "Campaign creation requires either a prepared launch bundle or an opening draft.",
+}).refine((input) => {
+  if (input.regionSemanticKey !== undefined) {
+    return (
+      input.entryPointId === undefined
+      && input.customEntryPoint === undefined
+      && input.opening === undefined
+      && input.preparedLaunch === undefined
+    );
+  }
+
+  return input.preparedLaunch !== undefined || input.opening !== undefined;
+}, {
+  message: "Campaign creation requires either a region selection or a prepared launch bundle/opening draft.",
 });
 
 export const moduleCreateRequestSchema = z.object({

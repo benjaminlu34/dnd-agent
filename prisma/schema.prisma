@@ -86,8 +86,10 @@ model Campaign {
   moduleId            String
   templateId          String
   moduleSchemaVersion Int                @default(1)
-  selectedEntryPointId String
+  selectedEntryPointId String?
   customEntryPointJson Json?
+  descentStatus       String
+  descentDataJson     Json?
   turnLockRequestId   String?
   turnLockSessionId   String?
   turnLockExpiresAt   DateTime?
@@ -129,6 +131,8 @@ model Campaign {
   knownRoutes         CampaignKnownRoute[]
   promptCache         CampaignPromptCache?
   activeJourney       ActiveJourney?
+
+  @@index([descentStatus])
 }
 
 model CharacterInstance {
@@ -304,6 +308,9 @@ model MemoryEntry {
 model LocationNode {
   id                   String          @id
   campaignId           String
+  semanticKey          String
+  materializationLevel String
+  descentDataJson      Json?
   name                 String
   type                 String
   locationKind         String          @default("spine")
@@ -341,13 +348,19 @@ model LocationNode {
   @@index([campaignId])
   @@index([campaignId, controllingFactionId])
   @@index([campaignId, parentLocationId])
+  @@unique([campaignId, semanticKey])
 }
 
 model LocationEdge {
   id                String       @id
   campaignId        String
+  semanticKey       String
+  materializationLevel String
   sourceId          String
   targetId          String
+  corridorClass     String?
+  modifiers         String[]     @default([])
+  travelBundleJson  Json?
   travelTimeMinutes Int
   dangerLevel       Int          @default(1)
   currentStatus     String       @default("open")
@@ -365,6 +378,7 @@ model LocationEdge {
 
   @@index([campaignId, sourceId])
   @@index([campaignId, targetId])
+  @@unique([campaignId, semanticKey])
 }
 
 model Faction {

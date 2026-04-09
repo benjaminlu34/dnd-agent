@@ -4,6 +4,14 @@ import { campaignOpeningDraftRequestSchema } from "@/lib/game/session-zero";
 
 export const runtime = "nodejs";
 
+function moduleRequiresDescentMessage(launchBlockReason: string) {
+  if (launchBlockReason === "requires_region_materialization") {
+    return "This module requires region-to-settlement descent before it can launch.";
+  }
+
+  return "This module requires world-to-region descent before it can launch.";
+}
+
 export async function POST(request: Request) {
   const payload = campaignOpeningDraftRequestSchema.safeParse(
     await request.json().catch(() => null),
@@ -26,7 +34,7 @@ export async function POST(request: Request) {
       if (result.error === "module_requires_descent") {
         return NextResponse.json(
           {
-            error: "World-scale modules require region materialization before launch. This feature is pending.",
+            error: moduleRequiresDescentMessage(result.launchBlockReason),
             code: "MODULE_REQUIRES_DESCENT",
           },
           { status: 409 },

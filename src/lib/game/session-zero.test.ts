@@ -4,6 +4,8 @@ import {
   campaignCreateRequestSchema,
   campaignOpeningDraftRequestSchema,
   customResolvedLaunchEntryDraftSchema,
+  descendedRegionBundleSchema,
+  descendedRegionManifestSchema,
   generatedCampaignOpeningSchema,
   generatedWorldBibleSchema,
   generatedWorldModuleSchema,
@@ -757,6 +759,203 @@ test("campaign create request schema accepts a prepared launch bundle without an
   });
 
   assert.equal(parsed.success, true);
+});
+
+test("campaign create request schema accepts world->region descent requests without launch draft data", () => {
+  const parsed = campaignCreateRequestSchema.safeParse({
+    moduleId: "mod_world_1",
+    templateId: "tpl_1",
+    regionSemanticKey: "region:loc_basin",
+  });
+
+  assert.equal(parsed.success, true);
+});
+
+test("campaign create request schema rejects mixing region descent with launch draft inputs", () => {
+  const parsed = campaignCreateRequestSchema.safeParse({
+    moduleId: "mod_world_1",
+    templateId: "tpl_1",
+    regionSemanticKey: "region:loc_basin",
+    opening: {
+      narration: "Rain glistens across the checkpoint.",
+      activeThreat: "The line is about to be searched.",
+      entryPointId: "entry_1",
+      locationNodeId: "preview_launch_1:location:loc_gate",
+      presentNpcIds: [],
+      citedInformationIds: [],
+      scene: {
+        title: "At the Gate",
+        summary: "The checkpoint tightens as you arrive.",
+        location: "Gate",
+        atmosphere: "Wet stone and restless guards.",
+        suggestedActions: ["Join the line"],
+      },
+    },
+  });
+
+  assert.equal(parsed.success, false);
+});
+
+test("descended region manifest schema rejects corridor references outside the manifest graph", () => {
+  const parsed = descendedRegionManifestSchema.safeParse({
+    regionSemanticKey: "region:loc_basin",
+    canonicalWorldLocationId: "loc_basin",
+    name: "The Basin",
+    summary: "A contested river basin.",
+    description: "A contested river basin with multiple trade corridors.",
+    inheritedWorldReferences: ["Bridge tolls", "Imperial pressure"],
+    preloadEligible: true,
+    settlementManifests: [
+      {
+        settlementSemanticKey: "settlement:region:loc_basin:vethmark",
+        parentRegionSemanticKey: "region:loc_basin",
+        name: "Vethmark",
+        type: "bridge_city",
+        summary: "The basin's toll city.",
+        description: "A toll city set over the river crossing.",
+        arrivalCorridorSemanticKeys: ["intra_region_corridor:region:loc_basin:bad_key"],
+        egressCorridorSemanticKeys: [],
+        downstreamShellPrerequisites: ["market square", "bridge approach"],
+        preloadPriority: "critical",
+      },
+      {
+        settlementSemanticKey: "settlement:region:loc_basin:thornpost",
+        parentRegionSemanticKey: "region:loc_basin",
+        name: "Thornpost",
+        type: "waystation",
+        summary: "A roadward staging settlement.",
+        description: "A waystation near the pass road.",
+        arrivalCorridorSemanticKeys: [],
+        egressCorridorSemanticKeys: [],
+        downstreamShellPrerequisites: ["inn yard"],
+        preloadPriority: "nearby",
+      },
+    ],
+    hiddenDestinationManifests: [],
+    intraRegionCorridorIndex: [
+      {
+        corridorSemanticKey: "intra_region_corridor:region:loc_basin:road_1",
+        sourceSemanticKey: "region:loc_basin",
+        targetSemanticKey: "settlement:region:loc_basin:vethmark",
+        baseClass: "routine_route",
+        modifiers: [],
+      },
+      {
+        corridorSemanticKey: "intra_region_corridor:region:loc_basin:road_2",
+        sourceSemanticKey: "region:loc_basin",
+        targetSemanticKey: "settlement:region:loc_basin:thornpost",
+        baseClass: "routine_route",
+        modifiers: [],
+      },
+    ],
+  });
+
+  assert.equal(parsed.success, false);
+});
+
+test("descended region bundle schema rejects unknown anchor references", () => {
+  const parsed = descendedRegionBundleSchema.safeParse({
+    regionSemanticKey: "region:loc_basin",
+    canonicalWorldLocationId: "loc_basin",
+    name: "The Basin",
+    summary: "A contested river basin.",
+    description: "A contested river basin with multiple trade corridors.",
+    inheritedWorldReferences: ["Bridge tolls", "Imperial pressure"],
+    preloadEligible: true,
+    settlementManifests: [
+      {
+        settlementSemanticKey: "settlement:region:loc_basin:vethmark",
+        parentRegionSemanticKey: "region:loc_basin",
+        name: "Vethmark",
+        type: "bridge_city",
+        summary: "The basin's toll city.",
+        description: "A toll city set over the river crossing.",
+        arrivalCorridorSemanticKeys: ["intra_region_corridor:region:loc_basin:road_1"],
+        egressCorridorSemanticKeys: ["intra_region_corridor:region:loc_basin:road_1"],
+        downstreamShellPrerequisites: ["market square", "bridge approach"],
+        preloadPriority: "critical",
+      },
+      {
+        settlementSemanticKey: "settlement:region:loc_basin:thornpost",
+        parentRegionSemanticKey: "region:loc_basin",
+        name: "Thornpost",
+        type: "waystation",
+        summary: "A roadward staging settlement.",
+        description: "A waystation near the pass road.",
+        arrivalCorridorSemanticKeys: ["intra_region_corridor:region:loc_basin:road_1"],
+        egressCorridorSemanticKeys: ["intra_region_corridor:region:loc_basin:road_1"],
+        downstreamShellPrerequisites: ["inn yard"],
+        preloadPriority: "nearby",
+      },
+    ],
+    hiddenDestinationManifests: [],
+    intraRegionCorridorIndex: [
+      {
+        corridorSemanticKey: "intra_region_corridor:region:loc_basin:road_1",
+        sourceSemanticKey: "region:loc_basin",
+        targetSemanticKey: "settlement:region:loc_basin:vethmark",
+        baseClass: "routine_route",
+        modifiers: [],
+      },
+      {
+        corridorSemanticKey: "intra_region_corridor:region:loc_basin:road_2",
+        sourceSemanticKey: "region:loc_basin",
+        targetSemanticKey: "settlement:region:loc_basin:thornpost",
+        baseClass: "routine_route",
+        modifiers: [],
+      },
+    ],
+    worldPressureSummary: "Tolls and military checkpoints distort movement across the basin.",
+    regionalDiscoverabilityHooks: ["Convoy bell timing", "Bridge toll rumors"],
+    corridorPacks: [
+      {
+        corridorSemanticKey: "intra_region_corridor:region:loc_basin:road_1",
+        sourceSemanticKey: "region:loc_basin",
+        targetSemanticKey: "settlement:region:loc_basin:vethmark",
+        sourceLabel: "The Basin",
+        targetLabel: "Vethmark",
+        baseClass: "routine_route",
+        modifiers: [],
+        travelTimeMinutes: 120,
+        dangerLevel: 2,
+        currentStatus: "open",
+        description: "A guarded road into the toll city.",
+        pressureSummary: "Bridge tolls slow movement and shape local rumor flow.",
+        interruptionCandidates: ["A caravan inspection bottleneck"],
+        refugeSummaries: [],
+        hiddenOpportunitySummaries: [],
+        nextAnchorSemanticKey: "settlement:region:loc_basin:unknown_anchor",
+        fallbackAnchorSemanticKey: null,
+      },
+      {
+        corridorSemanticKey: "intra_region_corridor:region:loc_basin:road_2",
+        sourceSemanticKey: "region:loc_basin",
+        targetSemanticKey: "settlement:region:loc_basin:thornpost",
+        sourceLabel: "The Basin",
+        targetLabel: "Thornpost",
+        baseClass: "routine_route",
+        modifiers: [],
+        travelTimeMinutes: 90,
+        dangerLevel: 2,
+        currentStatus: "open",
+        description: "A road toward the pass staging town.",
+        pressureSummary: "Caravan queues and pass timing shape movement.",
+        interruptionCandidates: ["A convoy marshal reshuffles departures"],
+        refugeSummaries: [],
+        hiddenOpportunitySummaries: [],
+        nextAnchorSemanticKey: null,
+        fallbackAnchorSemanticKey: null,
+      },
+    ],
+    downstreamLaunchability: {
+      settlementManifestCount: 2,
+      corridorPackCount: 2,
+      hiddenDestinationCount: 0,
+      readyForSettlementDescent: true,
+    },
+  });
+
+  assert.equal(parsed.success, false);
 });
 
 test("custom resolved launch entry draft schema allows solitary openings without local contacts", () => {

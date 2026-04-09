@@ -42,6 +42,9 @@ function remapLocation(
 ): GeneratedLocationNode {
   return {
     id: locationIds.get(location.id) ?? location.id,
+    semanticKey: location.semanticKey,
+    materializationLevel: location.materializationLevel,
+    descentDataJson: location.descentDataJson,
     name: location.name,
     type: location.type,
     locationKind: location.locationKind,
@@ -65,6 +68,8 @@ function remapEdge(
   return {
     ...edge,
     id: edgeIds.get(edge.id) ?? edge.id,
+    semanticKey: edge.semanticKey,
+    materializationLevel: edge.materializationLevel,
     sourceId: locationIds.get(edge.sourceId) ?? edge.sourceId,
     targetId: locationIds.get(edge.targetId) ?? edge.targetId,
   };

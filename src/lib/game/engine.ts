@@ -27,7 +27,6 @@ import {
   getPromptContext,
   getTurnRouterContext,
   getTurnSnapshot,
-  getTurnSnapshotInTransaction,
   toPlayerCampaignSnapshot,
 } from "@/lib/game/repository";
 import { canonicalizeNpcIdAgainstCandidates } from "@/lib/game/npc-identity";
@@ -169,6 +168,16 @@ function normalizeWhitespace(value: string) {
   return value.trim().replace(/\s+/g, " ");
 }
 
+function describeAbortSignal(signal?: AbortSignal) {
+  return {
+    signalAborted: signal?.aborted ?? false,
+    signalReason:
+      signal?.aborted && signal.reason !== undefined
+        ? String(signal.reason)
+        : null,
+  };
+}
+
 async function getCommittedPromptContext(input: {
   committedSnapshot: CampaignSnapshot | null;
   routerDecision: RouterDecision;
@@ -213,6 +222,7 @@ async function resolveCommittedSuggestedActions(input: {
       sessionId: input.sessionId,
       requestId: input.requestId,
       error: error instanceof Error ? error.message : String(error),
+      ...describeAbortSignal(input.signal),
     });
     return [];
   }
@@ -470,6 +480,28 @@ async function cleanupTurnLock(input: {
       turnLockExpiresAt: null,
     },
   });
+}
+
+async function cleanupTurnLockAfterCommit(input: {
+  campaignId: string;
+  sessionId: string;
+  requestId: string;
+  turnId: string;
+}) {
+  try {
+    await cleanupTurnLock({
+      campaignId: input.campaignId,
+      requestId: input.requestId,
+    });
+  } catch (error) {
+    logBackendDiagnostic("turn.lock_cleanup_failed_after_commit", {
+      campaignId: input.campaignId,
+      sessionId: input.sessionId,
+      requestId: input.requestId,
+      turnId: input.turnId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 function buildClarificationToolCall(input: {
@@ -8827,7 +8859,7 @@ async function commitResolvedTurn(input: {
   fetchedFacts: TurnFetchToolResult[];
   routerDecision: RouterDecision;
   groundedItemIds: string[];
-}): Promise<{ resultPayload: TurnResultPayload; memoryEntryId: string | null; committedSnapshot: CampaignSnapshot }> {
+}): Promise<{ resultPayload: TurnResultPayload; memoryEntryId: string | null; committedSnapshot: CampaignSnapshot | null }> {
   const {
     snapshot,
     sessionId,
@@ -8913,9 +8945,6 @@ async function commitResolvedTurn(input: {
           increment: 1,
         },
         stateJson: toCampaignRuntimeStateJson(evaluated.nextState),
-        turnLockRequestId: null,
-        turnLockSessionId: null,
-        turnLockExpiresAt: null,
       },
     });
 
@@ -9085,18 +9114,36 @@ async function commitResolvedTurn(input: {
         resultJson: toPrismaJsonValue(toTurnResultPayloadJson(resultPayload)),
       },
     });
-
-    committedSnapshot = await getTurnSnapshotInTransaction(tx, snapshot.campaignId, sessionId);
-    if (!committedSnapshot) {
-      throw new Error("Committed snapshot was unavailable inside the turn transaction.");
-    }
   }, {
     maxWait: 5000,
     timeout: 20000,
   });
 
-  if (!resultPayload || !committedSnapshot) {
-    throw new Error("Resolved turn commit did not produce a committed result snapshot.");
+  try {
+    committedSnapshot = await getTurnSnapshot(snapshot.campaignId, sessionId);
+    if (committedSnapshot && committedSnapshot.stateVersion !== expectedStateVersion + 1) {
+      logBackendDiagnostic("turn.commit.snapshot_drift", {
+        campaignId: snapshot.campaignId,
+        sessionId,
+        requestId,
+        turnId,
+        expectedStateVersionAfter: expectedStateVersion + 1,
+        observedStateVersion: committedSnapshot.stateVersion,
+      });
+      committedSnapshot = null;
+    }
+  } catch (error) {
+    logBackendDiagnostic("turn.commit.snapshot_unavailable", {
+      campaignId: snapshot.campaignId,
+      sessionId,
+      requestId,
+      turnId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  if (!resultPayload) {
+    throw new Error("Resolved turn commit did not produce a committed result payload.");
   }
 
   return {
@@ -9116,7 +9163,7 @@ async function commitFastForwardTurn(input: {
   turnMode: TurnMode;
   command: ValidatedExecuteFastForwardCommand;
   fetchedFacts: TurnFetchToolResult[];
-}): Promise<{ resultPayload: TurnResultPayload; memoryEntryId: string | null; committedSnapshot: CampaignSnapshot }> {
+}): Promise<{ resultPayload: TurnResultPayload; memoryEntryId: string | null; committedSnapshot: CampaignSnapshot | null }> {
   const {
     snapshot,
     sessionId,
@@ -9412,9 +9459,6 @@ async function commitFastForwardTurn(input: {
           increment: 1,
         },
         stateJson: toCampaignRuntimeStateJson(nextState),
-        turnLockRequestId: null,
-        turnLockSessionId: null,
-        turnLockExpiresAt: null,
       },
     });
 
@@ -9559,15 +9603,33 @@ async function commitFastForwardTurn(input: {
         resultJson: toPrismaJsonValue(toTurnResultPayloadJson(resultPayload)),
       },
     });
-
-    committedSnapshot = await getTurnSnapshotInTransaction(tx, snapshot.campaignId, sessionId);
-    if (!committedSnapshot) {
-      throw new Error("Committed snapshot was unavailable inside the fast-forward transaction.");
-    }
   });
 
-  if (!resultPayload || !committedSnapshot) {
-    throw new Error("Fast-forward turn commit completed without a committed result snapshot.");
+  try {
+    committedSnapshot = await getTurnSnapshot(snapshot.campaignId, sessionId);
+    if (committedSnapshot && committedSnapshot.stateVersion !== expectedStateVersion + 1) {
+      logBackendDiagnostic("turn.commit.snapshot_drift", {
+        campaignId: snapshot.campaignId,
+        sessionId,
+        requestId,
+        turnId,
+        expectedStateVersionAfter: expectedStateVersion + 1,
+        observedStateVersion: committedSnapshot.stateVersion,
+      });
+      committedSnapshot = null;
+    }
+  } catch (error) {
+    logBackendDiagnostic("turn.commit.snapshot_unavailable", {
+      campaignId: snapshot.campaignId,
+      sessionId,
+      requestId,
+      turnId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  if (!resultPayload) {
+    throw new Error("Fast-forward turn commit completed without a committed result payload.");
   }
 
   return {
@@ -10769,6 +10831,12 @@ export async function triageTurn(input: TurnSubmissionRequest & {
           });
     commitStarted = false;
     activeCommitTurnKeys.delete(turnKey);
+    await cleanupTurnLockAfterCommit({
+      campaignId: input.campaignId,
+      sessionId: input.sessionId,
+      requestId: input.requestId,
+      turnId: turn.id,
+    });
     logBackendDiagnostic("turn.commit.success", {
       campaignId: input.campaignId,
       sessionId: input.sessionId,
@@ -10832,6 +10900,7 @@ export async function triageTurn(input: TurnSubmissionRequest & {
         requestId: input.requestId,
         turnId: turn.id,
         error: error instanceof Error ? error.message : String(error),
+        ...describeAbortSignal(abortController.signal),
       });
     }
 
@@ -11270,6 +11339,12 @@ export async function resolvePendingCheck(input: ResolvePendingCheckRequest & {
       routerDecision: bundle.routerDecision,
       groundedItemIds: bundle.groundedItemIds,
     });
+    await cleanupTurnLockAfterCommit({
+      campaignId: input.campaignId,
+      sessionId: input.sessionId,
+      requestId: input.requestId,
+      turnId: pendingTurn.id,
+    });
 
     const promptContext = await getCommittedPromptContext({
       committedSnapshot: committed.committedSnapshot,
@@ -11317,6 +11392,7 @@ export async function resolvePendingCheck(input: ResolvePendingCheckRequest & {
         requestId: input.requestId,
         turnId: pendingTurn.id,
         error: error instanceof Error ? error.message : String(error),
+        ...describeAbortSignal(abortController.signal),
       });
     }
 

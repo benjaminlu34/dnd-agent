@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import {
+  getCampaignRuntimeStatus,
   getCampaignSnapshot,
   issueSnapshotPromptContext,
   toPlayerCampaignSnapshot,
@@ -15,6 +16,28 @@ type Context = {
 
 export async function GET(_: Request, context: Context) {
   const { id } = await context.params;
+  const runtimeStatus = await getCampaignRuntimeStatus(id);
+
+  if (!runtimeStatus) {
+    return NextResponse.json({ error: "Campaign not found." }, { status: 404 });
+  }
+
+  if (!runtimeStatus.playable) {
+    const isDescentFailure = runtimeStatus.descentStatus === "descent_failed";
+    return NextResponse.json(
+      {
+        error: isDescentFailure
+          ? "This campaign's descent failed. Regenerate it before trying to enter play."
+          : "This campaign has completed world-to-region descent but still needs settlement descent before it can enter play.",
+        code: isDescentFailure
+          ? "CAMPAIGN_DESCENT_FAILED"
+          : "CAMPAIGN_AWAITING_SETTLEMENT_DESCENT",
+        descentStatus: runtimeStatus.descentStatus,
+      },
+      { status: 409 },
+    );
+  }
+
   const snapshot = await getCampaignSnapshot(id);
 
   if (!snapshot) {

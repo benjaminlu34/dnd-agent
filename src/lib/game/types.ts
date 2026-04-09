@@ -395,6 +395,12 @@ export type ModuleEntryPointSummary = {
   locationName: string;
 };
 
+export type ModuleRegionSelectionOption = {
+  semanticKey: string;
+  name: string;
+  summary: string;
+};
+
 export type AdventureModuleDetail = {
   id: string;
   title: string;
@@ -408,6 +414,7 @@ export type AdventureModuleDetail = {
   schemaVersion: number;
   characterFramework?: CharacterFramework;
   entryPoints: ModuleEntryPointSummary[];
+  regionSelectionOptions: ModuleRegionSelectionOption[];
   createdAt: string;
   updatedAt: string;
 };
@@ -421,6 +428,9 @@ export type FactionResourcePool = {
 
 export type GeneratedLocationNode = {
   id: string;
+  semanticKey?: string;
+  materializationLevel?: MaterializationLevel;
+  descentDataJson?: Record<string, unknown> | null;
   name: string;
   type: string;
   locationKind?: LocationKind;
@@ -436,8 +446,13 @@ export type GeneratedLocationNode = {
 
 export type GeneratedLocationEdge = {
   id: string;
+  semanticKey?: string;
+  materializationLevel?: MaterializationLevel;
   sourceId: string;
   targetId: string;
+  corridorClass?: CorridorClass | null;
+  modifiers?: CorridorModifier[];
+  travelBundleJson?: Record<string, unknown> | null;
   travelTimeMinutes: number;
   dangerLevel: number;
   currentStatus: string;
@@ -582,6 +597,22 @@ export type LaunchBlockReason =
   | "none"
   | "requires_world_descent"
   | "requires_region_materialization";
+export type CampaignDescentStatus =
+  | "ready_for_play"
+  | "awaiting_settlement_descent"
+  | "descent_failed";
+export type MaterializationLevel = "manifest" | "bundle" | "shell";
+export type CorridorClass =
+  | "trivial_transfer"
+  | "routine_route"
+  | "journey_route"
+  | "stranding_risk_route";
+export type CorridorModifier =
+  | "hidden"
+  | "gated"
+  | "seasonal"
+  | "hostile_control"
+  | "hazardous";
 export type TargetSemanticScale = "local" | "regional" | "civilizational";
 export type DetailMode = "street_level" | "territorial" | "civilizational";
 export type ForbiddenDetailMode =
@@ -968,6 +999,98 @@ export type PreparedCampaignLaunch = {
   opening: GeneratedCampaignOpening;
 };
 
+export type DescendedSettlementManifest = {
+  settlementSemanticKey: string;
+  parentRegionSemanticKey: string;
+  name: string;
+  type: string;
+  summary: string;
+  description: string;
+  arrivalCorridorSemanticKeys: string[];
+  egressCorridorSemanticKeys: string[];
+  downstreamShellPrerequisites: string[];
+  preloadPriority: "critical" | "nearby" | "distant";
+};
+
+export type DescendedRegionalDestinationManifest = {
+  destinationSemanticKey: string;
+  parentRegionSemanticKey: string;
+  name: string;
+  type: string;
+  summary: string;
+  description: string;
+  hidden: boolean;
+  discoverabilityHooks: string[];
+};
+
+export type DescendedCorridorPack = {
+  corridorSemanticKey: string;
+  sourceSemanticKey: string;
+  targetSemanticKey: string;
+  sourceLabel: string;
+  targetLabel: string;
+  baseClass: CorridorClass;
+  modifiers: CorridorModifier[];
+  travelTimeMinutes: number;
+  dangerLevel: number;
+  currentStatus: string;
+  description: string;
+  pressureSummary: string;
+  interruptionCandidates: string[];
+  refugeSummaries: string[];
+  hiddenOpportunitySummaries: string[];
+  nextAnchorSemanticKey: string | null;
+  fallbackAnchorSemanticKey: string | null;
+};
+
+export type DescendedRegionManifest = {
+  regionSemanticKey: string;
+  canonicalWorldLocationId: string;
+  name: string;
+  summary: string;
+  description: string;
+  inheritedWorldReferences: string[];
+  preloadEligible: boolean;
+  settlementManifests: DescendedSettlementManifest[];
+  hiddenDestinationManifests: DescendedRegionalDestinationManifest[];
+  intraRegionCorridorIndex: Array<{
+    corridorSemanticKey: string;
+    sourceSemanticKey: string;
+    targetSemanticKey: string;
+    baseClass: CorridorClass;
+    modifiers: CorridorModifier[];
+  }>;
+};
+
+export type DescendedRegionBundle = DescendedRegionManifest & {
+  worldPressureSummary: string;
+  regionalDiscoverabilityHooks: string[];
+  corridorPacks: DescendedCorridorPack[];
+  downstreamLaunchability: {
+    settlementManifestCount: number;
+    corridorPackCount: number;
+    hiddenDestinationCount: number;
+    readyForSettlementDescent: boolean;
+  };
+};
+
+export type DescendedWorldTravelBundle = {
+  corridorSemanticKey: string;
+  sourceRegionSemanticKey: string;
+  targetRegionSemanticKey: string;
+  baseClass: CorridorClass;
+  modifiers: CorridorModifier[];
+  travelTimeMinutes: number;
+  dangerLevel: number;
+  currentStatus: string;
+  description: string;
+  macroJourneyPressure: string;
+  interruptionCandidates: string[];
+  refugeSummaries: string[];
+  nextAnchorSemanticKey: string | null;
+  fallbackAnchorSemanticKey: string | null;
+};
+
 export type CampaignRuntimeState = {
   currentLocationId: string | null;
   activeJourneyId?: string | null;
@@ -1329,7 +1452,7 @@ export type CampaignSnapshot = {
   stateVersion: number;
   generatedThroughDay: number;
   moduleId: string;
-  selectedEntryPointId: string;
+  selectedEntryPointId: string | null;
   title: string;
   premise: string;
   tone: string;
@@ -1382,6 +1505,10 @@ export type CampaignListItem = {
   characterName: string;
   characterArchetype: string;
   currentLocationName: string;
+  description?: string | null;
+  playable: boolean;
+  descentStatus: CampaignDescentStatus;
+  launchRegionName?: string | null;
   updatedAt: string;
   createdAt: string;
 };

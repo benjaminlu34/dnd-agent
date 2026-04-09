@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   BookOpen,
@@ -187,7 +187,13 @@ export function AdventureApp({
   const [streamedNarration, setStreamedNarration] = useState("");
   const [suggestedActions, setSuggestedActions] = useState<string[]>([]);
   const [missedTurnDigests, setMissedTurnDigests] = useState<TurnDigest[]>([]);
+  const activeCampaignIdRef = useRef<string | null>(campaignId);
   const worldTime = snapshot ? describeWorldTime(snapshot.state.globalTime) : null;
+  const campaignSwitchLocked = loadingSnapshot || submitting || retryingTurn;
+
+  useEffect(() => {
+    activeCampaignIdRef.current = campaignId;
+  }, [campaignId]);
 
   useEffect(() => {
     let active = true;
@@ -212,7 +218,7 @@ export function AdventureApp({
 
         const nextCampaigns = data.campaigns ?? [];
         setCampaigns(nextCampaigns);
-        setCampaignId((current) => current ?? nextCampaigns[0]?.id ?? null);
+        setCampaignId((current) => current ?? nextCampaigns.find((campaign) => campaign.playable)?.id ?? null);
       } catch (error) {
         if (active) {
           setTurnError(error instanceof Error ? error.message : "Failed to load campaigns.");
@@ -233,13 +239,27 @@ export function AdventureApp({
 
   useEffect(() => {
     let active = true;
+    const resetLoadedCampaignState = () => {
+      setSnapshot(null);
+      setSuggestedActions([]);
+      setMissedTurnDigests([]);
+      setPendingCheck(null);
+      setLatestCheck(null);
+      setStreamedNarration("");
+      setWarnings([]);
+      setClarification(null);
+      setAction("");
+    };
 
     async function loadSnapshot() {
       if (!campaignId) {
+        resetLoadedCampaignState();
         return;
       }
 
       setLoadingSnapshot(true);
+      setTurnError(null);
+      resetLoadedCampaignState();
 
       try {
         const response = await fetch(`/api/campaigns/${campaignId}`);
@@ -262,6 +282,7 @@ export function AdventureApp({
         setPendingCheck(null);
       } catch (error) {
         if (active) {
+          resetLoadedCampaignState();
           setTurnError(error instanceof Error ? error.message : "Failed to load campaign.");
         }
       } finally {
@@ -340,6 +361,10 @@ export function AdventureApp({
       throw new Error(data.error ?? "Failed to load campaign.");
     }
 
+    if (activeCampaignIdRef.current !== targetCampaignId) {
+      return;
+    }
+
     setSnapshot(data.snapshot);
     setSuggestedActions(extractSuggestedActions(data.snapshot));
     setMissedTurnDigests([]);
@@ -355,6 +380,7 @@ export function AdventureApp({
     if (!campaignId || !latestRetryableTurnId || retryingTurn || submitting) {
       return;
     }
+    const requestCampaignId = campaignId;
 
     setRetryingTurn(true);
     setTurnError(null);
@@ -377,9 +403,11 @@ export function AdventureApp({
         throw new Error(data.error ?? "Turn undo failed.");
       }
 
-      await refreshCurrentSnapshot(campaignId);
+      await refreshCurrentSnapshot(requestCampaignId);
     } catch (error) {
-      setTurnError(error instanceof Error ? error.message : "Turn undo failed.");
+      if (activeCampaignIdRef.current === requestCampaignId) {
+        setTurnError(error instanceof Error ? error.message : "Turn undo failed.");
+      }
     } finally {
       setRetryingTurn(false);
     }
@@ -393,6 +421,7 @@ export function AdventureApp({
     if (!campaignId || !sessionId || !pendingCheck || submitting) {
       return;
     }
+    const requestCampaignId = campaignId;
 
     setSubmitting(true);
     setTurnError(null);
@@ -438,6 +467,10 @@ export function AdventureApp({
       let preserveDraftOnRefresh = false;
 
       await consumeNdjson(response, (event) => {
+        if (activeCampaignIdRef.current !== requestCampaignId) {
+          return;
+        }
+
         if (event.type === "warning") {
           nextWarnings.push(event.message);
         } else if (event.type === "narration") {
@@ -479,6 +512,10 @@ export function AdventureApp({
         }
       });
 
+      if (activeCampaignIdRef.current !== requestCampaignId) {
+        return;
+      }
+
       if (nextSnapshot) {
         setSnapshot(nextSnapshot);
         setMissedTurnDigests(nextMissedTurnDigests);
@@ -493,7 +530,9 @@ export function AdventureApp({
       }
       setWarnings(nextWarnings);
     } catch (error) {
-      setTurnError(error instanceof Error ? error.message : "Check resolution failed.");
+      if (activeCampaignIdRef.current === requestCampaignId) {
+        setTurnError(error instanceof Error ? error.message : "Check resolution failed.");
+      }
     } finally {
       setSubmitting(false);
     }
@@ -504,9 +543,10 @@ export function AdventureApp({
     mode?: TurnSubmissionRequest["mode"],
     intent?: TurnSubmissionRequest["intent"],
   ) {
-    if (!campaignId || !sessionId || !nextAction.trim() || submitting || pendingCheck) {
+    if (!campaignId || !sessionId || !nextAction.trim() || submitting || retryingTurn || pendingCheck) {
       return;
     }
+    const requestCampaignId = campaignId;
 
     setSubmitting(true);
     setTurnError(null);
@@ -548,6 +588,10 @@ export function AdventureApp({
       let streamErrorMessage: string | null = null;
       let preserveDraftOnRefresh = false;
       await consumeNdjson(response, (event) => {
+        if (activeCampaignIdRef.current !== requestCampaignId) {
+          return;
+        }
+
         if (event.type === "warning") {
           nextWarnings.push(event.message);
         } else if (event.type === "narration") {
@@ -606,24 +650,39 @@ export function AdventureApp({
         }
       });
 
+      if (activeCampaignIdRef.current !== requestCampaignId) {
+        return;
+      }
+
       if (!nextSnapshot && !receivedClarification && !streamErrorMessage) {
         try {
-          const snapshotResponse = await fetch(`/api/campaigns/${campaignId}`);
+          const snapshotResponse = await fetch(`/api/campaigns/${requestCampaignId}`);
           const snapshotData = (await snapshotResponse.json()) as {
             snapshot?: PlayerCampaignSnapshot;
             error?: string;
           };
 
-          if (snapshotResponse.ok && snapshotData.snapshot) {
+          if (
+            activeCampaignIdRef.current === requestCampaignId
+            && snapshotResponse.ok
+            && snapshotData.snapshot
+          ) {
             nextSnapshot = snapshotData.snapshot;
-          } else if (!streamErrorMessage) {
+          } else if (
+            activeCampaignIdRef.current === requestCampaignId
+            && !streamErrorMessage
+          ) {
             setTurnError(snapshotData.error ?? "Turn resolved, but refreshing the campaign failed.");
           }
         } catch (error) {
-          if (!streamErrorMessage) {
+          if (activeCampaignIdRef.current === requestCampaignId && !streamErrorMessage) {
             setTurnError(error instanceof Error ? error.message : "Turn resolved, but refreshing the campaign failed.");
           }
         }
+      }
+
+      if (activeCampaignIdRef.current !== requestCampaignId) {
+        return;
       }
 
       if (nextSnapshot) {
@@ -645,7 +704,9 @@ export function AdventureApp({
         setSuggestedActions(nextActions);
       }
     } catch (error) {
-      setTurnError(error instanceof Error ? error.message : "Turn submission failed.");
+      if (activeCampaignIdRef.current === requestCampaignId) {
+        setTurnError(error instanceof Error ? error.message : "Turn submission failed.");
+      }
     } finally {
       setSubmitting(false);
     }
@@ -1131,13 +1192,20 @@ export function AdventureApp({
             </>
           ) : (
             <div className="flex min-h-[420px] flex-col items-center justify-center text-center">
-              <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">No Active Campaign</p>
+              <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">
+                {turnError ? "Campaign Unavailable" : "No Active Campaign"}
+              </p>
               <h2 className="mt-4 font-serif text-3xl text-zinc-100">
-                Start with a world worth stepping into.
+                {turnError ? "This campaign cannot enter play yet." : "Start with a world worth stepping into."}
               </h2>
               <p className="mt-3 max-w-lg text-sm leading-relaxed text-zinc-400">
-                Create a module, choose a protagonist, and come back here once a campaign is ready to play.
+                {turnError
+                  ? "Return to the archive to choose a playable campaign or continue the required descent flow."
+                  : "Create a module, choose a protagonist, and come back here once a campaign is ready to play."}
               </p>
+              {turnError ? (
+                <p className="mt-4 max-w-lg text-sm leading-relaxed text-amber-300">{turnError}</p>
+              ) : null}
               <div className="mt-6 flex flex-wrap justify-center gap-3">
                 <button
                   type="button"
@@ -1191,7 +1259,11 @@ export function AdventureApp({
                     <button
                       key={campaign.id}
                       type="button"
+                      disabled={!campaign.playable || campaignSwitchLocked}
                       onClick={() => {
+                        if (!campaign.playable || campaignSwitchLocked) {
+                          return;
+                        }
                         setCampaignId(campaign.id);
                         setLocationsDrawerOpen(false);
                         router.push(`/play/${campaign.id}`);
@@ -1200,11 +1272,27 @@ export function AdventureApp({
                         "w-full rounded-3xl border p-4 text-left transition",
                         campaignId === campaign.id
                           ? "border-amber-500/50 bg-zinc-950 text-zinc-100 shadow-lg shadow-amber-950/20"
-                          : "border-zinc-800 bg-zinc-900/80 text-zinc-200 hover:border-zinc-600 hover:bg-zinc-900",
+                          : campaign.playable
+                            ? "border-zinc-800 bg-zinc-900/80 text-zinc-200 hover:border-zinc-600 hover:bg-zinc-900"
+                            : "border-zinc-800 bg-zinc-950/60 text-zinc-500",
                       ].join(" ")}
                     >
                       <h3 className="font-serif text-base font-semibold text-zinc-100">{campaign.title}</h3>
                       <p className="mt-2 text-xs leading-relaxed text-zinc-400">{campaign.currentLocationName}</p>
+                      {!campaign.playable ? (
+                        <p
+                          className={[
+                            "mt-3 text-[11px] uppercase tracking-[0.18em]",
+                            campaign.descentStatus === "descent_failed"
+                              ? "text-red-300"
+                              : "text-amber-300",
+                          ].join(" ")}
+                        >
+                          {campaign.descentStatus === "descent_failed"
+                            ? "Descent Failed"
+                            : "Awaiting Settlement Descent"}
+                        </p>
+                      ) : null}
                     </button>
                   ))}
                 </div>

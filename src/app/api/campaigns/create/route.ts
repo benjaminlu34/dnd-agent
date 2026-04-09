@@ -6,6 +6,14 @@ import { campaignCreateRequestSchema } from "@/lib/game/session-zero";
 
 export const runtime = "nodejs";
 
+function moduleRequiresDescentMessage(launchBlockReason: string) {
+  if (launchBlockReason === "requires_region_materialization") {
+    return "This module requires region-to-settlement descent before it can launch.";
+  }
+
+  return "This module requires world-to-region descent before it can launch.";
+}
+
 export async function POST(request: Request) {
   const payload = campaignCreateRequestSchema.safeParse(await request.json().catch(() => null));
 
@@ -23,10 +31,20 @@ export async function POST(request: Request) {
     const result = await createCampaignFromModuleForUser(payload.data);
 
     if ("error" in result) {
+      if (result.error === "region_selection_required") {
+        return NextResponse.json(
+          {
+            error: "Select a launch region before starting world-to-region descent.",
+            code: "REGION_SELECTION_REQUIRED",
+          },
+          { status: 400 },
+        );
+      }
+
       if (result.error === "module_requires_descent") {
         return NextResponse.json(
           {
-            error: "World-scale modules require region materialization before launch. This feature is pending.",
+            error: moduleRequiresDescentMessage(result.launchBlockReason),
             code: "MODULE_REQUIRES_DESCENT",
           },
           { status: 409 },
@@ -46,7 +64,11 @@ export async function POST(request: Request) {
       );
     }
 
-    return NextResponse.json({ campaignId: result.campaignId });
+    return NextResponse.json({
+      campaignId: result.campaignId,
+      playable: result.playable ?? true,
+      descentStatus: result.descentStatus ?? "ready_for_play",
+    });
   } catch (error) {
     return NextResponse.json(
       {

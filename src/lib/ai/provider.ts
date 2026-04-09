@@ -16,6 +16,9 @@ import { MAX_STARTER_ITEMS, normalizeItemNameList } from "@/lib/game/item-utils"
 import { canonicalizeNpcIdAgainstCandidates } from "@/lib/game/npc-identity";
 import {
   customResolvedLaunchEntryDraftSchema,
+  descendedRegionBundleSchema,
+  descendedRegionManifestSchema,
+  descendedWorldTravelBundleSchema,
   generatedCampaignOpeningSchema,
   generatedEconomyMaterialLifeInputSchema,
   generatedKnowledgeThreadsInputSchema,
@@ -30,6 +33,9 @@ import {
 } from "@/lib/game/session-zero";
 import type {
   CampaignCharacter,
+  DescendedRegionBundle,
+  DescendedRegionManifest,
+  DescendedWorldTravelBundle,
   CheckResult,
   CharacterFramework,
   CharacterTemplate,
@@ -119,6 +125,43 @@ type ObjectiveLaunchEntryResolutionInput = {
   character: CharacterTemplate;
   prompt?: string;
   correctionNotes?: string | null;
+};
+
+type RegionManifestGenerationInput = {
+  world: GeneratedWorldModule;
+  artifacts?: OpenWorldGenerationArtifacts | null;
+  region: {
+    semanticKey: string;
+    locationId: string;
+    name: string;
+    summary: string;
+    description: string;
+    adjacentRegionSemanticKeys: string[];
+  };
+};
+
+type RegionBundleGenerationInput = RegionManifestGenerationInput & {
+  manifest: DescendedRegionManifest;
+};
+
+type WorldTravelBundleGenerationInput = {
+  world: GeneratedWorldModule;
+  artifacts?: OpenWorldGenerationArtifacts | null;
+  launchRegionSemanticKey: string;
+  launchRegionLocationId: string;
+  regionManifests: DescendedRegionManifest[];
+  corridorEdges: Array<{
+    corridorSemanticKey: string;
+    edgeId: string;
+    sourceRegionSemanticKey: string;
+    targetRegionSemanticKey: string;
+    sourceRegionName: string;
+    targetRegionName: string;
+    travelTimeMinutes: number;
+    dangerLevel: number;
+    currentStatus: string;
+    description: string | null;
+  }>;
 };
 
 type StartingLocalHydrationInput = {
@@ -790,6 +833,205 @@ function summarizeWorld(module: GeneratedWorldModule) {
     })),
     entryPoints: module.entryPoints,
   };
+}
+
+function summarizeRegionDescentContext(input: RegionManifestGenerationInput) {
+  const regionalLife = input.artifacts?.regionalLife.locations.find(
+    (entry) => entry.locationId === input.region.locationId,
+  );
+  const tradeIdentity = input.artifacts?.knowledgeEconomy.locationTradeIdentity.find(
+    (entry) => entry.locationId === input.region.locationId,
+  );
+  const localNpcs = input.world.npcs
+    .filter((npc) => npc.currentLocationId === input.region.locationId)
+    .slice(0, 8)
+    .map((npc) => ({
+      id: npc.id,
+      name: npc.name,
+      role: npc.role,
+      summary: npc.summary,
+      factionId: npc.factionId,
+    }));
+  const localInformation = input.world.information
+    .filter((information) => information.locationId === input.region.locationId)
+    .slice(0, 8)
+    .map((information) => ({
+      id: information.id,
+      title: information.title,
+      summary: information.summary,
+      truthfulness: information.truthfulness,
+      accessibility: information.accessibility,
+      factionId: information.factionId,
+    }));
+  const adjacentEdges = input.world.edges
+    .filter((edge) => edge.sourceId === input.region.locationId || edge.targetId === input.region.locationId)
+    .slice(0, 8)
+    .map((edge) => {
+      const targetId = edge.sourceId === input.region.locationId ? edge.targetId : edge.sourceId;
+      const target = input.world.locations.find((location) => location.id === targetId);
+      return {
+        edgeId: edge.id,
+        targetLocationId: targetId,
+        targetName: target?.name ?? targetId,
+        travelTimeMinutes: edge.travelTimeMinutes,
+        dangerLevel: edge.dangerLevel,
+        currentStatus: edge.currentStatus,
+        description: edge.description,
+      };
+    });
+
+  return {
+    region: {
+      semanticKey: input.region.semanticKey,
+      locationId: input.region.locationId,
+      name: input.region.name,
+      summary: input.region.summary,
+      description: input.region.description,
+      adjacentRegionSemanticKeys: input.region.adjacentRegionSemanticKeys,
+    },
+    world: {
+      title: input.world.title,
+      premise: input.world.premise,
+      tone: input.world.tone,
+      setting: input.world.setting,
+    },
+    worldBible: input.artifacts
+      ? {
+          groundLevelReality: input.artifacts.worldBible.groundLevelReality,
+          widespreadBurdens: input.artifacts.worldBible.widespreadBurdens.slice(0, 4),
+          presentScars: input.artifacts.worldBible.presentScars.slice(0, 4),
+          sharedRealities: input.artifacts.worldBible.sharedRealities.slice(0, 4),
+        }
+      : null,
+    regionalLife: regionalLife
+      ? {
+          publicActivity: regionalLife.publicActivity,
+          dominantActivities: regionalLife.dominantActivities.slice(0, 4),
+          localPressure: regionalLife.localPressure,
+          classTexture: regionalLife.classTexture,
+          publicHazards: regionalLife.publicHazards.slice(0, 3),
+          ordinaryKnowledge: regionalLife.ordinaryKnowledge.slice(0, 4),
+          reasonsToLinger: regionalLife.reasonsToLinger.slice(0, 3),
+        }
+      : null,
+    tradeIdentity: tradeIdentity
+      ? {
+          signatureGoods: tradeIdentity.signatureGoods.slice(0, 4),
+          supplyConditions: tradeIdentity.supplyConditions,
+          materialLife: tradeIdentity.materialLife,
+        }
+      : null,
+    factions: input.world.factions.slice(0, 10).map((faction) => ({
+      id: faction.id,
+      name: faction.name,
+      type: faction.type,
+      summary: faction.summary,
+      agenda: faction.agenda,
+      pressureClock: faction.pressureClock,
+    })),
+    localNpcs,
+    localInformation,
+    adjacentEdges,
+  };
+}
+
+function validateDescendedRegionManifest(
+  manifest: DescendedRegionManifest,
+  input: RegionManifestGenerationInput,
+) {
+  const issues: string[] = [];
+
+  if (manifest.regionSemanticKey !== input.region.semanticKey) {
+    issues.push("regionSemanticKey must match the requested region semantic key.");
+  }
+  if (manifest.canonicalWorldLocationId !== input.region.locationId) {
+    issues.push("canonicalWorldLocationId must match the requested world region id.");
+  }
+
+  const childKeys = new Set<string>([manifest.regionSemanticKey]);
+  for (const settlement of manifest.settlementManifests) {
+    if (settlement.parentRegionSemanticKey !== manifest.regionSemanticKey) {
+      issues.push(`Settlement ${settlement.name} must reference the parent region semantic key.`);
+    }
+    childKeys.add(settlement.settlementSemanticKey);
+  }
+  for (const destination of manifest.hiddenDestinationManifests) {
+    if (destination.parentRegionSemanticKey !== manifest.regionSemanticKey) {
+      issues.push(`Destination ${destination.name} must reference the parent region semantic key.`);
+    }
+    childKeys.add(destination.destinationSemanticKey);
+  }
+  for (const corridor of manifest.intraRegionCorridorIndex) {
+    if (!childKeys.has(corridor.sourceSemanticKey)) {
+      issues.push(`Corridor ${corridor.corridorSemanticKey} has an unknown sourceSemanticKey.`);
+    }
+    if (!childKeys.has(corridor.targetSemanticKey)) {
+      issues.push(`Corridor ${corridor.corridorSemanticKey} has an unknown targetSemanticKey.`);
+    }
+  }
+
+  return issues;
+}
+
+function validateDescendedRegionBundle(
+  bundle: DescendedRegionBundle,
+  input: RegionBundleGenerationInput,
+) {
+  const issues = validateDescendedRegionManifest(bundle, input);
+  const corridorKeys = new Set(bundle.intraRegionCorridorIndex.map((corridor) => corridor.corridorSemanticKey));
+
+  if (bundle.downstreamLaunchability.settlementManifestCount !== bundle.settlementManifests.length) {
+    issues.push("downstream settlementManifestCount must match settlementManifests length.");
+  }
+  if (bundle.downstreamLaunchability.corridorPackCount !== bundle.corridorPacks.length) {
+    issues.push("downstream corridorPackCount must match corridorPacks length.");
+  }
+  if (bundle.downstreamLaunchability.hiddenDestinationCount !== bundle.hiddenDestinationManifests.length) {
+    issues.push("downstream hiddenDestinationCount must match hiddenDestinationManifests length.");
+  }
+  if (!bundle.downstreamLaunchability.readyForSettlementDescent) {
+    issues.push("Region bundle must mark readyForSettlementDescent true for this phase.");
+  }
+
+  for (const pack of bundle.corridorPacks) {
+    if (!corridorKeys.has(pack.corridorSemanticKey)) {
+      issues.push(`Corridor pack ${pack.corridorSemanticKey} must appear in the corridor index.`);
+    }
+  }
+
+  return issues;
+}
+
+function validateDescendedWorldTravelBundles(
+  bundles: DescendedWorldTravelBundle[],
+  input: WorldTravelBundleGenerationInput,
+) {
+  const issues: string[] = [];
+  const edgeBySemanticKey = new Map(
+    input.corridorEdges.map((edge) => [edge.corridorSemanticKey, edge]),
+  );
+
+  for (const bundle of bundles) {
+    const edge = edgeBySemanticKey.get(bundle.corridorSemanticKey);
+    if (!edge) {
+      issues.push(`Unknown world travel corridor semantic key ${bundle.corridorSemanticKey}.`);
+      continue;
+    }
+    if (bundle.sourceRegionSemanticKey !== edge.sourceRegionSemanticKey) {
+      issues.push(`World travel bundle ${bundle.corridorSemanticKey} has the wrong sourceRegionSemanticKey.`);
+    }
+    if (bundle.targetRegionSemanticKey !== edge.targetRegionSemanticKey) {
+      issues.push(`World travel bundle ${bundle.corridorSemanticKey} has the wrong targetRegionSemanticKey.`);
+    }
+    if (bundle.travelTimeMinutes !== edge.travelTimeMinutes) {
+      issues.push(`World travel bundle ${bundle.corridorSemanticKey} must preserve travelTimeMinutes.`);
+    }
+    if (bundle.dangerLevel !== edge.dangerLevel) {
+      issues.push(`World travel bundle ${bundle.corridorSemanticKey} must preserve dangerLevel.`);
+    }
+  }
+
+  return issues;
 }
 
 function normalizeCharacterToolInput(input: unknown) {
@@ -3913,6 +4155,28 @@ const economyMaterialLifeTool = createStructuredTool(
   generatedEconomyMaterialLifeInputSchema,
 );
 
+const descendedRegionManifestTool = createStructuredTool(
+  "generate_region_manifest",
+  "Generate the world->region manifest for one world-scale region, including settlement manifests, hidden destination manifests, and intra-region corridor index.",
+  descendedRegionManifestSchema,
+);
+
+const descendedRegionBundleTool = createStructuredTool(
+  "generate_region_bundle",
+  "Materialize one preload-horizon region bundle with discoverability hooks and corridor packs while preserving the supplied manifest contract.",
+  descendedRegionBundleSchema,
+);
+
+const descendedWorldTravelBundleListSchema = z.object({
+  travelBundles: z.array(descendedWorldTravelBundleSchema).min(1).max(12),
+});
+
+const descendedWorldTravelBundleTool = createStructuredTool(
+  "generate_world_travel_bundles",
+  "Generate world-owned inter-region travel bundles for the supplied launch-region corridors.",
+  descendedWorldTravelBundleListSchema,
+);
+
 const openingTool = {
   name: "generate_campaign_opening",
   description: "Generate the opening scene for a chosen entry point.",
@@ -6272,6 +6536,7 @@ async function runCompletion(options: {
             ? String(error.cause)
             : null,
         willFailOver: canFailOver,
+        ...describeAbortSignal(options.signal),
       });
 
       if (canFailOver) {
@@ -6289,6 +6554,16 @@ async function runCompletion(options: {
   }
 
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+function describeAbortSignal(signal?: AbortSignal) {
+  return {
+    signalAborted: signal?.aborted ?? false,
+    signalReason:
+      signal?.aborted && signal.reason !== undefined
+        ? String(signal.reason)
+        : null,
+  };
 }
 
 export function getTurnQualityMeta() {
@@ -8752,6 +9027,177 @@ class DungeonMasterClient {
     }
   }
 
+  async generateRegionManifest(input: RegionManifestGenerationInput): Promise<DescendedRegionManifest> {
+    const context = summarizeRegionDescentContext(input);
+    let correctionNotes: string | null = null;
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const response = await runCompletion({
+        system: [
+          "You are generating the world->region descent manifest for one world-scale region.",
+          "Return exactly one structured RegionManifest payload.",
+          "Preserve the supplied regionSemanticKey and canonicalWorldLocationId exactly.",
+          "Generate settlement manifests and hidden regional destination manifests that feel native to the region's actual pressures, trade, and travel texture.",
+          "Generate only region-scale descendants. Do not materialize buildings, rooms, neighborhoods, taverns, or street-level local play.",
+          "Settlement and destination semantic keys must be machine-stable lowercase identifiers, not prose titles. Prefer short immutable key fragments inside the semantic key rather than human-facing slugs.",
+          "The intra-region corridor index must connect only the region itself, generated settlements, and generated hidden/regional destinations.",
+          "Keep outputs bounded and practical for a preload-horizon region graph.",
+        ].join("\n"),
+        user: [
+          formatPromptBlock("world", context.world),
+          formatPromptBlock("region_context", context.region),
+          formatPromptBlock("world_bible", context.worldBible),
+          formatPromptBlock("regional_life", context.regionalLife),
+          formatPromptBlock("trade_identity", context.tradeIdentity),
+          formatPromptBlock("factions", context.factions),
+          formatPromptBlock("local_npcs", context.localNpcs),
+          formatPromptBlock("local_information", context.localInformation),
+          formatPromptBlock("adjacent_edges", context.adjacentEdges),
+          formatPromptBlock("correction_notes", correctionNotes),
+          formatFinalInstruction([
+            "Use the provided regionSemanticKey and canonicalWorldLocationId exactly as given.",
+            "Create 2 to 8 settlement manifests that represent real downstream launch candidates.",
+            "Create 0 to 5 hidden regional destination manifests only when the region genuinely wants them.",
+            "Create 2 to 14 intra-region corridor index entries.",
+            "Settlement and destination semantic keys must be unique.",
+            "arrivalCorridorSemanticKeys and egressCorridorSemanticKeys must reference corridorSemanticKeys from the intra-region corridor index.",
+          ]),
+        ].filter(Boolean).join("\n\n"),
+        tools: [descendedRegionManifestTool],
+        maxTokens: 2600,
+      });
+
+      const parsed = descendedRegionManifestSchema.safeParse(response?.input);
+      if (!parsed.success) {
+        correctionNotes = describeZodIssues(parsed.error.issues);
+        continue;
+      }
+
+      const issues = validateDescendedRegionManifest(parsed.data, input);
+      if (issues.length === 0) {
+        return parsed.data;
+      }
+
+      correctionNotes = issues.join("\n");
+    }
+
+    throw new Error(`Region manifest generation failed for ${input.region.semanticKey}.`);
+  }
+
+  async generateRegionBundle(input: RegionBundleGenerationInput): Promise<DescendedRegionBundle> {
+    const context = summarizeRegionDescentContext(input);
+    let correctionNotes: string | null = null;
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const response = await runCompletion({
+        system: [
+          "You are materializing one preload-horizon RegionBundle for world->region descent.",
+          "Return exactly one structured RegionBundle payload.",
+          "Preserve the supplied manifest contract. Do not rename, remove, or replace the existing settlement manifests, hidden destination manifests, or corridor index.",
+          "Add bounded corridor packs, discoverability hooks, and downstream launchability metadata for later settlement descent.",
+          "This is still region-scale output. Do not invent settlement-local play surfaces or scene-level content.",
+          "Every corridor pack must reference an existing corridorSemanticKey from the supplied manifest.",
+        ].join("\n"),
+        user: [
+          formatPromptBlock("world", context.world),
+          formatPromptBlock("region_context", context.region),
+          formatPromptBlock("world_bible", context.worldBible),
+          formatPromptBlock("regional_life", context.regionalLife),
+          formatPromptBlock("trade_identity", context.tradeIdentity),
+          formatPromptBlock("manifest_contract", input.manifest),
+          formatPromptBlock("correction_notes", correctionNotes),
+          formatFinalInstruction([
+            "Preserve every manifest semantic key exactly.",
+            "Return one corridor pack per corridor index entry whenever possible; never invent corridorSemanticKeys outside the manifest.",
+            "readyForSettlementDescent must be true when the bundle is structurally complete.",
+            "regionalDiscoverabilityHooks should be compact, actionable, and rooted in the region's existing pressure texture.",
+          ]),
+        ].filter(Boolean).join("\n\n"),
+        tools: [descendedRegionBundleTool],
+        maxTokens: 3200,
+      });
+
+      const parsed = descendedRegionBundleSchema.safeParse(response?.input);
+      if (!parsed.success) {
+        correctionNotes = describeZodIssues(parsed.error.issues);
+        continue;
+      }
+
+      const issues = validateDescendedRegionBundle(parsed.data, input);
+      if (issues.length === 0) {
+        return parsed.data;
+      }
+
+      correctionNotes = issues.join("\n");
+    }
+
+    throw new Error(`Region bundle generation failed for ${input.region.semanticKey}.`);
+  }
+
+  async generateWorldTravelBundles(
+    input: WorldTravelBundleGenerationInput,
+  ): Promise<DescendedWorldTravelBundle[]> {
+    if (input.corridorEdges.length === 0) {
+      return [];
+    }
+
+    let correctionNotes: string | null = null;
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const response = await runCompletion({
+        system: [
+          "You are generating world-owned inter-region travel bundles for the first world->region preload horizon.",
+          "Return exactly one structured payload containing travelBundles.",
+          "Only generate travel bundles for the supplied corridor semantic keys.",
+          "Preserve source/target region semantic keys, travelTimeMinutes, dangerLevel, and currentStatus from the supplied corridor skeleton.",
+          "Use corridorClass and modifiers to decide whether a route should stay compressed or support meaningful journey interruption play.",
+          "Do not invent settlement-local content or intra-region travel here.",
+        ].join("\n"),
+        user: [
+          formatPromptBlock("world", {
+            title: input.world.title,
+            premise: input.world.premise,
+            tone: input.world.tone,
+            setting: input.world.setting,
+          }),
+          formatPromptBlock("launch_region", {
+            launchRegionSemanticKey: input.launchRegionSemanticKey,
+            launchRegionLocationId: input.launchRegionLocationId,
+          }),
+          formatPromptBlock("region_manifests", input.regionManifests.map((manifest) => ({
+            regionSemanticKey: manifest.regionSemanticKey,
+            name: manifest.name,
+            summary: manifest.summary,
+          }))),
+          formatPromptBlock("corridor_edges", input.corridorEdges),
+          formatPromptBlock("correction_notes", correctionNotes),
+          formatFinalInstruction([
+            "Return one travel bundle per supplied corridor edge.",
+            "Use the supplied corridorSemanticKey and region semantic keys exactly.",
+            "Keep interruptionCandidates and refugeSummaries bounded and practical.",
+          ]),
+        ].filter(Boolean).join("\n\n"),
+        tools: [descendedWorldTravelBundleTool],
+        maxTokens: 2400,
+      });
+
+      const parsed = descendedWorldTravelBundleListSchema.safeParse(response?.input);
+      if (!parsed.success) {
+        correctionNotes = describeZodIssues(parsed.error.issues);
+        continue;
+      }
+
+      const issues = validateDescendedWorldTravelBundles(parsed.data.travelBundles, input);
+      if (issues.length === 0) {
+        return parsed.data.travelBundles;
+      }
+
+      correctionNotes = issues.join("\n");
+    }
+
+    throw new Error(`World travel bundle generation failed for ${input.launchRegionSemanticKey}.`);
+  }
+
   async generateCampaignOpening(input: CampaignOpeningInput): Promise<GeneratedCampaignOpening> {
     const location = input.module.locations.find((entry) => entry.id === input.entryPoint.startLocationId);
     const presentNpcs = input.module.npcs.filter((npc) => input.entryPoint.presentNpcIds.includes(npc.id));
@@ -9685,6 +10131,7 @@ class DungeonMasterClient {
     } catch (error) {
       logNarrationDebug("resolved_turn_narration.error", {
         message: error instanceof Error ? error.message : String(error),
+        ...describeAbortSignal(input.signal),
       });
       throw new Error(error instanceof Error ? error.message : "Resolved-turn narration failed.");
     }
@@ -9742,6 +10189,7 @@ class DungeonMasterClient {
     } catch (error) {
       logNarrationDebug("resolved_turn_suggestions.error", {
         message: error instanceof Error ? error.message : String(error),
+        ...describeAbortSignal(input.signal),
       });
       throw new Error(error instanceof Error ? error.message : "Resolved-turn suggestion generation failed.");
     }
