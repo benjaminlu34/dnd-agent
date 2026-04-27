@@ -428,6 +428,37 @@ export function CampaignCreationApp({
               </div>
 
               <div className="app-section p-6">
+                <p className="ui-label">Progression</p>
+                {module.progressionFramework?.tracks.length ? (
+                  <div className="mt-4 space-y-3">
+                    {module.progressionFramework.tracks.map((track) => (
+                      <div key={track.id} className="rounded-2xl border border-zinc-800 bg-black p-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <h3 className="ui-title text-base">{track.label}</h3>
+                          {module.progressionFramework?.primaryTrackId === track.id ? (
+                            <span className="shrink-0 rounded-lg border border-zinc-700 px-2 py-1 text-[10px] font-medium uppercase tracking-[0.18em] text-zinc-400">
+                              Primary
+                            </span>
+                          ) : null}
+                        </div>
+                        <p className="ui-body mt-2">{track.summary}</p>
+                        {track.worldStandingScale?.length ? (
+                          <p className="mt-3 text-xs leading-relaxed text-zinc-500">
+                            World standing enabled from value {track.worldStandingScale[0]?.minValue}.
+                          </p>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="ui-body mt-3">
+                    This module has no long-term progression tracks. Play will still track conditions,
+                    companions, inventory, and world changes.
+                  </p>
+                )}
+              </div>
+
+              <div className="app-section p-6">
                 <div className="flex items-center justify-between gap-3">
                   <p className="ui-label">{isWorldRegionDescentFlow ? "Launch Region" : "Entry Points"}</p>
                   {!isWorldRegionDescentFlow && !isLaunchBlockedPendingFutureDescent ? (

@@ -507,10 +507,10 @@ test("artifact knowledgeEconomy schema defaults missing pressure seeds to empty"
     ],
   });
 
-  assert.equal(parsed.success, true);
-  if (parsed.success) {
-    assert.deepEqual(parsed.data.pressureSeeds, []);
+  if (!parsed.success) {
+    assert.fail("Expected schema to accept knowledge economy defaults.");
   }
+  assert.deepEqual(parsed.data.pressureSeeds, []);
 });
 
 test("prompt intent profile schema accepts representative prompt textures", () => {
@@ -591,6 +591,60 @@ test("generatedWorldModuleSchema rejects minor locations without justification",
 
   assert.equal(parsed.success, false);
   assert.match(JSON.stringify(parsed.error?.flatten()), /justify why they are topology/);
+});
+
+test("generatedWorldModuleSchema accepts compact numeric progression framework definitions", () => {
+  const world = createWorld();
+  world.locations[2] = {
+    ...world.locations[2]!,
+    controllingFactionId: "fac_guild",
+  };
+  world.progressionFramework = {
+    primaryTrackId: "abyssal_assimilation",
+    tracks: [
+      {
+        id: "abyssal_assimilation",
+        label: "Abyssal Assimilation",
+        summary: "How deeply the abyss has altered the character.",
+        min: 0,
+        max: 100,
+        defaultValue: 0,
+        worldStandingScale: [
+          {
+            minValue: 20,
+            effectiveTierLabel: "Early Kindled",
+            relativeStanding: "Above ordinary laborers, nearing trained junior delvers.",
+          },
+        ],
+      },
+    ],
+  };
+
+  const parsed = generatedWorldModuleSchema.safeParse(world);
+
+  assert.equal(parsed.success, true, parsed.success ? undefined : JSON.stringify(parsed.error.flatten()));
+});
+
+test("generatedWorldModuleSchema rejects progression primary tracks that are not defined", () => {
+  const world = createWorld();
+  world.progressionFramework = {
+    primaryTrackId: "missing_track",
+    tracks: [
+      {
+        id: "divine_favor",
+        label: "Divine Favor",
+        summary: "How strongly a patron favors the character.",
+        min: 0,
+        max: 10,
+        defaultValue: 0,
+      },
+    ],
+  };
+
+  const parsed = generatedWorldModuleSchema.safeParse(world);
+
+  assert.equal(parsed.success, false);
+  assert.match(JSON.stringify(parsed.error?.flatten()), /Primary progression track/);
 });
 
 test("campaign launch request schemas forbid conflicting entry selections while allowing prepared or auto launch flows", () => {

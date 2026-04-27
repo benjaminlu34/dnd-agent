@@ -23,6 +23,10 @@ import {
 import { instanceWorldForCampaign } from "@/lib/game/world-instancing";
 import { buildRegionSelectionOptions, WorldDescentOrchestrator } from "@/lib/game/world-descent";
 import { buildWorldGenerationScalePlan } from "@/lib/game/world-scale";
+import {
+  deriveProgressionSummary,
+  initializedProgressionState,
+} from "@/lib/game/progression";
 import { env } from "@/lib/env";
 import type {
   AdventureModuleDetail,
@@ -162,7 +166,7 @@ async function runQueryBatch<const T extends readonly unknown[]>(
       results.push(await task());
     }
 
-    return results as T;
+    return results as unknown as T;
   }
 
   const results: unknown[] = [];
@@ -171,7 +175,7 @@ async function runQueryBatch<const T extends readonly unknown[]>(
     results.push(...await Promise.all(chunk.map((task) => task())));
   }
 
-  return results as T;
+  return results as unknown as T;
 }
 
 function parseWorldTemplate(value: unknown): GeneratedWorldModule {
@@ -1723,7 +1727,7 @@ export async function getCharacterTemplateForUser(templateId: string) {
 }
 
 async function getModuleFramework(moduleId: string) {
-  const module = await prisma.adventureModule.findUnique({
+  const adventureModule = await prisma.adventureModule.findUnique({
     where: { id: moduleId },
     select: {
       id: true,
@@ -1733,11 +1737,11 @@ async function getModuleFramework(moduleId: string) {
     },
   });
 
-  if (!module) {
+  if (!adventureModule) {
     return null;
   }
 
-  return compileCharacterFramework(resolveModuleCharacterFramework(module));
+  return compileCharacterFramework(resolveModuleCharacterFramework(adventureModule));
 }
 
 export async function createCharacterConcept(input: CharacterConceptDraft) {
@@ -1948,6 +1952,7 @@ function toAdventureModuleSummary(
     launchableDirectly: scale.launchableDirectly,
     launchBlockReason: scale.launchBlockReason,
     entryPointCount: template.entryPoints.length,
+    progressionFramework: template.progressionFramework ?? null,
     campaignCount: module._count.campaigns,
     createdAt: module.createdAt.toISOString(),
     updatedAt: module.updatedAt.toISOString(),
@@ -1997,6 +2002,7 @@ export async function getAdventureModuleForUser(moduleId: string): Promise<Adven
     launchBlockReason: scale.launchBlockReason,
     schemaVersion: adventureModule.schemaVersion,
     characterFramework: template.characterFramework,
+    progressionFramework: template.progressionFramework ?? null,
     regionSelectionOptions: moduleRegionSelectionOptions(scale.scaleTier, template),
     entryPoints: template.entryPoints.map((entryPoint) => {
       const location = template.locations.find((location) => location.id === entryPoint.startLocationId);
@@ -2402,6 +2408,7 @@ async function createCampaignInTx(
     initialSchedules: Array<{ dayNumber: number; schedule: GeneratedDailySchedule }>;
   },
 ) {
+  const initialProgression = initializedProgressionState(input.instancedWorld.progressionFramework);
   const state: CampaignRuntimeState = {
     currentLocationId: input.instancedEntryPoint.startLocationId,
     activeJourneyId: null,
@@ -2415,6 +2422,11 @@ async function createCampaignInTx(
       conditions: [],
       activeCompanions: [],
       maxVitality: input.template.vitality ?? input.template.maxHealth ?? null,
+      ...(initialProgression
+        ? {
+            progression: initialProgression,
+          }
+        : {}),
     },
   };
 
@@ -4852,10 +4864,11 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     ),
   };
 
+  const moduleWorld = resolveModuleWorld(campaign.module);
   const character = toCampaignCharacter(
     toTemplateRecord(campaign.template),
     instance,
-    resolveModuleCharacterFramework(campaign.module),
+    moduleWorld.characterFramework ?? resolveModuleCharacterFramework(campaign.module),
     state.characterState.maxVitality ?? null,
   );
   const activePressures = buildActivePressures({
@@ -4918,6 +4931,7 @@ export async function getCampaignSnapshot(campaignId: string): Promise<CampaignS
     premise: campaign.module.premise,
     tone: campaign.module.tone,
     setting: campaign.module.setting,
+    progressionFramework: moduleWorld.progressionFramework ?? null,
     state,
     promptRequestId: null,
     assetItems,
@@ -5470,10 +5484,11 @@ async function getTurnSnapshotFromClient(
       (stack) => stack.characterInstanceId === characterInstance.id,
     ),
   };
+  const moduleWorld = resolveModuleWorld(module);
   const character = toCampaignCharacter(
     toTemplateRecord(template),
     instance,
-    resolveModuleCharacterFramework(module),
+    moduleWorld.characterFramework ?? resolveModuleCharacterFramework(module),
     state.characterState.maxVitality ?? null,
   );
   const activePressures = buildActivePressures({
@@ -5533,6 +5548,7 @@ async function getTurnSnapshotFromClient(
     premise: module.premise,
     tone: module.tone,
     setting: module.setting,
+    progressionFramework: moduleWorld.progressionFramework ?? null,
     state,
     promptRequestId: null,
     assetItems,
@@ -6029,6 +6045,10 @@ export async function getTurnRouterContext(snapshot: CampaignSnapshot): Promise<
     }),
     sceneFocus,
   ).slice(0, sceneFocus ? 4 : 8);
+  const progression = deriveProgressionSummary({
+    framework: snapshot.progressionFramework,
+    progression: snapshot.state.characterState.progression,
+  });
   return {
     currentLocation: snapshot.currentLocation
       ? {
@@ -6058,6 +6078,7 @@ export async function getTurnRouterContext(snapshot: CampaignSnapshot): Promise<
     approaches: snapshot.character.approaches ?? [],
     currencyProfile: snapshot.character.currencyProfile ?? buildDefaultCharacterFramework("runtime").currencyProfile,
     presentationProfile: snapshot.character.presentationProfile ?? buildDefaultCharacterFramework("runtime").presentationProfile,
+    progression,
     worldObjects: visibleWorldObjects.map<RouterWorldObjectSummary>((object) =>
       toRouterWorldObjectSummary(
         object,
@@ -6171,6 +6192,7 @@ export async function getPromptContext(
     approaches: snapshot.character.approaches ?? [],
     currencyProfile: snapshot.character.currencyProfile ?? buildDefaultCharacterFramework("runtime").currencyProfile,
     presentationProfile: snapshot.character.presentationProfile ?? buildDefaultCharacterFramework("runtime").presentationProfile,
+    progression: routerContext.progression,
     worldObjects: visibleWorldObjects.map<PromptWorldObject>((object) =>
       toPromptWorldObjectSummary(
         object,

@@ -11,6 +11,7 @@ import {
   X,
 } from "lucide-react";
 import { formatCurrencyCompact } from "@/lib/game/currency";
+import { deriveProgressionSummary } from "@/lib/game/progression";
 import type { StreamEvent } from "@/lib/http/ndjson";
 import type {
   CampaignListItem,
@@ -189,6 +190,16 @@ export function AdventureApp({
   const [missedTurnDigests, setMissedTurnDigests] = useState<TurnDigest[]>([]);
   const activeCampaignIdRef = useRef<string | null>(campaignId);
   const worldTime = snapshot ? describeWorldTime(snapshot.state.globalTime) : null;
+  const progressionSummary = useMemo(
+    () =>
+      snapshot
+        ? deriveProgressionSummary({
+            framework: snapshot.progressionFramework,
+            progression: snapshot.state.characterState.progression,
+          })
+        : null,
+    [snapshot],
+  );
   const campaignSwitchLocked = loadingSnapshot || submitting || retryingTurn;
 
   useEffect(() => {
@@ -780,6 +791,51 @@ export function AdventureApp({
                         </p>
                       </div>
                     </section>
+
+                    {progressionSummary ? (
+                      <section>
+                        <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Progression</p>
+                        <div className="mt-4 space-y-3">
+                          {progressionSummary.tracks.map((track) => {
+                            const definition = snapshot.progressionFramework?.tracks.find((entry) => entry.id === track.id);
+                            const min = definition?.min ?? 0;
+                            const max = definition?.max ?? Math.max(track.value, 1);
+                            const span = max - min;
+                            const percent = span > 0
+                              ? Math.min(100, Math.max(0, ((track.value - min) / span) * 100))
+                              : 0;
+
+                            return (
+                              <div key={track.id} className="rounded-2xl border border-zinc-800 bg-zinc-900/70 p-4">
+                                <div className="flex items-start justify-between gap-3">
+                                  <h3 className="font-serif text-base font-semibold text-zinc-100">{track.label}</h3>
+                                  <span className="text-sm font-medium text-zinc-200">{track.value}</span>
+                                </div>
+                                <p className="mt-2 text-sm leading-relaxed text-zinc-400">{track.summary}</p>
+                                <div className="mt-3 h-2 overflow-hidden rounded-full bg-zinc-950">
+                                  <div
+                                    className="h-full rounded-full bg-zinc-300"
+                                    style={{ width: `${percent}%` }}
+                                  />
+                                </div>
+                              </div>
+                            );
+                          })}
+                          {progressionSummary.worldStanding ? (
+                            <div className="rounded-2xl border border-zinc-800 bg-zinc-950/70 p-4">
+                              {progressionSummary.worldStanding.effectiveTierLabel ? (
+                                <p className="text-sm font-medium text-zinc-100">
+                                  {progressionSummary.worldStanding.effectiveTierLabel}
+                                </p>
+                              ) : null}
+                              <p className="mt-2 text-sm leading-relaxed text-zinc-400">
+                                {progressionSummary.worldStanding.relativeStanding}
+                              </p>
+                            </div>
+                          ) : null}
+                        </div>
+                      </section>
+                    ) : null}
 
                     <section>
                       <p className="text-[0.68rem] uppercase tracking-[0.22em] text-zinc-500">Equipment</p>

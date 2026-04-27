@@ -215,6 +215,39 @@ export type CharacterFramework = {
   presentationProfile: PresentationProfile;
 };
 
+export type ProgressionTrackDefinition = {
+  id: string;
+  label: string;
+  summary: string;
+  min?: number;
+  max?: number;
+  defaultValue: number;
+  worldStandingScale?: Array<{
+    minValue: number;
+    relativeStanding: string;
+    effectiveTierLabel?: string | null;
+  }>;
+};
+
+export type ProgressionFramework = {
+  tracks: ProgressionTrackDefinition[];
+  primaryTrackId?: string | null;
+};
+
+export type DerivedProgressionSummary = {
+  tracks: Array<{
+    id: string;
+    label: string;
+    value: number;
+    summary: string;
+  }>;
+  worldStanding?: {
+    effectiveTierId?: string | null;
+    effectiveTierLabel?: string | null;
+    relativeStanding: string;
+  } | null;
+};
+
 export type CharacterFrameworkValue = number | string | string[] | null;
 export type CharacterFrameworkValues = Record<string, CharacterFrameworkValue>;
 export type LegacyCurrencyDenominations = {
@@ -383,6 +416,7 @@ export type AdventureModuleSummary = {
   launchableDirectly: boolean;
   launchBlockReason: LaunchBlockReason;
   entryPointCount: number;
+  progressionFramework?: ProgressionFramework | null;
   campaignCount: number;
   createdAt: string;
   updatedAt: string;
@@ -413,6 +447,7 @@ export type AdventureModuleDetail = {
   launchBlockReason: LaunchBlockReason;
   schemaVersion: number;
   characterFramework?: CharacterFramework;
+  progressionFramework?: ProgressionFramework | null;
   entryPoints: ModuleEntryPointSummary[];
   regionSelectionOptions: ModuleRegionSelectionOption[];
   createdAt: string;
@@ -959,6 +994,7 @@ export type GeneratedWorldModule = {
   tone: string;
   setting: string;
   characterFramework?: CharacterFramework;
+  progressionFramework?: ProgressionFramework;
   locations: GeneratedLocationNode[];
   edges: GeneratedLocationEdge[];
   factions: GeneratedFaction[];
@@ -1101,6 +1137,9 @@ export type CampaignRuntimeState = {
     conditions: string[];
     activeCompanions: string[];
     maxVitality?: number | null;
+    progression?: {
+      trackValues: Record<string, number>;
+    };
   };
   sceneFocus: {
     key: string;
@@ -1457,6 +1496,7 @@ export type CampaignSnapshot = {
   premise: string;
   tone: string;
   setting: string;
+  progressionFramework?: ProgressionFramework | null;
   state: CampaignRuntimeState;
   promptRequestId?: string | null;
   character: CampaignCharacter;
@@ -1550,6 +1590,7 @@ export type SpatialPromptContext = {
   approaches?: CharacterFrameworkApproach[];
   currencyProfile?: CurrencyProfile;
   presentationProfile?: PresentationProfile;
+  progression?: DerivedProgressionSummary | null;
   worldObjects: PromptWorldObject[];
   sceneAspects: CampaignRuntimeState["sceneAspects"];
   localTexture: LocalTextureSummary | null;
@@ -1612,6 +1653,7 @@ export type TurnRouterContext = Pick<
   | "approaches"
   | "currencyProfile"
   | "presentationProfile"
+  | "progression"
 > & {
   inventory: RouterInventorySummary[];
   worldObjects: RouterWorldObjectSummary[];
@@ -2166,6 +2208,14 @@ export type MechanicsMutation =
       type: "update_character_state";
       conditionsAdded?: string[];
       conditionsRemoved?: string[];
+      reason: string;
+      phase?: MutationPhase;
+    }
+  | {
+      type: "update_character_progression_track";
+      trackId: string;
+      mode: "set" | "add" | "subtract";
+      value: number;
       reason: string;
       phase?: MutationPhase;
     }

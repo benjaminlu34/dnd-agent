@@ -3152,6 +3152,197 @@ test("update_character_state adds and removes tracked conditions in next runtime
   assert.deepEqual(evaluated.nextState.characterState.conditions, ["Disguised"]);
 });
 
+test("update_character_progression_track updates numeric progression and clamps to track bounds", () => {
+  const snapshot = createSnapshot();
+  snapshot.progressionFramework = {
+    primaryTrackId: "abyssal_assimilation",
+    tracks: [
+      {
+        id: "abyssal_assimilation",
+        label: "Abyssal Assimilation",
+        summary: "How deeply the abyss has altered the character.",
+        min: 0,
+        max: 10,
+        defaultValue: 2,
+      },
+    ],
+  };
+  snapshot.state.characterState.maxVitality = 12;
+  snapshot.state.characterState.activeCompanions = ["npc:watcher"];
+  snapshot.state.characterState.progression = {
+    trackValues: {
+      abyssal_assimilation: 4,
+    },
+  };
+
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot,
+    command: createValidatedCommand("success", [
+      {
+        type: "update_character_progression_track",
+        trackId: "abyssal_assimilation",
+        mode: "add",
+        value: 9,
+        reason: "The abyss answers the character's call.",
+      },
+    ]),
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["economy_light"]),
+  });
+
+  assert.equal(
+    evaluated.nextState.characterState.progression?.trackValues.abyssal_assimilation,
+    10,
+  );
+  assert.equal(evaluated.nextState.characterState.maxVitality, 12);
+  assert.deepEqual(evaluated.nextState.characterState.activeCompanions, ["npc:watcher"]);
+  assert.equal(evaluated.stateCommitLog.at(-1)?.reasonCode, "character_progression_updated");
+});
+
+test("update_character_progression_track supports set, subtract, and default initialization", () => {
+  const snapshot = createSnapshot();
+  snapshot.progressionFramework = {
+    primaryTrackId: "divine_favor",
+    tracks: [
+      {
+        id: "divine_favor",
+        label: "Divine Favor",
+        summary: "How strongly a patron favors the character.",
+        min: 0,
+        max: 10,
+        defaultValue: 6,
+      },
+    ],
+  };
+
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot,
+    command: createValidatedCommand("success", [
+      {
+        type: "update_character_progression_track",
+        trackId: "divine_favor",
+        mode: "subtract",
+        value: 2,
+        reason: "The patron withholds a sign.",
+      },
+      {
+        type: "update_character_progression_track",
+        trackId: "divine_favor",
+        mode: "set",
+        value: 3,
+        reason: "The character regains composure.",
+      },
+    ]),
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["economy_light"]),
+  });
+
+  assert.equal(evaluated.nextState.characterState.progression?.trackValues.divine_favor, 3);
+});
+
+test("update_character_progression_track rejects unauthorized progression changes", () => {
+  const snapshot = createSnapshot();
+  snapshot.progressionFramework = {
+    tracks: [
+      {
+        id: "divine_favor",
+        label: "Divine Favor",
+        summary: "How strongly a patron favors the character.",
+        min: 0,
+        max: 10,
+        defaultValue: 0,
+      },
+    ],
+  };
+
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot,
+    command: createValidatedCommand("success", [
+      {
+        type: "update_character_progression_track",
+        trackId: "divine_favor",
+        mode: "add",
+        value: 2,
+        reason: "The patron takes notice.",
+      },
+    ]),
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["converse"]),
+  });
+
+  assert.equal(evaluated.stateCommitLog.at(-1)?.status, "rejected");
+  assert.equal(evaluated.stateCommitLog.at(-1)?.reasonCode, "unauthorized_vector");
+});
+
+test("update_character_progression_track rejects negative update values", () => {
+  const snapshot = createSnapshot();
+  snapshot.progressionFramework = {
+    tracks: [
+      {
+        id: "divine_favor",
+        label: "Divine Favor",
+        summary: "How strongly a patron favors the character.",
+        min: 0,
+        max: 10,
+        defaultValue: 0,
+      },
+    ],
+  };
+
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot,
+    command: createValidatedCommand("success", [
+      {
+        type: "update_character_progression_track",
+        trackId: "divine_favor",
+        mode: "add",
+        value: -2,
+        reason: "Invalid negative amount.",
+      },
+    ]),
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["economy_light"]),
+  });
+
+  assert.equal(evaluated.stateCommitLog.at(-1)?.status, "rejected");
+  assert.equal(evaluated.stateCommitLog.at(-1)?.reasonCode, "invalid_value");
+});
+
+test("update_character_progression_track rejects undefined tracks", () => {
+  const snapshot = createSnapshot();
+  snapshot.progressionFramework = {
+    tracks: [
+      {
+        id: "divine_favor",
+        label: "Divine Favor",
+        summary: "How strongly a patron favors the character.",
+        min: 0,
+        max: 10,
+        defaultValue: 0,
+      },
+    ],
+  };
+
+  const evaluated = engineTestUtils.evaluateResolvedCommand({
+    snapshot,
+    command: createValidatedCommand("success", [
+      {
+        type: "update_character_progression_track",
+        trackId: "abyssal_assimilation",
+        mode: "set",
+        value: 5,
+        reason: "Attempt to update an absent track.",
+      },
+    ]),
+    fetchedFacts: [],
+    routerDecision: createRouterDecision(["economy_light"]),
+  });
+
+  assert.equal(evaluated.stateCommitLog.at(-1)?.status, "rejected");
+  assert.equal(evaluated.stateCommitLog.at(-1)?.reasonCode, "invalid_target");
+  assert.equal(evaluated.nextState.characterState.progression?.trackValues.abyssal_assimilation, undefined);
+});
+
 test("transfer_assets rejects moving goods into locked storage", () => {
   const snapshot = structuredClone(createSnapshot());
   snapshot.worldObjects = [

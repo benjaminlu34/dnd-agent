@@ -527,6 +527,63 @@ test("parseFinalActionToolCall accepts resolve_mechanics payloads", () => {
   assert.equal(parsed.success, true);
 });
 
+test("parseFinalActionToolCall accepts numeric character progression updates", () => {
+  const parsed = aiProviderTestUtils.parseFinalActionToolCall({
+    type: "resolve_mechanics",
+    timeMode: "exploration",
+    suggestedActions: ["Steady yourself"],
+    mutations: [
+      {
+        type: "update_character_progression_track",
+        trackId: "abyssal_assimilation",
+        mode: "add",
+        value: 2,
+        reason: "Abyssal exposure deepens the alteration.",
+      },
+    ],
+  });
+
+  assert.equal(parsed.success, true);
+});
+
+test("parseFinalActionToolCall rejects invalid character progression update modes", () => {
+  const parsed = aiProviderTestUtils.parseFinalActionToolCall({
+    type: "resolve_mechanics",
+    timeMode: "exploration",
+    suggestedActions: ["Steady yourself"],
+    mutations: [
+      {
+        type: "update_character_progression_track",
+        trackId: "abyssal_assimilation",
+        mode: "multiply",
+        value: 2,
+        reason: "Invalid arithmetic mode.",
+      },
+    ],
+  });
+
+  assert.equal(parsed.success, false);
+});
+
+test("parseFinalActionToolCall rejects negative character progression update values", () => {
+  const parsed = aiProviderTestUtils.parseFinalActionToolCall({
+    type: "resolve_mechanics",
+    timeMode: "exploration",
+    suggestedActions: ["Steady yourself"],
+    mutations: [
+      {
+        type: "update_character_progression_track",
+        trackId: "abyssal_assimilation",
+        mode: "subtract",
+        value: -2,
+        reason: "Invalid negative progression amount.",
+      },
+    ],
+  });
+
+  assert.equal(parsed.success, false);
+});
+
 test("parseFinalActionToolCall rejects invalid dynamic approach ids", () => {
   const parsed = aiProviderTestUtils.parseFinalActionToolCall(
     {
@@ -807,6 +864,7 @@ test("buildTurnRouterSystemPrompt distinguishes self-talk from on-screen social 
 
   assert.match(prompt, /Internal thoughts, mutters to yourself, and naming an item are not converse/);
   assert.match(prompt, /Directing a present subordinate or ally to pass along a message or fetch someone is a local in-scene action/);
+  assert.match(prompt, /economy_light covers .*character-progression changes/i);
   assert.match(prompt, /Use clarification only for hard blockers/);
   assert.match(prompt, /Do not invent new ids or spawn handles/);
   assert.match(prompt, /router_context\.knownNearbyNpcs lists authoritative named NPCs in the current location/i);
@@ -1383,6 +1441,20 @@ test("buildTurnUserPrompt includes attention packet before the main action block
       recentWorldShifts: [],
       activeThreads: [],
       inventory: [],
+      progression: {
+        tracks: [
+          {
+            id: "abyssal_assimilation",
+            label: "Abyssal Assimilation",
+            value: 7,
+            summary: "How deeply the abyss has altered the character.",
+          },
+        ],
+        worldStanding: {
+          effectiveTierLabel: "Early Kindled",
+          relativeStanding: "Above ordinary laborers, nearing trained junior delvers.",
+        },
+      },
       worldObjects: [],
       sceneFocus: {
         key: "forge",
@@ -1456,6 +1528,8 @@ test("buildTurnUserPrompt includes attention packet before the main action block
   assert.match(prompt, /targetRef: npc:npc_mira/);
   assert.match(prompt, /mustCheck:/);
   assert.match(prompt, /You are in Lantern Market\. Your current focus\/position is: The Forge\./);
+  assert.match(prompt, /Abyssal Assimilation/);
+  assert.match(prompt, /Above ordinary laborers/);
 });
 
 test("buildResolvedTurnNarrationPrompt does not treat departures as waited-for arrivals", () => {
@@ -2266,6 +2340,20 @@ test("formatRouterContextForModel compacts router payload to skinny referent lis
         quantity: 1,
       },
     ],
+    progression: {
+      tracks: [
+        {
+          id: "abyssal_assimilation",
+          label: "Abyssal Assimilation",
+          value: 30,
+          summary: "How deeply the abyss has altered the character.",
+        },
+      ],
+      worldStanding: {
+        effectiveTierLabel: "Early Kindled",
+        relativeStanding: "Above ordinary laborers, nearing trained junior delvers.",
+      },
+    },
     worldObjects: [
       {
         id: "wobj_lockbox",
@@ -2294,6 +2382,7 @@ test("formatRouterContextForModel compacts router payload to skinny referent lis
     ["Iron Lockbox [wobj_lockbox] {locked, key:item_lockbox_key} - A compact iron lockbox sits beneath the bench."],
   );
   assert.deepEqual(rendered.authoritativeState.routes, ["Neverwinter (720m, open, danger 2) [route_neverwinter]"]);
+  assert.equal(rendered.authoritativeState.characterProgression?.tracks[0]?.label, "Abyssal Assimilation");
   assert.match(
     rendered.authoritativeState.sceneActors[0] ?? "",
     /Captain Thorne \(watch captain\) \[npc:npc_captain_thorne, npc detail-fetch\(name\/identity available\)\]/,

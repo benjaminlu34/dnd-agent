@@ -38,6 +38,11 @@ import {
   parseSimulationPayload,
   runSimulationTick,
 } from "@/lib/game/simulation";
+import {
+  defaultProgressionTrackValues,
+  progressionTrackDefinitionMap,
+  progressionTrackValue,
+} from "@/lib/game/progression";
 import type {
   AssetHolderRef,
   CampaignRuntimeState,
@@ -2773,6 +2778,11 @@ function evaluateResolvedCommand(input: {
   const projectedFollowers = new Set(
     input.snapshot.state.characterState.activeCompanions.map((entry) => normalizeActorRef(entry)),
   );
+  const progressionTrackDefinitions = progressionTrackDefinitionMap(input.snapshot.progressionFramework);
+  const projectedProgressionTrackValues = new Map<string, number>([
+    ...Object.entries(defaultProgressionTrackValues(input.snapshot.progressionFramework)),
+    ...Object.entries(input.snapshot.state.characterState.progression?.trackValues ?? {}),
+  ]);
   const projectedTemporaryActors = new Map<string, ProjectedTemporaryActor>(
     input.snapshot.temporaryActors.map((actor) => [
       actor.id,
@@ -5418,6 +5428,95 @@ function evaluateResolvedCommand(input: {
       continue;
     }
 
+    if (mutation.type === "update_character_progression_track") {
+      if (!hasVector(input.routerDecision, "economy_light")) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "unauthorized_vector",
+          summary: "Character-progression changes are not authorized for this turn.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+
+      const trackDefinition = progressionTrackDefinitions.get(mutation.trackId);
+      if (!trackDefinition) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_target",
+          summary: "That progression track is not defined for this campaign.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+
+      if (mutation.value < 0) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "rejected",
+          reasonCode: "invalid_value",
+          summary: "Progression track updates must use a non-negative value.",
+          metadata: { ...mutation, phase } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+
+      const previousValue = progressionTrackValue(trackDefinition, {
+        trackValues: Object.fromEntries(projectedProgressionTrackValues),
+      });
+      const rawNextValue =
+        mutation.mode === "set"
+          ? mutation.value
+          : mutation.mode === "add"
+            ? previousValue + mutation.value
+            : previousValue - mutation.value;
+      const nextValue = progressionTrackValue(trackDefinition, {
+        trackValues: {
+          [mutation.trackId]: rawNextValue,
+        },
+      });
+
+      if (Object.is(previousValue, nextValue)) {
+        stateCommitLog.push({
+          kind: "mutation",
+          mutationType: mutation.type,
+          status: "noop",
+          reasonCode: "already_applied",
+          summary: `${trackDefinition.label} is already at ${nextValue}.`,
+          metadata: {
+            ...mutation,
+            previousValue,
+            nextValue,
+            phase,
+          } as unknown as Record<string, unknown>,
+        });
+        continue;
+      }
+
+      projectedProgressionTrackValues.set(mutation.trackId, nextValue);
+      const entry = {
+        kind: "mutation" as const,
+        mutationType: mutation.type,
+        status: "applied" as const,
+        reasonCode: "character_progression_updated",
+        summary: `${trackDefinition.label} changes to ${nextValue}.`,
+        metadata: {
+          ...mutation,
+          previousValue,
+          nextValue,
+          phase,
+        } as unknown as Record<string, unknown>,
+      };
+      stateCommitLog.push(entry);
+      appliedMutations.push({ mutation: { ...mutation, phase } as MechanicsMutation, entry });
+      continue;
+    }
+
     if (mutation.type === "set_follow_state") {
       if (projectedActiveJourney) {
         stateCommitLog.push({
@@ -5877,6 +5976,14 @@ function evaluateResolvedCommand(input: {
       characterState: {
         conditions: Array.from(projectedConditions),
         activeCompanions: Array.from(projectedFollowers),
+        maxVitality: input.snapshot.state.characterState.maxVitality ?? null,
+        ...(projectedProgressionTrackValues.size
+          ? {
+              progression: {
+                trackValues: Object.fromEntries(projectedProgressionTrackValues),
+              },
+            }
+          : {}),
       },
     } satisfies CampaignRuntimeState,
   };
@@ -6907,7 +7014,11 @@ async function applyResolvedMutations(input: {
       continue;
     }
 
-    if (mutation.type === "update_character_state" || mutation.type === "set_follow_state") {
+    if (
+      mutation.type === "update_character_state"
+      || mutation.type === "update_character_progression_track"
+      || mutation.type === "set_follow_state"
+    ) {
       continue;
     }
 

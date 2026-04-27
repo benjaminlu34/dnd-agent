@@ -32,6 +32,9 @@ const rawCampaignRuntimeStateSchema = z.object({
     conditions: z.array(z.string().trim().min(1)).default([]),
     activeCompanions: z.array(z.string().trim().min(1)).default([]),
     maxVitality: z.number().int().positive().nullish().default(null),
+    progression: z.object({
+      trackValues: z.record(z.string(), z.number()).default({}),
+    }).optional(),
   }).nullish().default({ conditions: [], activeCompanions: [], maxVitality: null }),
   sceneFocus: z.object({
     key: z.string().trim().min(1),
@@ -64,7 +67,18 @@ const campaignRuntimeStateSchema: z.ZodType<CampaignRuntimeState> = rawCampaignR
     globalTime: value.globalTime,
     pendingTurnId: value.pendingTurnId,
     lastActionSummary: value.lastActionSummary,
-    characterState: value.characterState ?? { conditions: [], activeCompanions: [], maxVitality: null },
+    characterState: {
+      conditions: value.characterState?.conditions ?? [],
+      activeCompanions: value.characterState?.activeCompanions ?? [],
+      maxVitality: value.characterState?.maxVitality ?? null,
+      ...(value.characterState?.progression
+        ? {
+            progression: {
+              trackValues: value.characterState.progression.trackValues,
+            },
+          }
+        : {}),
+    },
     sceneFocus: value.sceneFocus ?? null,
     sceneActorFocuses: value.sceneActorFocuses ?? {},
     sceneAspects: normalizedAspects,
@@ -200,6 +214,7 @@ const stateCommitLogEntrySchema: z.ZodType<StateCommitLogEntry> = z.object({
       "update_world_object_state",
       "update_item_state",
       "update_character_state",
+      "update_character_progression_track",
       "update_scene_object",
       "set_follow_state",
       "restore_health",

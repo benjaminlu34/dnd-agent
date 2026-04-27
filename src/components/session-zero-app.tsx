@@ -7,6 +7,8 @@ import type {
   CharacterTemplateSummary,
   OpenWorldGenerationArtifacts,
   GeneratedWorldModule,
+  ProgressionFramework,
+  ProgressionTrackDefinition,
   WorldScaleTier,
 } from "@/lib/game/types";
 import {
@@ -55,6 +57,97 @@ function stepSectionClassName(isActive: boolean) {
   ].join(" ");
 }
 
+function slugifyTrackId(value: string, fallback: string) {
+  const slug = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 72);
+
+  return slug || fallback;
+}
+
+function uniqueTrackId(base: string, tracks: ProgressionTrackDefinition[], currentIndex?: number) {
+  const used = new Set(
+    tracks
+      .filter((_, index) => index !== currentIndex)
+      .map((track) => track.id),
+  );
+  if (!used.has(base)) {
+    return base;
+  }
+
+  for (let suffix = 2; suffix < 100; suffix += 1) {
+    const candidate = `${base}_${suffix}`;
+    if (!used.has(candidate)) {
+      return candidate;
+    }
+  }
+
+  return `${base}_${Date.now()}`;
+}
+
+function numberInputValue(value: number | null | undefined) {
+  return value == null ? "" : String(value);
+}
+
+function parseRequiredNumber(value: string, fallback = 0) {
+  if (value.trim() === "") {
+    return fallback;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function parseOptionalNumber(value: string) {
+  if (value.trim() === "") {
+    return undefined;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function normalizeProgressionFramework(
+  framework: ProgressionFramework | null | undefined,
+): ProgressionFramework | undefined {
+  const tracks = (framework?.tracks ?? [])
+    .map((track) => ({
+      ...track,
+      id: track.id.trim(),
+      label: track.label.trim(),
+      summary: track.summary.trim(),
+      worldStandingScale: (track.worldStandingScale ?? [])
+        .map((standing) => ({
+          minValue: standing.minValue,
+          relativeStanding: standing.relativeStanding.trim(),
+          effectiveTierLabel: standing.effectiveTierLabel?.trim() || undefined,
+        }))
+        .filter((standing) => standing.relativeStanding.length > 0),
+    }))
+    .filter((track) => track.id.length > 0 && track.label.length > 0 && track.summary.length > 0);
+
+  if (!tracks.length) {
+    return undefined;
+  }
+
+  const primaryTrackId =
+    framework?.primaryTrackId && tracks.some((track) => track.id === framework.primaryTrackId)
+      ? framework.primaryTrackId
+      : tracks[0]?.id ?? null;
+
+  return {
+    tracks,
+    primaryTrackId,
+  };
+}
+
+function normalizeDraftForSave(draft: GeneratedWorldModule): GeneratedWorldModule {
+  return {
+    ...draft,
+    progressionFramework: normalizeProgressionFramework(draft.progressionFramework),
+  };
+}
+
 export function SessionZeroApp() {
   const router = useRouter();
   const [prompt, setPrompt] = useState("");
@@ -91,6 +184,132 @@ export function SessionZeroApp() {
       : getWorldGenerationStageStep(draftProgress?.stage ?? null);
   const generationProgressPercent =
     totalGenerationStages > 0 ? (currentGenerationStage / totalGenerationStages) * 100 : 0;
+  const draftProgressionTracks = draft?.progressionFramework?.tracks ?? [];
+  const draftPrimaryTrackId = draft?.progressionFramework?.primaryTrackId ?? draftProgressionTracks[0]?.id ?? null;
+
+  function updateDraftProgression(
+    updater: (framework: ProgressionFramework) => ProgressionFramework,
+  ) {
+    setDraft((current) => {
+      if (!current) {
+        return current;
+      }
+
+      const currentFramework = current.progressionFramework ?? {
+        tracks: [],
+        primaryTrackId: null,
+      };
+      const nextFramework = updater(currentFramework);
+
+      return {
+        ...current,
+        progressionFramework: nextFramework.tracks.length ? nextFramework : undefined,
+      };
+    });
+  }
+
+  function addProgressionTrack() {
+    updateDraftProgression((framework) => {
+      const label = `Progression Track ${framework.tracks.length + 1}`;
+      const id = uniqueTrackId(
+        slugifyTrackId(label, `progression_track_${framework.tracks.length + 1}`),
+        framework.tracks,
+      );
+      const track: ProgressionTrackDefinition = {
+        id,
+        label,
+        summary: "What this long-term change means for the character.",
+        min: 0,
+        max: 100,
+        defaultValue: 0,
+        worldStandingScale: [],
+      };
+
+      return {
+        tracks: [...framework.tracks, track],
+        primaryTrackId: framework.primaryTrackId ?? id,
+      };
+    });
+  }
+
+  function removeProgressionTrack(trackIndex: number) {
+    updateDraftProgression((framework) => {
+      const removedTrack = framework.tracks[trackIndex];
+      const tracks = framework.tracks.filter((_, index) => index !== trackIndex);
+      return {
+        tracks,
+        primaryTrackId:
+          removedTrack?.id === framework.primaryTrackId
+            ? tracks[0]?.id ?? null
+            : framework.primaryTrackId,
+      };
+    });
+  }
+
+  function updateProgressionTrack(
+    trackIndex: number,
+    updater: (track: ProgressionTrackDefinition, tracks: ProgressionTrackDefinition[]) => ProgressionTrackDefinition,
+  ) {
+    updateDraftProgression((framework) => {
+      const previousTrack = framework.tracks[trackIndex];
+      const tracks = framework.tracks.map((track, index) =>
+        index === trackIndex ? updater(track, framework.tracks) : track,
+      );
+      const nextTrack = tracks[trackIndex];
+      return {
+        tracks,
+        primaryTrackId:
+          previousTrack?.id === framework.primaryTrackId
+            ? nextTrack?.id ?? tracks[0]?.id ?? null
+            : framework.primaryTrackId,
+      };
+    });
+  }
+
+  function updateProgressionTrackLabel(trackIndex: number, label: string) {
+    updateProgressionTrack(trackIndex, (track, tracks) => {
+      const baseId = slugifyTrackId(label, track.id || `progression_track_${trackIndex + 1}`);
+      return {
+        ...track,
+        id: uniqueTrackId(baseId, tracks, trackIndex),
+        label,
+      };
+    });
+  }
+
+  function addStandingBand(trackIndex: number) {
+    updateProgressionTrack(trackIndex, (track) => ({
+      ...track,
+      worldStandingScale: [
+        ...(track.worldStandingScale ?? []),
+        {
+          minValue: track.defaultValue,
+          effectiveTierLabel: null,
+          relativeStanding: "Describe how the world would read this level of progress.",
+        },
+      ],
+    }));
+  }
+
+  function updateStandingBand(
+    trackIndex: number,
+    bandIndex: number,
+    updater: (band: NonNullable<ProgressionTrackDefinition["worldStandingScale"]>[number]) => NonNullable<ProgressionTrackDefinition["worldStandingScale"]>[number],
+  ) {
+    updateProgressionTrack(trackIndex, (track) => ({
+      ...track,
+      worldStandingScale: (track.worldStandingScale ?? []).map((band, index) =>
+        index === bandIndex ? updater(band) : band,
+      ),
+    }));
+  }
+
+  function removeStandingBand(trackIndex: number, bandIndex: number) {
+    updateProgressionTrack(trackIndex, (track) => ({
+      ...track,
+      worldStandingScale: (track.worldStandingScale ?? []).filter((_, index) => index !== bandIndex),
+    }));
+  }
 
   async function recoverDraftFromCheckpoint(progressId: string) {
     const response = await fetch(
@@ -385,7 +604,7 @@ export function SessionZeroApp() {
         body: JSON.stringify({
           prompt,
           scaleTier,
-          previousDraft: draft ?? undefined,
+          previousDraft: draft ? normalizeDraftForSave(draft) : undefined,
           progressId,
         }),
       });
@@ -549,7 +768,7 @@ export function SessionZeroApp() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ draft, artifacts: draftArtifacts ?? undefined }),
+        body: JSON.stringify({ draft: normalizeDraftForSave(draft), artifacts: draftArtifacts ?? undefined }),
       });
 
       const data = (await response.json()) as {
@@ -773,6 +992,199 @@ export function SessionZeroApp() {
                   </p>
                 </div>
               </div>
+
+              <div className="mt-6 rounded-lg border border-zinc-800 p-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-500">
+                      Progression
+                    </p>
+                    <p className="mt-2 text-sm leading-relaxed text-zinc-400">
+                      Add long-term tracks when the campaign fantasy should change the character over time.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    className="button-press rounded-lg border border-zinc-700 px-3 py-2 text-xs font-semibold text-zinc-200 transition-colors hover:bg-zinc-900 disabled:opacity-60"
+                    onClick={addProgressionTrack}
+                    disabled={draftProgressionTracks.length >= 8}
+                  >
+                    Add Track
+                  </button>
+                </div>
+
+                {draftProgressionTracks.length ? (
+                  <div className="mt-5 space-y-4">
+                    {draftProgressionTracks.map((track, trackIndex) => (
+                      <div key={track.id} className="rounded-lg border border-zinc-800 bg-black/50 p-4">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                          <div className="grid flex-1 gap-3 sm:grid-cols-[0.8fr_1.2fr]">
+                            <FieldShell label="Track Name">
+                              <input
+                                className={fieldClassName()}
+                                value={track.label}
+                                onChange={(event) => updateProgressionTrackLabel(trackIndex, event.target.value)}
+                                placeholder="Abyssal Assimilation"
+                              />
+                            </FieldShell>
+                            <FieldShell label="Summary">
+                              <input
+                                className={fieldClassName()}
+                                value={track.summary}
+                                onChange={(event) =>
+                                  updateProgressionTrack(trackIndex, (current) => ({
+                                    ...current,
+                                    summary: event.target.value,
+                                  }))
+                                }
+                                placeholder="What this long-term change means in play."
+                              />
+                            </FieldShell>
+                          </div>
+                          <button
+                            type="button"
+                            className="button-press rounded-lg border border-zinc-800 px-3 py-2 text-xs font-semibold text-zinc-400 transition-colors hover:border-red-900 hover:text-red-300"
+                            onClick={() => removeProgressionTrack(trackIndex)}
+                          >
+                            Remove
+                          </button>
+                        </div>
+
+                        <div className="mt-3 grid gap-3 sm:grid-cols-4">
+                          <FieldShell label="Min">
+                            <input
+                              className={fieldClassName()}
+                              type="number"
+                              value={numberInputValue(track.min)}
+                              onChange={(event) =>
+                                updateProgressionTrack(trackIndex, (current) => ({
+                                  ...current,
+                                  min: parseOptionalNumber(event.target.value),
+                                }))
+                              }
+                            />
+                          </FieldShell>
+                          <FieldShell label="Max">
+                            <input
+                              className={fieldClassName()}
+                              type="number"
+                              value={numberInputValue(track.max)}
+                              onChange={(event) =>
+                                updateProgressionTrack(trackIndex, (current) => ({
+                                  ...current,
+                                  max: parseOptionalNumber(event.target.value),
+                                }))
+                              }
+                            />
+                          </FieldShell>
+                          <FieldShell label="Default">
+                            <input
+                              className={fieldClassName()}
+                              type="number"
+                              value={numberInputValue(track.defaultValue)}
+                              onChange={(event) =>
+                                updateProgressionTrack(trackIndex, (current) => ({
+                                  ...current,
+                                  defaultValue: parseRequiredNumber(event.target.value, current.defaultValue),
+                                }))
+                              }
+                            />
+                          </FieldShell>
+                          <label className="flex items-end gap-2 pb-3 text-sm text-zinc-300">
+                            <input
+                              type="radio"
+                              checked={draftPrimaryTrackId === track.id}
+                              onChange={() =>
+                                updateDraftProgression((framework) => ({
+                                  ...framework,
+                                  primaryTrackId: track.id,
+                                }))
+                              }
+                            />
+                            Primary track
+                          </label>
+                        </div>
+
+                        <div className="mt-4 border-t border-zinc-800 pt-4">
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="text-xs font-medium text-zinc-300">World standing bands</p>
+                            <button
+                              type="button"
+                              className="button-press rounded-lg border border-zinc-800 px-3 py-2 text-xs font-semibold text-zinc-300 transition-colors hover:bg-zinc-900"
+                              onClick={() => addStandingBand(trackIndex)}
+                            >
+                              Add Band
+                            </button>
+                          </div>
+
+                          {(track.worldStandingScale ?? []).length ? (
+                            <div className="mt-3 space-y-3">
+                              {(track.worldStandingScale ?? []).map((band, bandIndex) => (
+                                <div key={`${track.id}-${bandIndex}`} className="grid gap-3 rounded-lg border border-zinc-800 p-3 md:grid-cols-[7rem_10rem_1fr_auto]">
+                                  <FieldShell label="At Value">
+                                    <input
+                                      className={fieldClassName()}
+                                      type="number"
+                                      value={numberInputValue(band.minValue)}
+                                      onChange={(event) =>
+                                        updateStandingBand(trackIndex, bandIndex, (current) => ({
+                                          ...current,
+                                          minValue: parseRequiredNumber(event.target.value, current.minValue),
+                                        }))
+                                      }
+                                    />
+                                  </FieldShell>
+                                  <FieldShell label="Tier Label">
+                                    <input
+                                      className={fieldClassName()}
+                                      value={band.effectiveTierLabel ?? ""}
+                                      onChange={(event) =>
+                                        updateStandingBand(trackIndex, bandIndex, (current) => ({
+                                          ...current,
+                                          effectiveTierLabel: event.target.value || null,
+                                        }))
+                                      }
+                                      placeholder="Early Kindled"
+                                    />
+                                  </FieldShell>
+                                  <FieldShell label="Relative Standing">
+                                    <input
+                                      className={fieldClassName()}
+                                      value={band.relativeStanding}
+                                      onChange={(event) =>
+                                        updateStandingBand(trackIndex, bandIndex, (current) => ({
+                                          ...current,
+                                          relativeStanding: event.target.value,
+                                        }))
+                                      }
+                                      placeholder="Above ordinary laborers, nearing trained delvers."
+                                    />
+                                  </FieldShell>
+                                  <button
+                                    type="button"
+                                    className="button-press self-end rounded-lg border border-zinc-800 px-3 py-3 text-xs font-semibold text-zinc-400 transition-colors hover:border-red-900 hover:text-red-300"
+                                    onClick={() => removeStandingBand(trackIndex, bandIndex)}
+                                  >
+                                    Remove
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="mt-3 text-sm leading-relaxed text-zinc-500">
+                              Optional. Add bands if the world has a recognizable scale for this track.
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-4 text-sm leading-relaxed text-zinc-500">
+                    No progression tracks yet. Leave this empty for grounded low-change campaigns, or add one to track corruption, favor, hunger, influence, mastery, debt, or another campaign-specific arc.
+                  </p>
+                )}
+              </div>
             </div>
           ) : null}
 
@@ -805,7 +1217,9 @@ export function SessionZeroApp() {
                       </p>
                     </div>
                     <span className="ml-4 text-[10px] font-medium uppercase tracking-widest text-zinc-500">
-                      {module.entryPointCount} Entry Points
+                      {module.progressionFramework?.tracks.length
+                        ? `${module.progressionFramework.tracks.length} Tracks`
+                        : `${module.entryPointCount} Entry Points`}
                     </span>
                   </button>
                 ))}

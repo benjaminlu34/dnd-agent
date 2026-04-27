@@ -176,3 +176,33 @@ test("parseCampaignRuntimeStateJson defaults missing scene-aspect focus keys to 
 
   assert.equal(parsed.sceneAspects.forge_smoke?.focusKey, null);
 });
+
+test("parseCampaignRuntimeStateJson preserves numeric progression track values", () => {
+  const parsed = parseCampaignRuntimeStateJson({
+    currentLocationId: "loc_gate",
+    globalTime: 480,
+    pendingTurnId: null,
+    lastActionSummary: null,
+    characterState: {
+      conditions: ["Marked"],
+      activeCompanions: ["npc:watcher"],
+      maxVitality: 12,
+      progression: {
+        trackValues: {
+          abyssal_assimilation: 4,
+        },
+      },
+    },
+  });
+
+  assert.deepEqual(parsed.characterState, {
+    conditions: ["Marked"],
+    activeCompanions: ["npc:watcher"],
+    maxVitality: 12,
+    progression: {
+      trackValues: {
+        abyssal_assimilation: 4,
+      },
+    },
+  });
+});

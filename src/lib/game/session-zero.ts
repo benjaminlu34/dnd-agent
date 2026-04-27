@@ -1010,6 +1010,57 @@ export const generatedEntryContextsInputSchema = z.object({
   entryPoints: z.array(entryContextSchema).length(3),
 });
 
+const progressionStandingScaleSchema = z.object({
+  minValue: z.number(),
+  relativeStanding: z.string().trim().min(1).max(240),
+  effectiveTierLabel: z.string().trim().min(1).max(80).nullable().optional(),
+});
+
+const progressionTrackSchema = z
+  .object({
+    id: z.string().trim().min(1).max(80),
+    label: z.string().trim().min(1).max(80),
+    summary: z.string().trim().min(1).max(240),
+    min: z.number().optional(),
+    max: z.number().optional(),
+    defaultValue: z.number(),
+    worldStandingScale: z.array(progressionStandingScaleSchema).max(8).optional(),
+  })
+  .superRefine((track, ctx) => {
+    if (track.min != null && track.max != null && track.min > track.max) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["min"],
+        message: "Progression track min cannot be greater than max.",
+      });
+    }
+  });
+
+const progressionFrameworkSchema = z
+  .object({
+    tracks: z.array(progressionTrackSchema).min(1).max(8),
+    primaryTrackId: z.string().trim().min(1).max(80).nullable().optional(),
+  })
+  .superRefine((framework, ctx) => {
+    addDuplicateStringIssues(
+      framework.tracks.map((track) => track.id),
+      ctx,
+      ["tracks"],
+      "Progression track ids must be unique.",
+    );
+
+    if (
+      framework.primaryTrackId
+      && !framework.tracks.some((track) => track.id === framework.primaryTrackId)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["primaryTrackId"],
+        message: "Primary progression track must reference a defined track.",
+      });
+    }
+  });
+
 export const generatedWorldModuleSchema = z
   .object({
     title: z.string().trim().min(1),
@@ -1017,6 +1068,7 @@ export const generatedWorldModuleSchema = z
     tone: z.string().trim().min(1),
     setting: z.string().trim().min(1),
     characterFramework: characterFrameworkSchema.optional(),
+    progressionFramework: progressionFrameworkSchema.optional(),
     locations: z.array(locationSchema).min(4),
     edges: z.array(edgeSchema).min(4),
     factions: z.array(factionSchema).min(2),
